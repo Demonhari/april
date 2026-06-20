@@ -1,0 +1,20 @@
+from __future__ import annotations
+
+import uuid
+
+from services.april_runtime.model_lifecycle import ModelLifecycle
+from services.april_runtime.schemas import RuntimeHealth
+
+
+def runtime_health(
+    lifecycle: ModelLifecycle, *, backend: str, request_id: str | None = None
+) -> RuntimeHealth:
+    models = lifecycle.list_models()
+    missing = [model.id for model in models if model.missing_path]
+    return RuntimeHealth(
+        status="degraded" if missing or any(model.state == "error" for model in models) else "ok",
+        backend=backend,
+        models=models,
+        missing_models=missing,
+        request_id=request_id or str(uuid.uuid4()),
+    )

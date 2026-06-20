@@ -1,0 +1,10 @@
+levels:
+  0: no_tools
+  1: read_only
+  2: safe_local_write
+  3: code_write
+  4: system_action
+  5: external_action
+
+approval_required_at_level: 3
+external_actions_enabled: false

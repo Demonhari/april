@@ -1,0 +1,25 @@
+agents:
+  general_agent:
+    model_id: april-brain
+    allowed_tools: []
+    memory_access: conversation_and_safe_memory
+  coding_agent:
+    model_id: april-coding
+    allowed_tools: [git_status, git_diff, git_log, git_branch, list_files, read_file, search_files, repo_indexer, test_runner, patch_generator, patch_applier]
+    memory_access: project_memory
+  reading_agent:
+    model_id: april-reading
+    allowed_tools: [read_file, search_files]
+    memory_access: conversation_and_safe_memory
+  creative_agent:
+    model_id: april-brain
+    allowed_tools: [create_note]
+    memory_access: conversation_and_safe_memory
+  reasoning_agent:
+    model_id: null
+    allowed_tools: [read_file, search_files, git_status, git_diff]
+    memory_access: conversation_and_safe_memory
+  system_action_agent:
+    model_id: april-brain
+    allowed_tools: [open_app, open_url, run_command]
+    memory_access: none

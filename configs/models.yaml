@@ -1,0 +1,36 @@
+models:
+  brain:
+    id: april-brain
+    name: granite3.3-2b
+    path: models/granite3.3-2b-q4_k_m.gguf
+    backend: llama_cpp
+    role: brain
+    threads: 8
+    context_size: 8192
+    temperature: 0.3
+    max_output_tokens: 1024
+    keep_loaded: true
+
+  coding:
+    id: april-coding
+    name: qwen3-1.7b
+    path: models/qwen3-1.7b-q8_0.gguf
+    backend: llama_cpp
+    role: coding
+    threads: 8
+    context_size: 8192
+    temperature: 0.2
+    max_output_tokens: 2048
+    keep_loaded: false
+
+  reading:
+    id: april-reading
+    name: qwen3-0.6b
+    path: models/qwen3-0.6b-q8_0.gguf
+    backend: llama_cpp
+    role: reading
+    threads: 6
+    context_size: 4096
+    temperature: 0.2
+    max_output_tokens: 1024
+    keep_loaded: false

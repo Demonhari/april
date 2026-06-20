@@ -1,0 +1,45 @@
+api:
+  host: 127.0.0.1
+  port: 8765
+  token: local-dev-token
+  cors_enabled: false
+  max_request_bytes: 1048576
+
+runtime:
+  host: 127.0.0.1
+  port: 8766
+  url: http://127.0.0.1:8766
+  backend: llama_cpp
+  preload_keep_loaded: true
+  request_timeout_seconds: 120
+
+memory:
+  database_path: data/april.db
+  vector_index_path: data/vector_index
+
+paths:
+  logs_path: logs
+  audit_path: logs/audit.jsonl
+  allowed_filesystem_roots:
+    - .
+  max_file_read_bytes: 1048576
+  max_file_write_bytes: 1048576
+
+permissions:
+  approval_expiry_seconds: 900
+  maximum_agent_tool_iterations: 5
+  external_actions_enabled: false
+  tool_timeout_seconds: 15
+
+brain:
+  model_id: april-brain
+
+voice:
+  enabled: false
+  audio_cache_path: data/audio_cache
+  retain_debug_audio: false
+  whisper_binary_path: null
+  whisper_model_path: null
+  piper_binary_path: null
+  piper_model_path: null
+  wake_word_model_path: null
