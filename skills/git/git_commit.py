@@ -11,10 +11,21 @@ async def git_commit(args: dict[str, Any]) -> ToolResult:
     async def run() -> ToolResult:
         message = str(args["message"])
         code, stdout, stderr = await run_git(args["repo_path"], ["commit", "-m", message])
+        commit_hash = None
+        if code == 0:
+            hash_code, hash_stdout, hash_stderr = await run_git(
+                args["repo_path"],
+                ["rev-parse", "HEAD"],
+            )
+            if hash_code == 0:
+                commit_hash = hash_stdout.strip()
+            elif hash_stderr:
+                stderr = f"{stderr}\n{hash_stderr}".strip()
         return ToolResult(
             ok=code == 0,
             stdout=stdout,
             stderr=stderr,
+            data={"commit_hash": commit_hash} if commit_hash else {},
             risk_level="code_write",
             permission_level=3,
         )

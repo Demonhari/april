@@ -20,6 +20,7 @@ class ProposedChange(BaseModel):
 class AgentResult(BaseModel):
     status: Literal["ok", "pending_approval", "unavailable", "error"]
     final_message: str
+    conversation_id: str | None = None
     tool_requests: list[dict[str, Any]] = Field(default_factory=list)
     local_citations: list[LocalCitation] = Field(default_factory=list)
     proposed_changes: list[ProposedChange] = Field(default_factory=list)

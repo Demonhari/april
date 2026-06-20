@@ -188,6 +188,13 @@ PROJECT_ID`, APRIL asks the coding model for a unified diff only, validates that
 the patch is scoped to the selected project, saves it as a safe draft patch, and
 creates a Level 3 approval for applying that exact patch once.
 
+Patch approvals bind the patch SHA-256, affected paths, repository root,
+available Git state, expected side effects, expiry, and approval ID. Before
+applying, APRIL re-reads the patch, recalculates the digest, validates target
+paths again, runs `git apply --check`, and consumes the approval whether the
+verified execution succeeds or fails. Git commit approvals similarly bind the
+exact staged diff digest and reject changed staged content.
+
 ## Repository Analysis Example
 
 ```bash
@@ -198,9 +205,21 @@ april ask "April, check why the animation in this repository is broken." --proje
 
 Repository work requires an explicit selected project through `project_id` or `repo_path`; APRIL no longer guesses a repository from the first allowed root. The coding agent can use read-only Git and filesystem tools without approval. File edits, patch application, test execution, and commits require approval.
 
+When a project is selected, APRIL derives project-scoped tool roots from trusted
+application state. Model-provided repository roots or absolute file paths cannot
+override the selected project.
+
 ## Streaming
 
 `POST /chat/stream` uses real runtime streaming. The Core API routes the request, runs permitted tools, stops immediately for approvals, and then forwards token events from April Runtime without buffering the full response. SSE events include `meta`, `token`, `approval_required`, `usage`, `done`, and `error`.
+
+## Conversations
+
+`POST /chat` accepts an optional `conversation_id`. If omitted, APRIL creates a
+local conversation and returns its ID in `result.conversation_id`. The
+interactive CLI creates one conversation ID per chat session and reuses it for
+every turn. Recent bounded history is included in the next agent prompt as
+context, not instructions.
 
 ## Memory
 
@@ -245,7 +264,12 @@ Tests use fake model/audio components and do not require GGUF files, network acc
 - Permission level and risk are computed deterministically from tool policy and arguments.
 - Level 3 and above operations require exact-action one-time approvals.
 - Filesystem access is restricted to configured roots and rejects traversal, symlink escapes, sensitive locations, binary files, and oversize reads.
-- Subprocess execution uses argv arrays with `shell=False`; pipes, redirects, substitutions, and shell metacharacters are denied.
+- Sensitive file names such as `.env`, `.env.*`, `.netrc`, private keys,
+  credential files, browser credential stores, keychains, and `data/april.db`
+  are denied case-insensitively.
+- Subprocess execution uses argv arrays with `shell=False`; pipes, redirects,
+  substitutions, shell interpreters, package installers, arbitrary `python -m`
+  modules, and shell metacharacters are denied.
 - External actions are disabled by default and not simulated.
 
 ## Limitations

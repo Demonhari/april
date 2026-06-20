@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 async def run_migrations(database: Database) -> None:
@@ -78,6 +78,7 @@ async def run_migrations(database: Database) -> None:
             args_json TEXT NOT NULL,
             agent TEXT NOT NULL DEFAULT 'general_agent',
             canonical_hash TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
             permission_level INTEGER NOT NULL,
             risk_level TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -126,6 +127,10 @@ async def run_migrations(database: Database) -> None:
     if "agent" not in approval_columns:
         await conn.execute(
             "ALTER TABLE approvals ADD COLUMN agent TEXT NOT NULL DEFAULT 'general_agent'"
+        )
+    if "metadata_json" not in approval_columns:
+        await conn.execute(
+            "ALTER TABLE approvals ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
         )
     await conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, datetime('now'))",

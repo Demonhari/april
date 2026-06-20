@@ -35,6 +35,7 @@ class ApprovalRequest(BaseModel):
     risk_level: RiskLevel
     affected_paths: list[str] = Field(default_factory=list)
     expected_side_effects: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ApprovalResponse(BaseModel):
@@ -46,6 +47,7 @@ class ApprovalResponse(BaseModel):
     risk_level: RiskLevel
     affected_paths: list[str]
     expected_side_effects: list[str]
+    metadata: dict[str, Any] = Field(default_factory=dict)
     expires_at: str
 
 

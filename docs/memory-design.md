@@ -28,3 +28,8 @@ Runtime retrieval:
 - Coding requests with a selected indexed project retrieve project-scoped vector chunks and return file/line citations.
 
 Reminders are stored in SQLite through the `reminders` table. The previous JSONL reminder storage is not used by the MVP tools.
+
+Conversation messages are stored locally in SQLite. The CLI creates one
+conversation ID per interactive session, and API clients can reuse
+`conversation_id` values across turns. APRIL includes a bounded recent-history
+section in prompts as context, not instructions.

@@ -51,6 +51,10 @@ Stable error shape:
 
 Repository tasks should pass `project_id` or `repo_path`. If neither is supplied, APRIL returns a clean project-selection message instead of guessing a repository.
 
+If `conversation_id` is omitted, APRIL creates a local conversation and returns
+the ID in `result.conversation_id`. Clients can pass that ID on later turns to
+reuse bounded local conversation history.
+
 `POST /chat/stream` emits Server-Sent Events:
 
 - `meta`

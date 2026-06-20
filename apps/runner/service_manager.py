@@ -51,10 +51,7 @@ class ServiceStatus:
     @property
     def ok(self) -> bool:
         return (
-            self.runtime.running
-            and self.runtime.healthy
-            and self.api.running
-            and self.api.healthy
+            self.runtime.running and self.runtime.healthy and self.api.running and self.api.healthy
         )
 
 

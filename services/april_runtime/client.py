@@ -69,11 +69,14 @@ class RuntimeClient:
             request_id=request_id,
         )
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client, client.stream(
-                "POST",
-                f"{self.base_url}/runtime/stream",
-                json=request.model_dump(),
-            ) as response:
+            async with (
+                httpx.AsyncClient(timeout=self.timeout) as client,
+                client.stream(
+                    "POST",
+                    f"{self.base_url}/runtime/stream",
+                    json=request.model_dump(),
+                ) as response,
+            ):
                 if response.status_code >= 400:
                     raise RuntimeUnavailableError(
                         "April Runtime returned an error.",

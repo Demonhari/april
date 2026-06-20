@@ -58,4 +58,6 @@ wake-word detection, or microphone capture.
 Natural chat code modification follows a patch-first boundary. The coding model
 may propose a unified diff, but APRIL validates the patch target paths, saves
 the patch as a safe local draft, and requires a Level 3 exact-action approval
-before `patch_applier` can apply it once.
+before `patch_applier` can apply it once. That approval binds the patch digest,
+affected paths, repository root, available Git state, and expected side effects;
+APRIL recalculates those values before applying the patch.

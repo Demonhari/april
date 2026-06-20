@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Coroutine
 from typing import Any
 
@@ -52,8 +53,14 @@ def ask(
     message: str,
     project_id: str | None = typer.Option(None, "--project-id"),
     repo_path: str | None = typer.Option(None, "--repo-path"),
+    conversation_id: str | None = typer.Option(None, "--conversation-id"),
 ) -> None:
-    payload = {"message": message, "project_id": project_id, "repo_path": repo_path}
+    payload = {
+        "message": message,
+        "project_id": project_id,
+        "repo_path": repo_path,
+        "conversation_id": conversation_id,
+    }
     data = run(client().post("/chat", payload))
     result = data["result"]
     console.print(result["final_message"])
@@ -68,11 +75,17 @@ def chat(
     repo_path: str | None = typer.Option(None, "--repo-path"),
 ) -> None:
     console.print("APRIL chat. Type /quit to exit.")
+    conversation_id = str(uuid.uuid4())
     while True:
         message = Prompt.ask("you")
         if message.strip() in {"/quit", "/exit"}:
             return
-        ask(message, project_id=project_id, repo_path=repo_path)
+        ask(
+            message,
+            project_id=project_id,
+            repo_path=repo_path,
+            conversation_id=conversation_id,
+        )
 
 
 @app.command()

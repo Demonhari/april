@@ -8,17 +8,37 @@ from april_common.errors import PermissionDeniedError, ValidationError
 
 SENSITIVE_SEGMENTS = {
     ".ssh",
+    ".aws",
+    ".azure",
+    ".gnupg",
+    ".config/gcloud",
     "Keychains",
     "Library/Keychains",
     "Library/Application Support/Google/Chrome",
     "Library/Application Support/Firefox",
-    ".aws",
-    ".azure",
-    ".config/gcloud",
     "/etc",
     "/private/etc",
 }
 
+SENSITIVE_FILENAMES = {
+    ".env",
+    ".netrc",
+    ".npmrc",
+    "credentials",
+    "credentials.json",
+    "credentials.yml",
+    "credentials.yaml",
+    "token",
+    "tokens.json",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "known_hosts",
+    "april.db",
+}
+
+SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
 MODEL_SUFFIXES = {".gguf", ".bin", ".safetensors", ".onnx"}
 TEXT_SUFFIXES = {
     ".py",
@@ -71,19 +91,36 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _deny_sensitive(path: Path) -> None:
+def deny_sensitive_path(path: Path) -> None:
     parts = set(path.parts)
+    casefold_parts = {part.casefold() for part in path.parts}
     for segment in SENSITIVE_SEGMENTS:
         if segment.startswith("/"):
             if _is_relative_to(path, Path(segment)):
                 raise PermissionDeniedError("Access to sensitive system paths is denied.")
         elif "/" in segment:
             segment_path = Path(segment)
+            segment_casefold = tuple(part.casefold() for part in segment_path.parts)
             for index in range(len(path.parts)):
                 if Path(*path.parts[index : index + len(segment_path.parts)]) == segment_path:
                     raise PermissionDeniedError("Access to sensitive credential paths is denied.")
-        elif segment in parts:
+                candidate = tuple(
+                    part.casefold() for part in path.parts[index : index + len(segment_path.parts)]
+                )
+                if candidate == segment_casefold:
+                    raise PermissionDeniedError("Access to sensitive credential paths is denied.")
+        elif segment in parts or segment.casefold() in casefold_parts:
             raise PermissionDeniedError("Access to sensitive credential paths is denied.")
+    name = path.name.casefold()
+    if name in SENSITIVE_FILENAMES:
+        raise PermissionDeniedError("Access to sensitive credential files is denied.")
+    if name.startswith(".env."):
+        raise PermissionDeniedError("Access to sensitive environment files is denied.")
+    if path.suffix.casefold() in SENSITIVE_SUFFIXES:
+        raise PermissionDeniedError("Access to private key files is denied.")
+    lower_parts = [part.casefold() for part in path.parts]
+    if len(lower_parts) >= 2 and lower_parts[-2:] == ["data", "april.db"]:
+        raise PermissionDeniedError("Direct tool access to the APRIL database is denied.")
 
 
 def normalize_existing_path(path: str | Path, policy: PathPolicy) -> Path:
@@ -91,7 +128,7 @@ def normalize_existing_path(path: str | Path, policy: PathPolicy) -> Path:
         raise ValidationError("Path contains a null byte.")
     requested = Path(path).expanduser()
     resolved = requested.resolve(strict=True)
-    _deny_sensitive(resolved)
+    deny_sensitive_path(resolved)
     roots = tuple(root.expanduser().resolve() for root in policy.allowed_roots)
     if not any(_is_relative_to(resolved, root) for root in roots):
         raise PermissionDeniedError("Path is outside configured allowed roots.")
@@ -104,13 +141,16 @@ def normalize_new_path(path: str | Path, policy: PathPolicy) -> Path:
     requested = Path(path).expanduser()
     parent = _nearest_existing_parent(requested)
     resolved_parent = parent.resolve(strict=True)
-    _deny_sensitive(resolved_parent)
+    deny_sensitive_path(resolved_parent)
     roots = tuple(root.expanduser().resolve() for root in policy.allowed_roots)
     if not any(_is_relative_to(resolved_parent, root) for root in roots):
         raise PermissionDeniedError("Path is outside configured allowed roots.")
     if requested.is_absolute():
-        return resolved_parent / requested.relative_to(parent)
-    return (resolved_parent / requested.relative_to(parent)).resolve()
+        resolved = resolved_parent / requested.relative_to(parent)
+    else:
+        resolved = (resolved_parent / requested.relative_to(parent)).resolve()
+    deny_sensitive_path(resolved)
+    return resolved
 
 
 def ensure_text_file(path: Path, *, max_bytes: int) -> None:

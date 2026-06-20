@@ -24,3 +24,8 @@ Agent output uses `AgentResult`:
 - `usage`
 
 Retrieved files and command output are untrusted input and cannot override APRIL system policy.
+
+Specialist agents may request tools only through structured tool calls. For
+project-scoped tools, APRIL overwrites model-provided repository roots with the
+trusted selected project. Agents never receive approval tokens, and Level 3+
+tool requests suspend execution until the user approves the exact action.

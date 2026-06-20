@@ -30,6 +30,11 @@ from services.api.schemas import (
     ToolRequestEnvelope,
 )
 from services.april_runtime.schemas import LoadModelRequest
+from services.permissions.artifacts import (
+    build_git_commit_metadata,
+    build_patch_approval_metadata,
+    verify_approval_artifact,
+)
 from services.permissions.schemas import ApprovalRequest
 from services.voice.health import voice_health
 from skills.schemas import ToolResult
@@ -169,6 +174,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             agent=request.agent,
         )
         if decision.confirmation_required:
+            side_effects = ["Execute requested tool once."]
             approval = await active.approvals.create(
                 ApprovalRequest(
                     tool=request.tool,
@@ -177,7 +183,8 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                     permission_level=decision.permission_level,
                     risk_level=decision.risk_level,
                     affected_paths=decision.affected_paths,
-                    expected_side_effects=["Execute requested tool once."],
+                    expected_side_effects=side_effects,
+                    metadata=await _approval_metadata(request.tool, request.args, side_effects),
                 ),
                 actor="local-user",
                 request_id=request_id,
@@ -336,8 +343,58 @@ async def _execute_approved_tool(
                 "agent": record.agent,
                 "permission_level": permission.permission_level,
                 "risk": permission.risk_level,
+                "metadata": record.metadata,
                 "approval_id": record.id,
                 "outcome": "started",
+            }
+        )
+    precondition_failure = await verify_approval_artifact(record)
+    if precondition_failure is not None:
+        await active.memory.record_tool_call(
+            tool=record.tool,
+            args=record.args,
+            status="failed",
+            permission_level=permission.permission_level,
+            risk_level=permission.risk_level,
+            result=precondition_failure.model_dump(),
+        )
+        await active.approvals.consume(
+            approval_id=request.approval_id,
+            result=precondition_failure.model_dump(),
+            actor="local-user",
+            request_id=request_id,
+        )
+        active.approvals.audit.write(
+            {
+                "actor": "local-user",
+                "request_id": request_id,
+                "event_type": "approved_tool_rejected",
+                "tool": record.tool,
+                "arguments": record.args,
+                "agent": record.agent,
+                "permission_level": permission.permission_level,
+                "risk": permission.risk_level,
+                "metadata": record.metadata,
+                "approval_id": record.id,
+                "outcome": "failed",
+                "result": precondition_failure.model_dump(),
+            }
+        )
+        return {"status": "failed", "result": precondition_failure}
+    if record.tool == "patch_applier":
+        active.approvals.audit.write(
+            {
+                "actor": "local-user",
+                "request_id": request_id,
+                "event_type": "approved_patch_verified",
+                "tool": record.tool,
+                "arguments": record.args,
+                "agent": record.agent,
+                "permission_level": permission.permission_level,
+                "risk": permission.risk_level,
+                "metadata": record.metadata,
+                "approval_id": record.id,
+                "outcome": "verified",
             }
         )
     try:
@@ -373,11 +430,26 @@ async def _execute_approved_tool(
             "agent": record.agent,
             "permission_level": permission.permission_level,
             "risk": permission.risk_level,
+            "metadata": record.metadata,
             "approval_id": record.id,
             "outcome": "ok" if tool_result.ok else "failed",
         }
     )
     return {"status": "executed" if tool_result.ok else "failed", "result": tool_result}
+
+
+async def _approval_metadata(
+    tool: str, args: dict[str, Any], expected_side_effects: list[str]
+) -> dict[str, Any]:
+    if tool == "patch_applier":
+        return await build_patch_approval_metadata(
+            repo_path=str(args["repo_path"]),
+            patch_path=str(args["patch_path"]),
+            expected_side_effects=expected_side_effects,
+        )
+    if tool == "git_commit":
+        return await build_git_commit_metadata(repo_path=str(args["repo_path"]))
+    return {}
 
 
 def _normalize_project_path(path: str, settings: AprilSettings) -> Path:

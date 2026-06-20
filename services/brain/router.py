@@ -41,8 +41,7 @@ class BrainRouter:
                         ChatMessage(
                             role="system",
                             content=(
-                                "Repair the previous response into exactly one "
-                                "valid JSON object."
+                                "Repair the previous response into exactly one valid JSON object."
                             ),
                         ),
                         ChatMessage(role="user", content=response.content),

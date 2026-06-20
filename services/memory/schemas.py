@@ -41,6 +41,7 @@ class ApprovalRecord(BaseModel):
     args: dict[str, Any]
     agent: str = "general_agent"
     canonical_hash: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
     permission_level: int
     risk_level: str
     status: Literal["pending", "approved", "denied", "expired", "consumed"]

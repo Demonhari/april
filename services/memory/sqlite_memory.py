@@ -6,7 +6,7 @@ from typing import Any
 
 from april_common.time import utc_now_iso
 from services.memory.database import Database
-from services.memory.schemas import MemoryRecord, Project, ReminderRecord
+from services.memory.schemas import MemoryRecord, Message, Project, ReminderRecord
 
 
 class SqliteMemory:
@@ -116,6 +116,13 @@ class SqliteMemory:
         )
         return conversation_id
 
+    async def ensure_conversation(self, conversation_id: str, title: str | None = None) -> str:
+        await self.database.execute(
+            "INSERT OR IGNORE INTO conversations(id, title, created_at) VALUES(?, ?, ?)",
+            (conversation_id, title, utc_now_iso()),
+        )
+        return conversation_id
+
     async def add_message(self, conversation_id: str, role: str, content: str) -> str:
         message_id = str(uuid.uuid4())
         await self.database.execute(
@@ -126,6 +133,20 @@ class SqliteMemory:
             (message_id, conversation_id, role, content, utc_now_iso()),
         )
         return message_id
+
+    async def recent_messages(self, conversation_id: str, *, limit: int = 8) -> list[Message]:
+        rows = await self.database.fetchall(
+            """
+            SELECT *
+            FROM messages
+            WHERE conversation_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (conversation_id, limit),
+        )
+        messages = [Message.model_validate(dict(row)) for row in rows]
+        return list(reversed(messages))
 
     async def delete_conversation(self, conversation_id: str) -> bool:
         cursor = await self.database.execute(

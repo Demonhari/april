@@ -15,6 +15,25 @@ from skills.filesystem.common import current_path_policy
 
 SHELL_META = {"|", "&", ";", ">", "<", "$", "`", "$(", "&&", "||", "\n"}
 MAX_COMMAND_OUTPUT = 100_000
+ALLOWED_PYTHON_MODULES = {"timeit", "pytest", "ruff"}
+DENIED_EXECUTABLES = {
+    "bash",
+    "brew",
+    "chmod",
+    "chown",
+    "conda",
+    "curl",
+    "fish",
+    "mv",
+    "npm",
+    "pip",
+    "pip3",
+    "pnpm",
+    "rm",
+    "sh",
+    "yarn",
+    "zsh",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +61,12 @@ def validate_command(argv: list[str], cwd: str | Path) -> tuple[list[str], Path,
     if not argv:
         raise ValidationError("Command argv cannot be empty.")
     _reject_shell_meta(argv)
-    executable = Path(argv[0]).name
+    requested_executable = Path(argv[0])
+    if requested_executable.name != argv[0]:
+        raise PermissionDeniedError("Executable paths are not accepted.")
+    executable = requested_executable.name
+    if executable in DENIED_EXECUTABLES:
+        raise PermissionDeniedError("Executable is explicitly denied.", {"executable": executable})
     rule = DEFAULT_RULES.get(executable)
     if rule is None:
         raise PermissionDeniedError("Executable is not allowlisted.", {"executable": executable})
@@ -50,6 +74,13 @@ def validate_command(argv: list[str], cwd: str | Path) -> tuple[list[str], Path,
         raise PermissionDeniedError(
             "Subcommand is not allowlisted.",
             {"executable": executable, "allowed": list(rule.subcommands)},
+        )
+    if executable == "python" and (
+        len(argv) < 3 or argv[1] != "-m" or argv[2] not in ALLOWED_PYTHON_MODULES
+    ):
+        raise PermissionDeniedError(
+            "python -m module is not allowlisted.",
+            {"allowed_modules": sorted(ALLOWED_PYTHON_MODULES)},
         )
     resolved = normalize_existing_path(cwd, current_path_policy())
     if not resolved.is_dir():

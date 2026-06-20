@@ -44,6 +44,22 @@ async def test_sensitive_path_rejected(settings_tmp) -> None:
 
 
 @pytest.mark.asyncio
+async def test_case_insensitive_env_rejected(settings_tmp) -> None:
+    secret = settings_tmp.home / ".ENV"
+    secret.write_text("TOKEN=secret", encoding="utf-8")
+    with pytest.raises(PermissionDeniedError):
+        await read_file({"path": str(secret)})
+
+
+@pytest.mark.asyncio
+async def test_private_key_file_rejected(settings_tmp) -> None:
+    secret = settings_tmp.home / "deploy.PEM"
+    secret.write_text("-----BEGIN PRIVATE KEY-----", encoding="utf-8")
+    with pytest.raises(PermissionDeniedError):
+        await read_file({"path": str(secret)})
+
+
+@pytest.mark.asyncio
 async def test_oversized_read_rejected(settings_tmp) -> None:
     big = settings_tmp.home / "big.txt"
     big.write_text("x" * (settings_tmp.paths.max_file_read_bytes + 1), encoding="utf-8")

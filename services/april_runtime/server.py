@@ -29,6 +29,7 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
         )
     else:
         active_lifecycle = lifecycle
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.runtime.preload_keep_loaded:

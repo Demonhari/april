@@ -14,7 +14,16 @@ from services.memory.schemas import ApprovalRecord
 from services.permissions.schemas import ApprovalRequest, ApprovalResponse
 
 
-def canonical_hash(tool: str, args: dict[str, Any]) -> str:
+def canonical_hash(tool: str, args: dict[str, Any], metadata: dict[str, Any] | None = None) -> str:
+    payload = json.dumps(
+        {"tool": tool, "args": args, "metadata": metadata or {}},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def legacy_canonical_hash(tool: str, args: dict[str, Any]) -> str:
     payload = json.dumps({"tool": tool, "args": args}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -32,15 +41,15 @@ class ApprovalStore:
         expires_at = (
             (utc_now() + timedelta(seconds=self.expiry_seconds)).isoformat().replace("+00:00", "Z")
         )
-        digest = canonical_hash(request.tool, request.args)
+        digest = canonical_hash(request.tool, request.args, request.metadata)
         async with self.database.transaction() as conn:
             await conn.execute(
                 """
                 INSERT INTO approvals(
-                    id, tool, args_json, agent, canonical_hash, permission_level, risk_level,
-                    status, expires_at, created_at
+                    id, tool, args_json, agent, canonical_hash, metadata_json,
+                    permission_level, risk_level, status, expires_at, created_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     approval_id,
@@ -48,6 +57,7 @@ class ApprovalStore:
                     json.dumps(request.args, sort_keys=True),
                     request.agent,
                     digest,
+                    json.dumps(request.metadata, sort_keys=True),
                     request.permission_level,
                     request.risk_level,
                     expires_at,
@@ -64,6 +74,7 @@ class ApprovalStore:
                 "agent": request.agent,
                 "permission_level": request.permission_level,
                 "risk": request.risk_level,
+                "metadata": request.metadata,
                 "approval_id": approval_id,
                 "outcome": "pending",
             }
@@ -77,6 +88,7 @@ class ApprovalStore:
             risk_level=request.risk_level,
             affected_paths=request.affected_paths,
             expected_side_effects=request.expected_side_effects,
+            metadata=request.metadata,
             expires_at=expires_at,
         )
 
@@ -101,7 +113,6 @@ class ApprovalStore:
         actor: str,
         request_id: str,
     ) -> ApprovalRecord:
-        expected_hash = canonical_hash(tool, args)
         async with self.database.transaction() as conn:
             cursor = await conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
             row = await cursor.fetchone()
@@ -117,7 +128,12 @@ class ApprovalStore:
                     (approval_id,),
                 )
                 raise PermissionDeniedError("Approval has expired.")
-            if record.tool != tool or record.canonical_hash != expected_hash:
+            expected_hash = canonical_hash(tool, args, record.metadata)
+            legacy_hash = legacy_canonical_hash(tool, args)
+            hash_matches = record.canonical_hash == expected_hash or (
+                not record.metadata and record.canonical_hash == legacy_hash
+            )
+            if record.tool != tool or not hash_matches:
                 raise PermissionDeniedError("Approval arguments changed.")
             await conn.execute(
                 "UPDATE approvals SET status = 'approved' WHERE id = ?",
@@ -133,6 +149,7 @@ class ApprovalStore:
                 "agent": record.agent,
                 "permission_level": record.permission_level,
                 "risk": record.risk_level,
+                "metadata": record.metadata,
                 "approval_id": approval_id,
                 "outcome": "approved",
             }
@@ -173,6 +190,7 @@ class ApprovalStore:
                 "agent": record.agent,
                 "permission_level": record.permission_level,
                 "risk": record.risk_level,
+                "metadata": record.metadata,
                 "approval_id": approval_id,
                 "outcome": "consumed",
             }
@@ -200,6 +218,7 @@ class ApprovalStore:
                 "agent": record.agent,
                 "permission_level": record.permission_level,
                 "risk": record.risk_level,
+                "metadata": record.metadata,
                 "approval_id": approval_id,
                 "outcome": "denied",
             }
@@ -214,4 +233,5 @@ class ApprovalStore:
     def _record_from_row(self, row: Any) -> ApprovalRecord:
         data = dict(row)
         data["args"] = json.loads(data.pop("args_json"))
+        data["metadata"] = json.loads(data.pop("metadata_json", "{}") or "{}")
         return ApprovalRecord.model_validate(data)
