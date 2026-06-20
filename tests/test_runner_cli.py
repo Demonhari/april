@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 from apps.runner.install import install_wrappers
 from apps.runner.main import app
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
+from apps.runner.verify import VerifyCheck
 
 
 class FakeManager:
@@ -99,6 +100,76 @@ def test_run_april_stop_calls_manager(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(app, ["april", "stop"])
     assert result.exit_code == 0
     assert manager.stopped is True
+
+
+def test_run_april_model_load_delegates(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    delegated: list[list[str]] = []
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
+    result = CliRunner().invoke(app, ["april", "model", "load", "april-brain", "--fake"])
+    assert result.exit_code == 0
+    assert manager.started == [True]
+    assert delegated == [["model", "load", "april-brain"]]
+
+
+def test_run_april_project_and_memory_commands_delegate(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    delegated: list[list[str]] = []
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
+    runner = CliRunner()
+    assert runner.invoke(app, ["april", "projects", "--fake"]).exit_code == 0
+    assert runner.invoke(app, ["april", "project", "add", str(tmp_path), "--fake"]).exit_code == 0
+    assert runner.invoke(app, ["april", "memory", "search", "query", "--fake"]).exit_code == 0
+    assert delegated == [
+        ["projects"],
+        ["project", "add", str(tmp_path)],
+        ["memory", "search", "query"],
+    ]
+
+
+def test_run_april_config_validate_reports_success(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main.validate_configuration", lambda home: [])
+    result = CliRunner().invoke(app, ["april", "config", "validate"])
+    assert result.exit_code == 0
+    assert "configuration is valid" in result.output
+
+
+def test_run_april_config_validate_reports_errors(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main.validate_configuration", lambda home: ["bad config"])
+    result = CliRunner().invoke(app, ["april", "config", "validate"])
+    assert result.exit_code == 1
+    assert "bad config" in result.output
+
+
+def test_run_april_verify_fake_reports_table(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.run_fake_verification",
+        lambda home: [VerifyCheck(name="runtime health", ok=True, detail="ok")],
+    )
+    result = CliRunner().invoke(app, ["april", "verify", "--fake"])
+    assert result.exit_code == 0
+    assert "APRIL Verification" in result.output
+    assert "runtime health" in result.output
+
+
+def test_run_april_verify_fake_fails_on_failed_check(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.run_fake_verification",
+        lambda home: [VerifyCheck(name="runtime health", ok=False, detail="offline")],
+    )
+    result = CliRunner().invoke(app, ["april", "verify", "--fake"])
+    assert result.exit_code == 1
+    assert "offline" in result.output
 
 
 def test_doctor_reports_missing_path(tmp_path: Path, monkeypatch) -> None:

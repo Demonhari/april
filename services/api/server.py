@@ -31,6 +31,7 @@ from services.api.schemas import (
 )
 from services.april_runtime.schemas import LoadModelRequest
 from services.permissions.artifacts import (
+    apply_approved_patch,
     build_git_commit_metadata,
     build_patch_approval_metadata,
     verify_approval_artifact,
@@ -348,7 +349,9 @@ async def _execute_approved_tool(
                 "outcome": "started",
             }
         )
-    precondition_failure = await verify_approval_artifact(record)
+    precondition_failure = (
+        None if record.tool == "patch_applier" else await verify_approval_artifact(record)
+    )
     if precondition_failure is not None:
         await active.memory.record_tool_call(
             tool=record.tool,
@@ -398,7 +401,10 @@ async def _execute_approved_tool(
             }
         )
     try:
-        tool_result = await active.tool_registry.execute(record.tool, record.args)
+        if record.tool == "patch_applier":
+            tool_result = await apply_approved_patch(record)
+        else:
+            tool_result = await active.tool_registry.execute(record.tool, record.args)
     except Exception as exc:
         tool_result = ToolResult(
             ok=False,
@@ -446,9 +452,14 @@ async def _approval_metadata(
             repo_path=str(args["repo_path"]),
             patch_path=str(args["patch_path"]),
             expected_side_effects=expected_side_effects,
+            project_id=str(args["project_id"]) if args.get("project_id") is not None else None,
         )
     if tool == "git_commit":
-        return await build_git_commit_metadata(repo_path=str(args["repo_path"]))
+        return await build_git_commit_metadata(
+            repo_path=str(args["repo_path"]),
+            message=str(args.get("message")) if args.get("message") is not None else None,
+            project_id=str(args["project_id"]) if args.get("project_id") is not None else None,
+        )
     return {}
 
 

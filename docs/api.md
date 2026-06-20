@@ -92,7 +92,16 @@ run april ask "April, plan my work today."
 run april health
 run april models
 run april approvals
+run april approve APPROVAL_ID
+run april deny APPROVAL_ID
+run april config validate
+run april verify --fake
 ```
 
 `--fake` affects only newly started child services by setting
 `APRIL_RUNTIME_BACKEND=fake`; it does not edit configuration files.
+
+`run april config validate` validates YAML shape, model references, agent
+references, tool references, and loopback defaults. `run april verify --fake`
+uses isolated temporary data paths and dynamic ports so it can exercise the
+local workflow without modifying user projects or requiring GGUF files.

@@ -119,6 +119,8 @@ Useful launcher commands:
 run april --fake
 april-run doctor
 run april doctor
+run april config validate
+run april verify --fake
 run april status
 run april stop
 run april restart
@@ -127,6 +129,8 @@ run april ask "April, plan my work today."
 run april health
 run april models
 run april approvals
+run april approve APPROVAL_ID
+run april deny APPROVAL_ID
 ```
 
 `run april --fake` starts missing services with `APRIL_RUNTIME_BACKEND=fake`
@@ -188,12 +192,16 @@ PROJECT_ID`, APRIL asks the coding model for a unified diff only, validates that
 the patch is scoped to the selected project, saves it as a safe draft patch, and
 creates a Level 3 approval for applying that exact patch once.
 
-Patch approvals bind the patch SHA-256, affected paths, repository root,
-available Git state, expected side effects, expiry, and approval ID. Before
-applying, APRIL re-reads the patch, recalculates the digest, validates target
-paths again, runs `git apply --check`, and consumes the approval whether the
-verified execution succeeds or fails. Git commit approvals similarly bind the
-exact staged diff digest and reject changed staged content.
+Patch proposals are stored in APRIL's content-addressed artifact store under
+`data/artifacts/patches/`. The artifact may live outside the selected
+repository, but every patch target must still resolve inside the selected
+project. Patch approvals bind the artifact ID, patch SHA-256, exact byte length,
+affected paths, selected project ID, repository root, available Git state,
+expected side effects, expiry, and approval ID. Before applying, APRIL loads the
+approved immutable bytes, recalculates the digest, validates target paths again,
+then runs `git -C REPO apply --check -` and `git -C REPO apply -` against those
+same in-memory bytes. Git commit approvals bind the exact staged diff digest,
+staged tree ID, commit message, and repository identity.
 
 ## Repository Analysis Example
 
@@ -253,6 +261,8 @@ make test
 make lint
 make typecheck
 make check
+run april config validate
+run april verify --fake
 ```
 
 Tests use fake model/audio components and do not require GGUF files, network access, microphones, speakers, whisper.cpp, Piper, openWakeWord, or `llama-cpp-python`.

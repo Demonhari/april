@@ -56,8 +56,15 @@ and writes service logs under `logs/`. It does not start desktop UI, voice,
 wake-word detection, or microphone capture.
 
 Natural chat code modification follows a patch-first boundary. The coding model
-may propose a unified diff, but APRIL validates the patch target paths, saves
-the patch as a safe local draft, and requires a Level 3 exact-action approval
-before `patch_applier` can apply it once. That approval binds the patch digest,
-affected paths, repository root, available Git state, and expected side effects;
-APRIL recalculates those values before applying the patch.
+may propose a unified diff, but APRIL validates the patch target paths, stores
+the exact bytes in a content-addressed APRIL artifact, and requires a Level 3
+exact-action approval before `patch_applier` can apply it once. The artifact can
+live under `data/artifacts/patches/` even when the selected repository is
+outside `APRIL_HOME`; only patch target paths must stay inside the repository.
+Approved patch application uses `git apply --check -` and `git apply -` with the
+same verified in-memory bytes.
+
+`run april verify --fake` starts isolated temporary Runtime/Core services on
+dynamic loopback ports, creates a temporary external Git project, exercises
+chat, repository analysis, immutable patch approval/application, approval replay
+rejection, audit checks, and runtime streaming, then stops the services.

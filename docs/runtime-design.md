@@ -30,3 +30,7 @@ Optional real-GGUF integration tests are controlled by `APRIL_TEST_GGUF_PATH`.
 When the variable is absent, tests skip without downloading models. When set,
 the test should use a small token limit and cover load, generation, streaming,
 and unload against the local file only.
+
+`run april verify --fake` exercises runtime health, model listing, and SSE
+streaming against the fake backend. It asserts exactly one runtime `usage` event
+for the stream it opens.

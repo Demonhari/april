@@ -41,7 +41,11 @@ class ApprovalStore:
         expires_at = (
             (utc_now() + timedelta(seconds=self.expiry_seconds)).isoformat().replace("+00:00", "Z")
         )
-        digest = canonical_hash(request.tool, request.args, request.metadata)
+        metadata = dict(request.metadata)
+        if metadata:
+            metadata["approval_id"] = approval_id
+            metadata["approval_expires_at"] = expires_at
+        digest = canonical_hash(request.tool, request.args, metadata)
         async with self.database.transaction() as conn:
             await conn.execute(
                 """
@@ -57,7 +61,7 @@ class ApprovalStore:
                     json.dumps(request.args, sort_keys=True),
                     request.agent,
                     digest,
-                    json.dumps(request.metadata, sort_keys=True),
+                    json.dumps(metadata, sort_keys=True),
                     request.permission_level,
                     request.risk_level,
                     expires_at,
@@ -74,7 +78,7 @@ class ApprovalStore:
                 "agent": request.agent,
                 "permission_level": request.permission_level,
                 "risk": request.risk_level,
-                "metadata": request.metadata,
+                "metadata": metadata,
                 "approval_id": approval_id,
                 "outcome": "pending",
             }
@@ -88,7 +92,7 @@ class ApprovalStore:
             risk_level=request.risk_level,
             affected_paths=request.affected_paths,
             expected_side_effects=request.expected_side_effects,
-            metadata=request.metadata,
+            metadata=metadata,
             expires_at=expires_at,
         )
 

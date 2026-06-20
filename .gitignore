@@ -3,6 +3,7 @@ data/*.db
 data/*.db-*
 data/vector_index/
 data/patches/
+data/artifacts/
 data/audio_cache/
 logs/*.log
 logs/*.jsonl

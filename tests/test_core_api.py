@@ -15,6 +15,7 @@ from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
 from services.permissions.engine import PermissionEngine
+from services.permissions.schemas import ApprovalRequest
 from skills.registry import default_registry
 from tests.conftest import FakeRuntimeClient
 
@@ -390,10 +391,10 @@ def test_code_modification_creates_patch_and_pending_approval(settings_tmp) -> N
     assert result["status"] == "pending_approval"
     assert result["pending_approval"]["tool"] == "patch_applier"
     patch_path = result["pending_approval"]["args"]["patch_path"]
-    assert patch_path.startswith(str(settings_tmp.home / "data" / "patches"))
+    assert patch_path.startswith(str(settings_tmp.home / "data" / "artifacts" / "patches"))
     assert "README.md" in result["final_message"]
     assert result["proposed_changes"][0]["path"] == "README.md"
-    generated_patches = list(settings_tmp.home.joinpath("data/patches").glob("*.patch"))
+    generated_patches = list(settings_tmp.home.joinpath("data/artifacts/patches").glob("*.patch"))
     assert len(generated_patches) == 1
     assert "fixed animation" in generated_patches[0].read_text(encoding="utf-8")
 
@@ -426,6 +427,61 @@ def test_code_modification_approval_applies_exact_patch_once(settings_tmp) -> No
         headers=auth(settings_tmp),
     )
     assert replay.status_code == 403
+
+
+def test_code_modification_external_project_uses_april_artifact_store(
+    settings_tmp, tmp_path
+) -> None:
+    import anyio
+
+    external_repo = tmp_path / "external-project"
+    external_repo.mkdir()
+    (external_repo / "README.md").write_text("# test repo\nanimation bug\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=external_repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "april@example.local"],
+        cwd=external_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "APRIL Test"],
+        cwd=external_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "add", "README.md"], cwd=external_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=external_repo, check=True)
+    paths = settings_tmp.paths.model_copy(
+        update={"allowed_filesystem_roots": [settings_tmp.home, external_repo]}
+    )
+    scoped_settings = settings_tmp.model_copy(update={"paths": paths})
+    container = anyio.run(make_container, scoped_settings)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(external_repo)},
+        headers=auth(scoped_settings),
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(scoped_settings),
+    )
+    assert response.status_code == 200
+    approval = response.json()["result"]["pending_approval"]
+    patch_path = approval["args"]["patch_path"]
+    assert patch_path.startswith(str(settings_tmp.home / "data" / "artifacts" / "patches"))
+    assert not patch_path.startswith(str(external_repo))
+    assert approval["metadata"]["project_id"] == project["id"]
+    approve_response = client.post(
+        "/tools/approve",
+        json={"approval_id": approval["approval_id"]},
+        headers=auth(scoped_settings),
+    )
+    assert approve_response.status_code == 200
+    assert approve_response.json()["status"] == "executed"
+    assert "fixed animation" in (external_repo / "README.md").read_text(encoding="utf-8")
 
 
 def test_patch_content_change_after_approval_is_rejected(settings_tmp) -> None:
@@ -500,6 +556,57 @@ def test_patch_new_path_after_approval_is_rejected(settings_tmp) -> None:
     assert approve_response.status_code == 200
     assert approve_response.json()["status"] == "failed"
     assert not (settings_tmp.home / "extra.txt").exists()
+
+
+async def create_legacy_patch_approval(container: ApiContainer, patch_path: str):
+    return await container.approvals.create(
+        ApprovalRequest(
+            tool="patch_applier",
+            args={"repo_path": str(container.settings.home), "patch_path": patch_path},
+            agent="coding_agent",
+            permission_level=3,
+            risk_level="code_write",
+            affected_paths=[patch_path],
+            expected_side_effects=["Apply legacy patch."],
+            metadata={},
+        ),
+        actor="test",
+        request_id="legacy-request",
+    )
+
+
+def test_legacy_patch_approval_without_artifact_metadata_is_rejected(settings_tmp) -> None:
+    import anyio
+
+    patch_path = settings_tmp.home / "legacy.patch"
+    patch_path.write_text(
+        "diff --git a/README.md b/README.md\n"
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1,2 +1,3 @@\n"
+        " # test repo\n"
+        " animation bug\n"
+        "+legacy apply\n",
+        encoding="utf-8",
+    )
+    container = anyio.run(make_container, settings_tmp)
+    approval = anyio.run(create_legacy_patch_approval, container, str(patch_path))
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/tools/approve",
+        json={"approval_id": approval.approval_id},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert "immutable artifact" in response.json()["result"]["stderr"]
+    assert "legacy apply" not in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
+    replay = client.post(
+        "/tools/approve",
+        json={"approval_id": approval.approval_id},
+        headers=auth(settings_tmp),
+    )
+    assert replay.status_code == 403
 
 
 def test_code_modification_changed_args_cannot_reuse_approval(settings_tmp) -> None:

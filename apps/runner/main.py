@@ -12,10 +12,22 @@ from rich.table import Table
 from apps.cli.render import console
 from apps.runner.install import is_april_wrapper, path_contains_dir
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
+from apps.runner.verify import run_fake_verification
+from april_common.config_validation import validate_configuration
 
 app = typer.Typer(help="Global command dispatcher.")
 april_app = typer.Typer(help="Run APRIL from any folder.", invoke_without_command=True)
+model_app = typer.Typer(help="Model operations.")
+project_app = typer.Typer(help="Project operations.")
+memory_app = typer.Typer(help="Memory operations.")
+conversation_app = typer.Typer(help="Conversation operations.")
+config_app = typer.Typer(help="Configuration operations.")
 app.add_typer(april_app, name="april")
+april_app.add_typer(model_app, name="model")
+april_app.add_typer(project_app, name="project")
+april_app.add_typer(memory_app, name="memory")
+april_app.add_typer(conversation_app, name="conversation")
+april_app.add_typer(config_app, name="config")
 
 
 def _manager() -> AprilServiceManager:
@@ -49,6 +61,11 @@ def _ensure_services(fake: bool) -> None:
         console.print("[red]APRIL services are not healthy.[/red]")
         _print_status(status)
         raise typer.Exit(1)
+
+
+def _delegate(args: list[str], *, fake: bool) -> None:
+    _ensure_services(fake)
+    raise typer.Exit(_run_april_cli(args))
 
 
 def _print_status(status: ServiceStatus) -> None:
@@ -160,13 +177,12 @@ def ask(
     project_id: str | None = typer.Option(None, "--project-id"),
     repo_path: str | None = typer.Option(None, "--repo-path"),
 ) -> None:
-    _ensure_services(_effective_fake(ctx, fake))
     args = ["ask", message]
     if project_id:
         args.extend(["--project-id", project_id])
     if repo_path:
         args.extend(["--repo-path", repo_path])
-    raise typer.Exit(_run_april_cli(args))
+    _delegate(args, fake=_effective_fake(ctx, fake))
 
 
 @april_app.command()
@@ -189,8 +205,7 @@ def health(
     ctx: typer.Context,
     fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
 ) -> None:
-    _ensure_services(_effective_fake(ctx, fake))
-    raise typer.Exit(_run_april_cli(["health"]))
+    _delegate(["health"], fake=_effective_fake(ctx, fake))
 
 
 @april_app.command()
@@ -198,8 +213,7 @@ def models(
     ctx: typer.Context,
     fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
 ) -> None:
-    _ensure_services(_effective_fake(ctx, fake))
-    raise typer.Exit(_run_april_cli(["models"]))
+    _delegate(["models"], fake=_effective_fake(ctx, fake))
 
 
 @april_app.command()
@@ -207,8 +221,152 @@ def approvals(
     ctx: typer.Context,
     fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
 ) -> None:
-    _ensure_services(_effective_fake(ctx, fake))
-    raise typer.Exit(_run_april_cli(["approvals"]))
+    _delegate(["approvals"], fake=_effective_fake(ctx, fake))
+
+
+@april_app.command()
+def approve(
+    ctx: typer.Context,
+    approval_id: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["approve", approval_id], fake=_effective_fake(ctx, fake))
+
+
+@april_app.command()
+def deny(
+    ctx: typer.Context,
+    approval_id: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["deny", approval_id], fake=_effective_fake(ctx, fake))
+
+
+@april_app.command()
+def projects(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["projects"], fake=_effective_fake(ctx, fake))
+
+
+@model_app.command("load")
+def model_load(
+    ctx: typer.Context,
+    model_id: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["model", "load", model_id], fake=_effective_fake(ctx, fake))
+
+
+@model_app.command("unload")
+def model_unload(
+    ctx: typer.Context,
+    model_id: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["model", "unload", model_id], fake=_effective_fake(ctx, fake))
+
+
+@project_app.command("add")
+def project_add(
+    ctx: typer.Context,
+    path: str,
+    name: str | None = typer.Option(None, "--name"),
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    args = ["project", "add", path]
+    if name:
+        args.extend(["--name", name])
+    _delegate(args, fake=_effective_fake(ctx, fake))
+
+
+@project_app.command("index")
+def project_index(
+    ctx: typer.Context,
+    project_id: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["project", "index", project_id], fake=_effective_fake(ctx, fake))
+
+
+@memory_app.command("list")
+def memory_list(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["memory", "list"], fake=_effective_fake(ctx, fake))
+
+
+@memory_app.command("search")
+def memory_search(
+    ctx: typer.Context,
+    query: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["memory", "search", query], fake=_effective_fake(ctx, fake))
+
+
+@memory_app.command("delete")
+def memory_delete(
+    ctx: typer.Context,
+    memory_id: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["memory", "delete", memory_id], fake=_effective_fake(ctx, fake))
+
+
+@memory_app.command("export")
+def memory_export(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["memory", "export"], fake=_effective_fake(ctx, fake))
+
+
+@conversation_app.command("delete")
+def conversation_delete(
+    ctx: typer.Context,
+    conversation_id: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["conversation", "delete", conversation_id], fake=_effective_fake(ctx, fake))
+
+
+@config_app.command("validate")
+def config_validate() -> None:
+    errors = validate_configuration(_manager().home)
+    if errors:
+        console.print("[red]APRIL configuration is invalid.[/red]")
+        for error in errors:
+            console.print(f"- {error}")
+        raise typer.Exit(1)
+    console.print("[green]APRIL configuration is valid.[/green]")
+
+
+@april_app.command()
+def verify(
+    fake: bool = typer.Option(False, "--fake", help="Run deterministic fake-backend verification."),
+    real_model: Path | None = typer.Option(None, "--real-model"),
+) -> None:
+    if real_model is not None:
+        console.print(
+            "[yellow]Real-model launcher verification is not implemented in this pass.[/yellow]"
+        )
+        raise typer.Exit(0)
+    if not fake:
+        console.print("[red]Use --fake for deterministic local verification.[/red]")
+        raise typer.Exit(1)
+    checks = run_fake_verification(_manager().home)
+    table = Table(title="APRIL Verification")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for check in checks:
+        table.add_row(check.name, "pass" if check.ok else "fail", check.detail)
+    console.print(table)
+    if not all(check.ok for check in checks):
+        raise typer.Exit(1)
 
 
 @april_app.command()

@@ -430,12 +430,13 @@ class AprilOrchestrator:
             )
 
         patch_path = str(generator_result.data["patch_path"])
-        apply_args = {"repo_path": project.path, "patch_path": patch_path}
+        apply_args = {"repo_path": project.path, "patch_path": patch_path, "project_id": project.id}
         expected_side_effects = ["Apply the saved patch once to local repository files."]
         metadata = await build_patch_approval_metadata(
             repo_path=project.path,
             patch_path=patch_path,
             expected_side_effects=expected_side_effects,
+            project_id=project.id,
         )
         permission = self.permission_engine.evaluate(
             tool="patch_applier",
@@ -570,11 +571,9 @@ class AprilOrchestrator:
         elif call.tool == "list_files":
             args["path"] = project.path
             args.setdefault("limit", 100)
-        elif call.tool == "repo_indexer":
+        elif call.tool in {"repo_indexer", "test_runner", "patch_applier"}:
             args["repo_path"] = project.path
             args["project_id"] = project.id
-        elif call.tool in {"test_runner", "patch_applier"}:
-            args["repo_path"] = project.path
         elif call.tool in {"read_file", "write_file"} and "path" in args:
             args["path"] = str(
                 normalize_project_child(
@@ -749,7 +748,12 @@ class AprilOrchestrator:
                 repo_path=str(args["repo_path"]),
                 patch_path=str(args["patch_path"]),
                 expected_side_effects=expected_side_effects,
+                project_id=str(args["project_id"]) if args.get("project_id") is not None else None,
             )
         if tool == "git_commit":
-            return await build_git_commit_metadata(repo_path=str(args["repo_path"]))
+            return await build_git_commit_metadata(
+                repo_path=str(args["repo_path"]),
+                message=str(args.get("message")) if args.get("message") is not None else None,
+                project_id=str(args["project_id"]) if args.get("project_id") is not None else None,
+            )
         return {}

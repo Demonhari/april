@@ -15,6 +15,7 @@ MAX_GIT_CAPTURE_BYTES = 2_000_000
 @dataclass(frozen=True, slots=True)
 class PatchArtifact:
     patch_sha256: str
+    patch_byte_length: int
     affected_paths: list[str]
     repo_root: str
     repo_head: str | None
@@ -96,6 +97,21 @@ async def inspect_patch_file(*, patch_path: str | Path, repo_root: str | Path) -
     affected_paths = validate_patch_text(text, root)
     return PatchArtifact(
         patch_sha256=sha256_file(patch),
+        patch_byte_length=patch.stat().st_size,
+        affected_paths=affected_paths,
+        repo_root=str(root),
+        repo_head=await git_head(root),
+        repo_state_digest=await git_worktree_digest(root),
+    )
+
+
+async def inspect_patch_bytes(*, patch_bytes: bytes, repo_root: str | Path) -> PatchArtifact:
+    root = normalize_project_root(repo_root)
+    text = patch_bytes.decode("utf-8", errors="replace")
+    affected_paths = validate_patch_text(text, root)
+    return PatchArtifact(
+        patch_sha256=sha256_bytes(patch_bytes),
+        patch_byte_length=len(patch_bytes),
         affected_paths=affected_paths,
         repo_root=str(root),
         repo_head=await git_head(root),
@@ -143,6 +159,16 @@ async def git_staged_digest(repo_root: str | Path) -> str:
     return sha256_bytes(stdout)
 
 
+async def git_staged_tree_id(repo_root: str | Path) -> str:
+    root = normalize_project_root(repo_root)
+    if not (root / ".git").exists():
+        raise PermissionDeniedError("Git commit approval requires a Git repository.")
+    code, stdout, stderr = await _run_git(root, ["write-tree"])
+    if code != 0:
+        raise PermissionDeniedError("Unable to calculate staged Git tree.", {"stderr": stderr})
+    return stdout.strip()
+
+
 async def git_apply_check(repo_root: str | Path, patch_path: str | Path) -> tuple[bool, str, str]:
     root = normalize_project_root(repo_root)
     patch = normalize_project_child(
@@ -153,6 +179,30 @@ async def git_apply_check(repo_root: str | Path, patch_path: str | Path) -> tupl
     )
     code, stdout, stderr = await _run_git(root, ["apply", "--check", "--", str(patch)])
     return code == 0, stdout, stderr
+
+
+async def git_apply_check_bytes(repo_root: str | Path, patch_bytes: bytes) -> tuple[bool, str, str]:
+    root = normalize_project_root(repo_root)
+    code, stdout, stderr = await _run_git_bytes_with_input(
+        root,
+        ["apply", "--check", "-"],
+        patch_bytes,
+    )
+    return (
+        code == 0,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
+
+
+async def git_apply_bytes(repo_root: str | Path, patch_bytes: bytes) -> tuple[int, str, str]:
+    root = normalize_project_root(repo_root)
+    code, stdout, stderr = await _run_git_bytes_with_input(root, ["apply", "-"], patch_bytes)
+    return (
+        code,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
 
 
 async def _run_git(repo_root: Path, args: list[str]) -> tuple[int, str, str]:
@@ -176,6 +226,36 @@ async def _run_git_bytes(repo_root: Path, args: list[str]) -> tuple[int, bytes, 
     try:
         stdout, stderr = await asyncio.wait_for(
             process.communicate(),
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        return 124, b"", b"Git command timed out."
+    return (
+        process.returncode or 0,
+        stdout[:MAX_GIT_CAPTURE_BYTES],
+        stderr[:MAX_GIT_CAPTURE_BYTES],
+    )
+
+
+async def _run_git_bytes_with_input(
+    repo_root: Path,
+    args: list[str],
+    stdin: bytes,
+) -> tuple[int, bytes, bytes]:
+    process = await asyncio.create_subprocess_exec(
+        "git",
+        "-C",
+        str(repo_root),
+        *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(stdin),
             timeout=GIT_TIMEOUT_SECONDS,
         )
     except TimeoutError:

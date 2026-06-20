@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 async def run_migrations(database: Database) -> None:
@@ -132,6 +132,15 @@ async def run_migrations(database: Database) -> None:
         await conn.execute(
             "ALTER TABLE approvals ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
         )
+    await conn.execute(
+        """
+        UPDATE approvals
+        SET status = 'expired'
+        WHERE status = 'pending'
+          AND permission_level >= 3
+          AND (metadata_json IS NULL OR metadata_json = '' OR metadata_json = '{}')
+        """
+    )
     await conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, datetime('now'))",
         (SCHEMA_VERSION,),

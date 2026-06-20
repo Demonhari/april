@@ -29,6 +29,11 @@ Runtime retrieval:
 
 Reminders are stored in SQLite through the `reminders` table. The previous JSONL reminder storage is not used by the MVP tools.
 
+Patch approval artifacts are stored locally under `data/artifacts/patches/` as
+content-addressed files named by SHA-256. Approval metadata stores the artifact
+ID, exact byte length, affected paths, project ID, repository identity, and Git
+state needed to apply the approved bytes once.
+
 Conversation messages are stored locally in SQLite. The CLI creates one
 conversation ID per interactive session, and API clients can reuse
 `conversation_id` values across turns. APRIL includes a bounded recent-history

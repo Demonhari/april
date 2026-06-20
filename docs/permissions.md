@@ -23,15 +23,20 @@ Approval execution is one-time and exact-action:
 - The canonical hash of tool name, normalized arguments, and immutable approval
   metadata must still match.
 - Current tool policy is re-evaluated for the scoped agent.
-- Patch approvals bind the patch SHA-256, normalized affected paths, repository
+- Patch approvals bind an APRIL-owned immutable artifact ID, patch SHA-256,
+  exact byte length, normalized affected paths, selected project ID, repository
   root, Git HEAD when available, working-tree/index state digest when available,
   expected side effects, expiry, and approval ID.
-- Immediately before patch application, APRIL re-reads the patch, recalculates
-  SHA-256, parses every target path again, rejects traversal, absolute patch
-  paths, symlink escapes, `.git` internals, sensitive paths, and out-of-project
-  targets, then runs `git apply --check`.
-- Git commit approvals bind the exact staged diff digest. APRIL recalculates the
-  staged diff immediately before `git commit` and rejects changed staged content.
+- The patch artifact is stored under `data/artifacts/patches/` and may live
+  outside the selected repository. Patch target paths may not.
+- Immediately before patch application, APRIL loads the approved artifact bytes,
+  recalculates SHA-256, parses every target path again, rejects traversal,
+  absolute patch paths, symlink escapes, `.git` internals, sensitive paths, and
+  out-of-project targets, then runs `git -C REPO apply --check -` and
+  `git -C REPO apply -` against those same bytes.
+- Git commit approvals bind the exact staged diff digest, staged tree ID, commit
+  message, and repository identity. APRIL recalculates the staged state
+  immediately before `git commit` and rejects changed staged content.
 - Level 3+ execution writes an audit start record before running; if this fails, the action does not run.
 - Tool calls are recorded in SQLite.
 - Failed executions consume the approval into a terminal state so replay is denied.
