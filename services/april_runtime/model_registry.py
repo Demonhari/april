@@ -53,6 +53,14 @@ class ModelDefinition(BaseModel):
     temperature: float = Field(ge=0, le=2)
     max_output_tokens: int = Field(gt=0)
     keep_loaded: bool = False
+    n_gpu_layers: int | None = None
+    n_batch: int | None = Field(default=None, gt=0)
+    n_ubatch: int | None = Field(default=None, gt=0)
+    use_mmap: bool | None = None
+    use_mlock: bool | None = None
+    chat_format: str | None = None
+    idle_unload_seconds: float | None = Field(default=None, gt=0)
+    priority: int = 0
 
     @field_validator("backend")
     @classmethod

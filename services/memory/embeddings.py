@@ -11,6 +11,11 @@ import numpy as np
 class EmbeddingProvider(ABC):
     @property
     @abstractmethod
+    def name(self) -> str:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
     def dimensions(self) -> int:
         raise NotImplementedError
 
@@ -22,6 +27,10 @@ class EmbeddingProvider(ABC):
 class HashedTokenEmbedding(EmbeddingProvider):
     def __init__(self, dimensions: int = 256) -> None:
         self._dimensions = dimensions
+
+    @property
+    def name(self) -> str:
+        return "hashed-token"
 
     @property
     def dimensions(self) -> int:
@@ -44,6 +53,10 @@ class HashedTokenEmbedding(EmbeddingProvider):
 
 
 class LocalModelEmbeddingPlaceholder(EmbeddingProvider):
+    @property
+    def name(self) -> str:
+        return "local-model-placeholder"
+
     @property
     def dimensions(self) -> int:
         raise NotImplementedError("Local GGUF embedding provider is an extension point.")

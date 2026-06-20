@@ -32,7 +32,19 @@ from services.permissions.tool_execution import ToolExecutionService
 from skills.registry import ToolRegistry
 from skills.schemas import ToolResult
 
-StreamEventName = Literal["meta", "token", "approval_required", "usage", "done", "error"]
+StreamEventName = Literal[
+    "meta",
+    "routing",
+    "agent_iteration",
+    "tool_request",
+    "tool_result",
+    "approval_required",
+    "final_answer",
+    "token",
+    "usage",
+    "done",
+    "error",
+]
 
 
 @dataclass(slots=True)
@@ -154,6 +166,7 @@ class AprilOrchestrator:
             actor=actor,
             project_id=project_id,
             repo_path=repo_path,
+            structured_specialists=True,
         )
         yield (
             "meta",
@@ -166,6 +179,57 @@ class AprilOrchestrator:
                 "citations": [citation.model_dump() for citation in prepared.citations],
             },
         )
+        yield (
+            "routing",
+            {
+                "intent": prepared.decision.intent,
+                "agent": prepared.agent_name,
+                "model_id": prepared.model_id,
+                "routing_method": prepared.decision.routing_method,
+                "decision_summary": prepared.decision.decision_summary,
+            },
+        )
+        if prepared.structured_agent:
+            yield (
+                "agent_iteration",
+                {
+                    "agent": prepared.agent_name,
+                    "status": "started",
+                    "structured": True,
+                },
+            )
+            result = await self._run_structured_prepared(prepared, message)
+            for request in result.tool_requests:
+                yield ("tool_request", request)
+            if result.pending_approval is not None:
+                yield (
+                    "approval_required",
+                    {
+                        "approval": result.pending_approval,
+                        "message": result.final_message,
+                        "proposed_changes": [
+                            change.model_dump() for change in result.proposed_changes
+                        ],
+                    },
+                )
+                yield ("done", {"finish_reason": "approval_required"})
+                return
+            if result.status == "ok":
+                yield ("final_answer", {"message": result.final_message})
+                yield ("token", {"text": result.final_message})
+                yield ("usage", result.usage)
+                yield ("done", {"finish_reason": "stop"})
+                return
+            yield (
+                "error",
+                {
+                    "message": result.final_message,
+                    "status": result.status,
+                    "warnings": result.warnings,
+                },
+            )
+            yield ("done", {"finish_reason": "error"})
+            return
         if prepared.pending_approval is not None:
             yield (
                 "approval_required",

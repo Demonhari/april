@@ -35,7 +35,11 @@ make install-dev
 
 ## Configuration
 
-Defaults live in `configs/april.yaml` and `configs/models.yaml`. Environment overrides use the `APRIL_` prefix.
+Defaults live in `configs/april.yaml`, `configs/models.yaml`,
+`configs/agents.yaml`, `configs/tools.yaml`, and `configs/permissions.yaml`.
+These files are active runtime policy, not documentation-only examples.
+Environment overrides use the `APRIL_` prefix for local machine settings such
+as ports, data paths, model backend, and allowed roots.
 
 Useful local development settings:
 
@@ -46,6 +50,14 @@ export APRIL_ALLOWED_FILESYSTEM_ROOTS="$PWD"
 ```
 
 Both APIs bind to `127.0.0.1` by default. CORS is disabled by default.
+
+Development installs can use direct dependency constraints without pulling in
+optional runtime or voice wheels:
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/pip install -e '.[dev]' -c constraints-dev.txt
+```
 
 ## Local Models
 
@@ -133,6 +145,14 @@ run april approve APPROVAL_ID
 run april deny APPROVAL_ID
 run april agent run coding_agent "Inspect this repository" --project-id PROJECT_ID
 run april config inspect
+run april reminder list
+run april reminder create "stand up" --due-at 2026-06-21T09:00:00Z
+run april reminder delete REMINDER_ID
+run april task list
+run april voice health
+run april voice devices
+run april voice ptt
+run april voice listen
 ```
 
 `run april --fake` starts missing services with `APRIL_RUNTIME_BACKEND=fake`
@@ -268,13 +288,21 @@ When the brain supplies `memory_queries`, APRIL retrieves local memories by poli
 
 ## Voice
 
-Voice is optional and disabled by default. Configure local `whisper.cpp` and Piper paths in `configs/april.yaml` or environment variables. No voice model or binary is downloaded by APRIL.
+Voice is optional and disabled by default. Configure local `whisper.cpp`,
+Piper, optional `sounddevice`, and optional openWakeWord model paths in
+`configs/april.yaml` or environment variables. No voice model, speech model,
+wake-word model, or binary is downloaded by APRIL.
 
 ```bash
+april voice health
+april voice devices
 april voice ptt
+april voice listen
 ```
 
-Push-to-talk starts only from explicit CLI invocation.
+Push-to-talk starts only from explicit CLI invocation. Wake-word mode is also an
+explicit command and falls back to push-to-talk behavior when wake-word support
+is unavailable. API startup never activates the microphone.
 
 ## Quality Gates
 
@@ -312,13 +340,18 @@ tool-call rows, and exactly one runtime streaming usage event.
   substitutions, shell interpreters, package installers, arbitrary `python -m`
   modules, and shell metacharacters are denied.
 - External actions are disabled by default and not simulated.
+- `open_app` is Level 4 and can only open configured macOS application names
+  with `/usr/bin/open -a` after exact approval.
+- `open_url` is Level 5, requires `external_actions_enabled`, accepts only
+  normalized `http`/`https` URLs without credentials, and requires exact
+  approval.
 
 ## Limitations
 
 - The MVP fake backend is deterministic and not intelligent.
 - The default vector embedding is a lightweight hashed-token baseline, not a semantic embedding model.
 - Desktop UI is documented as a future surface.
-- The global launcher starts only Runtime and the Core API; desktop UI and
-  always-listening voice remain future phases.
+- The global launcher starts Runtime and the Core API. Desktop UI remains a
+  future surface.
 - Real wake-word, STT, and TTS require user-installed local binaries/models.
 - Real GGUF inference requires manually installed model files and the optional `llama-cpp-python` dependency.

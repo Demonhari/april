@@ -20,6 +20,14 @@ Vector memory is local and stored under `data/vector_index/`. The MVP embedding 
 
 The hashed embedding is a baseline retrieval aid, not a semantic model.
 
+The vector index stores metadata and matrix data separately as `records.json`,
+`metadata.json`, and `vectors.npy`. Writes are batched under a local file lock
+and committed through atomic temporary-file replacement. Search uses the
+persisted matrix directly instead of reparsing vectors from JSON records.
+Indexing is scoped by source type, source ID, project ID, path, and content
+hash so deleted files are removed, changed files are replaced, unchanged files
+are reused, and repeated indexing is idempotent.
+
 Runtime retrieval:
 
 - Brain-provided `memory_queries` trigger local hybrid memory retrieval.
@@ -28,7 +36,10 @@ Runtime retrieval:
 - Sensitive-looking content is filtered before prompt inclusion.
 - Coding requests with a selected indexed project retrieve project-scoped vector chunks and return file/line citations.
 
-Reminders are stored in SQLite through the `reminders` table. The previous JSONL reminder storage is not used by the MVP tools.
+Reminders are stored in SQLite through the `reminders` table and exposed
+through authenticated API/CLI operations for list, create, and delete. The
+previous JSONL reminder storage is not used by the MVP tools. The existing
+`tasks` table is exposed for authenticated inspection.
 
 Patch approval artifacts are stored locally under `data/artifacts/patches/` as
 content-addressed files named by SHA-256. Approval metadata stores the artifact

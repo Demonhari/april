@@ -30,6 +30,7 @@ class RuntimeSettings(BaseModel):
     backend: str = "llama_cpp"
     preload_keep_loaded: bool = True
     request_timeout_seconds: float = 120.0
+    max_loaded_specialist_models: int = 2
 
 
 class MemorySettings(BaseModel):
@@ -60,6 +61,13 @@ class VoiceSettings(BaseModel):
     enabled: bool = False
     audio_cache_path: Path = Path("data/audio_cache")
     retain_debug_audio: bool = False
+    input_device: str | int | None = None
+    output_device: str | int | None = None
+    max_record_seconds: float = 30.0
+    vad_energy_threshold: float = 0.01
+    vad_required_frames: int = 3
+    wake_word_threshold: float = 0.5
+    wake_word_cooldown_seconds: float = 2.0
     whisper_binary_path: Path | None = None
     whisper_model_path: Path | None = None
     piper_binary_path: Path | None = None
@@ -125,6 +133,10 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_RUNTIME_URL": ("runtime", "url"),
     "APRIL_RUNTIME_BACKEND": ("runtime", "backend"),
     "APRIL_RUNTIME_PRELOAD_KEEP_LOADED": ("runtime", "preload_keep_loaded"),
+    "APRIL_RUNTIME_MAX_LOADED_SPECIALIST_MODELS": (
+        "runtime",
+        "max_loaded_specialist_models",
+    ),
     "APRIL_DATABASE_PATH": ("memory", "database_path"),
     "APRIL_VECTOR_INDEX_PATH": ("memory", "vector_index_path"),
     "APRIL_LOGS_PATH": ("paths", "logs_path"),
@@ -139,6 +151,9 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_BRAIN_MODEL_ID": ("brain", "model_id"),
     "APRIL_VOICE_ENABLED": ("voice", "enabled"),
     "APRIL_AUDIO_CACHE_PATH": ("voice", "audio_cache_path"),
+    "APRIL_VOICE_INPUT_DEVICE": ("voice", "input_device"),
+    "APRIL_VOICE_OUTPUT_DEVICE": ("voice", "output_device"),
+    "APRIL_VOICE_MAX_RECORD_SECONDS": ("voice", "max_record_seconds"),
     "APRIL_WHISPER_BINARY_PATH": ("voice", "whisper_binary_path"),
     "APRIL_WHISPER_MODEL_PATH": ("voice", "whisper_model_path"),
     "APRIL_PIPER_BINARY_PATH": ("voice", "piper_binary_path"),

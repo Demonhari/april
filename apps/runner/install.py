@@ -6,10 +6,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from april_common.settings import project_root
-
 APRIL_WRAPPER_MARKER = "# APRIL_RUN_WRAPPER=1"
-APRIL_RUN_COMMAND_MARKER = "# APRIL_RUN_COMMAND=.venv/bin/python -m apps.runner.main"
+APRIL_RUN_COMMAND_MARKER = "# APRIL_RUN_COMMAND=python -m apps.runner.main"
 PATH_BLOCK_START = "# >>> APRIL launcher PATH >>>"
 PATH_BLOCK_END = "# <<< APRIL launcher PATH <<<"
 PATH_EXPORT_LINE = 'export PATH="$HOME/.local/bin:$PATH"'
@@ -24,7 +22,6 @@ class InstallResult:
 
 def wrapper_content(*, repo_root: Path) -> str:
     root = repo_root.expanduser().resolve()
-    python_path = root / ".venv" / "bin" / "python"
     return "\n".join(
         [
             "#!/usr/bin/env bash",
@@ -33,7 +30,26 @@ def wrapper_content(*, repo_root: Path) -> str:
             "set -euo pipefail",
             f'export APRIL_HOME="{root}"',
             'export PYTHONPATH="$APRIL_HOME${PYTHONPATH:+:$PYTHONPATH}"',
-            f'exec "{python_path}" -m apps.runner.main "$@"',
+            'APRIL_PYTHON="${APRIL_PYTHON:-}"',
+            'if [[ -z "$APRIL_PYTHON" && -x "$APRIL_HOME/.venv/bin/python" ]]; then',
+            '  APRIL_PYTHON="$APRIL_HOME/.venv/bin/python"',
+            "fi",
+            'if [[ -z "$APRIL_PYTHON" ]]; then',
+            '  APRIL_PYTHON="python3.11"',
+            "fi",
+            'if ! command -v "$APRIL_PYTHON" >/dev/null 2>&1; then',
+            '  echo "APRIL launcher could not find a Python interpreter: $APRIL_PYTHON" >&2',
+            '  echo "Create .venv with python3.11 -m venv .venv and install APRIL." >&2',
+            '  echo "Or set APRIL_PYTHON to a provisioned interpreter." >&2',
+            "  exit 127",
+            "fi",
+            'if ! "$APRIL_PYTHON" -c "import apps.runner.main" >/dev/null 2>&1; then',
+            '  echo "APRIL is not importable with interpreter: $APRIL_PYTHON" >&2',
+            "  echo \"Run: python3.11 -m venv .venv && .venv/bin/pip install -e '.[dev]'\" >&2",
+            '  echo "Or set APRIL_PYTHON to an interpreter with APRIL dependencies." >&2',
+            "  exit 1",
+            "fi",
+            'exec "$APRIL_PYTHON" -m apps.runner.main "$@"',
             "",
         ]
     )
@@ -85,7 +101,6 @@ def uninstall_wrappers(*, bin_dir: Path) -> InstallResult:
 
 def verify_wrappers(*, repo_root: Path, bin_dir: Path) -> list[str]:
     root = repo_root.expanduser().resolve()
-    python_path = root / ".venv" / "bin" / "python"
     errors: list[str] = []
     for name in WRAPPER_NAMES:
         target = bin_dir.expanduser().resolve() / name
@@ -96,14 +111,12 @@ def verify_wrappers(*, repo_root: Path, bin_dir: Path) -> list[str]:
         required = [
             APRIL_WRAPPER_MARKER,
             str(root),
-            ".venv/bin/python",
+            "APRIL_PYTHON",
             "-m apps.runner.main",
         ]
         for needle in required:
             if needle not in content:
                 errors.append(f"{target} does not contain required text: {needle}")
-        if str(python_path) not in content:
-            errors.append(f"{target} does not reference expected interpreter: {python_path}")
         if not os.access(target, os.X_OK):
             errors.append(f"{target} is not executable")
     return errors
@@ -153,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     action_group = parser.add_mutually_exclusive_group(required=True)
     action_group.add_argument("--install", action="store_true")
     action_group.add_argument("--uninstall", action="store_true")
-    parser.add_argument("--repo-root", type=Path, default=project_root())
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--bin-dir", type=Path, default=Path.home() / ".local" / "bin")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--add-to-path", action="store_true")

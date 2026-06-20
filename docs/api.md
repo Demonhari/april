@@ -14,6 +14,10 @@ Core API:
 - `GET /memory/export`
 - `DELETE /memory/{memory_id}`
 - `DELETE /conversations/{conversation_id}`
+- `GET /reminders`
+- `POST /reminders`
+- `DELETE /reminders/{reminder_id}`
+- `GET /tasks`
 - `GET /projects`
 - `POST /projects`
 - `POST /projects/{project_id}/index`
@@ -62,7 +66,12 @@ scope.
 `POST /chat/stream` emits Server-Sent Events:
 
 - `meta`
+- `routing`
+- `agent_iteration`
+- `tool_request`
+- `tool_result`
 - `token`
+- `final_answer`
 - `approval_required`
 - `usage`
 - `done`
@@ -109,6 +118,22 @@ belongs to a suspended specialist run, the response is:
 If a resumed run asks for another Level 3+ tool, `result.status` is
 `pending_approval` and a new approval ID is returned.
 
+`POST /voice/input` accepts the same body shape as `/chat`, including
+`conversation_id`, so a push-to-talk voice loop can keep a stable conversation.
+
+Reminder operations are authenticated:
+
+```json
+POST /reminders
+{
+  "content": "stand up",
+  "due_at": "2026-06-21T09:00:00Z"
+}
+```
+
+`GET /tasks` returns the inspectable local task rows currently stored in
+SQLite. It does not execute tasks.
+
 ## Global Launcher
 
 The `run april` launcher is a local CLI supervisor, not a public API endpoint.
@@ -140,6 +165,14 @@ run april deny APPROVAL_ID
 run april config validate
 run april config inspect
 run april agent run coding_agent "Inspect this repository" --project-id PROJECT_ID
+run april reminder list
+run april reminder create "stand up" --due-at 2026-06-21T09:00:00Z
+run april reminder delete REMINDER_ID
+run april task list
+run april voice health
+run april voice devices
+run april voice ptt
+run april voice listen
 run april verify --fake
 ```
 

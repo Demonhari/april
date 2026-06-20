@@ -7,6 +7,8 @@ import pytest
 from april_common.errors import ConfigError
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelRegistry
+from services.april_runtime.prompt_templates import render_prompt
+from services.april_runtime.schemas import ChatMessage
 
 
 def model_data(path: str = "models/missing.gguf") -> dict[str, object]:
@@ -21,12 +23,22 @@ def model_data(path: str = "models/missing.gguf") -> dict[str, object]:
         "temperature": 0.2,
         "max_output_tokens": 64,
         "keep_loaded": False,
+        "n_gpu_layers": 0,
+        "n_batch": 128,
+        "n_ubatch": 64,
+        "use_mmap": True,
+        "use_mlock": False,
+        "chat_format": "generic",
+        "idle_unload_seconds": 60,
+        "priority": 10,
     }
 
 
 def test_valid_registry(tmp_path: Path) -> None:
     registry = ModelRegistry.from_dict({"models": {"brain": model_data()}}, root=tmp_path)
     assert registry.get("april-brain").role == "brain"
+    assert registry.get("april-brain").n_batch == 128
+    assert registry.get("april-brain").priority == 10
 
 
 def test_duplicate_ids_rejected(tmp_path: Path) -> None:
@@ -46,3 +58,14 @@ def test_missing_model_path_state_is_unavailable(tmp_path: Path) -> None:
     lifecycle = ModelLifecycle(registry)
     assert lifecycle.list_models()[0].state == "unavailable"
     assert lifecycle.list_models()[0].missing_path is True
+
+
+def test_prompt_template_requires_explicit_chat_format(tmp_path: Path) -> None:
+    generic = ModelRegistry.from_dict({"models": {"brain": model_data()}}, root=tmp_path).get(
+        "april-brain"
+    )
+    messages = [ChatMessage(role="user", content="hello")]
+    assert "USER: hello" in render_prompt(generic, messages)
+
+    qwen = generic.model_copy(update={"chat_format": "qwen"})
+    assert "<|im_start|>user" in render_prompt(qwen, messages)

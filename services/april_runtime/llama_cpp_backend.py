@@ -31,17 +31,31 @@ class LlamaCppBackend(RuntimeBackend):
                 "Configured GGUF model file is missing.", {"path": str(path)}
             )
         self._model = model
-        self._llm = await asyncio.to_thread(
-            Llama,
-            model_path=str(path),
-            n_ctx=model.context_size,
-            n_threads=model.threads,
-            verbose=False,
-        )
+        kwargs: dict[str, Any] = {
+            "model_path": str(path),
+            "n_ctx": model.context_size,
+            "n_threads": model.threads,
+            "verbose": False,
+        }
+        optional_values = {
+            "n_gpu_layers": model.n_gpu_layers,
+            "n_batch": model.n_batch,
+            "n_ubatch": model.n_ubatch,
+            "use_mmap": model.use_mmap,
+            "use_mlock": model.use_mlock,
+            "chat_format": model.chat_format,
+        }
+        kwargs.update({key: value for key, value in optional_values.items() if value is not None})
+        self._llm = await asyncio.to_thread(Llama, **kwargs)
 
     async def unload(self) -> None:
+        llm = self._llm
         self._llm = None
         self._model = None
+        if llm is not None:
+            close = getattr(llm, "close", None) or getattr(llm, "release", None)
+            if callable(close):
+                await asyncio.to_thread(close)
         await asyncio.sleep(0)
 
     async def generate(
@@ -94,9 +108,12 @@ class LlamaCppBackend(RuntimeBackend):
         llm = self._llm
 
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[str | Exception | None] = asyncio.Queue()
+        queue: asyncio.Queue[str | Exception | None] = asyncio.Queue(maxsize=32)
 
         def produce() -> None:
+            def put(item: str | Exception | None) -> None:
+                asyncio.run_coroutine_threadsafe(queue.put(item), loop).result()
+
             try:
                 kwargs: dict[str, Any] = {
                     "max_tokens": max_output_tokens,
@@ -115,11 +132,11 @@ class LlamaCppBackend(RuntimeBackend):
                 ):
                     text = chunk["choices"][0].get("text", "")
                     if text:
-                        loop.call_soon_threadsafe(queue.put_nowait, str(text))
+                        put(str(text))
             except Exception as exc:
-                loop.call_soon_threadsafe(queue.put_nowait, exc)
+                put(exc)
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
+                put(None)
 
         task = asyncio.create_task(asyncio.to_thread(produce))
         try:

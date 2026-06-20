@@ -134,6 +134,47 @@ def registry(tmp_path: Path) -> ModelRegistry:
     )
 
 
+def multi_registry(tmp_path: Path) -> ModelRegistry:
+    base = {
+        "name": "fake",
+        "path": "missing.gguf",
+        "backend": "fake",
+        "threads": 1,
+        "context_size": 1024,
+        "temperature": 0.2,
+        "max_output_tokens": 64,
+    }
+    return ModelRegistry.from_dict(
+        {
+            "models": {
+                "brain": {
+                    **base,
+                    "id": "april-brain",
+                    "role": "brain",
+                    "keep_loaded": True,
+                    "priority": 100,
+                },
+                "coding": {
+                    **base,
+                    "id": "april-coding",
+                    "role": "coding",
+                    "keep_loaded": False,
+                    "idle_unload_seconds": 0.01,
+                    "priority": 10,
+                },
+                "reading": {
+                    **base,
+                    "id": "april-reading",
+                    "role": "reading",
+                    "keep_loaded": False,
+                    "priority": 5,
+                },
+            }
+        },
+        root=tmp_path,
+    )
+
+
 @pytest.mark.asyncio
 async def test_idempotent_load_unload_and_concurrent_load(tmp_path: Path) -> None:
     backend = CountingBackend()
@@ -205,3 +246,58 @@ async def test_active_model_cannot_unload(tmp_path: Path) -> None:
     with pytest.raises(ModelUnavailableError):
         await lifecycle.unload_model("april-brain")
     await task
+
+
+@pytest.mark.asyncio
+async def test_idle_unload_unloads_specialist_but_not_keep_loaded(tmp_path: Path) -> None:
+    backends: dict[str, CountingBackend] = {}
+
+    def factory(model: ModelDefinition) -> CountingBackend:
+        backend = CountingBackend()
+        backends[model.id] = backend
+        return backend
+
+    lifecycle = ModelLifecycle(
+        multi_registry(tmp_path),
+        backend_factory=factory,
+        root_backend="fake",
+        max_loaded_specialist_models=2,
+    )
+    await lifecycle.load_model("april-brain")
+    await lifecycle.load_model("april-coding")
+    await asyncio.sleep(0.02)
+    await lifecycle.load_model("april-reading")
+    states = {model.id: model.state for model in lifecycle.list_models()}
+    assert states["april-brain"] == "loaded"
+    assert states["april-coding"] == "unloaded"
+    assert states["april-reading"] == "loaded"
+    assert backends["april-coding"].unloads == 1
+
+
+@pytest.mark.asyncio
+async def test_lru_evicts_lowest_priority_specialist(tmp_path: Path) -> None:
+    lifecycle = ModelLifecycle(
+        multi_registry(tmp_path),
+        backend_factory=lambda model: CountingBackend(),
+        root_backend="fake",
+        max_loaded_specialist_models=1,
+    )
+    await lifecycle.load_model("april-coding")
+    await lifecycle.load_model("april-reading")
+    states = {model.id: model.state for model in lifecycle.list_models()}
+    assert states["april-coding"] == "unloaded"
+    assert states["april-reading"] == "loaded"
+
+
+@pytest.mark.asyncio
+async def test_active_specialist_cannot_be_evicted(tmp_path: Path) -> None:
+    lifecycle = ModelLifecycle(
+        multi_registry(tmp_path),
+        backend_factory=lambda model: CountingBackend(),
+        root_backend="fake",
+        max_loaded_specialist_models=1,
+    )
+    await lifecycle.load_model("april-coding")
+    lifecycle.get_state("april-coding").active_requests = 1
+    with pytest.raises(ModelUnavailableError):
+        await lifecycle.load_model("april-reading")

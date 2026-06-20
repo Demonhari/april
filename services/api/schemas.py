@@ -57,6 +57,13 @@ class ProjectCreateRequest(BaseModel):
     name: str | None = None
 
 
+class ReminderCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=500)
+    due_at: str | None = None
+
+
 class HealthResponse(BaseModel):
     status: str
     database: dict[str, Any]

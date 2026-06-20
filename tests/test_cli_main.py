@@ -27,6 +27,10 @@ class FakeApiClient:
             return {"export": "{}"}
         if path == "/memory/search":
             return {"results": []}
+        if path == "/reminders":
+            return {"reminders": []}
+        if path == "/tasks":
+            return {"tasks": []}
         raise AssertionError(path)
 
     async def post(
@@ -47,6 +51,8 @@ class FakeApiClient:
             return {"id": "project-1"}
         if path.endswith("/index"):
             return {"result": {"ok": True}}
+        if path == "/reminders":
+            return {"reminder": {"id": "reminder-1", **payload}}
         raise AssertionError(path)
 
     async def delete(self, path: str) -> dict[str, Any]:
@@ -76,6 +82,11 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         ["memory", "delete", "memory-1"],
         ["memory", "export"],
         ["conversation", "delete", "conversation-1"],
+        ["reminder", "list"],
+        ["reminder", "create", "stand up", "--due-at", "2026-06-21T09:00:00Z"],
+        ["reminder", "delete", "reminder-1"],
+        ["task", "list"],
+        ["voice", "health"],
     ]
     for command in commands:
         result = runner.invoke(app, command)
@@ -98,3 +109,9 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         },
     ) in fake.calls
     assert ("DELETE", "/conversations/conversation-1", None) in fake.calls
+    assert (
+        "POST",
+        "/reminders",
+        {"content": "stand up", "due_at": "2026-06-21T09:00:00Z"},
+    ) in fake.calls
+    assert ("DELETE", "/reminders/reminder-1", None) in fake.calls

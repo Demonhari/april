@@ -30,12 +30,17 @@ PYTHON_BIN="${PYTHON:-python3.11}"
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   PYTHON_BIN="python3"
 fi
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "ERROR: Could not find python3.11 or python3." >&2
+  echo "Set PYTHON to a valid Python 3.11 interpreter." >&2
+  exit 1
+fi
 
 if [[ "${APRIL_INSTALL_SKIP_PIP:-0}" != "1" && ! -d ".venv" ]]; then
   "$PYTHON_BIN" -m venv .venv
 fi
 
-if [[ ! -x ".venv/bin/python" ]]; then
+if [[ "${APRIL_INSTALL_SKIP_PIP:-0}" != "1" && ! -x ".venv/bin/python" ]]; then
   "$PYTHON_BIN" -m venv .venv
 fi
 
@@ -46,6 +51,11 @@ if [[ "${APRIL_INSTALL_SKIP_PIP:-0}" != "1" ]]; then
   else
     .venv/bin/pip install -e ".[dev]"
   fi
+fi
+
+INSTALL_PYTHON="$PYTHON_BIN"
+if [[ -x ".venv/bin/python" ]]; then
+  INSTALL_PYTHON=".venv/bin/python"
 fi
 
 BIN_DIR="$HOME/.local/bin"
@@ -59,4 +69,5 @@ if [[ "$ADD_TO_PATH" == "1" ]]; then
   ARGS+=(--add-to-path)
 fi
 
-.venv/bin/python -m apps.runner.install "${ARGS[@]}"
+APRIL_HOME="$REPO_ROOT" PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  "$INSTALL_PYTHON" -m apps.runner.install "${ARGS[@]}"

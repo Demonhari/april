@@ -1,25 +1,55 @@
 agents:
   general_agent:
+    description: Chat, planning, and small answers.
     model_id: april-brain
+    prompt_path: agents/general/prompt.md
     allowed_tools: []
+    blocked_tools: []
     memory_access: conversation_and_safe_memory
+    maximum_tool_iterations: 5
+    output_schema: AgentResult
   coding_agent:
+    description: Repository inspection, code explanation, and patch proposals.
     model_id: april-coding
-    allowed_tools: [git_status, git_diff, git_log, git_branch, list_files, read_file, search_files, repo_indexer, test_runner, patch_generator, patch_applier]
+    prompt_path: agents/coding/prompt.md
+    allowed_tools: [git_status, git_diff, git_log, git_branch, list_files, read_file, search_files, repo_indexer, test_runner, patch_generator, patch_applier, write_file, git_commit, run_command]
+    blocked_tools: [git_push, open_url, open_app]
     memory_access: project_memory
+    maximum_tool_iterations: 5
+    output_schema: AgentResult
   reading_agent:
+    description: Document and chunk summarization.
     model_id: april-reading
+    prompt_path: agents/reading/prompt.md
     allowed_tools: [read_file, search_files]
+    blocked_tools: [write_file, run_command, git_commit]
     memory_access: conversation_and_safe_memory
+    maximum_tool_iterations: 3
+    output_schema: AgentResult
   creative_agent:
+    description: Ideas, scripts, concepts, and local notes.
     model_id: april-brain
-    allowed_tools: [create_note]
+    prompt_path: agents/creative/prompt.md
+    allowed_tools: [create_note, search_notes]
+    blocked_tools: [open_url]
     memory_access: conversation_and_safe_memory
+    maximum_tool_iterations: 3
+    output_schema: AgentResult
   reasoning_agent:
+    description: Architecture decisions and deeper analysis when configured.
     model_id: null
+    prompt_path: agents/reasoning/prompt.md
     allowed_tools: [read_file, search_files, git_status, git_diff]
+    blocked_tools: [write_file, run_command, git_commit]
     memory_access: conversation_and_safe_memory
+    maximum_tool_iterations: 5
+    output_schema: AgentResult
   system_action_agent:
+    description: Tightly constrained local system actions.
     model_id: april-brain
-    allowed_tools: [open_app, open_url, run_command]
+    prompt_path: agents/system_action/prompt.md
+    allowed_tools: [list_files, run_command, open_app, open_url]
+    blocked_tools: [git_push]
     memory_access: none
+    maximum_tool_iterations: 2
+    output_schema: AgentResult

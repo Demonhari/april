@@ -31,4 +31,10 @@ Controls:
 - repository operations require explicit project selection and allowed-root validation
 - retrieved memory and indexed repository chunks are marked as context, not instructions
 - external actions are disabled by default
+- approved external actions are rechecked against the current
+  `external_actions_enabled` setting before execution
+- `open_app` is restricted to configured plain application names and macOS
+  `/usr/bin/open -a` argv execution
+- `open_url` is restricted to normalized `http`/`https` URLs without embedded
+  credentials and macOS `/usr/bin/open` argv execution
 - bearer tokens and credential-like values are redacted from audit logs

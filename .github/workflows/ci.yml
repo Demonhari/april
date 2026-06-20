@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: Python 3.11 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]' -c constraints-dev.txt
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Format check
+        run: python -m ruff format --check .
+
+      - name: Type check
+        run: python -m mypy april_common apps services agents skills
+
+      - name: Tests with coverage
+        run: |
+          python -m pytest \
+            --cov=april_common \
+            --cov=services \
+            --cov=agents \
+            --cov=skills \
+            --cov=apps \
+            --cov-report=term-missing \
+            --cov-fail-under=85
+
+      - name: Compile
+        run: python -m compileall -q april_common apps services agents skills tests
+
+      - name: Config validation
+        run: run april config validate
+
+      - name: Fake verification
+        run: run april verify --fake

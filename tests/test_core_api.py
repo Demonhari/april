@@ -299,6 +299,33 @@ def test_chat_stream_uses_runtime_stream(settings_tmp) -> None:
     assert container.runtime_client.stream_called  # type: ignore[attr-defined]
 
 
+def test_chat_stream_specialist_uses_structured_events(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(settings_tmp),
+    ).json()
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={
+            "message": "April, check why the animation in this repository is broken.",
+            "project_id": project["id"],
+        },
+        headers=auth(settings_tmp),
+    ) as response:
+        body = response.read().decode()
+    assert response.status_code == 200
+    assert "event: routing" in body
+    assert "event: agent_iteration" in body
+    assert "event: final_answer" in body
+    assert container.runtime_client.stream_called is False  # type: ignore[attr-defined]
+
+
 def test_memory_retrieval_in_prompt(settings_tmp) -> None:
     import anyio
 
@@ -373,6 +400,44 @@ def test_health_response(settings_tmp) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["database"]["ok"] is True
+    assert response.json()["runtime"]["status"] == "ok"
+
+
+def test_health_degrades_when_runtime_unavailable(settings_tmp) -> None:
+    import anyio
+
+    class OfflineRuntime(FakeRuntimeClient):
+        async def health(self, *, timeout: float | None = None) -> dict[str, object]:
+            from april_common.errors import RuntimeUnavailableError
+
+            raise RuntimeUnavailableError("offline")
+
+    container = anyio.run(make_container, settings_tmp, OfflineRuntime())
+    client = TestClient(create_app(container))
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["runtime"]["status"] == "unavailable"
+
+
+def test_voice_input_preserves_conversation_id(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    first = client.post(
+        "/chat",
+        json={"message": "April, plan my work today."},
+        headers=auth(settings_tmp),
+    ).json()
+    conversation_id = first["result"]["conversation_id"]
+    voice = client.post(
+        "/voice/input",
+        json={"message": "Use that same plan.", "conversation_id": conversation_id},
+        headers=auth(settings_tmp),
+    )
+    assert voice.status_code == 200
+    assert voice.json()["result"]["conversation_id"] == conversation_id
 
 
 def test_project_add_normalizes_and_deduplicates(settings_tmp) -> None:
@@ -518,6 +583,23 @@ def test_direct_agent_run_rejects_unknown_agent(settings_tmp) -> None:
     response = client.post(
         "/agents/run",
         json={"agent": "missing_agent", "message": "hello"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 403
+
+
+def test_direct_agent_run_rejects_unstructured_option(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/agents/run",
+        json={
+            "agent": "general_agent",
+            "message": "hello",
+            "options": {"structured": False},
+        },
         headers=auth(settings_tmp),
     )
     assert response.status_code == 403
@@ -1415,6 +1497,29 @@ def test_disabled_external_action_is_denied(settings_tmp) -> None:
     )
     assert response.status_code == 403
     assert "External actions are disabled" in response.text
+
+
+def test_reminders_and_tasks_api_are_authenticated(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    unauthenticated = client.get("/reminders")
+    assert unauthenticated.status_code == 403
+    created = client.post(
+        "/reminders",
+        json={"content": "stand up", "due_at": "2026-06-21T09:00:00Z"},
+        headers=auth(settings_tmp),
+    )
+    assert created.status_code == 200
+    reminder_id = created.json()["reminder"]["id"]
+    listed = client.get("/reminders", headers=auth(settings_tmp))
+    assert listed.json()["reminders"][0]["content"] == "stand up"
+    tasks = client.get("/tasks", headers=auth(settings_tmp))
+    assert tasks.status_code == 200
+    assert tasks.json()["tasks"] == []
+    deleted = client.delete(f"/reminders/{reminder_id}", headers=auth(settings_tmp))
+    assert deleted.json() == {"deleted": True}
 
 
 def test_cors_setting_is_applied(settings_tmp) -> None:

@@ -8,7 +8,7 @@ import yaml
 
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelRegistry
-from services.april_runtime.schemas import ChatMessage, ChatRequest
+from services.april_runtime.schemas import ChatMessage, ChatRequest, GenerationOptions
 
 
 @pytest.mark.asyncio
@@ -44,23 +44,29 @@ async def test_optional_real_gguf_load_generate_stream_unload(tmp_path: Path) ->
     registry = ModelRegistry.from_file(config_path, root=tmp_path)
     lifecycle = ModelLifecycle(registry, root_backend="llama_cpp")
     await lifecycle.load_model("april-real-test")
+    assert lifecycle.list_models()[0].state == "loaded"
     response = await lifecycle.generate(
         ChatRequest(
             model_id="april-real-test",
             messages=[ChatMessage(role="user", content="Reply with one short sentence.")],
-            max_tokens=8,
+            options=GenerationOptions(max_output_tokens=8),
         )
     )
     assert response.content
+    assert response.usage.total_tokens >= response.usage.output_tokens
     events = [
         event
         async for event in lifecycle.stream(
             ChatRequest(
                 model_id="april-real-test",
                 messages=[ChatMessage(role="user", content="Say hello.")],
-                max_tokens=8,
+                options=GenerationOptions(max_output_tokens=8),
             )
         )
     ]
     assert any(name == "token" for name, _payload in events)
+    assert sum(1 for name, _payload in events if name == "usage") == 1
+    assert events[-1][0] == "done"
     await lifecycle.unload_model("april-real-test")
+    assert lifecycle.list_models()[0].state in {"unloaded", "unavailable"}
+    assert lifecycle.get_state("april-real-test").backend is None

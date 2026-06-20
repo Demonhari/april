@@ -10,6 +10,10 @@ April Runtime exposes:
 - `GET /runtime/health`
 
 Models are loaded only by registered ID from `configs/models.yaml`. Paths are not accepted through public APIs.
+Model entries may configure CPU-safe llama.cpp options such as thread count,
+batch sizes, mmap/mlock, GPU layer count, explicit chat format override,
+idle-unload timeout, and priority. Defaults do not require Metal or GPU
+offload.
 
 States:
 
@@ -40,7 +44,18 @@ opens.
 
 Generation options are backend-neutral for `temperature`, `top_p`,
 `max_output_tokens`, stop sequences, and optional seed. Lifecycle state tracks
-active requests, generation errors, recent latency, and recent tokens per
-second. A loaded model with active requests cannot be unloaded. llama.cpp
-streaming uses a thread-safe queue bridge and reports structured stream errors
-without emitting a successful completion after producer failure.
+loaded/unloaded/error state, active requests, generation errors, recent
+latency, recent tokens per second, load/unload timestamps, and the active
+eviction policy. A loaded model with active requests cannot be unloaded or
+evicted, and keep-loaded brain models are not idle-unloaded.
+
+Non-keep-loaded specialist models are eligible for idle unload after their
+configured timeout. When the loaded specialist count exceeds
+`runtime.max_loaded_specialist_models`, APRIL evicts inactive specialists by
+priority and deterministic LRU order. llama.cpp unload calls the backend
+release/close method when available and clears references even after load or
+generation errors.
+
+llama.cpp streaming uses a bounded thread-safe queue bridge and reports
+structured stream errors without emitting a successful completion after
+producer failure.

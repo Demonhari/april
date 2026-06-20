@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -28,6 +27,7 @@ from services.api.schemas import (
     ChatRequest,
     ChatResponse,
     ProjectCreateRequest,
+    ReminderCreateRequest,
     ToolApprovalAction,
     ToolRequestEnvelope,
 )
@@ -93,12 +93,21 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health(active: ApiContainer = Depends(get_container)) -> object:
+        status = "ok"
+        try:
+            runtime = await active.runtime_client.health(timeout=1.0)
+            if str(runtime.get("status", "ok")) not in {"ok", "degraded"}:
+                status = "degraded"
+        except AprilError as exc:
+            runtime = {"status": "unavailable", "error": exc.message}
+            status = "degraded"
         return {
-            "status": "ok",
+            "status": status,
             "database": {"ok": active.database.path.exists(), "path": str(active.database.path)},
             "vector_index": active.vector_memory.health(),
             "voice": voice_health(active.settings).model_dump(),
             "runtime_url": active.settings.runtime.url,
+            "runtime": runtime,
         }
 
     @app.post("/chat")
@@ -145,6 +154,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         request_id = str(uuid.uuid4())
         result = await active.orchestrator.chat(
             request.message,
+            conversation_id=request.conversation_id,
             request_id=request_id,
             project_id=request.project_id,
             repo_path=request.repo_path,
@@ -158,6 +168,11 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         x_request_id: str | None = Header(default=None),
     ) -> ChatResponse:
         request_id = x_request_id or str(uuid.uuid4())
+        if not request.options.structured:
+            raise PermissionDeniedError(
+                "Direct agent runs only support structured execution.",
+                {"agent": request.agent},
+            )
         result = await active.orchestrator.run_agent(
             agent_id=request.agent,
             message=request.message,
@@ -237,6 +252,31 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     async def memory_export(active: ApiContainer = Depends(authorized)) -> object:
         return {"export": await active.memory.export_memories()}
 
+    @app.get("/reminders")
+    async def reminders(active: ApiContainer = Depends(authorized)) -> object:
+        return {
+            "reminders": [
+                reminder.model_dump() for reminder in await active.memory.list_reminders()
+            ]
+        }
+
+    @app.post("/reminders")
+    async def reminder_create(
+        request: ReminderCreateRequest, active: ApiContainer = Depends(authorized)
+    ) -> object:
+        reminder = await active.memory.create_reminder(request.content, due_at=request.due_at)
+        return {"reminder": reminder.model_dump()}
+
+    @app.delete("/reminders/{reminder_id}")
+    async def reminder_delete(
+        reminder_id: str, active: ApiContainer = Depends(authorized)
+    ) -> object:
+        return {"deleted": await active.memory.delete_reminder(reminder_id)}
+
+    @app.get("/tasks")
+    async def tasks(active: ApiContainer = Depends(authorized)) -> object:
+        return {"tasks": [task.model_dump() for task in await active.memory.list_tasks()]}
+
     @app.delete("/conversations/{conversation_id}")
     async def conversation_delete(
         conversation_id: str, active: ApiContainer = Depends(authorized)
@@ -286,28 +326,14 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         request: LoadModelRequest,
         active: ApiContainer = Depends(authorized),
     ) -> object:
-        async with httpx.AsyncClient(
-            timeout=active.settings.runtime.request_timeout_seconds
-        ) as client:
-            response = await client.post(
-                f"{active.settings.runtime.url}/runtime/models/load",
-                json=request.model_dump(),
-            )
-        return response.json()
+        return await active.runtime_client.load(request.model_id, request_id=request.request_id)
 
     @app.post("/runtime/models/unload")
     async def runtime_model_unload(
         request: LoadModelRequest,
         active: ApiContainer = Depends(authorized),
     ) -> object:
-        async with httpx.AsyncClient(
-            timeout=active.settings.runtime.request_timeout_seconds
-        ) as client:
-            response = await client.post(
-                f"{active.settings.runtime.url}/runtime/models/unload",
-                json=request.model_dump(),
-            )
-        return response.json()
+        return await active.runtime_client.unload(request.model_id, request_id=request.request_id)
 
     return app
 

@@ -14,7 +14,9 @@ from apps.runner.install import is_april_wrapper, path_contains_dir
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
 from apps.runner.verify import run_fake_verification
 from april_common.config_validation import validate_configuration
+from april_common.effective_config import load_agents_file, load_permissions_file, load_tools_file
 from april_common.settings import load_settings
+from services.april_runtime.model_registry import ModelRegistry
 
 app = typer.Typer(help="Global command dispatcher.")
 april_app = typer.Typer(help="Run APRIL from any folder.", invoke_without_command=True)
@@ -24,6 +26,9 @@ memory_app = typer.Typer(help="Memory operations.")
 conversation_app = typer.Typer(help="Conversation operations.")
 config_app = typer.Typer(help="Configuration operations.")
 agent_app = typer.Typer(help="Direct specialist agent operations.")
+voice_app = typer.Typer(help="Voice operations.")
+reminder_app = typer.Typer(help="Reminder operations.")
+task_app = typer.Typer(help="Task inspection operations.")
 app.add_typer(april_app, name="april")
 april_app.add_typer(model_app, name="model")
 april_app.add_typer(project_app, name="project")
@@ -31,6 +36,9 @@ april_app.add_typer(memory_app, name="memory")
 april_app.add_typer(conversation_app, name="conversation")
 april_app.add_typer(config_app, name="config")
 april_app.add_typer(agent_app, name="agent")
+april_app.add_typer(voice_app, name="voice")
+april_app.add_typer(reminder_app, name="reminder")
+april_app.add_typer(task_app, name="task")
 
 
 def _manager() -> AprilServiceManager:
@@ -336,6 +344,76 @@ def conversation_delete(
     _delegate(["conversation", "delete", conversation_id], fake=_effective_fake(ctx, fake))
 
 
+@reminder_app.command("list")
+def reminder_list(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["reminder", "list"], fake=_effective_fake(ctx, fake))
+
+
+@reminder_app.command("create")
+def reminder_create(
+    ctx: typer.Context,
+    content: str,
+    due_at: str | None = typer.Option(None, "--due-at"),
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    args = ["reminder", "create", content]
+    if due_at:
+        args.extend(["--due-at", due_at])
+    _delegate(args, fake=_effective_fake(ctx, fake))
+
+
+@reminder_app.command("delete")
+def reminder_delete(
+    ctx: typer.Context,
+    reminder_id: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["reminder", "delete", reminder_id], fake=_effective_fake(ctx, fake))
+
+
+@task_app.command("list")
+def task_list(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["task", "list"], fake=_effective_fake(ctx, fake))
+
+
+@voice_app.command("health")
+def voice_health(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["voice", "health"], fake=_effective_fake(ctx, fake))
+
+
+@voice_app.command("devices")
+def voice_devices(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["voice", "devices"], fake=_effective_fake(ctx, fake))
+
+
+@voice_app.command("ptt")
+def voice_ptt(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["voice", "ptt"], fake=_effective_fake(ctx, fake))
+
+
+@voice_app.command("listen")
+def voice_listen(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["voice", "listen"], fake=_effective_fake(ctx, fake))
+
+
 @agent_app.command("run")
 def agent_run(
     ctx: typer.Context,
@@ -376,9 +454,18 @@ def config_inspect() -> None:
             console.print(f"- {error}")
         raise typer.Exit(1)
     settings = load_settings(root=_manager().home)
-    data = settings.model_dump(mode="json")
-    if isinstance(data.get("api"), dict):
-        data["api"]["token"] = "[REDACTED]"
+    home = _manager().home
+    settings_data = settings.model_dump(mode="json")
+    if isinstance(settings_data.get("api"), dict):
+        settings_data["api"]["token"] = "[REDACTED]"
+    models = ModelRegistry.from_file(home / "configs" / "models.yaml", root=home)
+    data = {
+        "settings": settings_data,
+        "models": [model.model_dump(mode="json") for model in models.list()],
+        "agents": load_agents_file(home).model_dump(mode="json"),
+        "tools": load_tools_file(home).model_dump(mode="json"),
+        "permissions": load_permissions_file(home).model_dump(mode="json"),
+    }
     console.print_json(data=data)
 
 

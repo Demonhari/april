@@ -14,6 +14,7 @@ from services.memory.schemas import (
     Project,
     ReminderRecord,
     SuspendedAgentRun,
+    TaskRecord,
 )
 
 
@@ -268,6 +269,10 @@ class SqliteMemory:
             (reminder_id,),
         )
         return cursor.rowcount > 0
+
+    async def list_tasks(self) -> list[TaskRecord]:
+        rows = await self.database.fetchall("SELECT * FROM tasks ORDER BY created_at DESC")
+        return [TaskRecord.model_validate(dict(row)) for row in rows]
 
     async def record_agent_run(
         self,

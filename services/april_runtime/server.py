@@ -26,6 +26,7 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
         active_lifecycle = ModelLifecycle(
             registry,
             root_backend=settings.runtime.backend,
+            max_loaded_specialist_models=settings.runtime.max_loaded_specialist_models,
         )
     else:
         active_lifecycle = lifecycle

@@ -184,6 +184,11 @@ class ToolExecutionService:
         args: dict[str, Any] | None = None,
     ) -> ToolExecutionOutcome:
         record = await self.approvals.get(approval_id)
+        if (
+            record.risk_level == "external_action"
+            and not self.settings.permissions.external_actions_enabled
+        ):
+            raise PermissionDeniedError("External actions are disabled by configuration.")
         active_tool = tool or record.tool
         active_args = args or record.args
         project_id = str(active_args["project_id"]) if active_args.get("project_id") else None

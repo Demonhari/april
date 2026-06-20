@@ -34,8 +34,10 @@ Core API responsibilities:
 - orchestration
 - permission checks
 - approval flow
+- active YAML policy loading for agents, tools, and permissions
 - memory
 - project selection and repository indexing
+- reminders and task inspection
 - tool execution
 - runtime proxying and token streaming
 
@@ -54,12 +56,19 @@ April Runtime responsibilities:
 - SSE streaming
 - optional llama.cpp integration
 
+Runtime behavior is driven by `configs/models.yaml` plus
+`configs/april.yaml`. Keep-loaded models remain resident, non-keep-loaded
+specialists load on demand, idle specialist models can unload after their
+configured timeout, and a deterministic priority/LRU policy enforces the
+configured maximum loaded specialist count. Active requests are never evicted.
+
 Repository operations require an explicit selected project. The orchestrator resolves `project_id` from SQLite or validates a supplied `repo_path` against allowed roots before any repository tool or vector retrieval runs.
 
 The optional global launcher is intentionally small: it owns only known APRIL
 subcommands, uses argv-array subprocess calls, records PIDs under `data/run/`,
-and writes service logs under `logs/`. It does not start desktop UI, voice,
-wake-word detection, or microphone capture.
+and writes service logs under `logs/`. It does not start desktop UI or
+background microphone capture. Voice starts only through explicit `voice`
+commands.
 
 Specialist agents now execute through `StructuredAgentLoop` by default. The
 Brain still selects the agent for natural `/chat`, but Coding, Reading,

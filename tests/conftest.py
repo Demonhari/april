@@ -159,6 +159,25 @@ class FakeRuntimeClient:
     async def models(self) -> dict[str, Any]:
         return {"models": []}
 
+    async def health(self, *, timeout: float | None = None) -> dict[str, Any]:
+        return {"status": "ok", "backend": "fake", "timeout": timeout}
+
+    async def load(self, model_id: str, *, request_id: str | None = None) -> dict[str, Any]:
+        return {
+            "request_id": request_id or "test-request",
+            "model_id": model_id,
+            "state": "loaded",
+            "message": "loaded",
+        }
+
+    async def unload(self, model_id: str, *, request_id: str | None = None) -> dict[str, Any]:
+        return {
+            "request_id": request_id or "test-request",
+            "model_id": model_id,
+            "state": "unloaded",
+            "message": "unloaded",
+        }
+
     async def stream(
         self,
         *,

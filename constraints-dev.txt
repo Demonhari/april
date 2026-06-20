@@ -1,0 +1,23 @@
+# Direct dependency constraints for reproducible APRIL dev installs.
+# Regenerate intentionally from a provisioned dev environment with:
+#   .venv/bin/python -m pip freeze --exclude-editable
+# Then copy only base project dependencies and the [dev] extra here.
+#
+# Do not add llama-cpp-python, sounddevice, openwakeword, GGUF files, or
+# platform-specific voice/runtime wheels to this base constraints file.
+aiosqlite==0.22.1
+fastapi==0.137.2
+httpx==0.28.1
+Jinja2==3.1.6
+numpy==2.4.6
+pydantic==2.13.4
+pydantic-settings==2.14.2
+PyYAML==6.0.3
+rich==15.0.0
+typer==0.26.7
+uvicorn==0.49.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+ruff==0.15.18
+mypy==2.1.0

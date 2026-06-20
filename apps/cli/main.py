@@ -19,12 +19,16 @@ memory_app = typer.Typer(help="Memory operations.")
 voice_app = typer.Typer(help="Voice operations.")
 conversation_app = typer.Typer(help="Conversation operations.")
 agent_app = typer.Typer(help="Direct specialist agent operations.")
+reminder_app = typer.Typer(help="Reminder operations.")
+task_app = typer.Typer(help="Task inspection operations.")
 app.add_typer(model_app, name="model")
 app.add_typer(project_app, name="project")
 app.add_typer(memory_app, name="memory")
 app.add_typer(voice_app, name="voice")
 app.add_typer(conversation_app, name="conversation")
 app.add_typer(agent_app, name="agent")
+app.add_typer(reminder_app, name="reminder")
+app.add_typer(task_app, name="task")
 
 
 def client() -> AprilApiClient:
@@ -198,6 +202,33 @@ def conversation_delete(conversation_id: str) -> None:
     print_jsonish(data)
 
 
+@reminder_app.command("list")
+def reminder_list() -> None:
+    data = run(client().get("/reminders"))
+    print_jsonish(data)
+
+
+@reminder_app.command("create")
+def reminder_create(
+    content: str,
+    due_at: str | None = typer.Option(None, "--due-at"),
+) -> None:
+    data = run(client().post("/reminders", {"content": content, "due_at": due_at}))
+    print_jsonish(data)
+
+
+@reminder_app.command("delete")
+def reminder_delete(reminder_id: str) -> None:
+    data = run(client().delete(f"/reminders/{reminder_id}"))
+    print_jsonish(data)
+
+
+@task_app.command("list")
+def task_list() -> None:
+    data = run(client().get("/tasks"))
+    print_jsonish(data)
+
+
 @voice_app.command("ptt")
 def voice_ptt() -> None:
     from services.voice.conversation_loop import PushToTalkLoop
@@ -208,6 +239,36 @@ def voice_ptt() -> None:
     if health_report.status == "degraded":
         console.print(health_report.model_dump())
     loop = PushToTalkLoop(api_client=client())
+    run(loop.run_once())
+
+
+@voice_app.command("health")
+def voice_health_command() -> None:
+    from services.voice.health import voice_health
+
+    print_jsonish(voice_health(get_settings()).model_dump())
+
+
+@voice_app.command("devices")
+def voice_devices() -> None:
+    try:
+        import sounddevice as sd
+    except ImportError as exc:
+        console.print("[red]sounddevice is not installed. Install APRIL voice extras.[/red]")
+        raise typer.Exit(1) from exc
+    print_jsonish({"devices": str(sd.query_devices())})
+
+
+@voice_app.command("listen")
+def voice_listen() -> None:
+    from services.voice.conversation_loop import WakeWordConversationLoop
+    from services.voice.health import voice_health
+
+    settings = get_settings()
+    health_report = voice_health(settings)
+    if health_report.status == "degraded":
+        console.print(health_report.model_dump())
+    loop = WakeWordConversationLoop(api_client=client())
     run(loop.run_once())
 
 

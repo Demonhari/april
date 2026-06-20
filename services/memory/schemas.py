@@ -80,6 +80,13 @@ class ReminderRecord(BaseModel):
     created_at: str
 
 
+class TaskRecord(BaseModel):
+    id: str
+    title: str
+    status: str
+    created_at: str
+
+
 class VectorMetadata(BaseModel):
     source_type: str
     source_id: str

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agents.registry import AgentRegistry, default_agent_registry
+from agents.registry import AgentRegistry
 from april_common.audit import AuditLogger
 from april_common.config_validation import validate_configuration
+from april_common.effective_config import (
+    build_agent_registry_from_config,
+    build_configured_tool_registry,
+    load_permissions_file,
+)
 from april_common.errors import ConfigError
 from april_common.settings import AprilSettings, get_settings
 from services.april_runtime.client import RuntimeClient
+from services.april_runtime.model_registry import ModelRegistry
 from services.brain.orchestrator import AprilOrchestrator
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
@@ -51,8 +57,28 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         active_settings.runtime.url,
         timeout=active_settings.runtime.request_timeout_seconds,
     )
-    tool_registry = default_registry()
-    permission_engine = PermissionEngine(tool_registry)
+    model_registry = ModelRegistry.from_file(
+        active_settings.home / "configs" / "models.yaml",
+        root=active_settings.home,
+    )
+    agent_registry = build_agent_registry_from_config(
+        home=active_settings.home,
+        model_registry=model_registry,
+        tool_registry=default_registry(),
+    )
+    tool_registry = build_configured_tool_registry(active_settings.home, agent_registry)
+    permissions_config = load_permissions_file(active_settings.home)
+    active_settings = active_settings.model_copy(
+        update={
+            "permissions": active_settings.permissions.model_copy(
+                update={"external_actions_enabled": permissions_config.external_actions_enabled}
+            )
+        }
+    )
+    permission_engine = PermissionEngine(
+        tool_registry,
+        approval_required_at=permissions_config.approval_required_at_level,
+    )
     audit = AuditLogger(active_settings.audit_path)
     approvals = ApprovalStore(
         database,
@@ -66,7 +92,6 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         permission_engine=permission_engine,
         approvals=approvals,
     )
-    agent_registry = default_agent_registry()
     orchestrator = AprilOrchestrator(
         settings=active_settings,
         runtime_client=runtime_client,

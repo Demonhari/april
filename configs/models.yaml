@@ -10,6 +10,8 @@ models:
     temperature: 0.3
     max_output_tokens: 1024
     keep_loaded: true
+    idle_unload_seconds: null
+    priority: 100
 
   coding:
     id: april-coding
@@ -22,6 +24,8 @@ models:
     temperature: 0.2
     max_output_tokens: 2048
     keep_loaded: false
+    idle_unload_seconds: 300
+    priority: 50
 
   reading:
     id: april-reading
@@ -34,3 +38,5 @@ models:
     temperature: 0.2
     max_output_tokens: 1024
     keep_loaded: false
+    idle_unload_seconds: 300
+    priority: 40

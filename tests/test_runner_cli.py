@@ -129,6 +129,44 @@ def test_run_april_project_and_memory_commands_delegate(tmp_path: Path, monkeypa
     ]
 
 
+def test_run_april_voice_reminder_and_task_commands_delegate(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    delegated: list[list[str]] = []
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
+    runner = CliRunner()
+    assert runner.invoke(app, ["april", "voice", "health", "--fake"]).exit_code == 0
+    assert runner.invoke(app, ["april", "voice", "ptt", "--fake"]).exit_code == 0
+    assert runner.invoke(app, ["april", "reminder", "list", "--fake"]).exit_code == 0
+    assert (
+        runner.invoke(
+            app,
+            [
+                "april",
+                "reminder",
+                "create",
+                "stand up",
+                "--due-at",
+                "2026-06-21T09:00:00Z",
+                "--fake",
+            ],
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(app, ["april", "reminder", "delete", "reminder-1", "--fake"]).exit_code == 0
+    )
+    assert runner.invoke(app, ["april", "task", "list", "--fake"]).exit_code == 0
+    assert delegated == [
+        ["voice", "health"],
+        ["voice", "ptt"],
+        ["reminder", "list"],
+        ["reminder", "create", "stand up", "--due-at", "2026-06-21T09:00:00Z"],
+        ["reminder", "delete", "reminder-1"],
+        ["task", "list"],
+    ]
+
+
 def test_run_april_config_validate_reports_success(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
@@ -151,6 +189,10 @@ def test_run_april_config_inspect_redacts_token(tmp_path: Path, monkeypatch) -> 
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     monkeypatch.setattr("apps.runner.main.validate_configuration", lambda home: [])
+    monkeypatch.setattr(
+        "apps.runner.main.ModelRegistry.from_file",
+        lambda path, *, root: type("FakeModels", (), {"list": lambda self: []})(),
+    )
     result = CliRunner().invoke(app, ["april", "config", "inspect"])
     assert result.exit_code == 0
     assert "[REDACTED]" in result.output

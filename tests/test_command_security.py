@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from april_common.errors import PermissionDeniedError
 from skills.terminal.command_policy import run_restricted_command, validate_command
@@ -14,6 +15,30 @@ def test_shell_metacharacters_rejected(settings_tmp) -> None:
 def test_unapproved_command_rejected(settings_tmp) -> None:
     with pytest.raises(PermissionDeniedError):
         validate_command(["sh", "-c", "echo hi"], settings_tmp.home)
+
+
+def test_command_allowlist_is_loaded_from_tools_yaml(settings_tmp) -> None:
+    config_dir = settings_tmp.home / "configs"
+    config_dir.mkdir()
+    (config_dir / "tools.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "tools": {
+                    "command_allowlist": [
+                        {
+                            "executable": "pytest",
+                            "subcommands": [],
+                            "permission_level": 3,
+                            "risk_level": "code_write",
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(PermissionDeniedError):
+        validate_command(["ruff", "check"], settings_tmp.home)
 
 
 def test_python_pip_install_rejected(settings_tmp) -> None:

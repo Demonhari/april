@@ -28,10 +28,10 @@ TEMPLATES_BY_FAMILY: dict[str, str] = {
 
 
 def select_template(model: ModelDefinition) -> str:
-    name = model.name.lower()
-    for family, template in TEMPLATES_BY_FAMILY.items():
-        if family in name:
-            return template
+    if model.chat_format:
+        configured = model.chat_format.lower()
+        if configured in TEMPLATES_BY_FAMILY:
+            return TEMPLATES_BY_FAMILY[configured]
     return GENERIC_TEMPLATE
 
 

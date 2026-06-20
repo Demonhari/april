@@ -1,5 +1,4 @@
 tools:
-  allow_external_actions: false
   command_allowlist:
     - executable: pytest
       subcommands: []
@@ -13,3 +12,8 @@ tools:
       subcommands: [-m]
       permission_level: 3
       risk_level: code_write
+  open_app_allowlist:
+    - TextEdit
+  open_url_allowed_schemes:
+    - http
+    - https

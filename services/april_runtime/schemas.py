@@ -99,6 +99,10 @@ class ModelInfo(BaseModel):
     generation_errors: int = 0
     recent_latency_ms: float | None = None
     recent_tokens_per_second: float | None = None
+    loaded_at: str | None = None
+    unloaded_at: str | None = None
+    idle_unload_seconds: float | None = None
+    priority: int = 0
 
 
 class RuntimeHealth(BaseModel):
@@ -107,6 +111,10 @@ class RuntimeHealth(BaseModel):
     models: list[ModelInfo]
     missing_models: list[str] = Field(default_factory=list)
     request_id: str
+    loaded_model_count: int = 0
+    active_requests: int = 0
+    generation_error_count: int = 0
+    lifecycle_policy: dict[str, Any] = Field(default_factory=dict)
 
 
 class StreamEvent(BaseModel):

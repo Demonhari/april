@@ -12,6 +12,7 @@ runtime:
   backend: llama_cpp
   preload_keep_loaded: true
   request_timeout_seconds: 120
+  max_loaded_specialist_models: 2
 
 memory:
   database_path: data/april.db

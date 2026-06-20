@@ -28,3 +28,6 @@ class ReminderStore:
 
     async def list(self) -> list[ReminderRecord]:
         return await self.memory.list_reminders()
+
+    async def delete(self, reminder_id: str) -> bool:
+        return await self.memory.delete_reminder(reminder_id)

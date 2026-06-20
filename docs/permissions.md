@@ -73,3 +73,16 @@ The command policy permits only exact executable/subcommand patterns. `python
 shell interpreters, shell metacharacters, pipes, redirects, command
 substitution, environment-prefix execution, and executable paths are denied.
 `run_command` always runs with the selected project as cwd.
+
+`configs/tools.yaml` is the active source for command allowlists and local
+opener allowlists. YAML can add safe command entries only within permanent hard
+constraints; it cannot enable shells, package managers, arbitrary executable
+paths, shell syntax, or arbitrary `python -m` modules.
+
+`open_app` is a Level 4 system action. It accepts only configured plain
+application names and, after exact approval, executes `/usr/bin/open -a APP`
+with an argv list on macOS. `open_url` is a Level 5 external action. It requires
+`permissions.yaml` `external_actions_enabled: true`, accepts only normalized
+`http`/`https` URLs without credentials, and executes `/usr/bin/open URL` with
+an argv list after exact approval. External actions are checked both before
+creating approval requests and again before approved execution.

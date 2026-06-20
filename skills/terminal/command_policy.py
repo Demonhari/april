@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from april_common.effective_config import load_tools_file
 from april_common.errors import PermissionDeniedError, ValidationError
 from april_common.path_security import normalize_existing_path
 from april_common.settings import get_settings
@@ -44,7 +45,7 @@ class CommandRule:
     risk_level: str = "code_write"
 
 
-DEFAULT_RULES = {
+FALLBACK_RULES = {
     "pytest": CommandRule("pytest", permission_level=3),
     "ruff": CommandRule("ruff", subcommands=("check", "format"), permission_level=3),
     "python": CommandRule("python", subcommands=("-m",), permission_level=3),
@@ -67,7 +68,8 @@ def validate_command(argv: list[str], cwd: str | Path) -> tuple[list[str], Path,
     executable = requested_executable.name
     if executable in DENIED_EXECUTABLES:
         raise PermissionDeniedError("Executable is explicitly denied.", {"executable": executable})
-    rule = DEFAULT_RULES.get(executable)
+    settings = get_settings()
+    rule = _configured_rules(settings.home).get(executable)
     if rule is None:
         raise PermissionDeniedError("Executable is not allowlisted.", {"executable": executable})
     if rule.subcommands and (len(argv) < 2 or argv[1] not in rule.subcommands):
@@ -91,6 +93,19 @@ def validate_command(argv: list[str], cwd: str | Path) -> tuple[list[str], Path,
     return [binary, *argv[1:]], resolved, rule
 
 
+def _configured_rules(home: Path) -> dict[str, CommandRule]:
+    tools = load_tools_file(home)
+    rules: dict[str, CommandRule] = {}
+    for item in tools.tools.command_allowlist:
+        rules[item.executable] = CommandRule(
+            executable=item.executable,
+            subcommands=tuple(item.subcommands),
+            permission_level=item.permission_level,
+            risk_level=item.risk_level,
+        )
+    return rules or FALLBACK_RULES
+
+
 def clean_environment() -> dict[str, str]:
     blocked = ("TOKEN", "SECRET", "PASSWORD", "AUTH", "KEY", "CREDENTIAL")
     return {
@@ -103,8 +118,8 @@ def clean_environment() -> dict[str, str]:
 async def run_restricted_command(
     argv: list[str], cwd: str | Path, *, timeout: float | None = None
 ) -> tuple[int, str, str]:
-    settings = get_settings()
     command, resolved_cwd, _rule = validate_command(argv, cwd)
+    settings = get_settings()
     process = await asyncio.create_subprocess_exec(
         *command,
         cwd=str(resolved_cwd),

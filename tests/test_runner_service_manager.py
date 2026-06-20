@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import IO
 
@@ -98,7 +100,8 @@ def test_wrapper_content_includes_april_home(tmp_path: Path) -> None:
     content = wrapper_content(repo_root=tmp_path)
     assert APRIL_WRAPPER_MARKER in content
     assert f'export APRIL_HOME="{tmp_path.resolve()}"' in content
-    assert ".venv/bin/python" in content
+    assert "APRIL_PYTHON" in content
+    assert "APRIL is not importable" in content
     assert "apps.runner.main" in content
 
 
@@ -115,7 +118,7 @@ def test_installer_creates_executable_wrappers(tmp_path: Path) -> None:
         content = path.read_text(encoding="utf-8")
         assert APRIL_WRAPPER_MARKER in content
         assert f'export APRIL_HOME="{tmp_path.resolve()}"' in content
-        assert ".venv/bin/python" in content
+        assert "APRIL_PYTHON" in content
         assert "apps.runner.main" in content
 
 
@@ -238,3 +241,75 @@ def test_setup_mac_global_add_to_path_uses_temp_home(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert (tmp_path / ".local" / "bin" / "run").exists()
     assert PATH_BLOCK_START in (tmp_path / ".zshrc").read_text(encoding="utf-8")
+
+
+def test_install_run_april_skip_pip_clean_checkout_does_not_create_venv(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "clean checkout"
+    home = tmp_path / "home"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "apps" / "runner").mkdir(parents=True)
+    shutil.copy2(Path("scripts/install_run_april.sh"), repo / "scripts/install_run_april.sh")
+    shutil.copy2(Path("apps/runner/install.py"), repo / "apps/runner/install.py")
+    (repo / "apps" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "apps" / "runner" / "__init__.py").write_text("", encoding="utf-8")
+    env = dict(os.environ)
+    env.update(
+        {
+            "HOME": str(home),
+            "APRIL_INSTALL_SKIP_PIP": "1",
+            "PYTHON": sys.executable,
+        }
+    )
+    result = subprocess.run(
+        ["bash", "scripts/install_run_april.sh", "--add-to-path"],
+        cwd=repo,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (repo / ".venv").exists()
+    assert (home / ".local" / "bin" / "run").exists()
+    assert PATH_BLOCK_START in (home / ".zshrc").read_text(encoding="utf-8")
+
+
+def test_wrapper_prefers_existing_venv_and_handles_spaces(tmp_path: Path) -> None:
+    repo = tmp_path / "repo with spaces"
+    bin_dir = tmp_path / "bin with spaces"
+    python_path = repo / ".venv" / "bin" / "python"
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" >> "$APRIL_HOME/python-args.txt"\nexit 0\n',
+        encoding="utf-8",
+    )
+    python_path.chmod(0o755)
+    install_wrappers(repo_root=repo, bin_dir=bin_dir)
+    result = subprocess.run(
+        [str(bin_dir / "run"), "april", "status"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    args = (repo / "python-args.txt").read_text(encoding="utf-8")
+    assert "-c\nimport apps.runner.main" in args
+    assert "-m\napps.runner.main\napril\nstatus" in args
+
+
+def test_wrapper_without_valid_interpreter_fails_actionably(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    install_wrappers(repo_root=tmp_path / "repo", bin_dir=bin_dir)
+    env = dict(os.environ)
+    env["APRIL_PYTHON"] = str(tmp_path / "missing-python")
+    result = subprocess.run(
+        [str(bin_dir / "run"), "april", "status"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 127
+    assert "could not find a Python interpreter" in result.stderr

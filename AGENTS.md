@@ -41,6 +41,12 @@ APRIL is a private, local-first AI assistant for a MacBook Pro. The project is C
 - Tests must not require network access, GGUF files, microphones, speakers, whisper.cpp, Piper, openWakeWord, or `llama-cpp-python`.
 - Fake runtime backends are valid in tests and local development.
 - Optional voice and llama.cpp dependencies must be isolated behind adapters.
+- Active runtime policy comes from `configs/agents.yaml`, `configs/tools.yaml`,
+  and `configs/permissions.yaml`; tests should exercise the same loaders used by
+  startup and `run april config validate`.
+- Use `constraints-dev.txt` for reproducible base/dev installs. Do not add
+  `llama-cpp-python`, audio, wake-word, or model artifacts to the base
+  constraints file.
 - Do not install Homebrew packages, run `sudo`, download models automatically, push Git branches, or commit secrets.
 - Do not implement unrestricted shell execution.
 - External actions such as `git_push`, deployment, email, payment, and publishing are out of scope for the MVP and must not be simulated as successful.
