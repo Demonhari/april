@@ -61,3 +61,34 @@ Repository tasks should pass `project_id` or `repo_path`. If neither is supplied
 - `error`
 
 Request bodies larger than `api.max_request_bytes` are rejected with `REQUEST_TOO_LARGE`.
+
+## Global Launcher
+
+The `run april` launcher is a local CLI supervisor, not a public API endpoint.
+It locates `APRIL_HOME`, starts missing services with:
+
+```bash
+python -m services.april_runtime.server
+python -m services.api.server
+```
+
+and then delegates to the existing `april` CLI. It stores PID files under
+`data/run/` and service logs under `logs/runtime.log` and `logs/api.log`.
+
+Supported commands include:
+
+```bash
+run april
+run april --fake
+run april status
+run april stop
+run april restart
+run april logs
+run april ask "April, plan my work today."
+run april health
+run april models
+run april approvals
+```
+
+`--fake` affects only newly started child services by setting
+`APRIL_RUNTIME_BACKEND=fake`; it does not edit configuration files.

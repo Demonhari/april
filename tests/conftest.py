@@ -70,6 +70,16 @@ class FakeRuntimeClient:
                     '"risk_level":"none","needs_confirmation":false,'
                     '"task_steps":["Answer directly"],"decision_summary":"General planning"}'
                 )
+        elif "unified diff patch only" in lower:
+            content = (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1,2 +1,3 @@\n"
+                " # test repo\n"
+                " animation bug\n"
+                "+fixed animation\n"
+            )
         else:
             content = "Start with the most important task, then schedule focused work blocks."
         return ChatResponse(

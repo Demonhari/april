@@ -63,5 +63,6 @@ class AprilApiClient:
     def startup_hint(self) -> str:
         return (
             "APRIL API is offline. Start April Runtime with `make run-runtime`, "
-            "then start the core API with `make run-api`."
+            "then start the core API with `make run-api`. Or run `run april` "
+            "after installing the global launcher."
         )

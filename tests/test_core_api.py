@@ -17,7 +17,9 @@ from skills.registry import default_registry
 from tests.conftest import FakeRuntimeClient
 
 
-async def make_container(settings_tmp) -> ApiContainer:
+async def make_container(
+    settings_tmp, runtime_client: FakeRuntimeClient | None = None
+) -> ApiContainer:
     database = Database(settings_tmp.database_path)
     await database.connect()
     await run_migrations(database)
@@ -25,7 +27,7 @@ async def make_container(settings_tmp) -> ApiContainer:
     memory = SqliteMemory(database)
     vector_memory = VectorMemory(settings_tmp.vector_index_path)
     memory_retriever = MemoryRetriever(memory, vector_memory)
-    runtime_client = FakeRuntimeClient()
+    runtime_client = runtime_client or FakeRuntimeClient()
     approvals = ApprovalStore(database, AuditLogger(settings_tmp.audit_path), expiry_seconds=60)
     from services.brain.orchestrator import AprilOrchestrator
 
@@ -325,3 +327,166 @@ def test_project_add_rejects_outside_allowed_roots(settings_tmp, tmp_path) -> No
         "/projects", json={"path": str(outside)}, headers=auth(settings_tmp)
     )
     assert response.status_code == 403
+
+
+def test_code_modification_without_project_asks_for_selection(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix."},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["status"] == "error"
+    assert "project" in result["final_message"].lower()
+
+
+def test_code_modification_creates_patch_and_pending_approval(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["status"] == "pending_approval"
+    assert result["pending_approval"]["tool"] == "patch_applier"
+    patch_path = result["pending_approval"]["args"]["patch_path"]
+    assert patch_path.startswith(str(settings_tmp.home / "data" / "patches"))
+    assert "README.md" in result["final_message"]
+    assert result["proposed_changes"][0]["path"] == "README.md"
+    generated_patches = list(settings_tmp.home.joinpath("data/patches").glob("*.patch"))
+    assert len(generated_patches) == 1
+    assert "fixed animation" in generated_patches[0].read_text(encoding="utf-8")
+
+
+def test_code_modification_approval_applies_exact_patch_once(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    approval_id = response.json()["result"]["pending_approval"]["approval_id"]
+    approve_response = client.post(
+        "/tools/approve",
+        json={"approval_id": approval_id},
+        headers=auth(settings_tmp),
+    )
+    assert approve_response.status_code == 200
+    assert approve_response.json()["status"] == "executed"
+    assert "fixed animation" in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
+    replay = client.post(
+        "/tools/approve",
+        json={"approval_id": approval_id},
+        headers=auth(settings_tmp),
+    )
+    assert replay.status_code == 403
+
+
+def test_code_modification_changed_args_cannot_reuse_approval(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    approval = response.json()["result"]["pending_approval"]
+    changed_args = dict(approval["args"])
+    changed_args["patch_path"] = str(settings_tmp.home / "other.patch")
+    approve_response = client.post(
+        "/tools/approve",
+        json={
+            "approval_id": approval["approval_id"],
+            "tool": "patch_applier",
+            "args": changed_args,
+        },
+        headers=auth(settings_tmp),
+    )
+    assert approve_response.status_code == 403
+
+
+class UnsafePatchRuntimeClient(FakeRuntimeClient):
+    def __init__(self, patch: str) -> None:
+        super().__init__()
+        self.patch = patch
+
+    async def chat(self, **kwargs):
+        response = await super().chat(**kwargs)
+        joined = "\n".join(message.content for message in kwargs["messages"])
+        if "unified diff patch only" in joined.lower():
+            return response.model_copy(update={"content": self.patch})
+        return response
+
+
+def test_code_modification_rejects_patch_outside_project(settings_tmp) -> None:
+    import anyio
+
+    runtime = UnsafePatchRuntimeClient(
+        "diff --git a/../outside.txt b/../outside.txt\n"
+        "--- a/../outside.txt\n"
+        "+++ b/../outside.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+outside\n"
+    )
+    container = anyio.run(make_container, settings_tmp, runtime)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    result = response.json()["result"]
+    assert result["status"] == "error"
+    assert "safe patch" in result["final_message"].lower()
+
+
+def test_code_modification_rejects_patch_touching_git(settings_tmp) -> None:
+    import anyio
+
+    runtime = UnsafePatchRuntimeClient(
+        "diff --git a/.git/config b/.git/config\n"
+        "--- a/.git/config\n"
+        "+++ b/.git/config\n"
+        "@@ -0,0 +1 @@\n"
+        "+bad\n"
+    )
+    container = anyio.run(make_container, settings_tmp, runtime)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    result = response.json()["result"]
+    assert result["status"] == "error"
+    assert "safe patch" in result["final_message"].lower()

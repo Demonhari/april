@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: install install-dev test coverage lint format typecheck check run-runtime run-api cli
+.PHONY: install install-dev test coverage lint format typecheck check run-runtime run-api cli install-global uninstall-global
 
 install:
 	$(PYTHON) -m venv $(VENV)
@@ -38,3 +38,9 @@ run-api:
 
 cli:
 	$(PY) -m apps.cli.main
+
+install-global:
+	bash scripts/install_run_april.sh
+
+uninstall-global:
+	bash scripts/uninstall_run_april.sh

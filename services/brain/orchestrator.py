@@ -4,12 +4,13 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from agents.registry import AgentRegistry
-from agents.schemas import AgentResult, LocalCitation
+from agents.schemas import AgentResult, LocalCitation, ProposedChange
 from april_common.errors import PermissionDeniedError
-from april_common.path_security import PathPolicy, normalize_existing_path
+from april_common.path_security import MODEL_SUFFIXES, PathPolicy, normalize_existing_path
 from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage
@@ -38,6 +39,7 @@ class PreparedTurn:
     pending_approval: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     final_message: str | None = None
+    proposed_changes: list[ProposedChange] = field(default_factory=list)
 
 
 class AprilOrchestrator:
@@ -142,7 +144,16 @@ class AprilOrchestrator:
             },
         )
         if prepared.pending_approval is not None:
-            yield ("approval_required", {"approval": prepared.pending_approval})
+            yield (
+                "approval_required",
+                {
+                    "approval": prepared.pending_approval,
+                    "message": prepared.final_message,
+                    "proposed_changes": [
+                        change.model_dump() for change in prepared.proposed_changes
+                    ],
+                },
+            )
             await self._finish_pending(prepared)
             yield ("done", {"finish_reason": "approval_required"})
             return
@@ -235,6 +246,19 @@ class AprilOrchestrator:
                 warnings=["No project was selected for repository analysis."],
             )
 
+        if decision.intent == "code_modification" and project is not None:
+            return await self._prepare_code_modification(
+                message=message,
+                decision=decision,
+                agent_name=agent.name,
+                agent_prompt=agent.system_prompt,
+                model_id=model_id,
+                project=project,
+                request_id=active_request_id,
+                conversation_id=active_conversation_id,
+                actor=actor,
+            )
+
         planned_calls = self._planned_tool_calls(decision, message=message, project=project)
         tool_outputs: list[str] = []
         citations: list[LocalCitation] = []
@@ -312,6 +336,126 @@ class AprilOrchestrator:
             citations=citations,
             pending_approval=pending_approval,
             warnings=warnings,
+        )
+
+    async def _prepare_code_modification(
+        self,
+        *,
+        message: str,
+        decision: BrainDecision,
+        agent_name: str,
+        agent_prompt: str,
+        model_id: str,
+        project: Project,
+        request_id: str,
+        conversation_id: str,
+        actor: str,
+    ) -> PreparedTurn:
+        prompt_parts, citations = await self._prompt_parts(
+            message=message,
+            decision=decision,
+            project=project,
+            tool_outputs=[],
+        )
+        patch_instruction = (
+            "Prepare a safe local code modification. Return a unified diff patch only.\n"
+            "Do not include prose, markdown fences, shell commands, or instructions.\n"
+            f"The patch must apply under this repository root only: {project.path}\n"
+            "Do not touch .git, model files, secrets, credentials, or files outside the project."
+        )
+        response = await self.runtime_client.chat(
+            model_id=model_id,
+            messages=[
+                ChatMessage(role="system", content=agent_prompt),
+                ChatMessage(
+                    role="user",
+                    content="\n\n".join([*prompt_parts, patch_instruction]),
+                ),
+            ],
+            request_id=request_id,
+        )
+        try:
+            affected_files = self._validate_patch(response.content, Path(project.path))
+        except PermissionDeniedError as exc:
+            return PreparedTurn(
+                request_id=request_id,
+                conversation_id=conversation_id,
+                decision=decision,
+                agent_name=agent_name,
+                model_id=model_id,
+                messages=[],
+                citations=citations,
+                final_message=f"APRIL could not create a safe patch proposal: {exc}",
+                warnings=["Patch proposal was rejected by local validation."],
+            )
+
+        generator_args = {"patch": response.content}
+        generator_result = await self.tool_registry.execute("patch_generator", generator_args)
+        await self.memory.record_tool_call(
+            tool="patch_generator",
+            args=generator_args,
+            status="ok" if generator_result.ok else "failed",
+            permission_level=generator_result.permission_level,
+            risk_level=generator_result.risk_level,
+            result=generator_result.model_dump(),
+            conversation_id=conversation_id,
+        )
+        if not generator_result.ok:
+            return PreparedTurn(
+                request_id=request_id,
+                conversation_id=conversation_id,
+                decision=decision,
+                agent_name=agent_name,
+                model_id=model_id,
+                messages=[],
+                citations=citations,
+                final_message="APRIL could not save the patch proposal.",
+                warnings=[generator_result.stderr or "patch_generator failed"],
+            )
+
+        patch_path = str(generator_result.data["patch_path"])
+        apply_args = {"repo_path": project.path, "patch_path": patch_path}
+        permission = self.permission_engine.evaluate(
+            tool="patch_applier",
+            args=apply_args,
+            agent=agent_name,
+            model_permission_level=decision.permission_level,
+            model_risk_level=decision.risk_level,
+        )
+        approval = await self.approvals.create(
+            ApprovalRequest(
+                tool="patch_applier",
+                args=apply_args,
+                agent=agent_name,
+                permission_level=permission.permission_level,
+                risk_level=permission.risk_level,
+                affected_paths=[*affected_files, patch_path],
+                expected_side_effects=["Apply the saved patch once to local repository files."],
+            ),
+            actor=actor,
+            request_id=request_id,
+        )
+        affected_text = "\n".join(f"- {path}" for path in affected_files)
+        final_message = (
+            "APRIL prepared a patch proposal and did not apply it.\n"
+            f"Patch path: {patch_path}\n"
+            f"Affected files:\n{affected_text}\n"
+            f"Approval required: {approval.approval_id}"
+        )
+        return PreparedTurn(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            decision=decision,
+            agent_name=agent_name,
+            model_id=model_id,
+            messages=[],
+            citations=citations,
+            pending_approval=approval.model_dump(),
+            final_message=final_message,
+            proposed_changes=[
+                ProposedChange(path=path, summary="Patch proposal", patch_path=patch_path)
+                for path in affected_files
+            ],
         )
 
     async def _resolve_project(
@@ -504,7 +648,10 @@ class AprilOrchestrator:
     async def _finish_pending(self, prepared: PreparedTurn) -> AgentResult:
         result = AgentResult(
             status="pending_approval",
-            final_message="This action requires approval before APRIL can execute it.",
+            final_message=prepared.final_message
+            or "This action requires approval before APRIL can execute it.",
+            local_citations=prepared.citations,
+            proposed_changes=prepared.proposed_changes,
             pending_approval=prepared.pending_approval,
             warnings=prepared.warnings,
         )
@@ -516,6 +663,63 @@ class AprilOrchestrator:
             summary=prepared.decision.decision_summary,
         )
         return result
+
+    def _validate_patch(self, patch: str, project_root: Path) -> list[str]:
+        if not patch.strip():
+            raise PermissionDeniedError("Patch proposal is empty.")
+        root = project_root.expanduser().resolve()
+        raw_paths: list[str] = []
+        for line in patch.splitlines():
+            if line.startswith("diff --git "):
+                parts = line.split()
+                if len(parts) >= 4:
+                    raw_paths.extend([parts[2], parts[3]])
+            elif line.startswith("--- ") or line.startswith("+++ "):
+                token = line[4:].strip().split("\t", maxsplit=1)[0]
+                raw_paths.append(token)
+        affected: set[str] = set()
+        for raw in raw_paths:
+            relative = self._patch_relative_path(raw)
+            if relative is None:
+                continue
+            self._validate_patch_target(relative, root)
+            affected.add(relative.as_posix())
+        if not affected:
+            raise PermissionDeniedError("Patch does not declare any affected project files.")
+        return sorted(affected)
+
+    def _patch_relative_path(self, raw_path: str) -> Path | None:
+        cleaned = raw_path.strip().strip('"')
+        if cleaned == "/dev/null":
+            return None
+        if cleaned.startswith("a/") or cleaned.startswith("b/"):
+            cleaned = cleaned[2:]
+        relative = Path(cleaned)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise PermissionDeniedError("Patch targets a path outside the project.")
+        return relative
+
+    def _validate_patch_target(self, relative: Path, project_root: Path) -> None:
+        parts = set(relative.parts)
+        lowered_parts = {part.lower() for part in parts}
+        denied_names = {
+            ".git",
+            ".env",
+            ".netrc",
+            ".ssh",
+            "id_rsa",
+            "id_dsa",
+            "id_ed25519",
+        }
+        if parts & denied_names or lowered_parts & denied_names:
+            raise PermissionDeniedError("Patch targets a sensitive path.")
+        if relative.suffix.lower() in MODEL_SUFFIXES:
+            raise PermissionDeniedError("Patch targets a model or binary artifact.")
+        target = (project_root / relative).resolve(strict=False)
+        try:
+            target.relative_to(project_root)
+        except ValueError as exc:
+            raise PermissionDeniedError("Patch target escapes the selected project.") from exc
 
     async def _finish_message(self, prepared: PreparedTurn, message: str) -> AgentResult:
         result = AgentResult(

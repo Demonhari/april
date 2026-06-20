@@ -80,6 +80,55 @@ april ask "April, plan my work today."
 april models
 ```
 
+## Run APRIL From Any Folder
+
+Install the global launcher:
+
+```bash
+scripts/setup_mac.sh --base
+make install-global
+```
+
+If `~/.local/bin` is not already in your shell path, add:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then from any terminal folder:
+
+```bash
+run april
+```
+
+`run april` locates `APRIL_HOME`, starts April Runtime and the Core API when
+they are missing, waits for both localhost health checks, then opens interactive
+CLI chat. It does not start voice, wake-word, or microphone services.
+
+Useful launcher commands:
+
+```bash
+run april --fake
+run april status
+run april stop
+run april restart
+run april logs
+run april ask "April, plan my work today."
+run april health
+run april models
+run april approvals
+```
+
+`run april --fake` starts missing services with `APRIL_RUNTIME_BACKEND=fake`
+without editing `.env`. Services still bind to `127.0.0.1`; PID files are under
+`data/run/`, and logs are written to `logs/runtime.log` and `logs/api.log`.
+
+Uninstall only APRIL-owned wrappers:
+
+```bash
+make uninstall-global
+```
+
 ## Approval Example
 
 ```bash
@@ -89,6 +138,11 @@ april approve APPROVAL_ID
 ```
 
 APRIL never treats a casual "yes" inside chat as approval. Approval must reference the exact approval ID or use the dedicated CLI/API approval flow. Before an approved tool runs, APRIL reloads the approval, revalidates current tool policy for the scoped agent, verifies the exact argument hash, records the tool call, consumes the approval once, and audits the outcome.
+
+For natural chat code changes such as `april ask "Apply the fix." --project-id
+PROJECT_ID`, APRIL asks the coding model for a unified diff only, validates that
+the patch is scoped to the selected project, saves it as a safe draft patch, and
+creates a Level 3 approval for applying that exact patch once.
 
 ## Repository Analysis Example
 
@@ -155,5 +209,7 @@ Tests use fake model/audio components and do not require GGUF files, network acc
 - The MVP fake backend is deterministic and not intelligent.
 - The default vector embedding is a lightweight hashed-token baseline, not a semantic embedding model.
 - Desktop UI is documented as a future surface.
+- The global launcher starts only Runtime and the Core API; desktop UI and
+  always-listening voice remain future phases.
 - Real wake-word, STT, and TTS require user-installed local binaries/models.
 - Real GGUF inference requires manually installed model files and the optional `llama-cpp-python` dependency.
