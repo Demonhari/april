@@ -9,6 +9,11 @@ from pathlib import Path
 from april_common.settings import project_root
 
 APRIL_WRAPPER_MARKER = "# APRIL_RUN_WRAPPER=1"
+APRIL_RUN_COMMAND_MARKER = "# APRIL_RUN_COMMAND=.venv/bin/python -m apps.runner.main"
+PATH_BLOCK_START = "# >>> APRIL launcher PATH >>>"
+PATH_BLOCK_END = "# <<< APRIL launcher PATH <<<"
+PATH_EXPORT_LINE = 'export PATH="$HOME/.local/bin:$PATH"'
+WRAPPER_NAMES = ("run", "april-run")
 
 
 @dataclass(frozen=True)
@@ -24,8 +29,10 @@ def wrapper_content(*, repo_root: Path) -> str:
         [
             "#!/usr/bin/env bash",
             APRIL_WRAPPER_MARKER,
+            APRIL_RUN_COMMAND_MARKER,
             "set -euo pipefail",
             f'export APRIL_HOME="{root}"',
+            'export PYTHONPATH="$APRIL_HOME${PYTHONPATH:+:$PYTHONPATH}"',
             f'exec "{python_path}" -m apps.runner.main "$@"',
             "",
         ]
@@ -45,7 +52,7 @@ def install_wrappers(*, repo_root: Path, bin_dir: Path, force: bool = False) -> 
     installed: list[Path] = []
     skipped: list[Path] = []
     content = wrapper_content(repo_root=repo_root)
-    for name in ("run", "april-run"):
+    for name in WRAPPER_NAMES:
         target = bin_dir / name
         if target.exists() and not is_april_wrapper(target) and not force:
             raise FileExistsError(
@@ -66,7 +73,7 @@ def uninstall_wrappers(*, bin_dir: Path) -> InstallResult:
     bin_dir = bin_dir.expanduser().resolve()
     removed: list[Path] = []
     skipped: list[Path] = []
-    for name in ("run", "april-run"):
+    for name in WRAPPER_NAMES:
         target = bin_dir / name
         if is_april_wrapper(target):
             target.unlink()
@@ -76,26 +83,112 @@ def uninstall_wrappers(*, bin_dir: Path) -> InstallResult:
     return InstallResult(installed=removed, skipped=skipped)
 
 
+def verify_wrappers(*, repo_root: Path, bin_dir: Path) -> list[str]:
+    root = repo_root.expanduser().resolve()
+    python_path = root / ".venv" / "bin" / "python"
+    errors: list[str] = []
+    for name in WRAPPER_NAMES:
+        target = bin_dir.expanduser().resolve() / name
+        if not target.exists():
+            errors.append(f"Missing wrapper: {target}")
+            continue
+        content = target.read_text(encoding="utf-8", errors="replace")
+        required = [
+            APRIL_WRAPPER_MARKER,
+            str(root),
+            ".venv/bin/python",
+            "-m apps.runner.main",
+        ]
+        for needle in required:
+            if needle not in content:
+                errors.append(f"{target} does not contain required text: {needle}")
+        if str(python_path) not in content:
+            errors.append(f"{target} does not reference expected interpreter: {python_path}")
+        if not os.access(target, os.X_OK):
+            errors.append(f"{target} is not executable")
+    return errors
+
+
+def path_contains_dir(bin_dir: Path, *, path_value: str | None = None) -> bool:
+    resolved_bin = bin_dir.expanduser().resolve()
+    path_value = os.environ.get("PATH", "") if path_value is None else path_value
+    for raw in path_value.split(os.pathsep):
+        if not raw:
+            continue
+        try:
+            if Path(raw).expanduser().resolve() == resolved_bin:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def shell_config_path(*, shell: str | None = None, home: Path | None = None) -> Path:
+    shell_name = Path(shell or os.environ.get("SHELL", "")).name
+    user_home = (home or Path.home()).expanduser()
+    if shell_name == "zsh":
+        return user_home / ".zshrc"
+    if shell_name == "bash":
+        return user_home / ".bashrc"
+    raise ValueError("Only zsh and bash PATH updates are supported automatically.")
+
+
+def add_path_block(*, shell: str | None = None, home: Path | None = None) -> tuple[Path, bool]:
+    config_path = shell_config_path(shell=shell, home=home)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    content = ""
+    if config_path.exists():
+        content = config_path.read_text(encoding="utf-8")
+    if PATH_BLOCK_START in content and PATH_BLOCK_END in content:
+        return config_path, False
+    block = f"{PATH_BLOCK_START}\n{PATH_EXPORT_LINE}\n{PATH_BLOCK_END}\n"
+    prefix = "" if not content or content.endswith("\n") else "\n"
+    with config_path.open("a", encoding="utf-8") as file:
+        file.write(prefix + block)
+    return config_path, True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install or remove APRIL global wrappers.")
-    action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument("--install", action="store_true")
-    action.add_argument("--uninstall", action="store_true")
+    action_group = parser.add_mutually_exclusive_group(required=True)
+    action_group.add_argument("--install", action="store_true")
+    action_group.add_argument("--uninstall", action="store_true")
     parser.add_argument("--repo-root", type=Path, default=project_root())
     parser.add_argument("--bin-dir", type=Path, default=Path.home() / ".local" / "bin")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--add-to-path", action="store_true")
     args = parser.parse_args(argv)
 
     if args.install:
         result = install_wrappers(repo_root=args.repo_root, bin_dir=args.bin_dir, force=args.force)
+        print("APRIL global launcher wrappers:")
         for path in result.installed:
             print(f"Installed {path}")
         for path in result.skipped:
             print(f"Already up to date: {path}")
+        errors = verify_wrappers(repo_root=args.repo_root, bin_dir=args.bin_dir)
+        if errors:
+            for error in errors:
+                print(f"ERROR: {error}")
+            return 1
+        for name in WRAPPER_NAMES:
+            print(f"Verified {args.bin_dir.expanduser().resolve() / name}")
         local_bin = str(args.bin_dir.expanduser().resolve())
-        path_parts = os.environ.get("PATH", "").split(os.pathsep)
-        if local_bin not in path_parts:
-            print(f'Add this to your shell PATH: export PATH="{local_bin}:$PATH"')
+        in_path = path_contains_dir(args.bin_dir)
+        print(f"{local_bin} in current PATH: {'yes' if in_path else 'no'}")
+        if args.add_to_path:
+            try:
+                config_path, changed = add_path_block()
+            except ValueError as exc:
+                print(f"ERROR: {exc}")
+                return 1
+            action_text = "Updated" if changed else "Already configured"
+            print(f"{action_text}: {config_path}")
+            print(f"Reload your shell with: source {config_path}")
+        if not in_path:
+            print('Add this to your current shell now: export PATH="$HOME/.local/bin:$PATH"')
+        print("Next command: run april --fake")
+        print(f'Fallback command: "{Path(local_bin) / "run"}" april --fake')
         return 0
 
     result = uninstall_wrappers(bin_dir=args.bin_dir)

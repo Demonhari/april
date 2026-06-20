@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import typer
 from rich.table import Table
 
 from apps.cli.render import console
+from apps.runner.install import is_april_wrapper, path_contains_dir
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
 
 app = typer.Typer(help="Global command dispatcher.")
@@ -66,6 +69,69 @@ def _print_status(status: ServiceStatus) -> None:
     console.print(table)
 
 
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve() or left.samefile(right)
+    except FileNotFoundError:
+        return left.resolve() == right.resolve()
+
+
+def _doctor() -> None:
+    manager = _manager()
+    home = manager.home
+    local_bin = Path.home() / ".local" / "bin"
+    run_path = local_bin / "run"
+    april_run_path = local_bin / "april-run"
+    command_run = shutil.which("run")
+    command_path = Path(command_run) if command_run else None
+    run_found = command_path is not None
+    command_is_april = bool(command_path and is_april_wrapper(command_path))
+    command_points_to_expected = bool(
+        command_path and run_path.exists() and _same_file(command_path, run_path)
+    )
+
+    table = Table(title="APRIL Launcher Doctor")
+    table.add_column("Check")
+    table.add_column("Result")
+    table.add_row("APRIL_HOME", str(home))
+    python_exists = (home / ".venv/bin/python").exists()
+    table.add_row(".venv/bin/python exists", "yes" if python_exists else "no")
+    table.add_row(f"{run_path} exists", "yes" if run_path.exists() else "no")
+    table.add_row(f"{april_run_path} exists", "yes" if april_run_path.exists() else "no")
+    table.add_row("run wrapper APRIL-owned", "yes" if is_april_wrapper(run_path) else "no")
+    table.add_row(
+        "april-run wrapper APRIL-owned",
+        "yes" if is_april_wrapper(april_run_path) else "no",
+    )
+    table.add_row("run wrapper executable", "yes" if os.access(run_path, os.X_OK) else "no")
+    table.add_row(
+        "april-run wrapper executable",
+        "yes" if os.access(april_run_path, os.X_OK) else "no",
+    )
+    table.add_row(f"{local_bin} in PATH", "yes" if path_contains_dir(local_bin) else "no")
+    table.add_row("command -v run", command_run or "not found")
+    table.add_row("command -v run is APRIL wrapper", "yes" if command_is_april else "no")
+    table.add_row(
+        "command -v run points to ~/.local/bin/run",
+        "yes" if command_points_to_expected else "no",
+    )
+    console.print(table)
+    _print_status(manager.status())
+
+    if not run_found:
+        console.print("[yellow]run was not found in PATH.[/yellow]")
+        console.print(f"cd {home}")
+        console.print("make install-global")
+        console.print('export PATH="$HOME/.local/bin:$PATH"')
+        console.print("run april --fake")
+    elif not command_is_april:
+        console.print("[yellow]run resolves to a non-APRIL command.[/yellow]")
+        console.print(f"cd {home}")
+        console.print("make install-global-force")
+    elif path_contains_dir(local_bin):
+        console.print("[green]OK: run resolves to an APRIL wrapper visible in PATH.[/green]")
+
+
 @april_app.callback(invoke_without_command=True)
 def april(
     ctx: typer.Context,
@@ -106,6 +172,16 @@ def ask(
 @april_app.command()
 def status() -> None:
     _print_status(_manager().status())
+
+
+@app.command()
+def doctor() -> None:
+    _doctor()
+
+
+@april_app.command("doctor")
+def april_doctor() -> None:
+    _doctor()
 
 
 @april_app.command()

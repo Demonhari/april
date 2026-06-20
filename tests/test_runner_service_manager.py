@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import os
 import signal
+import subprocess
 from pathlib import Path
 from typing import IO
 
 import pytest
 
-from apps.runner.install import install_wrappers, wrapper_content
+from apps.runner.install import (
+    APRIL_WRAPPER_MARKER,
+    PATH_BLOCK_START,
+    add_path_block,
+    install_wrappers,
+    path_contains_dir,
+    wrapper_content,
+)
 from apps.runner.service_manager import AprilServiceManager
 
 
@@ -87,8 +96,27 @@ def test_service_manager_uses_argv_arrays_and_fake_env(tmp_path: Path, monkeypat
 
 def test_wrapper_content_includes_april_home(tmp_path: Path) -> None:
     content = wrapper_content(repo_root=tmp_path)
+    assert APRIL_WRAPPER_MARKER in content
     assert f'export APRIL_HOME="{tmp_path.resolve()}"' in content
-    assert "-m apps.runner.main" in content
+    assert ".venv/bin/python" in content
+    assert "apps.runner.main" in content
+
+
+def test_installer_creates_executable_wrappers(tmp_path: Path) -> None:
+    bin_dir = tmp_path / ".local" / "bin"
+    result = install_wrappers(repo_root=tmp_path, bin_dir=bin_dir)
+    run_path = bin_dir / "run"
+    april_run_path = bin_dir / "april-run"
+    assert run_path in result.installed
+    assert april_run_path in result.installed
+    for path in (run_path, april_run_path):
+        assert path.exists()
+        assert os.access(path, os.X_OK)
+        content = path.read_text(encoding="utf-8")
+        assert APRIL_WRAPPER_MARKER in content
+        assert f'export APRIL_HOME="{tmp_path.resolve()}"' in content
+        assert ".venv/bin/python" in content
+        assert "apps.runner.main" in content
 
 
 def test_installer_refuses_non_april_run_without_force(tmp_path: Path) -> None:
@@ -101,6 +129,26 @@ def test_installer_refuses_non_april_run_without_force(tmp_path: Path) -> None:
     assert "not APRIL-owned" in str(exc_info.value)
     result = install_wrappers(repo_root=tmp_path, bin_dir=bin_dir, force=True)
     assert run_path in result.installed
+    assert APRIL_WRAPPER_MARKER in run_path.read_text(encoding="utf-8")
+
+
+def test_add_to_path_writes_zshrc_managed_block_once(tmp_path: Path) -> None:
+    config_path, changed = add_path_block(shell="/bin/zsh", home=tmp_path)
+    assert changed is True
+    assert config_path == tmp_path / ".zshrc"
+    content = config_path.read_text(encoding="utf-8")
+    assert PATH_BLOCK_START in content
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in content
+    _, changed_again = add_path_block(shell="/bin/zsh", home=tmp_path)
+    assert changed_again is False
+    assert config_path.read_text(encoding="utf-8").count(PATH_BLOCK_START) == 1
+
+
+def test_path_contains_dir_detects_local_bin(tmp_path: Path) -> None:
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    assert path_contains_dir(local_bin, path_value=str(local_bin))
+    assert not path_contains_dir(local_bin, path_value=str(tmp_path / "other"))
 
 
 def test_logs_command_reads_runtime_and_api_logs(tmp_path: Path, monkeypatch) -> None:
@@ -166,3 +214,27 @@ def test_start_uses_home_even_from_other_cwd(tmp_path: Path, monkeypatch) -> Non
     )
     manager.start()
     assert all(call["cwd"] == str(home) for call in popen.calls)
+
+
+def test_make_verify_global_uses_home_local_bin_directly() -> None:
+    makefile = Path("Makefile").read_text(encoding="utf-8")
+    assert 'verify-global:\n\t"$(HOME)/.local/bin/run" april status' in makefile
+
+
+def test_setup_mac_global_add_to_path_uses_temp_home(tmp_path: Path) -> None:
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path)
+    env["SHELL"] = "/bin/zsh"
+    env["APRIL_SETUP_SKIP_PIP"] = "1"
+    env["APRIL_INSTALL_SKIP_PIP"] = "1"
+    result = subprocess.run(
+        ["bash", "scripts/setup_mac.sh", "--base", "--global", "--add-to-path"],
+        cwd=Path.cwd(),
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / ".local" / "bin" / "run").exists()
+    assert PATH_BLOCK_START in (tmp_path / ".zshrc").read_text(encoding="utf-8")

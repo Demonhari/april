@@ -82,33 +82,43 @@ april models
 
 ## Run APRIL From Any Folder
 
-Install the global launcher:
+Recommended zsh setup:
 
 ```bash
+cd april
+scripts/setup_mac.sh --base --global --add-to-path
+source ~/.zshrc
+run april --fake
+```
+
+Alternative without modifying shell config:
+
+```bash
+cd april
 scripts/setup_mac.sh --base
 make install-global
-```
-
-If `~/.local/bin` is not already in your shell path, add:
-
-```bash
 export PATH="$HOME/.local/bin:$PATH"
+run april --fake
 ```
 
-Then from any terminal folder:
+Fallback that always works after install, even before PATH reload:
 
 ```bash
-run april
+"$HOME/.local/bin/run" april --fake
 ```
 
 `run april` locates `APRIL_HOME`, starts April Runtime and the Core API when
 they are missing, waits for both localhost health checks, then opens interactive
-CLI chat. It does not start voice, wake-word, or microphone services.
+CLI chat. It does not start voice, wake-word, or microphone services. Services
+still bind to `127.0.0.1`. Real GGUF models are optional for MVP testing; use
+`--fake` to run with the fake backend.
 
 Useful launcher commands:
 
 ```bash
 run april --fake
+april-run doctor
+run april doctor
 run april status
 run april stop
 run april restart
@@ -127,6 +137,40 @@ Uninstall only APRIL-owned wrappers:
 
 ```bash
 make uninstall-global
+```
+
+Troubleshooting `zsh: command not found: run`:
+
+Cause: the APRIL wrapper is not installed or `~/.local/bin` is not in PATH.
+
+Temporary fix for the current shell:
+
+```bash
+cd april
+make install-global
+export PATH="$HOME/.local/bin:$PATH"
+run april --fake
+```
+
+Permanent zsh fix:
+
+```bash
+cd april
+make install-global-path
+source ~/.zshrc
+run april --fake
+```
+
+If `run` resolves to a different command, inspect with:
+
+```bash
+april-run doctor
+```
+
+Then force-replace only when you intend to replace the existing `run` command:
+
+```bash
+make install-global-force
 ```
 
 ## Approval Example

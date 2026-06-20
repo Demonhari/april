@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: install install-dev test coverage lint format typecheck check run-runtime run-api cli install-global uninstall-global
+.PHONY: install install-dev test coverage lint format typecheck check run-runtime run-api cli install-global install-global-path install-global-force install-global-force-path verify-global uninstall-global
 
 install:
 	$(PYTHON) -m venv $(VENV)
@@ -41,6 +41,18 @@ cli:
 
 install-global:
 	bash scripts/install_run_april.sh
+
+install-global-path:
+	bash scripts/install_run_april.sh --add-to-path
+
+install-global-force:
+	bash scripts/install_run_april.sh --force
+
+install-global-force-path:
+	bash scripts/install_run_april.sh --force --add-to-path
+
+verify-global:
+	"$(HOME)/.local/bin/run" april status
 
 uninstall-global:
 	bash scripts/uninstall_run_april.sh

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from apps.runner.install import install_wrappers
 from apps.runner.main import app
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
 
@@ -98,3 +99,58 @@ def test_run_april_stop_calls_manager(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(app, ["april", "stop"])
     assert result.exit_code == 0
     assert manager.stopped is True
+
+
+def test_doctor_reports_missing_path(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    empty_bin = tmp_path / "empty-bin"
+    home.mkdir()
+    repo.mkdir()
+    empty_bin.mkdir()
+    install_wrappers(repo_root=repo, bin_dir=home / ".local" / "bin")
+    manager = FakeManager(repo)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(empty_bin))
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "run was not found in PATH" in result.output
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in result.output
+    assert "make install-global" in result.output
+
+
+def test_doctor_reports_ok_when_path_contains_april_wrapper(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    home.mkdir()
+    repo.mkdir()
+    local_bin = home / ".local" / "bin"
+    install_wrappers(repo_root=repo, bin_dir=local_bin)
+    manager = FakeManager(repo)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(local_bin))
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "doctor"])
+    assert result.exit_code == 0
+    assert "OK: run resolves to an APRIL wrapper visible in PATH" in result.output
+
+
+def test_doctor_reports_non_april_run_command(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    local_bin = home / ".local" / "bin"
+    home.mkdir()
+    repo.mkdir()
+    local_bin.mkdir(parents=True)
+    other_run = local_bin / "run"
+    other_run.write_text("#!/usr/bin/env bash\necho other\n", encoding="utf-8")
+    other_run.chmod(0o755)
+    manager = FakeManager(repo)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(local_bin))
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "run resolves to a non-APRIL command" in result.output
+    assert "make install-global-force" in result.output
