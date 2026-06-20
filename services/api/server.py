@@ -24,6 +24,7 @@ from april_common.settings import AprilSettings, get_settings
 from services.api.auth import require_bearer_token
 from services.api.dependencies import ApiContainer, build_container
 from services.api.schemas import (
+    AgentRunRequest,
     ChatRequest,
     ChatResponse,
     ProjectCreateRequest,
@@ -152,12 +153,15 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
 
     @app.post("/agents/run")
     async def agents_run(
-        request: ChatRequest,
+        request: AgentRunRequest,
         active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
     ) -> ChatResponse:
-        request_id = str(uuid.uuid4())
-        result = await active.orchestrator.chat(
-            request.message,
+        request_id = x_request_id or str(uuid.uuid4())
+        result = await active.orchestrator.run_agent(
+            agent_id=request.agent,
+            message=request.message,
+            conversation_id=request.conversation_id,
             request_id=request_id,
             project_id=request.project_id,
             repo_path=request.repo_path,
@@ -194,7 +198,13 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         x_request_id: str | None = Header(default=None),
     ) -> object:
         request_id = x_request_id or str(uuid.uuid4())
-        return await _execute_approved_tool(active, request, request_id=request_id)
+        return await active.orchestrator.approve_tool(
+            approval_id=request.approval_id,
+            actor="local-user",
+            request_id=request_id,
+            tool=request.tool,
+            args=request.args if request.tool is not None else None,
+        )
 
     @app.post("/tools/deny")
     async def deny(
@@ -202,12 +212,11 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         active: ApiContainer = Depends(authorized),
         x_request_id: str | None = Header(default=None),
     ) -> object:
-        await active.approvals.deny(
+        return await active.orchestrator.deny_tool(
             approval_id=request.approval_id,
             actor="local-user",
             request_id=x_request_id or str(uuid.uuid4()),
         )
-        return {"status": "denied", "approval_id": request.approval_id}
 
     @app.get("/approvals")
     async def approvals(active: ApiContainer = Depends(authorized)) -> object:

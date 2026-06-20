@@ -7,7 +7,14 @@ from typing import Any
 from april_common.errors import PermissionDeniedError
 from april_common.time import utc_now_iso
 from services.memory.database import Database
-from services.memory.schemas import Conversation, MemoryRecord, Message, Project, ReminderRecord
+from services.memory.schemas import (
+    Conversation,
+    MemoryRecord,
+    Message,
+    Project,
+    ReminderRecord,
+    SuspendedAgentRun,
+)
 
 
 class SqliteMemory:
@@ -198,10 +205,15 @@ class SqliteMemory:
         return list(reversed(messages))
 
     async def delete_conversation(self, conversation_id: str) -> bool:
-        cursor = await self.database.execute(
-            "DELETE FROM conversations WHERE id = ?",
-            (conversation_id,),
-        )
+        async with self.database.transaction() as conn:
+            await conn.execute(
+                "DELETE FROM suspended_agent_runs WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            cursor = await conn.execute(
+                "DELETE FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
         return cursor.rowcount > 0
 
     async def record_conversation_event(
@@ -316,6 +328,148 @@ class SqliteMemory:
         )
         return iteration_id
 
+    async def create_suspended_agent_run(
+        self,
+        *,
+        agent_run_id: str,
+        approval_id: str,
+        conversation_id: str,
+        project_id: str | None,
+        agent: str,
+        model_id: str | None,
+        iteration: int,
+        request_id: str,
+        messages: list[dict[str, Any]],
+        tool_request: dict[str, Any],
+        normalized_args: dict[str, Any],
+        context: dict[str, Any],
+    ) -> SuspendedAgentRun:
+        suspended_id = str(uuid.uuid4())
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            await conn.execute(
+                """
+                INSERT INTO suspended_agent_runs(
+                    id, agent_run_id, approval_id, conversation_id, project_id, agent,
+                    model_id, iteration, request_id, messages_json, tool_request_json,
+                    normalized_args_json, context_json, status, created_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'suspended', ?)
+                """,
+                (
+                    suspended_id,
+                    agent_run_id,
+                    approval_id,
+                    conversation_id,
+                    project_id,
+                    agent,
+                    model_id,
+                    iteration,
+                    request_id,
+                    json.dumps(messages, sort_keys=True),
+                    json.dumps(tool_request, sort_keys=True),
+                    json.dumps(normalized_args, sort_keys=True),
+                    json.dumps(context, sort_keys=True),
+                    now,
+                ),
+            )
+            await conn.execute(
+                "UPDATE agent_runs SET status = 'suspended' WHERE id = ?",
+                (agent_run_id,),
+            )
+        return SuspendedAgentRun(
+            id=suspended_id,
+            agent_run_id=agent_run_id,
+            approval_id=approval_id,
+            conversation_id=conversation_id,
+            project_id=project_id,
+            agent=agent,
+            model_id=model_id,
+            iteration=iteration,
+            request_id=request_id,
+            messages=messages,
+            tool_request=tool_request,
+            normalized_args=normalized_args,
+            context=context,
+            status="suspended",
+            created_at=now,
+        )
+
+    async def get_suspended_agent_run_by_approval(
+        self, approval_id: str
+    ) -> SuspendedAgentRun | None:
+        row = await self.database.fetchone(
+            "SELECT * FROM suspended_agent_runs WHERE approval_id = ?",
+            (approval_id,),
+        )
+        if row is None:
+            return None
+        return self._suspended_run_from_row(row)
+
+    async def mark_agent_run_resumed(self, *, approval_id: str) -> None:
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT agent_run_id FROM suspended_agent_runs WHERE approval_id = ?",
+                (approval_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return
+            await conn.execute(
+                """
+                UPDATE suspended_agent_runs
+                SET status = 'resumed', resumed_at = ?
+                WHERE approval_id = ?
+                """,
+                (now, approval_id),
+            )
+            await conn.execute(
+                "UPDATE agent_runs SET status = 'running' WHERE id = ?",
+                (row["agent_run_id"],),
+            )
+
+    async def mark_agent_run_completed(self, *, agent_run_id: str, status: str = "ok") -> None:
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            await conn.execute(
+                """
+                UPDATE agent_runs
+                SET status = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (status, now, agent_run_id),
+            )
+            await conn.execute(
+                """
+                UPDATE suspended_agent_runs
+                SET status = 'completed', completed_at = ?
+                WHERE agent_run_id = ? AND status IN ('suspended', 'resumed')
+                """,
+                (now, agent_run_id),
+            )
+
+    async def mark_agent_run_denied(self, *, approval_id: str) -> None:
+        await self._mark_suspended_terminal(
+            approval_id=approval_id,
+            suspended_status="denied",
+            run_status="denied",
+        )
+
+    async def mark_agent_run_expired(self, *, approval_id: str) -> None:
+        await self._mark_suspended_terminal(
+            approval_id=approval_id,
+            suspended_status="expired",
+            run_status="expired",
+        )
+
+    async def mark_agent_run_failed(self, *, approval_id: str) -> None:
+        await self._mark_suspended_terminal(
+            approval_id=approval_id,
+            suspended_status="failed",
+            run_status="failed",
+        )
+
     async def record_tool_call(
         self,
         *,
@@ -350,3 +504,44 @@ class SqliteMemory:
             ),
         )
         return call_id
+
+    async def _mark_suspended_terminal(
+        self,
+        *,
+        approval_id: str,
+        suspended_status: str,
+        run_status: str,
+    ) -> None:
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT agent_run_id FROM suspended_agent_runs WHERE approval_id = ?",
+                (approval_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return
+            await conn.execute(
+                """
+                UPDATE suspended_agent_runs
+                SET status = ?, completed_at = ?
+                WHERE approval_id = ?
+                """,
+                (suspended_status, now, approval_id),
+            )
+            await conn.execute(
+                """
+                UPDATE agent_runs
+                SET status = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (run_status, now, row["agent_run_id"]),
+            )
+
+    def _suspended_run_from_row(self, row: Any) -> SuspendedAgentRun:
+        data = dict(row)
+        data["messages"] = json.loads(data.pop("messages_json"))
+        data["tool_request"] = json.loads(data.pop("tool_request_json"))
+        data["normalized_args"] = json.loads(data.pop("normalized_args_json"))
+        data["context"] = json.loads(data.pop("context_json"))
+        return SuspendedAgentRun.model_validate(data)

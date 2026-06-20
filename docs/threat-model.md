@@ -11,6 +11,8 @@ Main boundaries:
 Controls:
 
 - model output cannot execute tools directly
+- specialist model output is parsed as strict structured JSON and may only
+  request tools through APRIL application code
 - deterministic permission engine is authoritative
 - configured allowed filesystem roots are enforced after symlink resolution
 - sensitive paths are denied
@@ -20,6 +22,8 @@ Controls:
   direct tool access to `data/april.db`
 - shell execution uses argv arrays and `shell=False`
 - Level 3+ operations require exact-action one-time approvals
+- structured approvals bind to a persisted suspended run and resume only that
+  run after the exact approved tool executes once
 - approved tools are revalidated against current policy before execution
 - patch and commit approvals bind immutable digests and repository state, then
   recalculate those digests immediately before execution

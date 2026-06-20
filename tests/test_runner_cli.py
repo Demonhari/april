@@ -147,6 +147,16 @@ def test_run_april_config_validate_reports_errors(tmp_path: Path, monkeypatch) -
     assert "bad config" in result.output
 
 
+def test_run_april_config_inspect_redacts_token(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main.validate_configuration", lambda home: [])
+    result = CliRunner().invoke(app, ["april", "config", "inspect"])
+    assert result.exit_code == 0
+    assert "[REDACTED]" in result.output
+    assert "local-dev-token" not in result.output
+
+
 def test_run_april_verify_fake_reports_table(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
@@ -170,6 +180,28 @@ def test_run_april_verify_fake_fails_on_failed_check(tmp_path: Path, monkeypatch
     result = CliRunner().invoke(app, ["april", "verify", "--fake"])
     assert result.exit_code == 1
     assert "offline" in result.output
+
+
+def test_run_april_verify_real_model_skips_without_path(monkeypatch) -> None:
+    monkeypatch.delenv("APRIL_TEST_GGUF_PATH", raising=False)
+    result = CliRunner().invoke(app, ["april", "verify", "--real-model"])
+    assert result.exit_code == 0
+    assert "Skipping real-model verification" in result.output
+
+
+def test_run_april_verify_real_model_rejects_missing_path(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.gguf"
+    result = CliRunner().invoke(app, ["april", "verify", "--real-model", str(missing)])
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+
+
+def test_run_april_verify_real_model_existing_path_is_not_fake_success(tmp_path: Path) -> None:
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"not a real model")
+    result = CliRunner().invoke(app, ["april", "verify", "--real-model", str(gguf)])
+    assert result.exit_code == 1
+    assert "not implemented" in result.output
 
 
 def test_doctor_reports_missing_path(tmp_path: Path, monkeypatch) -> None:

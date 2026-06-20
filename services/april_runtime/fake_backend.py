@@ -82,7 +82,18 @@ class FakeBackend(RuntimeBackend):
 
     def _response_for_prompt(self, prompt: str) -> str:
         lower = prompt.lower()
+        if "return exactly one json object with type final_answer" in lower:
+            return self._structured_agent_response(prompt, lower)
         if "route this request" in lower or '"intent"' in lower:
+            if "apply the fix" in lower:
+                return (
+                    '{"intent":"code_modification","agent":"coding_agent",'
+                    '"model_id":"april-coding","tools_needed":["patch_generator",'
+                    '"patch_applier"],"memory_queries":[],"permission_level":3,'
+                    '"risk_level":"code_write","needs_confirmation":true,'
+                    '"task_steps":["Generate patch","Request exact patch approval"],'
+                    '"decision_summary":"Code modification through structured loop"}'
+                )
             if "animation" in lower or "repository" in lower or "code" in lower:
                 return (
                     '{"intent":"coding_repo_analysis","agent":"coding_agent",'
@@ -91,6 +102,14 @@ class FakeBackend(RuntimeBackend):
                     '"needs_confirmation":false,'
                     '"task_steps":["Inspect repository status","Search relevant files"],'
                     '"decision_summary":"Read-only repository investigation"}'
+                )
+            if "summarize" in lower or "readme" in lower:
+                return (
+                    '{"intent":"document_reading","agent":"reading_agent",'
+                    '"model_id":"april-reading","tools_needed":["read_file"],'
+                    '"memory_queries":[],"permission_level":1,"risk_level":"read_only",'
+                    '"needs_confirmation":false,"task_steps":["Read file"],'
+                    '"decision_summary":"Read requested local document"}'
                 )
             return (
                 '{"intent":"planning","agent":"general_agent","model_id":"april-brain",'
@@ -109,3 +128,63 @@ class FakeBackend(RuntimeBackend):
                 "animation-related files to review."
             )
         return "APRIL fake response."
+
+    def _structured_agent_response(self, prompt: str, lower: str) -> str:
+        if "approved tool result" in lower or "tool result" in lower:
+            if '"tool": "patch_applier"' in lower or '"tool":"patch_applier"' in lower:
+                return (
+                    '{"type":"final_answer","message":"Applied the approved patch.",'
+                    '"summary":"patch applied","citations":[]}'
+                )
+            if '"tool": "patch_generator"' in lower or '"tool":"patch_generator"' in lower:
+                patch_path = self._extract_json_string(prompt, "patch_path") or "patch.patch"
+                return (
+                    '{"type":"tool_request","tool":"patch_applier","args":{'
+                    f'"patch_path":{self._json_string(patch_path)}'
+                    '},"reason":"Apply the generated patch after approval."}'
+                )
+            return (
+                '{"type":"final_answer","message":"Completed the requested inspection.",'
+                '"summary":"done","citations":[{"path":"README.md"}]}'
+            )
+        if "apply the fix" in lower:
+            patch = (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1,2 +1,3 @@\n"
+                " # verify\n"
+                " animation bug\n"
+                "+fixed animation\n"
+            )
+            return (
+                '{"type":"tool_request","tool":"patch_generator","args":{'
+                f'"patch":{self._json_string(patch)}'
+                '},"reason":"Create an immutable draft patch artifact."}'
+            )
+        if "read" in lower or "summarize" in lower:
+            return (
+                '{"type":"tool_request","tool":"read_file","args":{"path":"README.md"},'
+                '"reason":"Read the requested local file."}'
+            )
+        if "animation" in lower or "repository" in lower:
+            return (
+                '{"type":"tool_request","tool":"search_files",'
+                '"args":{"path":".","query":"animation","limit":20},'
+                '"reason":"Find animation-related files."}'
+            )
+        return (
+            '{"type":"final_answer","message":"APRIL fake structured response.",'
+            '"summary":"fake","citations":[]}'
+        )
+
+    def _extract_json_string(self, text: str, key: str) -> str | None:
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]+)"', text)
+        if not match:
+            return None
+        return match.group(1).encode("utf-8").decode("unicode_escape")
+
+    def _json_string(self, value: str) -> str:
+        import json
+
+        return json.dumps(value)

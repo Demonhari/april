@@ -24,11 +24,18 @@ tools at arbitrary unregistered paths. Recorded tool-call rows use the
 authoritative permission decision from the registry, not executor-reported
 metadata.
 
+Specialist agents never execute tools directly. They emit structured
+`tool_request` JSON, and APRIL application code normalizes the args, evaluates
+policy, and either executes a low-risk tool or creates an exact approval.
+
 Approval execution is one-time and exact-action:
 
 - APRIL reloads the approval record before execution.
 - The canonical hash of tool name, normalized arguments, and immutable approval
   metadata must still match.
+- Structured-agent approvals also bind the approval to the suspended run:
+  agent run ID, conversation ID, project ID, agent ID, model ID, tool name,
+  canonical args hash, request ID, and iteration.
 - Current tool policy is re-evaluated for the scoped agent.
 - Patch approvals bind an APRIL-owned immutable artifact ID, patch SHA-256,
   exact byte length, normalized affected paths, selected project ID, repository
@@ -47,6 +54,14 @@ Approval execution is one-time and exact-action:
 - Level 3+ execution writes an audit start record before running; if this fails, the action does not run.
 - Tool calls are recorded in SQLite.
 - Failed executions consume the approval into a terminal state so replay is denied.
+
+For structured specialist approvals, `/tools/approve` first validates that the
+conversation and project still exist. It then executes the exact approved tool
+once, appends only the sanitized result to the saved loop messages, marks the
+suspended state resumed, and continues the same agent run until final answer,
+structured error, or another approval. `/tools/deny` marks the suspended run
+denied and does not execute the tool. Expired, consumed, replayed, missing-scope,
+or tampered approvals do not resume.
 
 Project-scoped tool arguments from models are advisory. When a trusted
 `project_id` is selected, APRIL derives repository roots from that project and

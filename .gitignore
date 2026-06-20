@@ -5,6 +5,7 @@ data/vector_index/
 data/patches/
 data/artifacts/
 data/audio_cache/
+data/run/
 logs/*.log
 logs/*.jsonl
 models/*.gguf

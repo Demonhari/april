@@ -131,6 +131,8 @@ run april models
 run april approvals
 run april approve APPROVAL_ID
 run april deny APPROVAL_ID
+run april agent run coding_agent "Inspect this repository" --project-id PROJECT_ID
+run april config inspect
 ```
 
 `run april --fake` starts missing services with `APRIL_RUNTIME_BACKEND=fake`
@@ -188,9 +190,10 @@ april approve APPROVAL_ID
 APRIL never treats a casual "yes" inside chat as approval. Approval must reference the exact approval ID or use the dedicated CLI/API approval flow. Before an approved tool runs, APRIL reloads the approval, revalidates current tool policy for the scoped agent, verifies the exact argument hash, records the tool call, consumes the approval once, and audits the outcome.
 
 For natural chat code changes such as `april ask "Apply the fix." --project-id
-PROJECT_ID`, APRIL asks the coding model for a unified diff only, validates that
-the patch is scoped to the selected project, saves it as a safe draft patch, and
-creates a Level 3 approval for applying that exact patch once.
+PROJECT_ID`, the Coding Agent now runs through the structured specialist loop:
+it can inspect project files, ask `patch_generator` to create an immutable patch
+artifact, ask `patch_applier` to apply it, suspend for approval, and resume the
+same agent run after approval returns the exact tool result.
 
 Patch proposals are stored in APRIL's content-addressed artifact store under
 `data/artifacts/patches/`. The artifact may live outside the selected
@@ -236,11 +239,17 @@ history as context.
 
 ## Structured Agents
 
-Specialist agent loop support uses strict JSON outputs: `final_answer`,
-`tool_request`, `approval_required`, or `structured_error`. The loop enforces
-the configured agent model, allowed/blocked tools, maximum iterations, and
-permission gates. Level 3+ tool requests create exact approvals and suspend the
-run instead of executing.
+Specialist agents use the structured loop by default for `/chat` and
+`/agents/run`: Coding, Reading, Reasoning, System Action, and Creative when it
+requests tools. General Agent simple chat remains a direct model response.
+
+Specialist output must be exactly one JSON object: `final_answer`,
+`tool_request`, `approval_required`, or `structured_error`. The loop enforces the
+configured agent model, allowed/blocked tools, maximum iterations, and
+permission gates. Level 3+ tool requests create exact approvals and persist a
+suspended run. Approving the ID executes the exact tool once, appends the
+sanitized result, and resumes the same run. `APRIL_LEGACY_ORCHESTRATOR=1`
+temporarily restores the previous planned-tool path for compatibility testing.
 
 ## Memory
 

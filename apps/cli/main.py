@@ -18,11 +18,13 @@ project_app = typer.Typer(help="Project operations.")
 memory_app = typer.Typer(help="Memory operations.")
 voice_app = typer.Typer(help="Voice operations.")
 conversation_app = typer.Typer(help="Conversation operations.")
+agent_app = typer.Typer(help="Direct specialist agent operations.")
 app.add_typer(model_app, name="model")
 app.add_typer(project_app, name="project")
 app.add_typer(memory_app, name="memory")
 app.add_typer(voice_app, name="voice")
 app.add_typer(conversation_app, name="conversation")
+app.add_typer(agent_app, name="agent")
 
 
 def client() -> AprilApiClient:
@@ -122,6 +124,30 @@ def approve(approval_id: str) -> None:
 def deny(approval_id: str) -> None:
     data = run(client().post("/tools/deny", {"approval_id": approval_id}))
     print_jsonish(data)
+
+
+@agent_app.command("run")
+def agent_run(
+    agent: str,
+    message: str,
+    project_id: str | None = typer.Option(None, "--project-id"),
+    repo_path: str | None = typer.Option(None, "--repo-path"),
+    conversation_id: str | None = typer.Option(None, "--conversation-id"),
+) -> None:
+    payload = {
+        "agent": agent,
+        "message": message,
+        "project_id": project_id,
+        "repo_path": repo_path,
+        "conversation_id": conversation_id,
+        "options": {"structured": True},
+    }
+    data = run(client().post("/agents/run", payload))
+    result = data["result"]
+    console.print(result["final_message"])
+    if result.get("pending_approval"):
+        console.print("[yellow]Approval required:[/yellow]")
+        print_jsonish(result["pending_approval"])
 
 
 @app.command()

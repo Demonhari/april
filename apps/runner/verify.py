@@ -69,6 +69,21 @@ class LauncherVerifier:
                 lambda: self._conversation_switch_rejected(conversation_id),
             )
             self._check("read-only repo analysis", lambda: self._repo_analysis(project_id))
+            self._check(
+                "direct agent structured execution",
+                lambda: self._direct_agent_run(project_id),
+            )
+            denial_approval_id = self._check(
+                "denial path", lambda: self._patch_approval(project_id)
+            )
+            self._check("approval denial", lambda: self._deny_approval(denial_approval_id))
+            expired_approval_id = self._check(
+                "expired approval path", lambda: self._patch_approval(project_id)
+            )
+            self._check(
+                "expired approval rejection",
+                lambda: self._expired_approval_rejected(expired_approval_id),
+            )
             approval_id = self._check(
                 "patch approval creation", lambda: self._patch_approval(project_id)
             )
@@ -87,6 +102,7 @@ class LauncherVerifier:
             self._check("runtime streaming usage", self._runtime_streaming)
             self._check("audit records", self._audit_records)
             self._check("tool call records", self._tool_call_records)
+            self._check("agent run records", self._agent_run_records)
         finally:
             self._stop()
             self._check("services stopped", self._services_stopped)
@@ -242,41 +258,46 @@ class LauncherVerifier:
         return "ok"
 
     def _patch_approval(self, project_id: str) -> str:
-        patch_dir = self.verify_home / "data" / "patches"
-        patch_dir.mkdir(parents=True, exist_ok=True)
-        patch_path = patch_dir / "verify.patch"
-        patch_path.write_text(
-            "diff --git a/app.py b/app.py\n"
-            "--- a/app.py\n"
-            "+++ b/app.py\n"
-            "@@ -1 +1 @@\n"
-            "-value = 'old'\n"
-            "+value = 'new'\n",
-            encoding="utf-8",
-        )
         with self._client() as client:
             response = client.post(
-                "/tools/request",
+                "/chat",
                 json={
-                    "tool": "patch_applier",
-                    "agent": "coding_agent",
-                    "args": {
-                        "repo_path": str(self.project),
-                        "patch_path": str(patch_path),
-                        "project_id": project_id,
-                    },
+                    "message": "Apply the fix.",
+                    "project_id": project_id,
                 },
             ).json()
-        return str(response["approval"]["approval_id"])
+        result = response["result"]
+        if result["status"] != "pending_approval":
+            raise RuntimeError(str(response))
+        approval = result["pending_approval"]
+        if approval["metadata"].get("agent_run_id") is None:
+            raise RuntimeError("approval is not bound to a structured agent run")
+        return str(approval["approval_id"])
+
+    def _direct_agent_run(self, project_id: str) -> str:
+        with self._client() as client:
+            response = client.post(
+                "/agents/run",
+                json={
+                    "agent": "coding_agent",
+                    "message": "Check animation files",
+                    "project_id": project_id,
+                },
+            ).json()
+        if response["result"]["status"] != "ok":
+            raise RuntimeError(str(response))
+        return "ok"
 
     def _approve(self, approval_id: str) -> str:
         with self._client() as client:
             response = client.post("/tools/approve", json={"approval_id": approval_id}).json()
-        if response.get("status") != "executed":
+        if response.get("status") != "resumed":
             raise RuntimeError(str(response))
-        if "value = 'new'" not in (self.project / "app.py").read_text(encoding="utf-8"):
+        if "fixed animation" not in (self.project / "README.md").read_text(encoding="utf-8"):
             raise RuntimeError("patch was not applied")
-        return "applied"
+        if response.get("result", {}).get("status") != "ok":
+            raise RuntimeError("agent did not return final answer after resume")
+        return "applied and resumed"
 
     def _approval_replay_rejected(self, approval_id: str) -> str:
         with self._client() as client:
@@ -284,6 +305,37 @@ class LauncherVerifier:
         if response.status_code != 403:
             raise RuntimeError(f"expected 403, got {response.status_code}")
         return "403"
+
+    def _deny_approval(self, approval_id: str) -> str:
+        with self._client() as client:
+            response = client.post("/tools/deny", json={"approval_id": approval_id})
+        if response.status_code != 200:
+            raise RuntimeError(f"expected 200, got {response.status_code}")
+        payload = response.json()
+        if payload.get("status") != "denied":
+            raise RuntimeError(str(payload))
+        status = self._suspended_status(approval_id)
+        if status is not None and status != "denied":
+            raise RuntimeError(f"suspended run status is {status}")
+        return "denied"
+
+    def _expired_approval_rejected(self, approval_id: str) -> str:
+        database = self.temp / "data" / "april.db"
+        if database.exists():
+            with sqlite3.connect(database) as conn:
+                conn.execute(
+                    "UPDATE approvals SET expires_at = ? WHERE id = ?",
+                    ("1970-01-01T00:00:00Z", approval_id),
+                )
+                conn.commit()
+        with self._client() as client:
+            response = client.post("/tools/approve", json={"approval_id": approval_id})
+        if response.status_code != 403:
+            raise RuntimeError(f"expected 403, got {response.status_code}")
+        status = self._suspended_status(approval_id)
+        if status is not None and status != "expired":
+            raise RuntimeError(f"suspended run status is {status}")
+        return "403 expired"
 
     def _tampered_artifact_rejected(self, project_id: str) -> str:
         patch_dir = self.verify_home / "data" / "patches"
@@ -426,6 +478,27 @@ class LauncherVerifier:
         if count < 1:
             raise RuntimeError("no tool call rows found")
         return str(count)
+
+    def _agent_run_records(self) -> str:
+        database = self.temp / "data" / "april.db"
+        with sqlite3.connect(database) as conn:
+            runs = conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
+            iterations = conn.execute("SELECT COUNT(*) FROM agent_iterations").fetchone()[0]
+            suspended = conn.execute("SELECT COUNT(*) FROM suspended_agent_runs").fetchone()[0]
+        if runs < 1 or iterations < 1 or suspended < 1:
+            raise RuntimeError(f"runs={runs}, iterations={iterations}, suspended={suspended}")
+        return f"runs={runs}, iterations={iterations}, suspended={suspended}"
+
+    def _suspended_status(self, approval_id: str) -> str | None:
+        database = self.temp / "data" / "april.db"
+        if not database.exists():
+            return None
+        with sqlite3.connect(database) as conn:
+            row = conn.execute(
+                "SELECT status FROM suspended_agent_runs WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        return None if row is None else str(row[0])
 
     def _services_stopped(self) -> str:
         alive = []

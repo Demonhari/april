@@ -20,7 +20,9 @@ States:
 - unloading
 - error
 
-The fake backend supports deterministic normal and streaming responses. It is the default development and test path and requires no GGUF files.
+The fake backend supports deterministic normal, streaming, Brain-routing, and
+structured specialist-loop responses. It is the default development and test
+path and requires no GGUF files.
 
 The llama.cpp backend is optional. It fails with a clear optional dependency error if `llama-cpp-python` is missing or the configured GGUF file is absent. Only `services/april_runtime/llama_cpp_backend.py` imports `llama_cpp`.
 
@@ -31,9 +33,10 @@ When the variable is absent, tests skip without downloading models. When set,
 the test should use a small token limit and cover load, generation, streaming,
 and unload against the local file only.
 
-`run april verify --fake` exercises runtime health, model listing, and SSE
-streaming against the fake backend. It asserts exactly one runtime `usage` event
-for the stream it opens.
+`run april verify --fake` exercises runtime health, model listing, structured
+specialist execution, approval suspension/resume, and SSE streaming against the
+fake backend. It asserts exactly one runtime `usage` event for the stream it
+opens.
 
 Generation options are backend-neutral for `temperature`, `top_p`,
 `max_output_tokens`, stop sequences, and optional seed. Lifecycle state tracks

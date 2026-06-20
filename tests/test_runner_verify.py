@@ -48,18 +48,45 @@ class FakeClient:
         if path == "/projects":
             return FakeResponse({"id": "project-1"})
         if path == "/chat":
+            if json["message"] == "Apply the fix.":
+                count = getattr(self.verifier, "_fake_approval_count", 0) + 1
+                self.verifier._fake_approval_count = count
+                return FakeResponse(
+                    {
+                        "result": {
+                            "status": "pending_approval",
+                            "conversation_id": "conv-3",
+                            "pending_approval": {
+                                "approval_id": f"approval-{count}",
+                                "metadata": {"agent_run_id": "run-1"},
+                            },
+                        }
+                    }
+                )
             if json["message"].startswith("Start a separate"):
                 return FakeResponse({"result": {"status": "ok", "conversation_id": "conv-2"}})
             return FakeResponse({"result": {"status": "ok", "conversation_id": "conv-1"}})
+        if path == "/agents/run":
+            return FakeResponse({"result": {"status": "ok", "conversation_id": "conv-agent"}})
         if path == "/tools/request":
             if "escape.patch" in str(json["args"]["patch_path"]):
                 return FakeResponse({"error": {"message": "denied"}}, status_code=403)
             return FakeResponse({"approval": {"approval_id": "approval-1"}})
         if path == "/tools/approve":
-            if json["approval_id"] == "approval-1":
-                (self.verifier.project / "app.py").write_text("value = 'new'\n", encoding="utf-8")
-                return FakeResponse({"status": "executed"})
+            approved = getattr(self.verifier, "_fake_approved_ids", set())
+            if json["approval_id"] in approved:
+                return FakeResponse({"error": {"message": "denied"}}, status_code=403)
+            if json["approval_id"] == "approval-3":
+                (self.verifier.project / "README.md").write_text(
+                    "# verify\nanimation bug\nfixed animation\n",
+                    encoding="utf-8",
+                )
+                approved.add(json["approval_id"])
+                self.verifier._fake_approved_ids = approved
+                return FakeResponse({"status": "resumed", "result": {"status": "ok"}})
             return FakeResponse({"error": {"message": "denied"}}, status_code=403)
+        if path == "/tools/deny":
+            return FakeResponse({"status": "denied"})
         raise AssertionError(path)
 
 
@@ -98,6 +125,7 @@ def test_verifier_http_steps_are_deterministic(tmp_path: Path, monkeypatch) -> N
     (verifier.verify_home / "data" / "patches").mkdir(parents=True, exist_ok=True)
     verifier.project.mkdir(parents=True, exist_ok=True)
     (verifier.project / "app.py").write_text("value = 'old'\n", encoding="utf-8")
+    (verifier.project / "README.md").write_text("# verify\nanimation bug\n", encoding="utf-8")
     monkeypatch.setattr("apps.runner.verify.httpx.Client", lambda **kwargs: FakeClient(verifier))
     monkeypatch.setattr("apps.runner.verify.httpx.stream", lambda *args, **kwargs: FakeStream())
 
@@ -106,10 +134,17 @@ def test_verifier_http_steps_are_deterministic(tmp_path: Path, monkeypatch) -> N
     assert verifier._multi_turn("project-1") == "conv-1"
     assert verifier._isolated_conversation("project-1", "conv-1") == "conv-2"
     assert verifier._repo_analysis("project-1") == "ok"
+    assert verifier._direct_agent_run("project-1") == "ok"
+    denial_approval_id = verifier._patch_approval("project-1")
+    assert denial_approval_id == "approval-1"
+    assert verifier._deny_approval(denial_approval_id) == "denied"
+    expired_approval_id = verifier._patch_approval("project-1")
+    assert expired_approval_id == "approval-2"
+    assert verifier._expired_approval_rejected(expired_approval_id) == "403 expired"
     approval_id = verifier._patch_approval("project-1")
-    assert approval_id == "approval-1"
-    assert verifier._approve(approval_id) == "applied"
-    assert verifier._approval_replay_rejected("other") == "403"
+    assert approval_id == "approval-3"
+    assert verifier._approve(approval_id) == "applied and resumed"
+    assert verifier._approval_replay_rejected(approval_id) == "403"
     assert verifier._path_escape_rejected("project-1") == "403"
     assert "token events" in verifier._runtime_streaming()
     audit = verifier.temp / "logs" / "audit.jsonl"
@@ -130,7 +165,10 @@ def test_verifier_run_records_failures_and_stops(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(verifier, "_isolated_conversation", lambda project_id, conv: "other")
     monkeypatch.setattr(verifier, "_conversation_switch_rejected", lambda conv: "403")
     monkeypatch.setattr(verifier, "_repo_analysis", lambda project_id: "ok")
+    monkeypatch.setattr(verifier, "_direct_agent_run", lambda project_id: "ok")
     monkeypatch.setattr(verifier, "_patch_approval", lambda project_id: "approval")
+    monkeypatch.setattr(verifier, "_deny_approval", lambda approval_id: "denied")
+    monkeypatch.setattr(verifier, "_expired_approval_rejected", lambda approval_id: "403 expired")
     monkeypatch.setattr(verifier, "_approve", lambda approval_id: "applied")
     monkeypatch.setattr(verifier, "_approval_replay_rejected", lambda approval_id: "403")
     monkeypatch.setattr(verifier, "_tampered_artifact_rejected", lambda project_id: "failed")
@@ -140,6 +178,7 @@ def test_verifier_run_records_failures_and_stops(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(verifier, "_runtime_streaming", lambda: "streamed")
     monkeypatch.setattr(verifier, "_audit_records", lambda: "audit")
     monkeypatch.setattr(verifier, "_tool_call_records", lambda: "1")
+    monkeypatch.setattr(verifier, "_agent_run_records", lambda: "runs")
 
     checks = verifier.run()
     assert checks

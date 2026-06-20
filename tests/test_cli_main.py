@@ -35,6 +35,8 @@ class FakeApiClient:
         self.calls.append(("POST", path, payload))
         if path == "/chat":
             return {"result": {"final_message": "answer", "pending_approval": None}}
+        if path == "/agents/run":
+            return {"result": {"final_message": "agent answer", "pending_approval": None}}
         if path == "/tools/approve":
             return {"status": "executed"}
         if path == "/tools/deny":
@@ -65,6 +67,7 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         ["approvals"],
         ["approve", "approval-1"],
         ["deny", "approval-1"],
+        ["agent", "run", "coding_agent", "inspect"],
         ["projects"],
         ["project", "add", "/tmp/project"],
         ["project", "index", "project-1"],
@@ -81,5 +84,17 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         "POST",
         "/chat",
         {"message": "hello", "project_id": None, "repo_path": None, "conversation_id": None},
+    ) in fake.calls
+    assert (
+        "POST",
+        "/agents/run",
+        {
+            "agent": "coding_agent",
+            "message": "inspect",
+            "project_id": None,
+            "repo_path": None,
+            "conversation_id": None,
+            "options": {"structured": True},
+        },
     ) in fake.calls
     assert ("DELETE", "/conversations/conversation-1", None) in fake.calls

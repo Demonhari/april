@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 async def run_migrations(database: Database) -> None:
@@ -144,6 +144,26 @@ async def run_migrations(database: Database) -> None:
             approval_id TEXT,
             error TEXT,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS suspended_agent_runs (
+            id TEXT PRIMARY KEY,
+            agent_run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+            approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(id) ON DELETE CASCADE,
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            agent TEXT NOT NULL,
+            model_id TEXT,
+            iteration INTEGER NOT NULL,
+            request_id TEXT NOT NULL,
+            messages_json TEXT NOT NULL,
+            tool_request_json TEXT NOT NULL,
+            normalized_args_json TEXT NOT NULL,
+            context_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            resumed_at TEXT,
+            completed_at TEXT
         );
         """
     )

@@ -70,6 +70,45 @@ scope.
 
 Request bodies larger than `api.max_request_bytes` are rejected with `REQUEST_TOO_LARGE`.
 
+Specialist `/chat` requests are Brain-routed but run through
+`StructuredAgentLoop` after agent selection. General Agent chat remains a direct
+model response.
+
+`POST /agents/run` is a typed direct-agent endpoint:
+
+```json
+{
+  "agent": "coding_agent",
+  "message": "Inspect this repository",
+  "conversation_id": "...",
+  "project_id": "...",
+  "options": {
+    "structured": true
+  }
+}
+```
+
+The endpoint rejects unknown agents, returns `unavailable` for agents with no
+configured model such as the default Reasoning Agent, validates project scope
+for project-required agents, and returns `ok`, `pending_approval`,
+`unavailable`, or `error` in `result.status`.
+
+`POST /tools/approve` preserves direct tool approval behavior. When the approval
+belongs to a suspended specialist run, the response is:
+
+```json
+{
+  "status": "resumed",
+  "result": {
+    "status": "ok",
+    "final_message": "..."
+  }
+}
+```
+
+If a resumed run asks for another Level 3+ tool, `result.status` is
+`pending_approval` and a new approval ID is returned.
+
 ## Global Launcher
 
 The `run april` launcher is a local CLI supervisor, not a public API endpoint.
@@ -99,6 +138,8 @@ run april approvals
 run april approve APPROVAL_ID
 run april deny APPROVAL_ID
 run april config validate
+run april config inspect
+run april agent run coding_agent "Inspect this repository" --project-id PROJECT_ID
 run april verify --fake
 ```
 
@@ -106,9 +147,11 @@ run april verify --fake
 `APRIL_RUNTIME_BACKEND=fake`; it does not edit configuration files.
 
 `run april config validate` validates YAML shape, model references, agent
-references, tool references, and loopback defaults. `run april verify --fake`
-uses isolated temporary data paths and dynamic ports so it can exercise the
-local workflow without modifying user projects or requiring GGUF files.
+references, tool references, and loopback defaults. `run april config inspect`
+prints effective non-secret config with the API token redacted. `run april
+verify --fake` uses isolated temporary data paths and dynamic ports so it can
+exercise the local structured specialist workflow without modifying user
+projects or requiring GGUF files.
 
 `POST /tools/request`, `POST /tools/approve`, orchestrator planned tools, and
 project indexing share the same trusted execution service. Repository roots and

@@ -28,6 +28,11 @@ def legacy_canonical_hash(tool: str, args: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def canonical_args_hash(args: dict[str, Any]) -> str:
+    payload = json.dumps(args, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class ApprovalStore:
     def __init__(self, database: Database, audit: AuditLogger, *, expiry_seconds: int) -> None:
         self.database = database
@@ -225,6 +230,35 @@ class ApprovalStore:
                 "metadata": record.metadata,
                 "approval_id": approval_id,
                 "outcome": "denied",
+            }
+        )
+
+    async def expire_pending(self, *, approval_id: str, actor: str, request_id: str) -> None:
+        async with self.database.transaction() as conn:
+            cursor = await conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
+            row = await cursor.fetchone()
+            if row is None:
+                raise PermissionDeniedError("Approval does not exist.")
+            record = self._record_from_row(row)
+            if record.status != "pending":
+                raise PermissionDeniedError("Approval is not pending.", {"status": record.status})
+            await conn.execute(
+                "UPDATE approvals SET status = 'expired' WHERE id = ?",
+                (approval_id,),
+            )
+        self.audit.write(
+            {
+                "actor": actor,
+                "request_id": request_id,
+                "event_type": "approval_expired",
+                "tool": record.tool,
+                "arguments": record.args,
+                "agent": record.agent,
+                "permission_level": record.permission_level,
+                "risk": record.risk_level,
+                "metadata": record.metadata,
+                "approval_id": approval_id,
+                "outcome": "expired",
             }
         )
 

@@ -14,6 +14,7 @@ from apps.runner.install import is_april_wrapper, path_contains_dir
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
 from apps.runner.verify import run_fake_verification
 from april_common.config_validation import validate_configuration
+from april_common.settings import load_settings
 
 app = typer.Typer(help="Global command dispatcher.")
 april_app = typer.Typer(help="Run APRIL from any folder.", invoke_without_command=True)
@@ -22,12 +23,14 @@ project_app = typer.Typer(help="Project operations.")
 memory_app = typer.Typer(help="Memory operations.")
 conversation_app = typer.Typer(help="Conversation operations.")
 config_app = typer.Typer(help="Configuration operations.")
+agent_app = typer.Typer(help="Direct specialist agent operations.")
 app.add_typer(april_app, name="april")
 april_app.add_typer(model_app, name="model")
 april_app.add_typer(project_app, name="project")
 april_app.add_typer(memory_app, name="memory")
 april_app.add_typer(conversation_app, name="conversation")
 april_app.add_typer(config_app, name="config")
+april_app.add_typer(agent_app, name="agent")
 
 
 def _manager() -> AprilServiceManager:
@@ -333,6 +336,26 @@ def conversation_delete(
     _delegate(["conversation", "delete", conversation_id], fake=_effective_fake(ctx, fake))
 
 
+@agent_app.command("run")
+def agent_run(
+    ctx: typer.Context,
+    agent: str,
+    message: str,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+    project_id: str | None = typer.Option(None, "--project-id"),
+    repo_path: str | None = typer.Option(None, "--repo-path"),
+    conversation_id: str | None = typer.Option(None, "--conversation-id"),
+) -> None:
+    args = ["agent", "run", agent, message]
+    if project_id:
+        args.extend(["--project-id", project_id])
+    if repo_path:
+        args.extend(["--repo-path", repo_path])
+    if conversation_id:
+        args.extend(["--conversation-id", conversation_id])
+    _delegate(args, fake=_effective_fake(ctx, fake))
+
+
 @config_app.command("validate")
 def config_validate() -> None:
     errors = validate_configuration(_manager().home)
@@ -344,16 +367,45 @@ def config_validate() -> None:
     console.print("[green]APRIL configuration is valid.[/green]")
 
 
+@config_app.command("inspect")
+def config_inspect() -> None:
+    errors = validate_configuration(_manager().home)
+    if errors:
+        console.print("[red]APRIL configuration is invalid.[/red]")
+        for error in errors:
+            console.print(f"- {error}")
+        raise typer.Exit(1)
+    settings = load_settings(root=_manager().home)
+    data = settings.model_dump(mode="json")
+    if isinstance(data.get("api"), dict):
+        data["api"]["token"] = "[REDACTED]"
+    console.print_json(data=data)
+
+
 @april_app.command()
 def verify(
+    model_path: Path | None = typer.Argument(None),
     fake: bool = typer.Option(False, "--fake", help="Run deterministic fake-backend verification."),
-    real_model: Path | None = typer.Option(None, "--real-model"),
+    real_model: bool = typer.Option(False, "--real-model"),
 ) -> None:
-    if real_model is not None:
+    if real_model:
+        configured_path = model_path or (
+            Path(os.environ["APRIL_TEST_GGUF_PATH"])
+            if os.environ.get("APRIL_TEST_GGUF_PATH")
+            else None
+        )
+        if configured_path is None:
+            console.print(
+                "[yellow]Skipping real-model verification: no GGUF path provided.[/yellow]"
+            )
+            raise typer.Exit(0)
+        if not configured_path.expanduser().exists():
+            console.print(f"[red]GGUF path does not exist: {configured_path}[/red]")
+            raise typer.Exit(1)
         console.print(
             "[yellow]Real-model launcher verification is not implemented in this pass.[/yellow]"
         )
-        raise typer.Exit(0)
+        raise typer.Exit(1)
     if not fake:
         console.print("[red]Use --fake for deterministic local verification.[/red]")
         raise typer.Exit(1)

@@ -10,7 +10,7 @@ from april_common.project_scope import normalize_project_child, normalize_projec
 from april_common.settings import AprilSettings
 from services.memory.schemas import Project
 from services.memory.sqlite_memory import SqliteMemory
-from services.permissions.approvals import ApprovalStore
+from services.permissions.approvals import ApprovalStore, canonical_args_hash
 from services.permissions.artifacts import (
     apply_approved_patch,
     build_git_commit_metadata,
@@ -120,6 +120,7 @@ class ToolExecutionService:
         model_permission_level: int = 0,
         model_risk_level: str = "none",
         expected_side_effects: list[str] | None = None,
+        approval_metadata: dict[str, Any] | None = None,
     ) -> ToolExecutionOutcome:
         normalized_args = self.normalize_args(tool, args, context)
         permission = self.permission_engine.evaluate(
@@ -142,6 +143,7 @@ class ToolExecutionService:
                 context=active_context,
                 permission=permission,
                 expected_side_effects=expected_side_effects,
+                metadata_overrides=approval_metadata,
             )
             await self.memory.record_conversation_event(
                 conversation_id=context.conversation_id,
@@ -308,8 +310,13 @@ class ToolExecutionService:
         context: ToolExecutionContext,
         permission: PermissionDecision,
         expected_side_effects: list[str] | None = None,
+        metadata_overrides: dict[str, Any] | None = None,
     ) -> ApprovalResponse:
         side_effects = expected_side_effects or self.side_effects(tool)
+        metadata = await self.approval_metadata(tool, args, side_effects)
+        metadata.update(metadata_overrides or {})
+        metadata.setdefault("tool_name", tool)
+        metadata.setdefault("canonical_args_hash", canonical_args_hash(args))
         approval = await self.approvals.create(
             ApprovalRequest(
                 tool=tool,
@@ -319,7 +326,7 @@ class ToolExecutionService:
                 risk_level=permission.risk_level,
                 affected_paths=permission.affected_paths,
                 expected_side_effects=side_effects,
-                metadata=await self.approval_metadata(tool, args, side_effects),
+                metadata=metadata,
             ),
             actor=context.actor,
             request_id=context.request_id,

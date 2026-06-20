@@ -173,6 +173,29 @@ async def test_structured_agent_loop_level_three_suspends(settings_tmp) -> None:
 
 
 @pytest.mark.asyncio
+async def test_structured_agent_loop_iteration_limit_is_enforced(settings_tmp) -> None:
+    repeated_request = (
+        '{"type":"tool_request","tool":"read_file","args":{"path":"README.md"},'
+        '"reason":"keep reading"}'
+    )
+    loop, context, _memory, database, _runtime = await make_loop(
+        settings_tmp,
+        [repeated_request] * 5,
+    )
+    result = await loop.run(
+        agent=coding_agent(),
+        message="loop",
+        context=context,
+        request_id="request",
+    )
+    assert result.status == "error"
+    assert "iteration limit" in result.final_message
+    rows = await database.fetchall("SELECT * FROM agent_runs WHERE status = 'error'")
+    assert len(rows) == 1
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_reasoning_agent_without_model_unavailable(settings_tmp) -> None:
     loop, context, _memory, database, _runtime = await make_loop(settings_tmp, [])
     result = await loop.run(

@@ -53,6 +53,26 @@ class ApprovalRecord(BaseModel):
     consumed_at: str | None = None
 
 
+class SuspendedAgentRun(BaseModel):
+    id: str
+    agent_run_id: str
+    approval_id: str
+    conversation_id: str
+    project_id: str | None = None
+    agent: str
+    model_id: str | None = None
+    iteration: int
+    request_id: str
+    messages: list[dict[str, Any]]
+    tool_request: dict[str, Any]
+    normalized_args: dict[str, Any]
+    context: dict[str, Any]
+    status: Literal["suspended", "resumed", "completed", "denied", "expired", "failed"]
+    created_at: str
+    resumed_at: str | None = None
+    completed_at: str | None = None
+
+
 class ReminderRecord(BaseModel):
     id: str
     content: str

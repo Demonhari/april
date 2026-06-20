@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agents.schemas import AgentResult
 
@@ -17,6 +17,23 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     request_id: str
     result: AgentResult
+
+
+class AgentRunOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    structured: bool = True
+
+
+class AgentRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str
+    message: str = Field(min_length=1, max_length=50_000)
+    conversation_id: str | None = None
+    project_id: str | None = None
+    repo_path: str | None = None
+    options: AgentRunOptions = Field(default_factory=AgentRunOptions)
 
 
 class ToolApprovalAction(BaseModel):

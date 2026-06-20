@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 
 from fastapi.testclient import TestClient
@@ -32,7 +33,11 @@ async def make_container(
     vector_memory = VectorMemory(settings_tmp.vector_index_path)
     memory_retriever = MemoryRetriever(memory, vector_memory)
     runtime_client = runtime_client or FakeRuntimeClient()
-    approvals = ApprovalStore(database, AuditLogger(settings_tmp.audit_path), expiry_seconds=60)
+    approvals = ApprovalStore(
+        database,
+        AuditLogger(settings_tmp.audit_path),
+        expiry_seconds=settings_tmp.permissions.approval_expiry_seconds,
+    )
     permission_engine = PermissionEngine(registry)
     tool_executor = ToolExecutionService(
         settings=settings_tmp,
@@ -143,6 +148,37 @@ def test_read_only_coding_analysis(settings_tmp) -> None:
     )
     assert response.status_code == 200
     assert response.json()["result"]["status"] == "ok"
+    rows = anyio.run(
+        container.database.fetchall,
+        "SELECT * FROM agent_runs WHERE agent = ? AND summary = ?",
+        ("coding_agent", "structured agent loop"),
+    )
+    assert len(rows) == 1
+
+
+def test_chat_routes_reading_agent_through_structured_loop(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(settings_tmp),
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Summarize README.md", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["status"] == "ok"
+    rows = anyio.run(
+        container.database.fetchall,
+        "SELECT * FROM agent_runs WHERE agent = ? AND summary = ?",
+        ("reading_agent", "structured agent loop"),
+    )
+    assert len(rows) == 1
 
 
 def test_repo_request_without_project_asks_for_selection(settings_tmp) -> None:
@@ -403,11 +439,303 @@ def test_code_modification_creates_patch_and_pending_approval(settings_tmp) -> N
     assert result["pending_approval"]["tool"] == "patch_applier"
     patch_path = result["pending_approval"]["args"]["patch_path"]
     assert patch_path.startswith(str(settings_tmp.home / "data" / "artifacts" / "patches"))
-    assert "README.md" in result["final_message"]
+    assert "Approval required" in result["final_message"]
     assert result["proposed_changes"][0]["path"] == "README.md"
+    assert result["pending_approval"]["metadata"]["agent_run_id"]
     generated_patches = list(settings_tmp.home.joinpath("data/artifacts/patches").glob("*.patch"))
     assert len(generated_patches) == 1
     assert "fixed animation" in generated_patches[0].read_text(encoding="utf-8")
+    rows = anyio.run(
+        container.database.fetchall,
+        "SELECT * FROM suspended_agent_runs WHERE approval_id = ?",
+        (result["pending_approval"]["approval_id"],),
+    )
+    assert len(rows) == 1
+
+
+def test_legacy_orchestrator_flag_keeps_one_shot_patch_path(settings_tmp, monkeypatch) -> None:
+    import anyio
+
+    monkeypatch.setenv("APRIL_LEGACY_ORCHESTRATOR", "1")
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["status"] == "pending_approval"
+    assert result["pending_approval"]["tool"] == "patch_applier"
+    assert result["pending_approval"]["metadata"].get("agent_run_id") is None
+    approve = client.post(
+        "/tools/approve",
+        json={"approval_id": result["pending_approval"]["approval_id"]},
+        headers=auth(settings_tmp),
+    )
+    assert approve.status_code == 200
+    assert approve.json()["status"] == "executed"
+
+
+def test_direct_agent_run_validates_and_uses_structured_loop(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(settings_tmp),
+    ).json()
+    response = client.post(
+        "/agents/run",
+        json={
+            "agent": "coding_agent",
+            "message": "Check animation files",
+            "project_id": project["id"],
+        },
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["status"] == "ok"
+    rows = anyio.run(
+        container.database.fetchall,
+        "SELECT * FROM agent_runs WHERE agent = ? AND summary = ?",
+        ("coding_agent", "structured agent loop"),
+    )
+    assert len(rows) == 1
+
+
+def test_direct_agent_run_rejects_unknown_agent(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/agents/run",
+        json={"agent": "missing_agent", "message": "hello"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 403
+
+
+def test_direct_reasoning_agent_without_model_is_unavailable(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/agents/run",
+        json={"agent": "reasoning_agent", "message": "think"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["status"] == "unavailable"
+
+
+def test_direct_coding_agent_requires_project(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/agents/run",
+        json={"agent": "coding_agent", "message": "inspect"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 403
+
+
+def test_direct_agent_run_suspends_and_resumes_after_approval(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(settings_tmp),
+    ).json()
+    response = client.post(
+        "/agents/run",
+        json={
+            "agent": "coding_agent",
+            "message": "Apply the fix.",
+            "project_id": project["id"],
+        },
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    approval_id = response.json()["result"]["pending_approval"]["approval_id"]
+    approve = client.post(
+        "/tools/approve",
+        json={"approval_id": approval_id},
+        headers=auth(settings_tmp),
+    )
+    assert approve.status_code == 200
+    assert approve.json()["status"] == "resumed"
+    assert approve.json()["result"]["status"] == "ok"
+
+
+def test_suspended_agent_denial_updates_run_without_execution(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(settings_tmp),
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    approval_id = response.json()["result"]["pending_approval"]["approval_id"]
+    denied = client.post(
+        "/tools/deny",
+        json={"approval_id": approval_id},
+        headers=auth(settings_tmp),
+    )
+    assert denied.status_code == 200
+    assert denied.json()["status"] == "denied"
+    assert "fixed animation" not in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
+    rows = anyio.run(
+        container.database.fetchall,
+        "SELECT status FROM suspended_agent_runs WHERE approval_id = ?",
+        (approval_id,),
+    )
+    assert rows[0]["status"] == "denied"
+
+
+def test_suspended_agent_expired_approval_does_not_resume(settings_tmp) -> None:
+    import anyio
+
+    permissions = settings_tmp.permissions.model_copy(update={"approval_expiry_seconds": -1})
+    expired_settings = settings_tmp.model_copy(update={"permissions": permissions})
+    container = anyio.run(make_container, expired_settings)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(expired_settings),
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(expired_settings),
+    )
+    approval_id = response.json()["result"]["pending_approval"]["approval_id"]
+    approve = client.post(
+        "/tools/approve",
+        json={"approval_id": approval_id},
+        headers=auth(expired_settings),
+    )
+    assert approve.status_code == 403
+    assert "fixed animation" not in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
+    rows = anyio.run(
+        container.database.fetchall,
+        "SELECT status FROM suspended_agent_runs WHERE approval_id = ?",
+        (approval_id,),
+    )
+    assert rows[0]["status"] == "expired"
+
+
+def test_deleted_conversation_cannot_resume_suspended_agent(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(settings_tmp),
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    result = response.json()["result"]
+    approval_id = result["pending_approval"]["approval_id"]
+    conversation_id = result["conversation_id"]
+    delete = client.delete(
+        f"/conversations/{conversation_id}",
+        headers=auth(settings_tmp),
+    )
+    assert delete.status_code == 200
+    approve = client.post(
+        "/tools/approve",
+        json={"approval_id": approval_id},
+        headers=auth(settings_tmp),
+    )
+    assert approve.status_code == 403
+    assert "fixed animation" not in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
+
+
+def test_missing_project_cannot_resume_suspended_agent(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(settings_tmp),
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    approval_id = response.json()["result"]["pending_approval"]["approval_id"]
+    anyio.run(
+        container.database.execute,
+        "DELETE FROM projects WHERE id = ?",
+        (project["id"],),
+    )
+    approve = client.post(
+        "/tools/approve",
+        json={"approval_id": approval_id},
+        headers=auth(settings_tmp),
+    )
+    assert approve.status_code == 403
+    assert "fixed animation" not in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
+
+
+def test_suspended_agent_survives_service_restart(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(settings_tmp),
+    ).json()
+    response = client.post(
+        "/chat",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    )
+    approval_id = response.json()["result"]["pending_approval"]["approval_id"]
+    anyio.run(container.database.close)
+
+    restarted = anyio.run(make_container, settings_tmp)
+    restarted_client = TestClient(create_app(restarted))
+    approve = restarted_client.post(
+        "/tools/approve",
+        json={"approval_id": approval_id},
+        headers=auth(settings_tmp),
+    )
+    assert approve.status_code == 200
+    assert approve.json()["status"] == "resumed"
+    assert "fixed animation" in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
 
 
 def test_code_modification_approval_applies_exact_patch_once(settings_tmp) -> None:
@@ -430,7 +758,8 @@ def test_code_modification_approval_applies_exact_patch_once(settings_tmp) -> No
         headers=auth(settings_tmp),
     )
     assert approve_response.status_code == 200
-    assert approve_response.json()["status"] == "executed"
+    assert approve_response.json()["status"] == "resumed"
+    assert approve_response.json()["result"]["status"] == "ok"
     assert "fixed animation" in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
     replay = client.post(
         "/tools/approve",
@@ -491,7 +820,8 @@ def test_code_modification_external_project_uses_april_artifact_store(
         headers=auth(scoped_settings),
     )
     assert approve_response.status_code == 200
-    assert approve_response.json()["status"] == "executed"
+    assert approve_response.json()["status"] == "resumed"
+    assert approve_response.json()["result"]["status"] == "ok"
     assert "fixed animation" in (external_repo / "README.md").read_text(encoding="utf-8")
 
 
@@ -656,6 +986,21 @@ class UnsafePatchRuntimeClient(FakeRuntimeClient):
     async def chat(self, **kwargs):
         response = await super().chat(**kwargs)
         joined = "\n".join(message.content for message in kwargs["messages"])
+        lower = joined.lower()
+        if (
+            "return exactly one json object with type final_answer" in lower
+            and "apply the fix" in lower
+            and "tool result" not in lower
+        ):
+            return response.model_copy(
+                update={
+                    "content": (
+                        '{"type":"tool_request","tool":"patch_generator","args":{'
+                        f'"patch":{json.dumps(self.patch)}'
+                        '},"reason":"Create an unsafe test patch."}'
+                    )
+                }
+            )
         if "unified diff patch only" in joined.lower():
             return response.model_copy(update={"content": self.patch})
         return response
@@ -669,14 +1014,43 @@ class PlannedOverrideRuntimeClient(FakeRuntimeClient):
     async def chat(self, **kwargs):
         response = await super().chat(**kwargs)
         joined = "\n".join(message.content for message in kwargs["messages"])
-        if "route this request" in joined.lower():
+        lower = joined.lower()
+        if "return exactly one json object with type final_answer" in lower:
+            path = self._extract_path_from_decision()
+            if "override absolute path" in lower:
+                return response.model_copy(
+                    update={
+                        "content": (
+                            '{"type":"tool_request","tool":"read_file","args":{'
+                            f'"path":{json.dumps(path)}'
+                            '},"reason":"Attempt absolute read."}'
+                        )
+                    }
+                )
+            if "override repo path" in lower:
+                return response.model_copy(
+                    update={
+                        "content": (
+                            '{"type":"tool_request","tool":"search_files","args":{'
+                            f'"path":{json.dumps(path)},'
+                            '"query":"other-project-secret","limit":20'
+                            '},"reason":"Attempt search override."}'
+                        )
+                    }
+                )
+        if "route this request" in lower:
             return response.model_copy(update={"content": self.decision_json})
         return response
 
+    def _extract_path_from_decision(self) -> str:
+        data = json.loads(self.decision_json)
+        calls = data.get("planned_tool_calls") or []
+        if not calls:
+            return "."
+        return str(calls[0].get("args", {}).get("path", "."))
 
-def test_model_supplied_search_path_is_overridden_by_selected_project(
-    settings_tmp, tmp_path
-) -> None:
+
+def test_model_supplied_search_path_override_is_rejected(settings_tmp, tmp_path) -> None:
     import anyio
 
     other_project = settings_tmp.home.parent / "other-project-search"
@@ -699,9 +1073,8 @@ def test_model_supplied_search_path_is_overridden_by_selected_project(
         json={"message": "override repo path", "project_id": project["id"]},
         headers=auth(settings_tmp),
     )
-    assert response.status_code == 200
-    prompt = "\n".join(message.content for message in runtime.last_messages)
-    assert "other-project-secret" not in prompt
+    assert response.status_code == 403
+    assert "relative" in response.text.lower() or "project" in response.text.lower()
 
 
 def test_model_supplied_absolute_read_path_outside_project_is_rejected(
@@ -753,9 +1126,8 @@ def test_code_modification_rejects_patch_outside_project(settings_tmp) -> None:
         json={"message": "Apply the fix.", "project_id": project["id"]},
         headers=auth(settings_tmp),
     )
-    result = response.json()["result"]
-    assert result["status"] == "error"
-    assert "safe patch" in result["final_message"].lower()
+    assert response.status_code == 403
+    assert "project" in response.text.lower() or "patch" in response.text.lower()
 
 
 def test_code_modification_rejects_patch_touching_git(settings_tmp) -> None:
@@ -778,9 +1150,8 @@ def test_code_modification_rejects_patch_touching_git(settings_tmp) -> None:
         json={"message": "Apply the fix.", "project_id": project["id"]},
         headers=auth(settings_tmp),
     )
-    result = response.json()["result"]
-    assert result["status"] == "error"
-    assert "safe patch" in result["final_message"].lower()
+    assert response.status_code == 403
+    assert ".git" in response.text or "patch" in response.text.lower()
 
 
 def test_code_modification_rejects_symlink_escape(settings_tmp, tmp_path) -> None:
@@ -801,9 +1172,8 @@ def test_code_modification_rejects_symlink_escape(settings_tmp, tmp_path) -> Non
         json={"message": "Apply the fix.", "project_id": project["id"]},
         headers=auth(settings_tmp),
     )
-    result = response.json()["result"]
-    assert result["status"] == "error"
-    assert "safe patch" in result["final_message"].lower()
+    assert response.status_code == 403
+    assert "patch" in response.text.lower() or "project" in response.text.lower()
 
 
 def test_git_commit_staged_change_after_approval_is_rejected(settings_tmp) -> None:
