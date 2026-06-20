@@ -34,3 +34,10 @@ and unload against the local file only.
 `run april verify --fake` exercises runtime health, model listing, and SSE
 streaming against the fake backend. It asserts exactly one runtime `usage` event
 for the stream it opens.
+
+Generation options are backend-neutral for `temperature`, `top_p`,
+`max_output_tokens`, stop sequences, and optional seed. Lifecycle state tracks
+active requests, generation errors, recent latency, and recent tokens per
+second. A loaded model with active requests cannot be unloaded. llama.cpp
+streaming uses a thread-safe queue bridge and reports structured stream errors
+without emitting a successful completion after producer failure.

@@ -25,6 +25,9 @@ APRIL is a private, local-first AI assistant for a MacBook Pro. The project is C
 - Patch approvals must bind immutable APRIL-owned artifact bytes, not a mutable
   source path. Approved patch application must use the verified bytes for both
   `git apply --check -` and `git apply -`.
+- All tool execution paths must use the trusted `ToolExecutionContext` service
+  so project roots, command cwd, permission decisions, tool-call records, and
+  audit events are derived from application state rather than model text.
 - A casual chat response such as "yes" is not an approval. Approvals must reference the approval ID or use the dedicated approval flow.
 - Filesystem access must be constrained to configured allowed roots after path expansion and symlink resolution.
 - Sensitive locations such as SSH keys, Keychains, browser profiles, cloud credentials, system config directories, and other users' home directories are denied unless explicitly configured.

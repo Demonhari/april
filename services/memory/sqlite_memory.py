@@ -4,9 +4,10 @@ import json
 import uuid
 from typing import Any
 
+from april_common.errors import PermissionDeniedError
 from april_common.time import utc_now_iso
 from services.memory.database import Database
-from services.memory.schemas import MemoryRecord, Message, Project, ReminderRecord
+from services.memory.schemas import Conversation, MemoryRecord, Message, Project, ReminderRecord
 
 
 class SqliteMemory:
@@ -108,30 +109,78 @@ class SqliteMemory:
         memories = [memory.model_dump() for memory in await self.list_memories()]
         return json.dumps({"memories": memories}, indent=2)
 
-    async def create_conversation(self, title: str | None = None) -> str:
+    async def create_conversation(
+        self,
+        title: str | None = None,
+        *,
+        project_id: str | None = None,
+        actor: str = "local-user",
+    ) -> str:
         conversation_id = str(uuid.uuid4())
+        created_at = utc_now_iso()
         await self.database.execute(
-            "INSERT INTO conversations(id, title, created_at) VALUES(?, ?, ?)",
-            (conversation_id, title, utc_now_iso()),
+            """
+            INSERT INTO conversations(id, title, project_id, actor, created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (conversation_id, title, project_id, actor, created_at, created_at),
         )
         return conversation_id
 
-    async def ensure_conversation(self, conversation_id: str, title: str | None = None) -> str:
+    async def get_conversation(self, conversation_id: str) -> Conversation | None:
+        row = await self.database.fetchone(
+            "SELECT * FROM conversations WHERE id = ?",
+            (conversation_id,),
+        )
+        if row is None:
+            return None
+        return Conversation.model_validate(dict(row))
+
+    async def ensure_conversation(
+        self,
+        conversation_id: str,
+        title: str | None = None,
+        *,
+        project_id: str | None = None,
+        actor: str = "local-user",
+    ) -> str:
+        existing = await self.get_conversation(conversation_id)
+        if existing is not None:
+            if existing.project_id != project_id:
+                raise PermissionDeniedError(
+                    "Conversation project scope cannot change.",
+                    {
+                        "conversation_id": conversation_id,
+                        "existing_project_id": existing.project_id,
+                        "requested_project_id": project_id,
+                    },
+                )
+            return conversation_id
+        now = utc_now_iso()
         await self.database.execute(
-            "INSERT OR IGNORE INTO conversations(id, title, created_at) VALUES(?, ?, ?)",
-            (conversation_id, title, utc_now_iso()),
+            """
+            INSERT INTO conversations(id, title, project_id, actor, created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (conversation_id, title, project_id, actor, now, now),
         )
         return conversation_id
 
     async def add_message(self, conversation_id: str, role: str, content: str) -> str:
         message_id = str(uuid.uuid4())
-        await self.database.execute(
-            """
-            INSERT INTO messages(id, conversation_id, role, content, created_at)
-            VALUES(?, ?, ?, ?, ?)
-            """,
-            (message_id, conversation_id, role, content, utc_now_iso()),
-        )
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            await conn.execute(
+                """
+                INSERT INTO messages(id, conversation_id, role, content, created_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (message_id, conversation_id, role, content, now),
+            )
+            await conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conversation_id),
+            )
         return message_id
 
     async def recent_messages(self, conversation_id: str, *, limit: int = 8) -> list[Message]:
@@ -154,6 +203,31 @@ class SqliteMemory:
             (conversation_id,),
         )
         return cursor.rowcount > 0
+
+    async def record_conversation_event(
+        self,
+        *,
+        conversation_id: str | None,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> str:
+        event_id = str(uuid.uuid4())
+        await self.database.execute(
+            """
+            INSERT INTO conversation_events(
+                id, conversation_id, event_type, payload_json, created_at
+            )
+            VALUES(?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                conversation_id,
+                event_type,
+                json.dumps(payload, sort_keys=True),
+                utc_now_iso(),
+            ),
+        )
+        return event_id
 
     async def create_reminder(self, content: str, due_at: str | None = None) -> ReminderRecord:
         reminder_id = str(uuid.uuid4())
@@ -203,6 +277,44 @@ class SqliteMemory:
             (run_id, conversation_id, agent, status, model_id, summary, utc_now_iso()),
         )
         return run_id
+
+    async def record_agent_iteration(
+        self,
+        *,
+        run_id: str,
+        iteration: int,
+        model_id: str | None,
+        state: str,
+        model_output: dict[str, Any] | None = None,
+        tool_request: dict[str, Any] | None = None,
+        tool_result: dict[str, Any] | None = None,
+        approval_id: str | None = None,
+        error: str | None = None,
+    ) -> str:
+        iteration_id = str(uuid.uuid4())
+        await self.database.execute(
+            """
+            INSERT INTO agent_iterations(
+                id, run_id, iteration, model_id, state, model_output_json,
+                tool_request_json, tool_result_json, approval_id, error, created_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                iteration_id,
+                run_id,
+                iteration,
+                model_id,
+                state,
+                json.dumps(model_output or {}, sort_keys=True),
+                json.dumps(tool_request or {}, sort_keys=True),
+                json.dumps(tool_result or {}, sort_keys=True),
+                approval_id,
+                error,
+                utc_now_iso(),
+            ),
+        )
+        return iteration_id
 
     async def record_tool_call(
         self,

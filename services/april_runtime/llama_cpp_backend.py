@@ -50,18 +50,27 @@ class LlamaCppBackend(RuntimeBackend):
         *,
         temperature: float,
         max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
     ) -> GenerationResult:
         if self._llm is None:
             raise RuntimeUnavailableError("Model is not loaded.")
         llm = self._llm
 
         def run() -> Any:
-            return llm(
-                prompt,
-                max_tokens=max_output_tokens,
-                temperature=temperature,
-                stream=False,
-            )
+            kwargs: dict[str, Any] = {
+                "max_tokens": max_output_tokens,
+                "temperature": temperature,
+                "stream": False,
+            }
+            if top_p is not None:
+                kwargs["top_p"] = top_p
+            if stop:
+                kwargs["stop"] = stop
+            if seed is not None:
+                kwargs["seed"] = seed
+            return llm(prompt, **kwargs)
 
         output = await asyncio.to_thread(run)
         choice = output["choices"][0]
@@ -76,26 +85,41 @@ class LlamaCppBackend(RuntimeBackend):
         *,
         temperature: float,
         max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
     ) -> AsyncIterator[str]:
         if self._llm is None:
             raise RuntimeUnavailableError("Model is not loaded.")
         llm = self._llm
 
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[str | Exception | None] = asyncio.Queue()
 
         def produce() -> None:
             try:
+                kwargs: dict[str, Any] = {
+                    "max_tokens": max_output_tokens,
+                    "temperature": temperature,
+                    "stream": True,
+                }
+                if top_p is not None:
+                    kwargs["top_p"] = top_p
+                if stop:
+                    kwargs["stop"] = stop
+                if seed is not None:
+                    kwargs["seed"] = seed
                 for chunk in llm(
                     prompt,
-                    max_tokens=max_output_tokens,
-                    temperature=temperature,
-                    stream=True,
+                    **kwargs,
                 ):
                     text = chunk["choices"][0].get("text", "")
                     if text:
-                        queue.put_nowait(str(text))
+                        loop.call_soon_threadsafe(queue.put_nowait, str(text))
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
             finally:
-                queue.put_nowait(None)
+                loop.call_soon_threadsafe(queue.put_nowait, None)
 
         task = asyncio.create_task(asyncio.to_thread(produce))
         try:
@@ -103,6 +127,8 @@ class LlamaCppBackend(RuntimeBackend):
                 token = await queue.get()
                 if token is None:
                     break
+                if isinstance(token, Exception):
+                    raise token
                 yield token
         finally:
             await task

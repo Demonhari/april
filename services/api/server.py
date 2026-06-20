@@ -11,6 +11,7 @@ import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.middleware.cors import CORSMiddleware
 
 from april_common.errors import (
     AprilError,
@@ -30,15 +31,7 @@ from services.api.schemas import (
     ToolRequestEnvelope,
 )
 from services.april_runtime.schemas import LoadModelRequest
-from services.permissions.artifacts import (
-    apply_approved_patch,
-    build_git_commit_metadata,
-    build_patch_approval_metadata,
-    verify_approval_artifact,
-)
-from services.permissions.schemas import ApprovalRequest
 from services.voice.health import voice_health
-from skills.schemas import ToolResult
 
 
 def create_app(container: ApiContainer | None = None) -> FastAPI:
@@ -50,6 +43,15 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
 
     app = FastAPI(title="APRIL Core API", version="0.1.0", lifespan=lifespan)
     app.state.container = container
+    initial_settings = container.settings if container is not None else get_settings()
+    if initial_settings.api.cors_enabled:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["http://127.0.0.1", "http://localhost"],
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+        )
 
     @app.exception_handler(AprilError)
     async def april_error_handler(request: Request, exc: AprilError) -> JSONResponse:
@@ -169,38 +171,21 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         x_request_id: str | None = Header(default=None),
     ) -> object:
         request_id = x_request_id or str(uuid.uuid4())
-        decision = active.permission_engine.evaluate(
+        context = await active.tool_executor.context(
+            request_id=request_id,
+            actor="local-user",
+            agent_id=request.agent,
+            project_id=str(request.args["project_id"]) if request.args.get("project_id") else None,
+            source="api",
+        )
+        outcome = await active.tool_executor.request_or_execute(
             tool=request.tool,
             args=request.args,
-            agent=request.agent,
+            context=context,
         )
-        if decision.confirmation_required:
-            side_effects = ["Execute requested tool once."]
-            approval = await active.approvals.create(
-                ApprovalRequest(
-                    tool=request.tool,
-                    args=request.args,
-                    agent=request.agent,
-                    permission_level=decision.permission_level,
-                    risk_level=decision.risk_level,
-                    affected_paths=decision.affected_paths,
-                    expected_side_effects=side_effects,
-                    metadata=await _approval_metadata(request.tool, request.args, side_effects),
-                ),
-                actor="local-user",
-                request_id=request_id,
-            )
-            return {"status": "pending_approval", "approval": approval}
-        result = await active.tool_registry.execute(request.tool, request.args)
-        await active.memory.record_tool_call(
-            tool=request.tool,
-            args=request.args,
-            status="ok" if result.ok else "failed",
-            permission_level=result.permission_level,
-            risk_level=result.risk_level,
-            result=result.model_dump(),
-        )
-        return {"status": "executed", "result": result}
+        if outcome.approval is not None:
+            return {"status": "pending_approval", "approval": outcome.approval}
+        return {"status": outcome.status, "result": outcome.result}
 
     @app.post("/tools/approve")
     async def approve(
@@ -268,11 +253,20 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         project = await active.memory.get_project(project_id)
         if project is None:
             raise PermissionDeniedError("Project not found.")
-        result = await active.tool_registry.execute(
-            "repo_indexer",
-            {"repo_path": project.path, "project_id": project_id},
+        request_id = str(uuid.uuid4())
+        context = await active.tool_executor.context(
+            request_id=request_id,
+            actor="local-user",
+            agent_id="coding_agent",
+            project_id=project_id,
+            source="api",
         )
-        return {"result": result}
+        outcome = await active.tool_executor.request_or_execute(
+            tool="repo_indexer",
+            args={"repo_path": project.path, "project_id": project_id},
+            context=context,
+        )
+        return {"result": outcome.result}
 
     @app.get("/runtime/models")
     async def runtime_models(active: ApiContainer = Depends(authorized)) -> object:
@@ -312,155 +306,14 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
 async def _execute_approved_tool(
     active: ApiContainer, request: ToolApprovalAction, *, request_id: str
 ) -> object:
-    if request.tool is None:
-        record = await active.approvals.get(request.approval_id)
-        tool = record.tool
-        args = record.args
-    else:
-        tool = request.tool
-        args = request.args
-    record = await active.approvals.approve_exact(
+    outcome = await active.tool_executor.execute_approved(
         approval_id=request.approval_id,
-        tool=tool,
-        args=args,
         actor="local-user",
         request_id=request_id,
+        tool=request.tool,
+        args=request.args if request.tool is not None else None,
     )
-    permission = active.permission_engine.evaluate(
-        tool=record.tool,
-        args=record.args,
-        agent=record.agent,
-        model_permission_level=record.permission_level,
-        model_risk_level=record.risk_level,
-    )
-    if permission.permission_level >= 3:
-        active.approvals.audit.write(
-            {
-                "actor": "local-user",
-                "request_id": request_id,
-                "event_type": "approved_tool_execution_started",
-                "tool": record.tool,
-                "arguments": record.args,
-                "agent": record.agent,
-                "permission_level": permission.permission_level,
-                "risk": permission.risk_level,
-                "metadata": record.metadata,
-                "approval_id": record.id,
-                "outcome": "started",
-            }
-        )
-    precondition_failure = (
-        None if record.tool == "patch_applier" else await verify_approval_artifact(record)
-    )
-    if precondition_failure is not None:
-        await active.memory.record_tool_call(
-            tool=record.tool,
-            args=record.args,
-            status="failed",
-            permission_level=permission.permission_level,
-            risk_level=permission.risk_level,
-            result=precondition_failure.model_dump(),
-        )
-        await active.approvals.consume(
-            approval_id=request.approval_id,
-            result=precondition_failure.model_dump(),
-            actor="local-user",
-            request_id=request_id,
-        )
-        active.approvals.audit.write(
-            {
-                "actor": "local-user",
-                "request_id": request_id,
-                "event_type": "approved_tool_rejected",
-                "tool": record.tool,
-                "arguments": record.args,
-                "agent": record.agent,
-                "permission_level": permission.permission_level,
-                "risk": permission.risk_level,
-                "metadata": record.metadata,
-                "approval_id": record.id,
-                "outcome": "failed",
-                "result": precondition_failure.model_dump(),
-            }
-        )
-        return {"status": "failed", "result": precondition_failure}
-    if record.tool == "patch_applier":
-        active.approvals.audit.write(
-            {
-                "actor": "local-user",
-                "request_id": request_id,
-                "event_type": "approved_patch_verified",
-                "tool": record.tool,
-                "arguments": record.args,
-                "agent": record.agent,
-                "permission_level": permission.permission_level,
-                "risk": permission.risk_level,
-                "metadata": record.metadata,
-                "approval_id": record.id,
-                "outcome": "verified",
-            }
-        )
-    try:
-        if record.tool == "patch_applier":
-            tool_result = await apply_approved_patch(record)
-        else:
-            tool_result = await active.tool_registry.execute(record.tool, record.args)
-    except Exception as exc:
-        tool_result = ToolResult(
-            ok=False,
-            stderr=str(exc),
-            risk_level=permission.risk_level,
-            permission_level=permission.permission_level,
-        )
-    await active.memory.record_tool_call(
-        tool=record.tool,
-        args=record.args,
-        status="ok" if tool_result.ok else "failed",
-        permission_level=permission.permission_level,
-        risk_level=permission.risk_level,
-        result=tool_result.model_dump(),
-    )
-    await active.approvals.consume(
-        approval_id=request.approval_id,
-        result=tool_result.model_dump(),
-        actor="local-user",
-        request_id=request_id,
-    )
-    active.approvals.audit.write(
-        {
-            "actor": "local-user",
-            "request_id": request_id,
-            "event_type": "approved_tool_executed",
-            "tool": record.tool,
-            "arguments": record.args,
-            "agent": record.agent,
-            "permission_level": permission.permission_level,
-            "risk": permission.risk_level,
-            "metadata": record.metadata,
-            "approval_id": record.id,
-            "outcome": "ok" if tool_result.ok else "failed",
-        }
-    )
-    return {"status": "executed" if tool_result.ok else "failed", "result": tool_result}
-
-
-async def _approval_metadata(
-    tool: str, args: dict[str, Any], expected_side_effects: list[str]
-) -> dict[str, Any]:
-    if tool == "patch_applier":
-        return await build_patch_approval_metadata(
-            repo_path=str(args["repo_path"]),
-            patch_path=str(args["patch_path"]),
-            expected_side_effects=expected_side_effects,
-            project_id=str(args["project_id"]) if args.get("project_id") is not None else None,
-        )
-    if tool == "git_commit":
-        return await build_git_commit_metadata(
-            repo_path=str(args["repo_path"]),
-            message=str(args.get("message")) if args.get("message") is not None else None,
-            project_id=str(args["project_id"]) if args.get("project_id") is not None else None,
-        )
-    return {}
+    return {"status": outcome.status, "result": outcome.result}
 
 
 def _normalize_project_path(path: str, settings: AprilSettings) -> Path:

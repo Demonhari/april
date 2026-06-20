@@ -16,6 +16,7 @@ from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
 from services.permissions.engine import PermissionEngine
 from services.permissions.schemas import ApprovalRequest
+from services.permissions.tool_execution import ToolExecutionService
 from skills.registry import default_registry
 from tests.conftest import FakeRuntimeClient
 
@@ -32,6 +33,14 @@ async def make_container(
     memory_retriever = MemoryRetriever(memory, vector_memory)
     runtime_client = runtime_client or FakeRuntimeClient()
     approvals = ApprovalStore(database, AuditLogger(settings_tmp.audit_path), expiry_seconds=60)
+    permission_engine = PermissionEngine(registry)
+    tool_executor = ToolExecutionService(
+        settings=settings_tmp,
+        memory=memory,
+        tool_registry=registry,
+        permission_engine=permission_engine,
+        approvals=approvals,
+    )
     from services.brain.orchestrator import AprilOrchestrator
 
     orchestrator = AprilOrchestrator(
@@ -39,8 +48,9 @@ async def make_container(
         runtime_client=runtime_client,
         memory=memory,
         tool_registry=registry,
-        permission_engine=PermissionEngine(registry),
+        permission_engine=permission_engine,
         approvals=approvals,
+        tool_executor=tool_executor,
         agent_registry=default_agent_registry(),
         memory_retriever=memory_retriever,
     )
@@ -52,8 +62,9 @@ async def make_container(
         memory_retriever=memory_retriever,
         runtime_client=runtime_client,  # type: ignore[arg-type]
         tool_registry=registry,
-        permission_engine=PermissionEngine(registry),
+        permission_engine=permission_engine,
         approvals=approvals,
+        tool_executor=tool_executor,
         agent_registry=default_agent_registry(),
         orchestrator=orchestrator,
     )
@@ -820,12 +831,19 @@ def test_git_commit_staged_change_after_approval_is_rejected(settings_tmp) -> No
 
     container = anyio.run(make_container, settings_tmp)
     client = TestClient(create_app(container))
+    project = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
     approval_response = client.post(
         "/tools/request",
         json={
             "tool": "git_commit",
             "agent": "coding_agent",
-            "args": {"repo_path": str(settings_tmp.home), "message": "approved"},
+            "args": {
+                "repo_path": str(settings_tmp.home),
+                "project_id": project["id"],
+                "message": "approved",
+            },
         },
         headers=auth(settings_tmp),
     )
@@ -842,3 +860,206 @@ def test_git_commit_staged_change_after_approval_is_rejected(settings_tmp) -> No
     )
     assert execute_response.status_code == 200
     assert execute_response.json()["status"] == "failed"
+
+
+def test_direct_tool_request_requires_registered_project_for_repo_tools(
+    settings_tmp, tmp_path
+) -> None:
+    import anyio
+
+    other_repo = tmp_path / "unregistered"
+    other_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=other_repo, check=True, capture_output=True)
+    paths = settings_tmp.paths.model_copy(
+        update={"allowed_filesystem_roots": [settings_tmp.home, other_repo]}
+    )
+    scoped_settings = settings_tmp.model_copy(update={"paths": paths})
+    container = anyio.run(make_container, scoped_settings)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/tools/request",
+        json={
+            "tool": "git_status",
+            "agent": "coding_agent",
+            "args": {"repo_path": str(other_repo)},
+        },
+        headers=auth(scoped_settings),
+    )
+    assert response.status_code == 403
+    assert "registered selected project" in response.text
+
+
+def test_conversation_cannot_switch_project(settings_tmp, tmp_path) -> None:
+    import anyio
+
+    other_project = tmp_path / "other-project"
+    other_project.mkdir()
+    (other_project / "README.md").write_text("# other\n", encoding="utf-8")
+    paths = settings_tmp.paths.model_copy(
+        update={"allowed_filesystem_roots": [settings_tmp.home, other_project]}
+    )
+    scoped_settings = settings_tmp.model_copy(update={"paths": paths})
+    container = anyio.run(make_container, scoped_settings)
+    client = TestClient(create_app(container))
+    first_project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(scoped_settings),
+    ).json()
+    second_project = client.post(
+        "/projects",
+        json={"path": str(other_project)},
+        headers=auth(scoped_settings),
+    ).json()
+    first = client.post(
+        "/chat",
+        json={"message": "April, plan my work today.", "project_id": first_project["id"]},
+        headers=auth(scoped_settings),
+    ).json()
+    response = client.post(
+        "/chat",
+        json={
+            "message": "Use the same conversation elsewhere.",
+            "conversation_id": first["result"]["conversation_id"],
+            "project_id": second_project["id"],
+        },
+        headers=auth(scoped_settings),
+    )
+    assert response.status_code == 403
+    assert "project scope cannot change" in response.text
+
+
+def test_run_command_cwd_is_forced_to_selected_project(settings_tmp, tmp_path) -> None:
+    import anyio
+
+    other_project = tmp_path / "other-command"
+    other_project.mkdir()
+    paths = settings_tmp.paths.model_copy(
+        update={"allowed_filesystem_roots": [settings_tmp.home, other_project]}
+    )
+    scoped_settings = settings_tmp.model_copy(update={"paths": paths})
+    container = anyio.run(make_container, scoped_settings)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(scoped_settings),
+    ).json()
+    response = client.post(
+        "/tools/request",
+        json={
+            "tool": "run_command",
+            "agent": "coding_agent",
+            "args": {
+                "project_id": project["id"],
+                "argv": ["pytest"],
+                "cwd": str(other_project),
+            },
+        },
+        headers=auth(scoped_settings),
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending_approval"
+    assert response.json()["approval"]["args"]["cwd"] == str(settings_tmp.home)
+
+
+def test_project_index_records_audit_and_tool_call(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+    response = client.post(
+        f"/projects/{project['id']}/index",
+        json={},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    rows = anyio.run(
+        container.database.fetchall, "SELECT * FROM tool_calls WHERE tool = ?", ("repo_indexer",)
+    )
+    assert len(rows) == 1
+    assert "tool_executed" in settings_tmp.audit_path.read_text(encoding="utf-8")
+
+
+def test_project_scoped_read_cannot_access_another_project(settings_tmp, tmp_path) -> None:
+    import anyio
+
+    other_project = tmp_path / "other-read"
+    other_project.mkdir()
+    (other_project / "secret.txt").write_text("other secret", encoding="utf-8")
+    paths = settings_tmp.paths.model_copy(
+        update={"allowed_filesystem_roots": [settings_tmp.home, other_project]}
+    )
+    scoped_settings = settings_tmp.model_copy(update={"paths": paths})
+    container = anyio.run(make_container, scoped_settings)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(scoped_settings),
+    ).json()
+    response = client.post(
+        "/tools/request",
+        json={
+            "tool": "read_file",
+            "agent": "coding_agent",
+            "args": {"project_id": project["id"], "path": "../other-read/secret.txt"},
+        },
+        headers=auth(scoped_settings),
+    )
+    assert response.status_code == 403
+
+
+def test_recorded_permission_uses_policy_not_executor_output(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+    index = client.post(
+        f"/projects/{response['id']}/index",
+        json={},
+        headers=auth(settings_tmp),
+    )
+    assert index.status_code == 200
+    rows = anyio.run(
+        container.database.fetchall, "SELECT * FROM tool_calls WHERE tool = ?", ("repo_indexer",)
+    )
+    assert rows[0]["permission_level"] == 2
+
+
+def test_disabled_external_action_is_denied(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/tools/request",
+        json={"tool": "git_push", "agent": "system_action_agent", "args": {}},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 403
+    assert "External actions are disabled" in response.text
+
+
+def test_cors_setting_is_applied(settings_tmp) -> None:
+    import anyio
+
+    api = settings_tmp.api.model_copy(update={"cors_enabled": True})
+    cors_settings = settings_tmp.model_copy(update={"api": api})
+    container = anyio.run(make_container, cors_settings)
+    client = TestClient(create_app(container))
+    response = client.options(
+        "/chat",
+        headers={
+            "Origin": "http://127.0.0.1",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1"

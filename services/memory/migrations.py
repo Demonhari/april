@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 async def run_migrations(database: Database) -> None:
@@ -48,6 +48,9 @@ async def run_migrations(database: Database) -> None:
         CREATE TABLE IF NOT EXISTS conversations (
             id TEXT PRIMARY KEY,
             title TEXT,
+            project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            actor TEXT NOT NULL DEFAULT 'local-user',
+            updated_at TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -56,6 +59,14 @@ async def run_migrations(database: Database) -> None:
             conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_events (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
 
@@ -120,6 +131,20 @@ async def run_migrations(database: Database) -> None:
             created_at TEXT NOT NULL,
             completed_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS agent_iterations (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+            iteration INTEGER NOT NULL,
+            model_id TEXT,
+            state TEXT NOT NULL,
+            model_output_json TEXT,
+            tool_request_json TEXT,
+            tool_result_json TEXT,
+            approval_id TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL
+        );
         """
     )
     columns = await conn.execute("PRAGMA table_info(approvals)")
@@ -131,6 +156,19 @@ async def run_migrations(database: Database) -> None:
     if "metadata_json" not in approval_columns:
         await conn.execute(
             "ALTER TABLE approvals ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+        )
+    columns = await conn.execute("PRAGMA table_info(conversations)")
+    conversation_columns = {row[1] for row in await columns.fetchall()}
+    if "project_id" not in conversation_columns:
+        await conn.execute("ALTER TABLE conversations ADD COLUMN project_id TEXT")
+    if "actor" not in conversation_columns:
+        await conn.execute(
+            "ALTER TABLE conversations ADD COLUMN actor TEXT NOT NULL DEFAULT 'local-user'"
+        )
+    if "updated_at" not in conversation_columns:
+        await conn.execute("ALTER TABLE conversations ADD COLUMN updated_at TEXT")
+        await conn.execute(
+            "UPDATE conversations SET updated_at = created_at WHERE updated_at IS NULL"
         )
     await conn.execute(
         """

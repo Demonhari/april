@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from agents.registry import AgentRegistry, default_agent_registry
 from april_common.audit import AuditLogger
+from april_common.config_validation import validate_configuration
+from april_common.errors import ConfigError
 from april_common.settings import AprilSettings, get_settings
 from services.april_runtime.client import RuntimeClient
 from services.brain.orchestrator import AprilOrchestrator
@@ -14,6 +16,7 @@ from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
 from services.permissions.engine import PermissionEngine
+from services.permissions.tool_execution import ToolExecutionService
 from skills.registry import ToolRegistry, default_registry
 
 
@@ -28,12 +31,16 @@ class ApiContainer:
     tool_registry: ToolRegistry
     permission_engine: PermissionEngine
     approvals: ApprovalStore
+    tool_executor: ToolExecutionService
     agent_registry: AgentRegistry
     orchestrator: AprilOrchestrator
 
 
 async def build_container(settings: AprilSettings | None = None) -> ApiContainer:
     active_settings = settings or get_settings()
+    errors = validate_configuration(active_settings.home)
+    if errors:
+        raise ConfigError("APRIL configuration is invalid.", {"errors": errors})
     database = Database(active_settings.database_path)
     await database.connect()
     await run_migrations(database)
@@ -52,6 +59,13 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         audit,
         expiry_seconds=active_settings.permissions.approval_expiry_seconds,
     )
+    tool_executor = ToolExecutionService(
+        settings=active_settings,
+        memory=memory,
+        tool_registry=tool_registry,
+        permission_engine=permission_engine,
+        approvals=approvals,
+    )
     agent_registry = default_agent_registry()
     orchestrator = AprilOrchestrator(
         settings=active_settings,
@@ -60,6 +74,7 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         tool_registry=tool_registry,
         permission_engine=permission_engine,
         approvals=approvals,
+        tool_executor=tool_executor,
         agent_registry=agent_registry,
         memory_retriever=memory_retriever,
     )
@@ -73,6 +88,7 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         tool_registry=tool_registry,
         permission_engine=permission_engine,
         approvals=approvals,
+        tool_executor=tool_executor,
         agent_registry=agent_registry,
         orchestrator=orchestrator,
     )

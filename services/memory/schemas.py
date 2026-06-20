@@ -24,7 +24,10 @@ class MemoryRecord(BaseModel):
 class Conversation(BaseModel):
     id: str
     title: str | None = None
+    project_id: str | None = None
+    actor: str = "local-user"
     created_at: str
+    updated_at: str | None = None
 
 
 class Message(BaseModel):

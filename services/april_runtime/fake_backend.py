@@ -30,10 +30,16 @@ class FakeBackend(RuntimeBackend):
         *,
         temperature: float,
         max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
     ) -> GenerationResult:
         if self.fail_generate:
             raise RuntimeError("fake generation failure")
         text = self._response_for_prompt(prompt)
+        for sequence in stop or []:
+            if sequence:
+                text = text.split(sequence, maxsplit=1)[0]
         output_words = text.split()[:max_output_tokens]
         content = " ".join(output_words)
         return GenerationResult(
@@ -48,6 +54,9 @@ class FakeBackend(RuntimeBackend):
         *,
         temperature: float,
         max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
     ) -> AsyncIterator[str]:
         if self.fail_stream:
             raise RuntimeError("fake stream failure")
@@ -55,6 +64,9 @@ class FakeBackend(RuntimeBackend):
             prompt,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
         )
         words = result.text.split()
         for index, word in enumerate(words):

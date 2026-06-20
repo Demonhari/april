@@ -17,6 +17,13 @@ APRIL requires explicit approval for Level 3 and above. The model cannot lower p
 
 Unknown tools are denied. Tools not allowed for the selected agent are denied.
 
+Every tool execution is scoped by `ToolExecutionContext`. For project-scoped
+tools, APRIL overwrites or derives roots, working directories, and repository
+arguments from the selected project. Direct API calls cannot point repository
+tools at arbitrary unregistered paths. Recorded tool-call rows use the
+authoritative permission decision from the registry, not executor-reported
+metadata.
+
 Approval execution is one-time and exact-action:
 
 - APRIL reloads the approval record before execution.
@@ -50,3 +57,4 @@ The command policy permits only exact executable/subcommand patterns. `python
 -m` is restricted to explicitly allowlisted modules, and package installers,
 shell interpreters, shell metacharacters, pipes, redirects, command
 substitution, environment-prefix execution, and executable paths are denied.
+`run_command` always runs with the selected project as cwd.

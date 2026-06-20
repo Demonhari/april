@@ -40,6 +40,9 @@ class RuntimeBackend(ABC):
         *,
         temperature: float,
         max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
     ) -> GenerationResult:
         raise NotImplementedError
 
@@ -50,6 +53,9 @@ class RuntimeBackend(ABC):
         *,
         temperature: float,
         max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
     ) -> AsyncIterator[str]:
         raise NotImplementedError
 

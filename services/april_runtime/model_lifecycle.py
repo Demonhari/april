@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -39,6 +40,10 @@ class ModelRuntimeState:
     generations: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    active_requests: int = 0
+    generation_errors: int = 0
+    recent_latency_ms: float | None = None
+    recent_tokens_per_second: float | None = None
 
 
 class ModelLifecycle:
@@ -96,6 +101,10 @@ class ModelLifecycle:
             input_tokens=state.input_tokens,
             output_tokens=state.output_tokens,
             missing_path=not path.exists(),
+            active_requests=state.active_requests,
+            generation_errors=state.generation_errors,
+            recent_latency_ms=state.recent_latency_ms,
+            recent_tokens_per_second=state.recent_tokens_per_second,
         )
 
     async def preload(self) -> None:
@@ -140,6 +149,12 @@ class ModelLifecycle:
     async def unload_model(self, model_id: str) -> ModelRuntimeState:
         state = self.get_state(model_id)
         async with state.lifecycle_lock:
+            if state.active_requests > 0:
+                raise ModelUnavailableError(
+                    model_id,
+                    "Cannot unload model while active requests are running.",
+                    {"active_requests": state.active_requests},
+                )
             if state.state in {"unloaded", "unavailable"}:
                 return state
             if state.backend is None:
@@ -162,12 +177,12 @@ class ModelLifecycle:
         state = await self.load_model(request.model_id)
         if state.backend is None:
             raise ModelUnavailableError(request.model_id, "Model backend is not available.")
-        temperature, max_output_tokens = effective_generation_options(state.model, request.options)
+        options = effective_generation_options(state.model, request.options)
         context = await self.context_manager.fit(
             model=state.model,
             backend=state.backend,
             messages=request.messages,
-            max_output_tokens=max_output_tokens,
+            max_output_tokens=options.max_output_tokens,
         )
         prompt = render_prompt(state.model, context.messages)
         lock = (
@@ -176,22 +191,33 @@ class ModelLifecycle:
             else _NoopLock()
         )
         async with lock:
+            start = time.monotonic()
             try:
+                state.active_requests += 1
                 result = await state.backend.generate(
                     prompt,
-                    temperature=temperature,
-                    max_output_tokens=max_output_tokens,
+                    temperature=options.temperature,
+                    max_output_tokens=options.max_output_tokens,
+                    top_p=options.top_p,
+                    stop=options.stop,
+                    seed=options.seed,
                 )
             except Exception as exc:
                 state.state = "error"
                 state.load_error = str(exc)
+                state.generation_errors += 1
                 raise ModelUnavailableError(
                     request.model_id, "Generation failed.", {"cause": str(exc)}
                 ) from exc
+            finally:
+                state.active_requests = max(0, state.active_requests - 1)
+            elapsed = max(time.monotonic() - start, 0.000_001)
         state.last_used_at = utc_now_iso()
         state.generations += 1
         state.input_tokens += result.input_tokens
         state.output_tokens += result.output_tokens
+        state.recent_latency_ms = elapsed * 1000
+        state.recent_tokens_per_second = result.output_tokens / elapsed
         usage = Usage(
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
@@ -214,28 +240,33 @@ class ModelLifecycle:
         state = await self.load_model(request.model_id)
         if state.backend is None:
             raise ModelUnavailableError(request.model_id, "Model backend is not available.")
-        temperature, max_output_tokens = effective_generation_options(state.model, request.options)
+        options = effective_generation_options(state.model, request.options)
         context = await self.context_manager.fit(
             model=state.model,
             backend=state.backend,
             messages=request.messages,
-            max_output_tokens=max_output_tokens,
+            max_output_tokens=options.max_output_tokens,
         )
         prompt = render_prompt(state.model, context.messages)
         input_tokens = await state.backend.count_tokens(prompt)
         output_tokens = 0
+        start = time.monotonic()
         lock = (
             state.generation_lock
             if not state.backend.supports_concurrent_generation
             else _NoopLock()
         )
         async with lock:
+            state.active_requests += 1
             yield "meta", {"context_truncated": context.truncated}
             try:
                 async for token in state.backend.stream(
                     prompt,
-                    temperature=temperature,
-                    max_output_tokens=max_output_tokens,
+                    temperature=options.temperature,
+                    max_output_tokens=options.max_output_tokens,
+                    top_p=options.top_p,
+                    stop=options.stop,
+                    seed=options.seed,
                 ):
                     output_tokens += len(await state.backend.tokenize(token))
                     yield "token", {"text": token}
@@ -245,12 +276,18 @@ class ModelLifecycle:
             except Exception as exc:
                 state.state = "error"
                 state.load_error = str(exc)
-                yield "error", {"code": "GENERATION_FAILED", "message": str(exc)}
+                state.generation_errors += 1
+                yield "error", {"code": "GENERATION_FAILED", "message": "Generation failed."}
                 return
+            finally:
+                state.active_requests = max(0, state.active_requests - 1)
         state.last_used_at = utc_now_iso()
         state.generations += 1
         state.input_tokens += input_tokens
         state.output_tokens += output_tokens
+        elapsed = max(time.monotonic() - start, 0.000_001)
+        state.recent_latency_ms = elapsed * 1000
+        state.recent_tokens_per_second = output_tokens / elapsed
         yield (
             "usage",
             {

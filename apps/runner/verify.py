@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,7 @@ class LauncherVerifier:
         self.temp = Path(tempfile.mkdtemp(prefix="april-verify-"))
         self.verify_home = self.temp / "april_home"
         self.project = self.temp / "external_project"
+        self.second_project = self.temp / "second_project"
         self.runtime_port = _free_port()
         self.api_port = _free_port()
         self.api_token = "verify-token"
@@ -62,6 +64,10 @@ class LauncherVerifier:
                 "conversation isolation",
                 lambda: self._isolated_conversation(project_id, conversation_id),
             )
+            self._check(
+                "conversation project switch rejection",
+                lambda: self._conversation_switch_rejected(conversation_id),
+            )
             self._check("read-only repo analysis", lambda: self._repo_analysis(project_id))
             approval_id = self._check(
                 "patch approval creation", lambda: self._patch_approval(project_id)
@@ -71,10 +77,16 @@ class LauncherVerifier:
                 "approval replay rejection", lambda: self._approval_replay_rejected(approval_id)
             )
             self._check(
+                "tampered artifact rejection", lambda: self._tampered_artifact_rejected(project_id)
+            )
+            self._check(
                 "path escape patch rejection", lambda: self._path_escape_rejected(project_id)
             )
+            self._check("repo override rejection", lambda: self._repo_override_rejected())
+            self._check("run command cwd forcing", lambda: self._run_command_cwd_forced(project_id))
             self._check("runtime streaming usage", self._runtime_streaming)
             self._check("audit records", self._audit_records)
+            self._check("tool call records", self._tool_call_records)
         finally:
             self._stop()
             self._check("services stopped", self._services_stopped)
@@ -97,8 +109,10 @@ class LauncherVerifier:
         self.verify_home.mkdir(parents=True)
         shutil.copytree(self.repo_home / "configs", self.verify_home / "configs")
         self.project.mkdir()
+        self.second_project.mkdir()
         (self.project / "README.md").write_text("# verify\nanimation bug\n", encoding="utf-8")
         (self.project / "app.py").write_text("value = 'old'\n", encoding="utf-8")
+        (self.second_project / "README.md").write_text("# second\n", encoding="utf-8")
         _git(self.project, "init")
         _git(self.project, "config", "user.email", "april@example.local")
         _git(self.project, "config", "user.name", "APRIL Verify")
@@ -120,7 +134,7 @@ class LauncherVerifier:
                 "APRIL_VECTOR_INDEX_PATH": str(self.temp / "data" / "vector_index"),
                 "APRIL_AUDIT_PATH": str(self.temp / "logs" / "audit.jsonl"),
                 "APRIL_LOGS_PATH": str(self.temp / "logs"),
-                "APRIL_ALLOWED_FILESYSTEM_ROOTS": str(self.project),
+                "APRIL_ALLOWED_FILESYSTEM_ROOTS": f"{self.project},{self.second_project}",
             }
         )
         return env
@@ -199,6 +213,21 @@ class LauncherVerifier:
             raise RuntimeError("conversation IDs overlapped")
         return str(other_id)
 
+    def _conversation_switch_rejected(self, existing_id: str) -> str:
+        with self._client() as client:
+            second = client.post("/projects", json={"path": str(self.second_project)}).json()
+            response = client.post(
+                "/chat",
+                json={
+                    "message": "Try to move this conversation.",
+                    "project_id": second["id"],
+                    "conversation_id": existing_id,
+                },
+            )
+        if response.status_code != 403:
+            raise RuntimeError(f"expected 403, got {response.status_code}")
+        return "403"
+
     def _repo_analysis(self, project_id: str) -> str:
         with self._client() as client:
             response = client.post(
@@ -256,6 +285,47 @@ class LauncherVerifier:
             raise RuntimeError(f"expected 403, got {response.status_code}")
         return "403"
 
+    def _tampered_artifact_rejected(self, project_id: str) -> str:
+        patch_dir = self.verify_home / "data" / "patches"
+        patch_dir.mkdir(parents=True, exist_ok=True)
+        patch_path = patch_dir / "tamper.patch"
+        patch_path.write_text(
+            "diff --git a/README.md b/README.md\n"
+            "--- a/README.md\n"
+            "+++ b/README.md\n"
+            "@@ -1,2 +1,3 @@\n"
+            " # verify\n"
+            " animation bug\n"
+            "+tamper check\n",
+            encoding="utf-8",
+        )
+        with self._client() as client:
+            response = client.post(
+                "/tools/request",
+                json={
+                    "tool": "patch_applier",
+                    "agent": "coding_agent",
+                    "args": {
+                        "repo_path": str(self.project),
+                        "patch_path": str(patch_path),
+                        "project_id": project_id,
+                    },
+                },
+            ).json()
+            approval = response["approval"]
+            artifact_id = approval["metadata"]["artifact_id"]
+            artifact_path = (
+                self.verify_home / "data" / "artifacts" / "patches" / f"{artifact_id}.patch"
+            )
+            artifact_path.write_text("tampered bytes\n", encoding="utf-8")
+            approve = client.post(
+                "/tools/approve",
+                json={"approval_id": approval["approval_id"]},
+            ).json()
+        if approve.get("status") != "failed":
+            raise RuntimeError(str(approve))
+        return "failed"
+
     def _path_escape_rejected(self, project_id: str) -> str:
         patch_dir = self.verify_home / "data" / "patches"
         patch_dir.mkdir(parents=True, exist_ok=True)
@@ -284,6 +354,39 @@ class LauncherVerifier:
         if response.status_code != 403:
             raise RuntimeError(f"expected 403, got {response.status_code}")
         return "403"
+
+    def _repo_override_rejected(self) -> str:
+        with self._client() as client:
+            response = client.post(
+                "/tools/request",
+                json={
+                    "tool": "git_status",
+                    "agent": "coding_agent",
+                    "args": {"repo_path": str(self.second_project)},
+                },
+            )
+        if response.status_code != 403:
+            raise RuntimeError(f"expected 403, got {response.status_code}")
+        return "403"
+
+    def _run_command_cwd_forced(self, project_id: str) -> str:
+        with self._client() as client:
+            response = client.post(
+                "/tools/request",
+                json={
+                    "tool": "run_command",
+                    "agent": "coding_agent",
+                    "args": {
+                        "project_id": project_id,
+                        "argv": ["pytest"],
+                        "cwd": str(self.second_project),
+                    },
+                },
+            ).json()
+        cwd = response["approval"]["args"]["cwd"]
+        if Path(cwd).resolve() != self.project.resolve():
+            raise RuntimeError(f"cwd was not forced: {cwd}")
+        return "forced"
 
     def _runtime_streaming(self) -> str:
         request = {
@@ -315,6 +418,14 @@ class LauncherVerifier:
         if "approved_tool_executed" not in text or "approval_consumed" not in text:
             raise RuntimeError("expected audit events not found")
         return "ok"
+
+    def _tool_call_records(self) -> str:
+        database = self.temp / "data" / "april.db"
+        with sqlite3.connect(database) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
+        if count < 1:
+            raise RuntimeError("no tool call rows found")
+        return str(count)
 
     def _services_stopped(self) -> str:
         alive = []

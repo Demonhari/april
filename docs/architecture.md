@@ -39,6 +39,12 @@ Core API responsibilities:
 - tool execution
 - runtime proxying and token streaming
 
+All tool calls now pass through a trusted `ToolExecutionContext`. The context is
+created by APRIL application code, not by the model, and carries request ID,
+actor, agent, selected project, trusted project root, approval ID, permission
+decision, source, and audit correlation. Project-scoped tools derive repository
+roots from SQLite project records.
+
 April Runtime responsibilities:
 
 - model registry validation
@@ -66,5 +72,7 @@ same verified in-memory bytes.
 
 `run april verify --fake` starts isolated temporary Runtime/Core services on
 dynamic loopback ports, creates a temporary external Git project, exercises
-chat, repository analysis, immutable patch approval/application, approval replay
-rejection, audit checks, and runtime streaming, then stops the services.
+chat, project-bound conversation isolation, repository analysis, immutable patch
+approval/application, tampered artifact rejection, approval replay rejection,
+repo override rejection, command cwd forcing, audit/tool-call checks, and
+runtime streaming, then stops the services.

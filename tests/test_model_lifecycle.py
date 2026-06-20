@@ -27,7 +27,14 @@ class CountingBackend(RuntimeBackend):
         self.unloads += 1
 
     async def generate(
-        self, prompt: str, *, temperature: float, max_output_tokens: int
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
     ) -> GenerationResult:
         self.active_generations += 1
         self.max_active = max(self.max_active, self.active_generations)
@@ -35,7 +42,16 @@ class CountingBackend(RuntimeBackend):
         self.active_generations -= 1
         return GenerationResult(text="ok", input_tokens=1, output_tokens=1)
 
-    async def stream(self, prompt: str, *, temperature: float, max_output_tokens: int):
+    async def stream(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ):
         yield "ok"
 
     async def tokenize(self, text: str) -> list[int]:
@@ -48,6 +64,52 @@ class CountingBackend(RuntimeBackend):
 class FailingBackend(CountingBackend):
     async def load(self, model: ModelDefinition) -> None:
         raise RuntimeError("load failed")
+
+
+class OptionCaptureBackend(CountingBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_top_p: float | None = None
+        self.last_stop: list[str] | None = None
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> GenerationResult:
+        self.last_top_p = top_p
+        self.last_stop = stop
+        return await super().generate(
+            prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
+        )
+
+
+class SlowBackend(CountingBackend):
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> GenerationResult:
+        self.active_generations += 1
+        self.max_active = max(self.max_active, self.active_generations)
+        await asyncio.sleep(0.2)
+        self.active_generations -= 1
+        return GenerationResult(text="ok", input_tokens=1, output_tokens=1)
 
 
 def registry(tmp_path: Path) -> ModelRegistry:
@@ -110,3 +172,36 @@ async def test_backend_error_state(tmp_path: Path) -> None:
     with pytest.raises(ModelUnavailableError):
         await lifecycle.load_model("april-brain")
     assert lifecycle.list_models()[0].state == "error"
+
+
+@pytest.mark.asyncio
+async def test_generation_options_reach_backend(tmp_path: Path) -> None:
+    backend = OptionCaptureBackend()
+    lifecycle = ModelLifecycle(
+        registry(tmp_path), backend_factory=lambda model: backend, root_backend="fake"
+    )
+    request = ChatRequest(
+        model_id="april-brain",
+        messages=[ChatMessage(role="user", content="hello")],
+        options={"top_p": 0.7, "stop": ["END"]},
+    )
+    await lifecycle.generate(request)
+    assert backend.last_top_p == 0.7
+    assert backend.last_stop == ["END"]
+
+
+@pytest.mark.asyncio
+async def test_active_model_cannot_unload(tmp_path: Path) -> None:
+    backend = SlowBackend()
+    lifecycle = ModelLifecycle(
+        registry(tmp_path), backend_factory=lambda model: backend, root_backend="fake"
+    )
+    request = ChatRequest(
+        model_id="april-brain",
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+    task = asyncio.create_task(lifecycle.generate(request))
+    await asyncio.sleep(0.05)
+    with pytest.raises(ModelUnavailableError):
+        await lifecycle.unload_model("april-brain")
+    await task

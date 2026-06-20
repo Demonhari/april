@@ -86,7 +86,8 @@ def test_verifier_helpers_use_temp_environment(tmp_path: Path, monkeypatch) -> N
         env = verifier._env()
         assert env["APRIL_HOME"] == str(verifier.verify_home)
         assert env["APRIL_RUNTIME_BACKEND"] == "fake"
-        assert env["APRIL_ALLOWED_FILESYSTEM_ROOTS"] == str(verifier.project)
+        assert str(verifier.project) in env["APRIL_ALLOWED_FILESYSTEM_ROOTS"]
+        assert str(verifier.second_project) in env["APRIL_ALLOWED_FILESYSTEM_ROOTS"]
     finally:
         verifier._stop()
 
@@ -127,13 +128,18 @@ def test_verifier_run_records_failures_and_stops(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(verifier, "_register_project", lambda: "project")
     monkeypatch.setattr(verifier, "_multi_turn", lambda project_id: "conversation")
     monkeypatch.setattr(verifier, "_isolated_conversation", lambda project_id, conv: "other")
+    monkeypatch.setattr(verifier, "_conversation_switch_rejected", lambda conv: "403")
     monkeypatch.setattr(verifier, "_repo_analysis", lambda project_id: "ok")
     monkeypatch.setattr(verifier, "_patch_approval", lambda project_id: "approval")
     monkeypatch.setattr(verifier, "_approve", lambda approval_id: "applied")
     monkeypatch.setattr(verifier, "_approval_replay_rejected", lambda approval_id: "403")
+    monkeypatch.setattr(verifier, "_tampered_artifact_rejected", lambda project_id: "failed")
     monkeypatch.setattr(verifier, "_path_escape_rejected", lambda project_id: "403")
+    monkeypatch.setattr(verifier, "_repo_override_rejected", lambda: "403")
+    monkeypatch.setattr(verifier, "_run_command_cwd_forced", lambda project_id: "forced")
     monkeypatch.setattr(verifier, "_runtime_streaming", lambda: "streamed")
     monkeypatch.setattr(verifier, "_audit_records", lambda: "audit")
+    monkeypatch.setattr(verifier, "_tool_call_records", lambda: "1")
 
     checks = verifier.run()
     assert checks

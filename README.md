@@ -229,6 +229,19 @@ interactive CLI creates one conversation ID per chat session and reuses it for
 every turn. Recent bounded history is included in the next agent prompt as
 context, not instructions.
 
+Conversations are bound to either a selected project ID or explicit no-project
+scope. APRIL rejects attempts to reuse a project conversation with a different
+project. Brain routing and code-modification planning receive bounded recent
+history as context.
+
+## Structured Agents
+
+Specialist agent loop support uses strict JSON outputs: `final_answer`,
+`tool_request`, `approval_required`, or `structured_error`. The loop enforces
+the configured agent model, allowed/blocked tools, maximum iterations, and
+permission gates. Level 3+ tool requests create exact approvals and suspend the
+run instead of executing.
+
 ## Memory
 
 Memory is local SQLite plus a local vector index:
@@ -267,11 +280,20 @@ run april verify --fake
 
 Tests use fake model/audio components and do not require GGUF files, network access, microphones, speakers, whisper.cpp, Piper, openWakeWord, or `llama-cpp-python`.
 
+`run april verify --fake` is a release smoke gate. It checks project-bound
+conversations, immutable patch application, tampered artifact rejection, repo
+override rejection, forced command working directories, audit records,
+tool-call rows, and exactly one runtime streaming usage event.
+
 ## Security Model
 
 - Model output is advisory only.
 - Unknown tools are denied.
 - Permission level and risk are computed deterministically from tool policy and arguments.
+- Every tool call runs through a trusted `ToolExecutionContext` containing the
+  request, actor, agent, selected project, approval, and audit correlation. For
+  project tools, APRIL derives the repository root from the registered project;
+  model-supplied roots cannot override it.
 - Level 3 and above operations require exact-action one-time approvals.
 - Filesystem access is restricted to configured roots and rejects traversal, symlink escapes, sensitive locations, binary files, and oversize reads.
 - Sensitive file names such as `.env`, `.env.*`, `.netrc`, private keys,

@@ -38,3 +38,8 @@ Conversation messages are stored locally in SQLite. The CLI creates one
 conversation ID per interactive session, and API clients can reuse
 `conversation_id` values across turns. APRIL includes a bounded recent-history
 section in prompts as context, not instructions.
+
+Conversations store project scope, actor, creation time, and update time. APRIL
+records structured conversation events for brain decisions, approval-required
+events, agent suspension, and final agent answers. Agent loop iterations are
+persisted separately so suspended runs remain inspectable after restart.

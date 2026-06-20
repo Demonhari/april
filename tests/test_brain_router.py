@@ -12,12 +12,19 @@ from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
 from services.permissions.approvals import ApprovalStore
 from services.permissions.engine import PermissionEngine
+from services.permissions.tool_execution import ToolExecutionService
 from skills.registry import default_registry
 from tests.conftest import FakeRuntimeClient
 
 
 class UnknownAgentRouter:
-    async def route(self, message: str, *, request_id: str | None = None) -> BrainDecision:
+    async def route(
+        self,
+        message: str,
+        *,
+        request_id: str | None = None,
+        history: object | None = None,
+    ) -> BrainDecision:
         return BrainDecision(
             intent="bad",
             agent="missing_agent",
@@ -38,13 +45,24 @@ async def test_unknown_agent_rejected(settings_tmp) -> None:
     await database.connect()
     await run_migrations(database)
     registry = default_registry()
+    memory = SqliteMemory(database)
+    permission_engine = PermissionEngine(registry)
+    approvals = ApprovalStore(database, AuditLogger(settings_tmp.audit_path), expiry_seconds=60)
+    tool_executor = ToolExecutionService(
+        settings=settings_tmp,
+        memory=memory,
+        tool_registry=registry,
+        permission_engine=permission_engine,
+        approvals=approvals,
+    )
     orchestrator = AprilOrchestrator(
         settings=settings_tmp,
         runtime_client=FakeRuntimeClient(),
-        memory=SqliteMemory(database),
+        memory=memory,
         tool_registry=registry,
-        permission_engine=PermissionEngine(registry),
-        approvals=ApprovalStore(database, AuditLogger(settings_tmp.audit_path), expiry_seconds=60),
+        permission_engine=permission_engine,
+        approvals=approvals,
+        tool_executor=tool_executor,
         agent_registry=default_agent_registry(),
         brain_router=UnknownAgentRouter(),  # type: ignore[arg-type]
     )

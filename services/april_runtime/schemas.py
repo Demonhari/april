@@ -18,6 +18,8 @@ class GenerationOptions(BaseModel):
     temperature: float | None = None
     max_output_tokens: int | None = None
     top_p: float | None = None
+    stop: list[str] = Field(default_factory=list)
+    seed: int | None = None
 
     @field_validator("temperature")
     @classmethod
@@ -31,6 +33,13 @@ class GenerationOptions(BaseModel):
     def validate_max_output_tokens(cls, value: int | None) -> int | None:
         if value is not None and value < 1:
             raise ValueError("max_output_tokens must be positive")
+        return value
+
+    @field_validator("top_p")
+    @classmethod
+    def validate_top_p(cls, value: float | None) -> float | None:
+        if value is not None and not 0 < value <= 1:
+            raise ValueError("top_p must be between 0 and 1")
         return value
 
 
@@ -86,6 +95,10 @@ class ModelInfo(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     missing_path: bool = False
+    active_requests: int = 0
+    generation_errors: int = 0
+    recent_latency_ms: float | None = None
+    recent_tokens_per_second: float | None = None
 
 
 class RuntimeHealth(BaseModel):

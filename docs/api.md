@@ -55,6 +55,10 @@ If `conversation_id` is omitted, APRIL creates a local conversation and returns
 the ID in `result.conversation_id`. Clients can pass that ID on later turns to
 reuse bounded local conversation history.
 
+Conversation IDs are project-bound. Reusing a conversation with a different
+`project_id` returns a stable permission error instead of silently switching
+scope.
+
 `POST /chat/stream` emits Server-Sent Events:
 
 - `meta`
@@ -105,3 +109,8 @@ run april verify --fake
 references, tool references, and loopback defaults. `run april verify --fake`
 uses isolated temporary data paths and dynamic ports so it can exercise the
 local workflow without modifying user projects or requiring GGUF files.
+
+`POST /tools/request`, `POST /tools/approve`, orchestrator planned tools, and
+project indexing share the same trusted execution service. Repository roots and
+command working directories are derived from selected projects rather than
+model-provided paths.

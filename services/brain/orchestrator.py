@@ -25,8 +25,9 @@ from services.permissions.artifacts import (
     build_patch_approval_metadata,
 )
 from services.permissions.engine import PermissionEngine
-from services.permissions.schemas import ApprovalRequest
+from services.permissions.tool_execution import ToolExecutionService
 from skills.registry import ToolRegistry
+from skills.schemas import ToolResult
 
 StreamEventName = Literal["meta", "token", "approval_required", "usage", "done", "error"]
 
@@ -56,6 +57,7 @@ class AprilOrchestrator:
         tool_registry: ToolRegistry,
         permission_engine: PermissionEngine,
         approvals: ApprovalStore,
+        tool_executor: ToolExecutionService,
         agent_registry: AgentRegistry,
         memory_retriever: MemoryRetriever | None = None,
         brain_router: BrainRouter | None = None,
@@ -66,6 +68,7 @@ class AprilOrchestrator:
         self.tool_registry = tool_registry
         self.permission_engine = permission_engine
         self.approvals = approvals
+        self.tool_executor = tool_executor
         self.agent_registry = agent_registry
         self.memory_retriever = memory_retriever
         self.brain_router = brain_router or BrainRouter(
@@ -169,7 +172,6 @@ class AprilOrchestrator:
             return
 
         chunks: list[str] = []
-        usage: dict[str, Any] = {}
         finish_reason = "stop"
         try:
             async for raw_event in self.runtime_client.stream(
@@ -183,7 +185,6 @@ class AprilOrchestrator:
                     chunks.append(text)
                     yield ("token", {"text": text})
                 elif event_name == "usage":
-                    usage = payload
                     yield ("usage", payload)
                 elif event_name == "error":
                     yield ("error", payload)
@@ -208,8 +209,6 @@ class AprilOrchestrator:
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
         )
-        if usage:
-            yield ("usage", usage)
         yield ("done", {"finish_reason": finish_reason})
 
     async def _prepare_turn(
@@ -223,12 +222,29 @@ class AprilOrchestrator:
         repo_path: str | None,
     ) -> PreparedTurn:
         active_request_id = request_id or str(uuid.uuid4())
-        active_conversation_id = conversation_id or await self.memory.create_conversation()
+        project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
+        active_conversation_id = conversation_id or await self.memory.create_conversation(
+            project_id=project.id if project else None,
+            actor=actor,
+        )
         if conversation_id is not None:
-            await self.memory.ensure_conversation(active_conversation_id)
+            await self.memory.ensure_conversation(
+                active_conversation_id,
+                project_id=project.id if project else None,
+                actor=actor,
+            )
         history = await self.memory.recent_messages(active_conversation_id, limit=8)
         await self.memory.add_message(active_conversation_id, "user", message)
-        decision = await self.brain_router.route(message, request_id=active_request_id)
+        decision = await self.brain_router.route(
+            message,
+            request_id=active_request_id,
+            history=history,
+        )
+        await self.memory.record_conversation_event(
+            conversation_id=active_conversation_id,
+            event_type="brain_decision",
+            payload=decision.model_dump(),
+        )
         agent = self.agent_registry.get(decision.agent)
         if agent is None:
             raise PermissionDeniedError(
@@ -238,7 +254,6 @@ class AprilOrchestrator:
         if agent.model_id is not None and decision.model_id != agent.model_id:
             decision = decision.model_copy(update={"model_id": agent.model_id})
 
-        project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
         if self._requires_project(decision) and project is None:
             return PreparedTurn(
                 request_id=active_request_id,
@@ -280,45 +295,29 @@ class AprilOrchestrator:
                     + ", ".join(missing)
                 )
                 continue
-            permission = self.permission_engine.evaluate(
+            context = await self.tool_executor.context(
+                request_id=active_request_id,
+                conversation_id=active_conversation_id,
+                actor=actor,
+                agent_id=agent.name,
+                project_id=project.id
+                if project
+                else (str(planned.args["project_id"]) if planned.args.get("project_id") else None),
+                source="orchestrator",
+            )
+            outcome = await self.tool_executor.request_or_execute(
                 tool=planned.tool,
                 args=planned.args,
-                agent=agent.name,
+                context=context,
                 model_permission_level=decision.permission_level,
                 model_risk_level=decision.risk_level,
             )
-            if permission.confirmation_required:
-                side_effects = self._side_effects(planned.tool)
-                approval = await self.approvals.create(
-                    ApprovalRequest(
-                        tool=planned.tool,
-                        args=planned.args,
-                        agent=agent.name,
-                        permission_level=permission.permission_level,
-                        risk_level=permission.risk_level,
-                        affected_paths=permission.affected_paths,
-                        expected_side_effects=side_effects,
-                        metadata=await self._approval_metadata(
-                            planned.tool,
-                            planned.args,
-                            side_effects,
-                        ),
-                    ),
-                    actor=actor,
-                    request_id=active_request_id,
-                )
-                pending_approval = approval.model_dump()
+            if outcome.approval is not None:
+                pending_approval = outcome.approval.model_dump()
                 break
-            tool_result = await self.tool_registry.execute(planned.tool, planned.args)
-            await self.memory.record_tool_call(
-                tool=planned.tool,
-                args=planned.args,
-                status="ok" if tool_result.ok else "failed",
-                permission_level=tool_result.permission_level,
-                risk_level=tool_result.risk_level,
-                result=tool_result.model_dump(),
-                conversation_id=active_conversation_id,
-            )
+            tool_result = outcome.result
+            if tool_result is None:
+                continue
             if tool_result.stdout:
                 tool_outputs.append(f"{planned.tool}:\n{tool_result.stdout[:4000]}")
             if planned.tool == "read_file" and tool_result.ok:
@@ -371,7 +370,7 @@ class AprilOrchestrator:
             decision=decision,
             project=project,
             tool_outputs=[],
-            history=[],
+            history=await self.memory.recent_messages(conversation_id, limit=8),
         )
         patch_instruction = (
             "Prepare a safe local code modification. Return a unified diff patch only.\n"
@@ -406,16 +405,29 @@ class AprilOrchestrator:
             )
 
         generator_args = {"patch": response.content}
-        generator_result = await self.tool_registry.execute("patch_generator", generator_args)
-        await self.memory.record_tool_call(
+        generator_context = await self.tool_executor.context(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            actor=actor,
+            agent_id=agent_name,
+            project_id=project.id,
+            source="orchestrator",
+        )
+        generator_outcome = await self.tool_executor.request_or_execute(
             tool="patch_generator",
             args=generator_args,
-            status="ok" if generator_result.ok else "failed",
-            permission_level=generator_result.permission_level,
-            risk_level=generator_result.risk_level,
-            result=generator_result.model_dump(),
-            conversation_id=conversation_id,
+            context=generator_context,
+            model_permission_level=2,
+            model_risk_level="safe_write",
         )
+        generator_result = generator_outcome.result
+        if generator_result is None:
+            generator_result = ToolResult(
+                ok=False,
+                stderr="Patch generator unexpectedly required approval.",
+                risk_level="safe_write",
+                permission_level=2,
+            )
         if not generator_result.ok:
             return PreparedTurn(
                 request_id=request_id,
@@ -432,33 +444,35 @@ class AprilOrchestrator:
         patch_path = str(generator_result.data["patch_path"])
         apply_args = {"repo_path": project.path, "patch_path": patch_path, "project_id": project.id}
         expected_side_effects = ["Apply the saved patch once to local repository files."]
-        metadata = await build_patch_approval_metadata(
-            repo_path=project.path,
-            patch_path=patch_path,
-            expected_side_effects=expected_side_effects,
+        apply_context = await self.tool_executor.context(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            actor=actor,
+            agent_id=agent_name,
             project_id=project.id,
+            source="orchestrator",
         )
-        permission = self.permission_engine.evaluate(
+        apply_outcome = await self.tool_executor.request_or_execute(
             tool="patch_applier",
             args=apply_args,
-            agent=agent_name,
+            context=apply_context,
             model_permission_level=decision.permission_level,
             model_risk_level=decision.risk_level,
+            expected_side_effects=expected_side_effects,
         )
-        approval = await self.approvals.create(
-            ApprovalRequest(
-                tool="patch_applier",
-                args=apply_args,
-                agent=agent_name,
-                permission_level=permission.permission_level,
-                risk_level=permission.risk_level,
-                affected_paths=[*affected_files, patch_path],
-                expected_side_effects=expected_side_effects,
-                metadata=metadata,
-            ),
-            actor=actor,
-            request_id=request_id,
-        )
+        approval = apply_outcome.approval
+        if approval is None:
+            return PreparedTurn(
+                request_id=request_id,
+                conversation_id=conversation_id,
+                decision=decision,
+                agent_name=agent_name,
+                model_id=model_id,
+                messages=[],
+                citations=citations,
+                final_message="APRIL could not create the required patch approval.",
+                warnings=["patch_applier did not produce a pending approval."],
+            )
         affected_text = "\n".join(f"- {path}" for path in affected_files)
         final_message = (
             "APRIL prepared a patch proposal and did not apply it.\n"
@@ -499,12 +513,13 @@ class AprilOrchestrator:
             normalized = normalize_existing_path(repo_path, policy)
             if not normalized.is_dir():
                 raise PermissionDeniedError("Repository path must be a directory.")
-            return Project(
-                id="direct-repo-path",
-                path=str(normalized),
-                name=normalized.name,
-                created_at="",
-            )
+            registered = await self.memory.get_project_by_path(str(normalized))
+            if registered is None:
+                raise PermissionDeniedError(
+                    "Repository path must be registered as a project before use.",
+                    {"path": str(normalized)},
+                )
+            return registered
         return None
 
     def _requires_project(self, decision: BrainDecision) -> bool:
@@ -542,9 +557,9 @@ class AprilOrchestrator:
             if project is not None and tool.startswith("git_"):
                 args = {"repo_path": project.path}
             elif project is not None and tool == "search_files":
-                args = {"path": project.path, "query": message, "limit": 20}
+                args = {"path": ".", "query": message, "limit": 20}
             elif project is not None and tool == "list_files":
-                args = {"path": project.path, "limit": 100}
+                args = {"path": ".", "limit": 100}
             elif project is not None and tool == "repo_indexer":
                 args = {"repo_path": project.path, "project_id": project.id}
             elif tool == "create_reminder":
@@ -565,11 +580,11 @@ class AprilOrchestrator:
         if call.tool.startswith("git_"):
             args["repo_path"] = project.path
         elif call.tool == "search_files":
-            args["path"] = project.path
+            args["path"] = "."
             args.setdefault("query", message)
             args.setdefault("limit", 20)
         elif call.tool == "list_files":
-            args["path"] = project.path
+            args["path"] = "."
             args.setdefault("limit", 100)
         elif call.tool in {"repo_indexer", "test_runner", "patch_applier"}:
             args["repo_path"] = project.path
@@ -580,7 +595,7 @@ class AprilOrchestrator:
                     args["path"],
                     project_root=project.path,
                     must_exist=call.tool == "read_file",
-                    allow_absolute=True,
+                    allow_absolute=False,
                 )
             )
         return args
@@ -597,7 +612,7 @@ class AprilOrchestrator:
             "write_file": ["path", "content"],
             "patch_applier": ["repo_path", "patch_path"],
             "git_commit": ["repo_path", "message"],
-            "run_command": ["argv", "cwd"],
+            "run_command": ["argv"],
             "repo_indexer": ["repo_path"],
             "create_reminder": ["content"],
         }
