@@ -52,6 +52,11 @@ class ValidationError(AprilError):
         super().__init__("VALIDATION_ERROR", message, 422, details or {})
 
 
+class RequestTooLargeError(AprilError):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__("REQUEST_TOO_LARGE", message, 413, details or {})
+
+
 def error_payload(error: AprilError, request_id: str | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "error": {

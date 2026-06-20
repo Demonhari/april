@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,10 @@ def settings_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AprilSettin
 
 
 class FakeRuntimeClient:
+    def __init__(self) -> None:
+        self.last_messages: list[ChatMessage] = []
+        self.stream_called = False
+
     async def chat(
         self,
         *,
@@ -37,6 +43,7 @@ class FakeRuntimeClient:
         options: Any | None = None,
         request_id: str | None = None,
     ) -> ChatResponse:
+        self.last_messages = messages
         joined = "\n".join(message.content for message in messages)
         lower = joined.lower()
         if "route this request" in lower:
@@ -74,3 +81,39 @@ class FakeRuntimeClient:
 
     async def models(self) -> dict[str, Any]:
         return {"models": []}
+
+    async def stream(
+        self,
+        *,
+        model_id: str,
+        messages: list[ChatMessage],
+        options: Any | None = None,
+        request_id: str | None = None,
+    ) -> AsyncIterator[str]:
+        self.stream_called = True
+        self.last_messages = messages
+        for token in ("streamed ", "answer"):
+            yield json.dumps(
+                {
+                    "request_id": request_id or "test-request",
+                    "event": "token",
+                    "model_id": model_id,
+                    "payload": {"text": token},
+                }
+            )
+        yield json.dumps(
+            {
+                "request_id": request_id or "test-request",
+                "event": "usage",
+                "model_id": model_id,
+                "payload": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            }
+        )
+        yield json.dumps(
+            {
+                "request_id": request_id or "test-request",
+                "event": "done",
+                "model_id": model_id,
+                "payload": {"finish_reason": "stop"},
+            }
+        )

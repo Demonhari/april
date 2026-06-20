@@ -20,4 +20,8 @@ States:
 - unloading
 - error
 
-The fake backend supports deterministic normal and streaming responses. The llama.cpp backend fails with a clear optional dependency error if `llama-cpp-python` is missing.
+The fake backend supports deterministic normal and streaming responses. It is the default development and test path and requires no GGUF files.
+
+The llama.cpp backend is optional. It fails with a clear optional dependency error if `llama-cpp-python` is missing or the configured GGUF file is absent. Only `services/april_runtime/llama_cpp_backend.py` imports `llama_cpp`.
+
+The Core API's `/chat/stream` endpoint forwards typed runtime stream events without waiting for a full model response.

@@ -37,15 +37,16 @@ class ApprovalStore:
             await conn.execute(
                 """
                 INSERT INTO approvals(
-                    id, tool, args_json, canonical_hash, permission_level, risk_level,
+                    id, tool, args_json, agent, canonical_hash, permission_level, risk_level,
                     status, expires_at, created_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     approval_id,
                     request.tool,
                     json.dumps(request.args, sort_keys=True),
+                    request.agent,
                     digest,
                     request.permission_level,
                     request.risk_level,
@@ -60,6 +61,7 @@ class ApprovalStore:
                 "event_type": "approval_created",
                 "tool": request.tool,
                 "arguments": request.args,
+                "agent": request.agent,
                 "permission_level": request.permission_level,
                 "risk": request.risk_level,
                 "approval_id": approval_id,
@@ -70,6 +72,7 @@ class ApprovalStore:
             approval_id=approval_id,
             tool=request.tool,
             args=request.args,
+            agent=request.agent,
             permission_level=request.permission_level,
             risk_level=request.risk_level,
             affected_paths=request.affected_paths,
@@ -82,6 +85,12 @@ class ApprovalStore:
             "SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at ASC"
         )
         return [self._record_from_row(row) for row in rows]
+
+    async def get(self, approval_id: str) -> ApprovalRecord:
+        row = await self.database.fetchone("SELECT * FROM approvals WHERE id = ?", (approval_id,))
+        if row is None:
+            raise PermissionDeniedError("Approval does not exist.")
+        return self._record_from_row(row)
 
     async def approve_exact(
         self,
@@ -121,6 +130,7 @@ class ApprovalStore:
                 "event_type": "approval_approved",
                 "tool": tool,
                 "arguments": args,
+                "agent": record.agent,
                 "permission_level": record.permission_level,
                 "risk": record.risk_level,
                 "approval_id": approval_id,
@@ -160,6 +170,7 @@ class ApprovalStore:
                 "event_type": "approval_consumed",
                 "tool": record.tool,
                 "arguments": record.args,
+                "agent": record.agent,
                 "permission_level": record.permission_level,
                 "risk": record.risk_level,
                 "approval_id": approval_id,
@@ -186,6 +197,7 @@ class ApprovalStore:
                 "event_type": "approval_denied",
                 "tool": record.tool,
                 "arguments": record.args,
+                "agent": record.agent,
                 "permission_level": record.permission_level,
                 "risk": record.risk_level,
                 "approval_id": approval_id,

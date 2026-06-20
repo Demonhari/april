@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -28,7 +29,16 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
         )
     else:
         active_lifecycle = lifecycle
-    app = FastAPI(title="April Runtime", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if settings.runtime.preload_keep_loaded:
+            await active_lifecycle.preload()
+        try:
+            yield
+        finally:
+            await active_lifecycle.cleanup()
+
+    app = FastAPI(title="April Runtime", version="0.1.0", lifespan=lifespan)
     app.state.lifecycle = active_lifecycle
     app.state.settings = settings
 
@@ -36,15 +46,6 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
     async def april_error_handler(request: Request, exc: AprilError) -> JSONResponse:
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         return JSONResponse(error_payload(exc, request_id), status_code=exc.status_code)
-
-    @app.on_event("startup")
-    async def startup() -> None:
-        if settings.runtime.preload_keep_loaded:
-            await active_lifecycle.preload()
-
-    @app.on_event("shutdown")
-    async def shutdown() -> None:
-        await active_lifecycle.cleanup()
 
     @app.post("/runtime/chat")
     async def chat(request: ChatRequest) -> object:

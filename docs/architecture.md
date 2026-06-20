@@ -11,13 +11,14 @@ sequenceDiagram
   participant Runtime as April Runtime
   participant Model as GGUF Model
 
-  CLI->>API: POST /chat
+  CLI->>API: POST /chat or /chat/stream
   API->>Brain: route request
-  Brain->>Agent: selected agent + tools
-  Agent->>API: typed tool requests
+  Brain->>Agent: selected agent + planned tool calls
+  API->>API: deterministic permission and approval gates
+  API->>API: local memory/vector retrieval
   Agent->>Runtime: model request by registered model ID
-  Runtime->>Model: llama-cpp-python generation
-  Runtime-->>Agent: typed response/stream
+  Runtime->>Model: optional llama-cpp-python generation
+  Runtime-->>Agent: typed response or SSE token stream
   API-->>CLI: AgentResult
 ```
 
@@ -30,8 +31,9 @@ Core API responsibilities:
 - permission checks
 - approval flow
 - memory
+- project selection and repository indexing
 - tool execution
-- runtime proxying
+- runtime proxying and token streaming
 
 April Runtime responsibilities:
 
@@ -41,3 +43,5 @@ April Runtime responsibilities:
 - generation locking
 - SSE streaming
 - optional llama.cpp integration
+
+Repository operations require an explicit selected project. The orchestrator resolves `project_id` from SQLite or validates a supplied `repo_path` against allowed roots before any repository tool or vector retrieval runs.

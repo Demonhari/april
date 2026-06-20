@@ -9,6 +9,7 @@ from services.april_runtime.client import RuntimeClient
 from services.brain.orchestrator import AprilOrchestrator
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
+from services.memory.retriever import MemoryRetriever
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
@@ -22,6 +23,7 @@ class ApiContainer:
     database: Database
     memory: SqliteMemory
     vector_memory: VectorMemory
+    memory_retriever: MemoryRetriever
     runtime_client: RuntimeClient
     tool_registry: ToolRegistry
     permission_engine: PermissionEngine
@@ -37,6 +39,7 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
     await run_migrations(database)
     memory = SqliteMemory(database)
     vector_memory = VectorMemory(active_settings.vector_index_path)
+    memory_retriever = MemoryRetriever(memory, vector_memory)
     runtime_client = RuntimeClient(
         active_settings.runtime.url,
         timeout=active_settings.runtime.request_timeout_seconds,
@@ -58,12 +61,14 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         permission_engine=permission_engine,
         approvals=approvals,
         agent_registry=agent_registry,
+        memory_retriever=memory_retriever,
     )
     return ApiContainer(
         settings=active_settings,
         database=database,
         memory=memory,
         vector_memory=vector_memory,
+        memory_retriever=memory_retriever,
         runtime_client=runtime_client,
         tool_registry=tool_registry,
         permission_engine=permission_engine,

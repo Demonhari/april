@@ -42,7 +42,7 @@
 - The brain model cannot grant or lower permissions. Tool policy and argument-sensitive checks decide the authoritative permission level and risk.
 - All Level 3+ actions create pending approvals and do not execute until a later exact-action approval is consumed.
 - Filesystem tools resolve paths and nearest existing parents before access, block symlink escapes, reject null bytes, cap file sizes, and deny sensitive locations.
-- Shell execution is restricted to configured argv allowlists. No model-controlled command uses `shell=True`.
+- Shell execution is restricted to configured argv allowlists. Model-controlled commands never enable shell execution.
 - Audit records are append-only JSONL. Risky operations fail closed if approval or audit state fails.
 - Voice is never activated by API startup and must be explicitly invoked.
 

@@ -10,6 +10,8 @@ from agents.schemas import AgentResult
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=50_000)
     conversation_id: str | None = None
+    project_id: str | None = None
+    repo_path: str | None = None
 
 
 class ChatResponse(BaseModel):

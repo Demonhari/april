@@ -48,8 +48,13 @@ def health() -> None:
 
 
 @app.command()
-def ask(message: str) -> None:
-    data = run(client().post("/chat", {"message": message}))
+def ask(
+    message: str,
+    project_id: str | None = typer.Option(None, "--project-id"),
+    repo_path: str | None = typer.Option(None, "--repo-path"),
+) -> None:
+    payload = {"message": message, "project_id": project_id, "repo_path": repo_path}
+    data = run(client().post("/chat", payload))
     result = data["result"]
     console.print(result["final_message"])
     if result.get("pending_approval"):
@@ -58,13 +63,16 @@ def ask(message: str) -> None:
 
 
 @app.command()
-def chat() -> None:
+def chat(
+    project_id: str | None = typer.Option(None, "--project-id"),
+    repo_path: str | None = typer.Option(None, "--repo-path"),
+) -> None:
     console.print("APRIL chat. Type /quit to exit.")
     while True:
         message = Prompt.ask("you")
         if message.strip() in {"/quit", "/exit"}:
             return
-        ask(message)
+        ask(message, project_id=project_id, repo_path=repo_path)
 
 
 @app.command()

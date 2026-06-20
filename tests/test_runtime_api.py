@@ -33,6 +33,29 @@ def runtime_client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
+def runtime_lifecycle(tmp_path: Path, *, keep_loaded: bool = False) -> ModelLifecycle:
+    registry = ModelRegistry.from_dict(
+        {
+            "models": {
+                "brain": {
+                    "id": "april-brain",
+                    "name": "fake",
+                    "path": "missing.gguf",
+                    "backend": "fake",
+                    "role": "brain",
+                    "threads": 1,
+                    "context_size": 1024,
+                    "temperature": 0.2,
+                    "max_output_tokens": 64,
+                    "keep_loaded": keep_loaded,
+                }
+            }
+        },
+        root=tmp_path,
+    )
+    return ModelLifecycle(registry, root_backend="fake")
+
+
 def test_runtime_normal_generation(tmp_path: Path) -> None:
     client = runtime_client(tmp_path)
     response = client.post(
@@ -51,3 +74,10 @@ def test_runtime_unknown_model(tmp_path: Path) -> None:
     )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_runtime_lifespan_preload_and_cleanup(tmp_path: Path) -> None:
+    lifecycle = runtime_lifecycle(tmp_path, keep_loaded=True)
+    with TestClient(create_app(lifecycle)):
+        assert lifecycle.list_models()[0].state == "loaded"
+    assert lifecycle.list_models()[0].state == "unloaded"

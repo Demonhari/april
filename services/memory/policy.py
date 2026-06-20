@@ -12,9 +12,13 @@ class MemoryPolicyDecision:
 
 
 class MemoryPolicy:
+    def is_sensitive(self, content: str) -> bool:
+        normalized = content.lower()
+        return any(term in normalized for term in SENSITIVE_TERMS)
+
     def evaluate(self, content: str, *, requested_by_user: bool = False) -> MemoryPolicyDecision:
         normalized = content.lower()
-        if any(term in normalized for term in SENSITIVE_TERMS):
+        if self.is_sensitive(content):
             return MemoryPolicyDecision(
                 False, "Sensitive-looking content is not stored as durable memory."
             )

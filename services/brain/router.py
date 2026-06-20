@@ -8,7 +8,8 @@ from services.brain.parser import parse_with_repair
 from services.brain.schemas import BrainDecision
 
 ROUTER_SYSTEM_PROMPT = """Route this request. Return exactly one JSON object matching:
-{"intent": "...", "agent": "...", "model_id": "...", "tools_needed": [], "memory_queries": [],
+{"intent": "...", "agent": "...", "model_id": "...", "tools_needed": [],
+"planned_tool_calls": [{"tool": "...", "args": {}, "reason": "..."}], "memory_queries": [],
 "permission_level": 0, "risk_level": "none", "needs_confirmation": false,
 "task_steps": ["short operational step"], "decision_summary": "concise summary"}.
 Do not include chain-of-thought."""

@@ -3,12 +3,22 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
+import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from april_common.errors import AprilError, PermissionDeniedError, error_payload
+from april_common.errors import (
+    AprilError,
+    PermissionDeniedError,
+    RequestTooLargeError,
+    error_payload,
+)
+from april_common.path_security import PathPolicy, normalize_existing_path
 from april_common.settings import AprilSettings, get_settings
 from services.api.auth import require_bearer_token
 from services.api.dependencies import ApiContainer, build_container
@@ -22,16 +32,43 @@ from services.api.schemas import (
 from services.april_runtime.schemas import LoadModelRequest
 from services.permissions.schemas import ApprovalRequest
 from services.voice.health import voice_health
+from skills.schemas import ToolResult
 
 
 def create_app(container: ApiContainer | None = None) -> FastAPI:
-    app = FastAPI(title="APRIL Core API", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        yield
+        if app.state.container is not None:
+            await app.state.container.database.close()
+
+    app = FastAPI(title="APRIL Core API", version="0.1.0", lifespan=lifespan)
     app.state.container = container
 
     @app.exception_handler(AprilError)
     async def april_error_handler(request: Request, exc: AprilError) -> JSONResponse:
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         return JSONResponse(error_payload(exc, request_id), status_code=exc.status_code)
+
+    @app.middleware("http")
+    async def enforce_request_size(request: Request, call_next: Any) -> object:
+        active_settings = (
+            app.state.container.settings if app.state.container is not None else get_settings()
+        )
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                length = int(content_length)
+            except ValueError:
+                length = 0
+            if length > active_settings.api.max_request_bytes:
+                request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+                error = RequestTooLargeError(
+                    "Request body exceeds configured maximum size.",
+                    {"max_request_bytes": active_settings.api.max_request_bytes},
+                )
+                return JSONResponse(error_payload(error, request_id), status_code=413)
+        return await call_next(request)
 
     async def get_container() -> ApiContainer:
         if app.state.container is None:
@@ -44,11 +81,6 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     ) -> ApiContainer:
         await require_bearer_token(active.settings, authorization)
         return active
-
-    @app.on_event("shutdown")
-    async def shutdown() -> None:
-        if app.state.container is not None:
-            await app.state.container.database.close()
 
     @app.get("/health")
     async def health(active: ApiContainer = Depends(get_container)) -> object:
@@ -71,6 +103,8 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             request.message,
             conversation_id=request.conversation_id,
             request_id=request_id,
+            project_id=request.project_id,
+            repo_path=request.repo_path,
         )
         return ChatResponse(request_id=request_id, result=result)
 
@@ -83,15 +117,14 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         request_id = x_request_id or str(uuid.uuid4())
 
         async def events() -> AsyncIterator[str]:
-            result = await active.orchestrator.chat(
+            async for event_name, payload in active.orchestrator.stream_chat(
                 request.message,
                 conversation_id=request.conversation_id,
                 request_id=request_id,
-            )
-            for token in result.final_message.split():
-                data = json.dumps({"request_id": request_id, "text": token + " "})
-                yield f"event: token\ndata: {data}\n\n"
-            yield f"event: done\ndata: {json.dumps({'request_id': request_id})}\n\n"
+                project_id=request.project_id,
+                repo_path=request.repo_path,
+            ):
+                yield _sse_event(event_name, request_id, payload)
 
         return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -101,7 +134,12 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         active: ApiContainer = Depends(authorized),
     ) -> ChatResponse:
         request_id = str(uuid.uuid4())
-        result = await active.orchestrator.chat(request.message, request_id=request_id)
+        result = await active.orchestrator.chat(
+            request.message,
+            request_id=request_id,
+            project_id=request.project_id,
+            repo_path=request.repo_path,
+        )
         return ChatResponse(request_id=request_id, result=result)
 
     @app.post("/agents/run")
@@ -110,7 +148,12 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         active: ApiContainer = Depends(authorized),
     ) -> ChatResponse:
         request_id = str(uuid.uuid4())
-        result = await active.orchestrator.chat(request.message, request_id=request_id)
+        result = await active.orchestrator.chat(
+            request.message,
+            request_id=request_id,
+            project_id=request.project_id,
+            repo_path=request.repo_path,
+        )
         return ChatResponse(request_id=request_id, result=result)
 
     @app.post("/tools/request")
@@ -130,6 +173,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                 ApprovalRequest(
                     tool=request.tool,
                     args=request.args,
+                    agent=request.agent,
                     permission_level=decision.permission_level,
                     risk_level=decision.risk_level,
                     affected_paths=decision.affected_paths,
@@ -140,6 +184,14 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             )
             return {"status": "pending_approval", "approval": approval}
         result = await active.tool_registry.execute(request.tool, request.args)
+        await active.memory.record_tool_call(
+            tool=request.tool,
+            args=request.args,
+            status="ok" if result.ok else "failed",
+            permission_level=result.permission_level,
+            risk_level=result.risk_level,
+            result=result.model_dump(),
+        )
         return {"status": "executed", "result": result}
 
     @app.post("/tools/approve")
@@ -149,31 +201,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         x_request_id: str | None = Header(default=None),
     ) -> object:
         request_id = x_request_id or str(uuid.uuid4())
-        if request.tool is None:
-            pending = await active.approvals.list_pending()
-            match = next((record for record in pending if record.id == request.approval_id), None)
-            if match is None:
-                raise PermissionDeniedError("Pending approval was not found.")
-            tool = match.tool
-            args = match.args
-        else:
-            tool = request.tool
-            args = request.args
-        record = await active.approvals.approve_exact(
-            approval_id=request.approval_id,
-            tool=tool,
-            args=args,
-            actor="local-user",
-            request_id=request_id,
-        )
-        result = await active.tool_registry.execute(record.tool, record.args)
-        await active.approvals.consume(
-            approval_id=request.approval_id,
-            result=result.model_dump(),
-            actor="local-user",
-            request_id=request_id,
-        )
-        return {"status": "executed", "result": result}
+        return await _execute_approved_tool(active, request, request_id=request_id)
 
     @app.post("/tools/deny")
     async def deny(
@@ -223,12 +251,13 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     async def project_add(
         request: ProjectCreateRequest, active: ApiContainer = Depends(authorized)
     ) -> object:
-        return await active.memory.add_project(request.path, name=request.name)
+        normalized = _normalize_project_path(request.path, active.settings)
+        project = await active.memory.add_project(str(normalized), name=request.name)
+        return project
 
     @app.post("/projects/{project_id}/index")
     async def project_index(project_id: str, active: ApiContainer = Depends(authorized)) -> object:
-        projects = await active.memory.list_projects()
-        project = next((item for item in projects if item.id == project_id), None)
+        project = await active.memory.get_project(project_id)
         if project is None:
             raise PermissionDeniedError("Project not found.")
         result = await active.tool_registry.execute(
@@ -246,9 +275,6 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         request: LoadModelRequest,
         active: ApiContainer = Depends(authorized),
     ) -> object:
-        # Direct HTTP proxy keeps model paths hidden behind registered IDs.
-        import httpx
-
         async with httpx.AsyncClient(
             timeout=active.settings.runtime.request_timeout_seconds
         ) as client:
@@ -263,8 +289,6 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         request: LoadModelRequest,
         active: ApiContainer = Depends(authorized),
     ) -> object:
-        import httpx
-
         async with httpx.AsyncClient(
             timeout=active.settings.runtime.request_timeout_seconds
         ) as client:
@@ -275,6 +299,102 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         return response.json()
 
     return app
+
+
+async def _execute_approved_tool(
+    active: ApiContainer, request: ToolApprovalAction, *, request_id: str
+) -> object:
+    if request.tool is None:
+        record = await active.approvals.get(request.approval_id)
+        tool = record.tool
+        args = record.args
+    else:
+        tool = request.tool
+        args = request.args
+    record = await active.approvals.approve_exact(
+        approval_id=request.approval_id,
+        tool=tool,
+        args=args,
+        actor="local-user",
+        request_id=request_id,
+    )
+    permission = active.permission_engine.evaluate(
+        tool=record.tool,
+        args=record.args,
+        agent=record.agent,
+        model_permission_level=record.permission_level,
+        model_risk_level=record.risk_level,
+    )
+    if permission.permission_level >= 3:
+        active.approvals.audit.write(
+            {
+                "actor": "local-user",
+                "request_id": request_id,
+                "event_type": "approved_tool_execution_started",
+                "tool": record.tool,
+                "arguments": record.args,
+                "agent": record.agent,
+                "permission_level": permission.permission_level,
+                "risk": permission.risk_level,
+                "approval_id": record.id,
+                "outcome": "started",
+            }
+        )
+    try:
+        tool_result = await active.tool_registry.execute(record.tool, record.args)
+    except Exception as exc:
+        tool_result = ToolResult(
+            ok=False,
+            stderr=str(exc),
+            risk_level=permission.risk_level,
+            permission_level=permission.permission_level,
+        )
+    await active.memory.record_tool_call(
+        tool=record.tool,
+        args=record.args,
+        status="ok" if tool_result.ok else "failed",
+        permission_level=permission.permission_level,
+        risk_level=permission.risk_level,
+        result=tool_result.model_dump(),
+    )
+    await active.approvals.consume(
+        approval_id=request.approval_id,
+        result=tool_result.model_dump(),
+        actor="local-user",
+        request_id=request_id,
+    )
+    active.approvals.audit.write(
+        {
+            "actor": "local-user",
+            "request_id": request_id,
+            "event_type": "approved_tool_executed",
+            "tool": record.tool,
+            "arguments": record.args,
+            "agent": record.agent,
+            "permission_level": permission.permission_level,
+            "risk": permission.risk_level,
+            "approval_id": record.id,
+            "outcome": "ok" if tool_result.ok else "failed",
+        }
+    )
+    return {"status": "executed" if tool_result.ok else "failed", "result": tool_result}
+
+
+def _normalize_project_path(path: str, settings: AprilSettings) -> Path:
+    policy = PathPolicy(
+        allowed_roots=tuple(settings.allowed_roots),
+        max_read_bytes=settings.paths.max_file_read_bytes,
+        max_write_bytes=settings.paths.max_file_write_bytes,
+    )
+    normalized = normalize_existing_path(path, policy)
+    if not normalized.is_dir():
+        raise PermissionDeniedError("Project path must be an existing directory.")
+    return normalized
+
+
+def _sse_event(event: str, request_id: str, payload: dict[str, Any]) -> str:
+    body = {"request_id": request_id, "event": event, "payload": payload}
+    return f"event: {event}\ndata: {json.dumps(body)}\n\n"
 
 
 app = create_app()

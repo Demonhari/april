@@ -37,3 +37,27 @@ Stable error shape:
   }
 }
 ```
+
+`POST /chat` and `POST /chat/stream` accept:
+
+```json
+{
+  "message": "April, inspect this repository",
+  "conversation_id": "...",
+  "project_id": "...",
+  "repo_path": "/absolute/path/inside/allowed/roots"
+}
+```
+
+Repository tasks should pass `project_id` or `repo_path`. If neither is supplied, APRIL returns a clean project-selection message instead of guessing a repository.
+
+`POST /chat/stream` emits Server-Sent Events:
+
+- `meta`
+- `token`
+- `approval_required`
+- `usage`
+- `done`
+- `error`
+
+Request bodies larger than `api.max_request_bytes` are rejected with `REQUEST_TOO_LARGE`.

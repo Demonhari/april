@@ -76,6 +76,7 @@ async def run_migrations(database: Database) -> None:
             id TEXT PRIMARY KEY,
             tool TEXT NOT NULL,
             args_json TEXT NOT NULL,
+            agent TEXT NOT NULL DEFAULT 'general_agent',
             canonical_hash TEXT NOT NULL,
             permission_level INTEGER NOT NULL,
             risk_level TEXT NOT NULL,
@@ -120,6 +121,12 @@ async def run_migrations(database: Database) -> None:
         );
         """
     )
+    columns = await conn.execute("PRAGMA table_info(approvals)")
+    approval_columns = {row[1] for row in await columns.fetchall()}
+    if "agent" not in approval_columns:
+        await conn.execute(
+            "ALTER TABLE approvals ADD COLUMN agent TEXT NOT NULL DEFAULT 'general_agent'"
+        )
     await conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, datetime('now'))",
         (SCHEMA_VERSION,),

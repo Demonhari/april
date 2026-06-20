@@ -16,3 +16,12 @@ APRIL requires explicit approval for Level 3 and above. The model cannot lower p
 - argument-sensitive risk
 
 Unknown tools are denied. Tools not allowed for the selected agent are denied.
+
+Approval execution is one-time and exact-action:
+
+- APRIL reloads the approval record before execution.
+- The canonical hash of tool name and normalized arguments must still match.
+- Current tool policy is re-evaluated for the scoped agent.
+- Level 3+ execution writes an audit start record before running; if this fails, the action does not run.
+- Tool calls are recorded in SQLite.
+- Failed executions consume the approval into a terminal state so replay is denied.

@@ -6,7 +6,7 @@ from typing import Any
 
 from april_common.time import utc_now_iso
 from services.memory.database import Database
-from services.memory.schemas import MemoryRecord, Project
+from services.memory.schemas import MemoryRecord, Project, ReminderRecord
 
 
 class SqliteMemory:
@@ -14,6 +14,9 @@ class SqliteMemory:
         self.database = database
 
     async def add_project(self, path: str, name: str | None = None) -> Project:
+        existing = await self.get_project_by_path(path)
+        if existing is not None:
+            return existing
         project_id = str(uuid.uuid4())
         created_at = utc_now_iso()
         project_name = name or path.rstrip("/").split("/")[-1] or path
@@ -22,6 +25,18 @@ class SqliteMemory:
             (project_id, path, project_name, created_at),
         )
         return Project(id=project_id, path=path, name=project_name, created_at=created_at)
+
+    async def get_project(self, project_id: str) -> Project | None:
+        row = await self.database.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,))
+        if row is None:
+            return None
+        return Project.model_validate(dict(row))
+
+    async def get_project_by_path(self, path: str) -> Project | None:
+        row = await self.database.fetchone("SELECT * FROM projects WHERE path = ?", (path,))
+        if row is None:
+            return None
+        return Project.model_validate(dict(row))
 
     async def list_projects(self) -> list[Project]:
         rows = await self.database.fetchall("SELECT * FROM projects ORDER BY created_at DESC")
@@ -116,6 +131,34 @@ class SqliteMemory:
         cursor = await self.database.execute(
             "DELETE FROM conversations WHERE id = ?",
             (conversation_id,),
+        )
+        return cursor.rowcount > 0
+
+    async def create_reminder(self, content: str, due_at: str | None = None) -> ReminderRecord:
+        reminder_id = str(uuid.uuid4())
+        created_at = utc_now_iso()
+        await self.database.execute(
+            """
+            INSERT INTO reminders(id, content, due_at, created_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (reminder_id, content, due_at, created_at),
+        )
+        return ReminderRecord(
+            id=reminder_id,
+            content=content,
+            due_at=due_at,
+            created_at=created_at,
+        )
+
+    async def list_reminders(self) -> list[ReminderRecord]:
+        rows = await self.database.fetchall("SELECT * FROM reminders ORDER BY created_at DESC")
+        return [ReminderRecord.model_validate(dict(row)) for row in rows]
+
+    async def delete_reminder(self, reminder_id: str) -> bool:
+        cursor = await self.database.execute(
+            "DELETE FROM reminders WHERE id = ?",
+            (reminder_id,),
         )
         return cursor.rowcount > 0
 

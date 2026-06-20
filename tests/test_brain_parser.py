@@ -18,6 +18,20 @@ def test_valid_strict_json() -> None:
     assert decision.routing_method == "model"
 
 
+def test_valid_structured_tool_calls() -> None:
+    decision = parse_brain_decision(
+        """
+        {"intent":"reminders","agent":"general_agent","model_id":"april-brain",
+        "tools_needed":["create_reminder"],
+        "planned_tool_calls":[{"tool":"create_reminder","args":{"content":"stand up"}}],
+        "memory_queries":[],"permission_level":2,"risk_level":"safe_write",
+        "needs_confirmation":false,"task_steps":["Create reminder"],
+        "decision_summary":"Local reminder"}
+        """
+    )
+    assert decision.planned_tool_calls[0].args["content"] == "stand up"
+
+
 @pytest.mark.asyncio
 async def test_malformed_json_repair() -> None:
     async def repair(_: str) -> str:

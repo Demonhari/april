@@ -83,21 +83,26 @@ april models
 ## Approval Example
 
 ```bash
-april ask "Apply the fix."
+april ask "Apply the fix." --project-id PROJECT_ID
 april approvals
 april approve APPROVAL_ID
 ```
 
-APRIL never treats a casual "yes" inside chat as approval. Approval must reference the exact approval ID or use the dedicated CLI/API approval flow.
+APRIL never treats a casual "yes" inside chat as approval. Approval must reference the exact approval ID or use the dedicated CLI/API approval flow. Before an approved tool runs, APRIL reloads the approval, revalidates current tool policy for the scoped agent, verifies the exact argument hash, records the tool call, consumes the approval once, and audits the outcome.
 
 ## Repository Analysis Example
 
 ```bash
 export APRIL_ALLOWED_FILESYSTEM_ROOTS="$PWD"
-april ask "April, check why the animation in this repository is broken."
+april project add "$PWD"
+april ask "April, check why the animation in this repository is broken." --project-id PROJECT_ID
 ```
 
-The coding agent can use read-only Git and filesystem tools without approval. File edits, patch application, test execution, and commits require approval.
+Repository work requires an explicit selected project through `project_id` or `repo_path`; APRIL no longer guesses a repository from the first allowed root. The coding agent can use read-only Git and filesystem tools without approval. File edits, patch application, test execution, and commits require approval.
+
+## Streaming
+
+`POST /chat/stream` uses real runtime streaming. The Core API routes the request, runs permitted tools, stops immediately for approvals, and then forwards token events from April Runtime without buffering the full response. SSE events include `meta`, `token`, `approval_required`, `usage`, `done`, and `error`.
 
 ## Memory
 
@@ -111,6 +116,8 @@ april conversation delete CONVERSATION_ID
 ```
 
 Durable memory is not created automatically from every message. Sensitive-looking content is rejected by policy.
+
+When the brain supplies `memory_queries`, APRIL retrieves local memories by policy and includes them in the agent prompt under a clearly marked context section. General planning requests also receive a small set of recent durable memories. Coding requests with a selected indexed project retrieve project-scoped vector chunks with local citations.
 
 ## Voice
 
@@ -149,4 +156,4 @@ Tests use fake model/audio components and do not require GGUF files, network acc
 - The default vector embedding is a lightweight hashed-token baseline, not a semantic embedding model.
 - Desktop UI is documented as a future surface.
 - Real wake-word, STT, and TTS require user-installed local binaries/models.
-- FastAPI lifecycle handlers currently use `on_event`; tests report deprecation warnings but behavior is covered.
+- Real GGUF inference requires manually installed model files and the optional `llama-cpp-python` dependency.

@@ -119,6 +119,7 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_API_PORT": ("api", "port"),
     "APRIL_API_TOKEN": ("api", "token"),
     "APRIL_API_CORS_ENABLED": ("api", "cors_enabled"),
+    "APRIL_API_MAX_REQUEST_BYTES": ("api", "max_request_bytes"),
     "APRIL_RUNTIME_HOST": ("runtime", "host"),
     "APRIL_RUNTIME_PORT": ("runtime", "port"),
     "APRIL_RUNTIME_URL": ("runtime", "url"),

@@ -79,3 +79,18 @@ async def test_approval_transaction_integrity(settings_tmp) -> None:
     records = await store.list_pending()
     assert records[0].id == approval.approval_id
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_reminders_are_stored_in_sqlite(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    reminder = await memory.create_reminder("stand up", due_at="2026-06-21T09:00:00Z")
+    reminders = await memory.list_reminders()
+    assert reminders[0].id == reminder.id
+    assert reminders[0].content == "stand up"
+    assert await memory.delete_reminder(reminder.id)
+    assert await memory.list_reminders() == []
+    await database.close()

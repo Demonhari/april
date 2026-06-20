@@ -39,6 +39,7 @@ class ApprovalRecord(BaseModel):
     id: str
     tool: str
     args: dict[str, Any]
+    agent: str = "general_agent"
     canonical_hash: str
     permission_level: int
     risk_level: str
@@ -46,6 +47,13 @@ class ApprovalRecord(BaseModel):
     expires_at: str
     created_at: str
     consumed_at: str | None = None
+
+
+class ReminderRecord(BaseModel):
+    id: str
+    content: str
+    due_at: str | None = None
+    created_at: str
 
 
 class VectorMetadata(BaseModel):

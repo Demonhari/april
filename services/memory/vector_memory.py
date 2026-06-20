@@ -66,10 +66,14 @@ class VectorMemory:
         self._write_records(updated)
         return len(records) - len(updated)
 
-    def search(self, query: str, *, limit: int = 10) -> list[SearchResult]:
+    def search(
+        self, query: str, *, limit: int = 10, project_id: str | None = None
+    ) -> list[SearchResult]:
         query_vector = self.embedding.embed(query)
         results: list[SearchResult] = []
         for record in self._read_records():
+            if project_id is not None and record["metadata"].get("project_id") != project_id:
+                continue
             vector = np.asarray(record["vector"], dtype=np.float32)
             score = float(np.dot(query_vector, vector))
             results.append(

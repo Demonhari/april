@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from services.brain.schemas import BrainDecision
+from services.brain.schemas import BrainDecision, PlannedToolCall
 from services.permissions.schemas import RiskLevel
 
 
@@ -14,7 +14,7 @@ class FallbackRouter:
                 intent="destructive_action",
                 agent="system_action_agent",
                 model_id="april-brain",
-                tools=["list_files"],
+                tools=[],
                 level=4,
                 risk="system_action",
                 confirmation=True,
@@ -36,7 +36,7 @@ class FallbackRouter:
                 intent="code_modification",
                 agent="coding_agent",
                 model_id="april-coding",
-                tools=["patch_applier"],
+                tools=[],
                 level=3,
                 risk="code_write",
                 confirmation=True,
@@ -47,7 +47,7 @@ class FallbackRouter:
                 intent="coding_repo_analysis",
                 agent="coding_agent",
                 model_id="april-coding",
-                tools=["git_status", "search_files", "read_file"],
+                tools=["git_status", "search_files"],
                 level=1,
                 risk="read_only",
                 confirmation=False,
@@ -58,7 +58,7 @@ class FallbackRouter:
                 intent="document_reading",
                 agent="reading_agent",
                 model_id="april-reading",
-                tools=["read_file"],
+                tools=[],
                 level=1,
                 risk="read_only",
                 confirmation=False,
@@ -81,6 +81,13 @@ class FallbackRouter:
                 agent="general_agent",
                 model_id="april-brain",
                 tools=["create_reminder"],
+                planned_tool_calls=[
+                    PlannedToolCall(
+                        tool="create_reminder",
+                        args={"content": message},
+                        reason="Create local reminder from explicit reminder request.",
+                    )
+                ],
                 level=2,
                 risk="safe_write",
                 confirmation=False,
@@ -129,6 +136,7 @@ class FallbackRouter:
         agent: str,
         model_id: str,
         tools: list[str],
+        planned_tool_calls: list[PlannedToolCall] | None = None,
         level: int,
         risk: RiskLevel,
         confirmation: bool,
@@ -139,6 +147,7 @@ class FallbackRouter:
             agent=agent,
             model_id=model_id,
             tools_needed=tools,
+            planned_tool_calls=planned_tool_calls or [],
             memory_queries=[],
             permission_level=level,
             risk_level=risk,

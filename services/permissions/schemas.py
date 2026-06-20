@@ -30,6 +30,7 @@ class PermissionDecision(BaseModel):
 class ApprovalRequest(BaseModel):
     tool: str
     args: dict[str, Any]
+    agent: str = "general_agent"
     permission_level: int
     risk_level: RiskLevel
     affected_paths: list[str] = Field(default_factory=list)
@@ -40,6 +41,7 @@ class ApprovalResponse(BaseModel):
     approval_id: str
     tool: str
     args: dict[str, Any]
+    agent: str
     permission_level: int
     risk_level: RiskLevel
     affected_paths: list[str]
