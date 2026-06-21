@@ -320,6 +320,39 @@ class SqliteMemory:
             (key, value, utc_now_iso()),
         )
 
+    async def get_repo_snapshot(self, project_id: str) -> dict[str, Any] | None:
+        row = await self.database.fetchone(
+            "SELECT last_head_sha, last_dirty_count, updated_at "
+            "FROM repo_snapshots WHERE project_id = ?",
+            (project_id,),
+        )
+        if row is None:
+            return None
+        return {
+            "head_sha": row["last_head_sha"],
+            "dirty_count": int(row["last_dirty_count"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    async def upsert_repo_snapshot(
+        self,
+        project_id: str,
+        head_sha: str | None,
+        dirty_count: int,
+        updated_at: str,
+    ) -> None:
+        await self.database.execute(
+            """
+            INSERT INTO repo_snapshots(project_id, last_head_sha, last_dirty_count, updated_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                last_head_sha = excluded.last_head_sha,
+                last_dirty_count = excluded.last_dirty_count,
+                updated_at = excluded.updated_at
+            """,
+            (project_id, head_sha, dirty_count, updated_at),
+        )
+
     async def create_task_plan(self, plan: TaskPlan) -> TaskPlan:
         title = plan.steps[0].title if plan.steps else plan.intent
         await self.database.execute(

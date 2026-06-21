@@ -112,6 +112,32 @@ async def test_scheduler_state_round_trip(settings_tmp) -> None:
 
 
 @pytest.mark.asyncio
+async def test_repo_snapshot_round_trip(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    project = await memory.add_project(str(settings_tmp.home))
+    assert await memory.get_repo_snapshot(project.id) is None
+    await memory.upsert_repo_snapshot(project.id, "abc123", 2, "2026-06-22T00:00:00Z")
+    snapshot = await memory.get_repo_snapshot(project.id)
+    assert snapshot == {
+        "head_sha": "abc123",
+        "dirty_count": 2,
+        "updated_at": "2026-06-22T00:00:00Z",
+    }
+    # Upsert overwrites rather than duplicating.
+    await memory.upsert_repo_snapshot(project.id, "def456", 0, "2026-06-23T00:00:00Z")
+    snapshot = await memory.get_repo_snapshot(project.id)
+    assert snapshot == {
+        "head_sha": "def456",
+        "dirty_count": 0,
+        "updated_at": "2026-06-23T00:00:00Z",
+    }
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_list_upcoming_reminders_window(settings_tmp) -> None:
     database = Database(settings_tmp.database_path)
     await database.connect()

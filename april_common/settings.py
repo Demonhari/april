@@ -91,6 +91,7 @@ class SchedulerSettings(BaseModel):
     notification_sink: str = "log"
     briefing_enabled: bool = False
     briefing_time: str = "08:00"
+    repo_monitor_enabled: bool = False
 
     @field_validator("notification_sink")
     @classmethod
@@ -209,6 +210,7 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_SCHEDULER_NOTIFICATION_SINK": ("scheduler", "notification_sink"),
     "APRIL_SCHEDULER_BRIEFING_ENABLED": ("scheduler", "briefing_enabled"),
     "APRIL_SCHEDULER_BRIEFING_TIME": ("scheduler", "briefing_time"),
+    "APRIL_SCHEDULER_REPO_MONITOR_ENABLED": ("scheduler", "repo_monitor_enabled"),
 }
 
 

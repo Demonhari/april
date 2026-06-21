@@ -34,7 +34,7 @@ from services.api.schemas import (
     ToolRequestEnvelope,
 )
 from services.april_runtime.schemas import LoadModelRequest
-from services.scheduler import compose_briefing
+from services.scheduler import compose_briefing, compute_repo_activity
 from services.voice.health import voice_health
 
 
@@ -302,10 +302,15 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     ) -> object:
         now = utc_now()
         until = now + timedelta(hours=24)
+        repo_activity = None
+        if active.settings.scheduler.repo_monitor_enabled:
+            # Preview must not advance the baseline (persist=False, idempotent).
+            repo_activity = await compute_repo_activity(active.memory, persist=False)
         notification = await compose_briefing(
             active.memory,
             now_iso=now.isoformat().replace("+00:00", "Z"),
             until_iso=until.isoformat().replace("+00:00", "Z"),
+            repo_activity=repo_activity,
         )
         return notification.model_dump()
 

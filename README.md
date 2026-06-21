@@ -414,7 +414,13 @@ scheduler:
   notification_sink: log   # "log" (logs/scheduler.log) or "macos" (native banner)
   briefing_enabled: true   # fire a daily briefing
   briefing_time: "08:00"   # local time, once per local day
+  repo_monitor_enabled: true  # add read-only repo activity to the briefing
 ```
+
+When `repo_monitor_enabled` is true, the briefing appends a read-only "Project
+activity" section listing registered git projects with new commits or uncommitted
+changes since the last briefing (all git access is local; `run april briefing`
+previews this without advancing the baseline).
 
 The daily briefing is restart-safe: the last briefing date is persisted, so it
 fires at most once per local day even if the process restarts. You can preview

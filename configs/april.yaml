@@ -62,3 +62,7 @@ scheduler:
   briefing_enabled: false
   # Local time of day (HH:MM, 24h) to fire the daily briefing, once per local day.
   briefing_time: "08:00"
+  # Read-only repo monitoring surfaced inside the daily briefing. OFF by default.
+  # When true, the briefing lists registered projects with new commits or
+  # uncommitted changes since the last briefing. Never accesses the network.
+  repo_monitor_enabled: false

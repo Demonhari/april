@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 async def run_migrations(database: Database) -> None:
@@ -123,6 +123,13 @@ async def run_migrations(database: Database) -> None:
         CREATE TABLE IF NOT EXISTS scheduler_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS repo_snapshots (
+            project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            last_head_sha TEXT,
+            last_dirty_count INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         );
 

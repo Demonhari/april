@@ -9,6 +9,7 @@ from services.memory.sqlite_memory import SqliteMemory
 from services.scheduler.briefing import compose_briefing
 from services.scheduler.clock import Clock, SystemClock
 from services.scheduler.notifications import Notification, NotificationSink
+from services.scheduler.repo_monitor import RepoActivity, compute_repo_activity
 
 _LAST_BRIEFING_KEY = "last_briefing_date"
 
@@ -138,10 +139,15 @@ class SchedulerService:
         if local_now.time() < self._briefing_time():
             return
         now = self.clock.now()
+        repo_activity: list[RepoActivity] | None = None
+        if self.settings.scheduler.repo_monitor_enabled:
+            # Scheduled briefing advances the per-project baseline (persist=True).
+            repo_activity = await compute_repo_activity(self.memory, persist=True)
         notification = await compose_briefing(
             self.memory,
             now_iso=self._iso(now),
             until_iso=self._iso(now + timedelta(hours=24)),
+            repo_activity=repo_activity,
         )
         await self.sink.emit(notification)
         await self.memory.set_scheduler_state(_LAST_BRIEFING_KEY, today_str)
