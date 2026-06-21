@@ -1251,7 +1251,7 @@ class PlannedOverrideRuntimeClient(FakeRuntimeClient):
                         )
                     }
                 )
-        if "route this request" in lower:
+        if "route this request" in lower or "route the user request" in lower:
             return response.model_copy(update={"content": self.decision_json})
         return response
 

@@ -84,8 +84,13 @@ class FakeBackend(RuntimeBackend):
         lower = prompt.lower()
         if "return exactly one json object with type final_answer" in lower:
             return self._structured_agent_response(prompt, lower)
-        if "route this request" in lower or '"intent"' in lower:
-            if "apply the fix" in lower:
+        if (
+            "route this request" in lower
+            or "route the user request" in lower
+            or '"intent"' in lower
+        ):
+            route_text = self._routing_user_text(prompt).lower()
+            if "apply the fix" in route_text:
                 return (
                     '{"intent":"code_modification","agent":"coding_agent",'
                     '"model_id":"april-coding","tools_needed":["patch_generator",'
@@ -94,7 +99,7 @@ class FakeBackend(RuntimeBackend):
                     '"task_steps":["Generate patch","Request exact patch approval"],'
                     '"decision_summary":"Code modification through structured loop"}'
                 )
-            if "animation" in lower or "repository" in lower or "code" in lower:
+            if "animation" in route_text or "repository" in route_text or "code" in route_text:
                 return (
                     '{"intent":"coding_repo_analysis","agent":"coding_agent",'
                     '"model_id":"april-coding","tools_needed":["git_status","search_files"],'
@@ -103,7 +108,7 @@ class FakeBackend(RuntimeBackend):
                     '"task_steps":["Inspect repository status","Search relevant files"],'
                     '"decision_summary":"Read-only repository investigation"}'
                 )
-            if "summarize" in lower or "readme" in lower:
+            if "summarize" in route_text or "readme" in route_text:
                 return (
                     '{"intent":"document_reading","agent":"reading_agent",'
                     '"model_id":"april-reading","tools_needed":["read_file"],'
@@ -128,6 +133,17 @@ class FakeBackend(RuntimeBackend):
                 "animation-related files to review."
             )
         return "APRIL fake response."
+
+    def _routing_user_text(self, prompt: str) -> str:
+        if "Current request:" in prompt:
+            return prompt.rsplit("Current request:", maxsplit=1)[-1]
+        if "USER:" in prompt:
+            return prompt.rsplit("USER:", maxsplit=1)[-1]
+        if "<|user|>" in prompt:
+            return prompt.rsplit("<|user|>", maxsplit=1)[-1]
+        if "<|im_start|>user" in prompt:
+            return prompt.rsplit("<|im_start|>user", maxsplit=1)[-1]
+        return prompt
 
     def _structured_agent_response(self, prompt: str, lower: str) -> str:
         if "approved tool result" in lower or "tool result" in lower:

@@ -11,7 +11,7 @@ import pytest
 from april_common.errors import RuntimeUnavailableError
 from services.voice.audio_player import FakeAudioPlayer, SoundDeviceAudioPlayer
 from services.voice.conversation_loop import PushToTalkLoop, normalize_transcript
-from services.voice.health import voice_health
+from services.voice.health import query_audio_devices, voice_doctor, voice_health
 from services.voice.microphone import FakeMicrophone, SoundDeviceMicrophone
 from services.voice.speech_to_text import FakeSpeechToText
 from services.voice.text_to_speech import FakeTextToSpeech
@@ -48,6 +48,22 @@ def test_voice_degraded_without_dependencies(settings_tmp) -> None:
         update={"voice": settings_tmp.voice.model_copy(update={"enabled": True})}
     )
     assert voice_health(enabled).status == "degraded"
+
+
+def test_voice_doctor_reports_devices(settings_tmp, monkeypatch) -> None:
+    fake_sounddevice = types.SimpleNamespace(
+        query_devices=lambda: [
+            {"name": "Mic", "max_input_channels": 1, "max_output_channels": 0},
+            {"name": "Speaker", "max_input_channels": 0, "max_output_channels": 2},
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+    devices = query_audio_devices()
+    assert devices["input_devices"][0]["name"] == "Mic"
+    report = voice_doctor(settings_tmp)
+    assert report["sounddevice_installed"] is True
+    assert report["input_devices"]
+    assert report["output_devices"]
 
 
 @pytest.mark.asyncio

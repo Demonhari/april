@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -9,8 +10,12 @@ import httpx
 
 from apps.runner.verify import (
     LauncherVerifier,
+    ModelBenchmark,
     RealModelVerifier,
+    RealWorkflowVerifier,
     VerifyCheck,
+    WorkflowVerifier,
+    run_model_benchmark,
     run_real_model_verification,
 )
 
@@ -241,9 +246,17 @@ def test_real_model_verifier_prepare_and_env(tmp_path: Path, monkeypatch) -> Non
 def test_run_real_model_verification_uses_real_verifier(tmp_path: Path, monkeypatch) -> None:
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"fake")
+    monkeypatch.setattr("apps.runner.verify._llama_cpp_installed", lambda: True)
 
     class FakeRealModelVerifier:
-        def __init__(self, *, home: Path, model_path: Path) -> None:
+        def __init__(
+            self,
+            *,
+            home: Path,
+            model_path: Path,
+            max_output_tokens: int = 32,
+            timeout: float = 180.0,
+        ) -> None:
             self.home = home
             self.model_path = model_path
 
@@ -253,6 +266,140 @@ def test_run_real_model_verification_uses_real_verifier(tmp_path: Path, monkeypa
     monkeypatch.setattr("apps.runner.verify.RealModelVerifier", FakeRealModelVerifier)
     checks = run_real_model_verification(Path.cwd(), gguf)
     assert checks == [VerifyCheck(name=str(gguf), ok=True, detail=str(Path.cwd()))]
+
+
+def test_run_real_model_verification_reports_runtime_extra_when_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"fake")
+    monkeypatch.setattr("apps.runner.verify._llama_cpp_installed", lambda: False)
+    checks = run_real_model_verification(Path.cwd(), gguf)
+    assert checks[0].ok is False
+    assert checks[0].detail == "pip install -e '.[runtime]'"
+
+
+def test_run_model_benchmark_reports_runtime_extra_when_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"fake")
+    monkeypatch.setattr("apps.runner.verify._llama_cpp_installed", lambda: False)
+    results = run_model_benchmark(
+        Path.cwd(),
+        gguf,
+        prompt="hello",
+        runs=1,
+        max_output_tokens=4,
+        keep_loaded=False,
+    )
+    assert results[0].ok is False
+    assert "pip install -e" in results[0].detail
+
+
+def test_model_benchmark_run_and_single_success(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19301, 19302])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    benchmark = ModelBenchmark(
+        home=Path.cwd(),
+        model_path=tmp_path / "model.gguf",
+        prompt="hello",
+        runs=2,
+        max_output_tokens=4,
+        keep_loaded=False,
+    )
+    monkeypatch.setattr(benchmark, "_prepare", lambda: None)
+    monkeypatch.setattr(benchmark, "_env", lambda: {})
+    monkeypatch.setattr(benchmark, "_start", lambda *args: subprocess.Popen(["true"]))
+    monkeypatch.setattr(benchmark, "_wait_json", lambda *args, **kwargs: {"status": "ok"})
+    calls: list[int] = []
+    monkeypatch.setattr(
+        benchmark,
+        "_run_one",
+        lambda index: (
+            calls.append(index)
+            or __import__("apps.runner.verify", fromlist=["BenchmarkResult"]).BenchmarkResult(
+                run_index=index,
+                ok=True,
+            )
+        ),
+    )
+    results = benchmark.run()
+    assert [result.run_index for result in results] == [1, 2]
+    assert calls == [1, 2]
+
+
+def test_model_benchmark_run_one_unloads(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19401, 19402])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    benchmark = ModelBenchmark(
+        home=Path.cwd(),
+        model_path=tmp_path / "model.gguf",
+        prompt="hello",
+        runs=1,
+        max_output_tokens=4,
+        keep_loaded=False,
+    )
+    calls: list[str] = []
+    benchmark.load_time_seconds = 1.0
+    benchmark.generation_time_seconds = 2.0
+    benchmark.first_token_latency_seconds = 0.5
+    benchmark.output_tokens = 6
+    benchmark.tokens_per_second = 3.0
+    monkeypatch.setattr(benchmark, "_load_model", lambda: calls.append("load") or "loaded")
+    monkeypatch.setattr(benchmark, "_benchmark_stream", lambda: calls.append("stream"))
+    monkeypatch.setattr(benchmark, "_unload_model", lambda: calls.append("unload") or "unloaded")
+    result = benchmark._run_one(1)
+    assert result.ok is True
+    assert result.unload_success is True
+    assert calls == ["load", "stream", "unload"]
+
+
+def test_workflow_verifier_run_uses_release_checklist(monkeypatch) -> None:
+    ports = iter([19601, 19602])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    workflow = WorkflowVerifier(home=Path.cwd())
+    calls: list[str] = []
+    monkeypatch.setattr(workflow, "_prepare", lambda: calls.append("prepare"))
+    monkeypatch.setattr(workflow, "_env", lambda: {})
+    monkeypatch.setattr(workflow, "_start", lambda *args: subprocess.Popen(["true"]))
+    monkeypatch.setattr(workflow, "_wait_json", lambda url: {"status": "ok"})
+    monkeypatch.setattr(workflow, "_model_load_unload", lambda: "loaded -> unloaded")
+    monkeypatch.setattr(workflow, "_register_project", lambda: "project")
+    monkeypatch.setattr(workflow, "_multi_turn", lambda project_id: "conversation")
+    monkeypatch.setattr(workflow, "_task_listing", lambda: "1 tasks")
+    monkeypatch.setattr(workflow, "_repo_analysis", lambda project_id: "ok")
+    monkeypatch.setattr(workflow, "_patch_approval", lambda project_id: "approval")
+    monkeypatch.setattr(workflow, "_deny_approval", lambda approval_id: "denied")
+    monkeypatch.setattr(workflow, "_approve", lambda approval_id: "applied")
+    monkeypatch.setattr(workflow, "_system_action_policy", lambda: "checked")
+    monkeypatch.setattr(workflow, "_reminder_create_list", lambda: "1 reminders")
+    monkeypatch.setattr(workflow, "_voice_health", lambda: "disabled")
+    checks = workflow.run()
+    assert calls == ["prepare"]
+    assert all(check.ok for check in checks)
+    assert any(check.name == "voice health" for check in checks)
+
+
+def test_real_workflow_latest_routing_method(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19501, 19502])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    verifier = RealWorkflowVerifier(home=Path.cwd(), model_path=tmp_path / "model.gguf")
+    try:
+        database = verifier.temp / "data" / "april.db"
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as conn:
+            conn.execute(
+                "CREATE TABLE conversation_events("
+                "event_type TEXT, payload_json TEXT, created_at TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO conversation_events VALUES(?, ?, ?)",
+                ("brain_decision", '{"routing_method":"model"}', "2026-01-01T00:00:00Z"),
+            )
+        assert verifier._latest_routing_method() == "model"
+    finally:
+        shutil.rmtree(verifier.temp, ignore_errors=True)
 
 
 def test_real_model_verifier_response_error_and_stopped(tmp_path: Path, monkeypatch) -> None:

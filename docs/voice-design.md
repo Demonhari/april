@@ -39,7 +39,11 @@ CLI commands:
 
 ```bash
 april voice health
+april voice doctor
 april voice devices
+april voice test-record --seconds 3
+april voice test-stt /path/to/audio.wav
+april voice test-tts "Hello Hari"
 april voice ptt
 april voice listen
 ```

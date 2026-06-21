@@ -64,6 +64,7 @@ class ChatResponse(BaseModel):
     usage: Usage
     context_truncated: bool = False
     warnings: list[str] = Field(default_factory=list)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class LoadModelRequest(BaseModel):

@@ -91,6 +91,12 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+def is_path_within_roots(path: Path, roots: list[Path] | tuple[Path, ...]) -> bool:
+    resolved = path.expanduser().resolve(strict=False)
+    resolved_roots = tuple(root.expanduser().resolve(strict=False) for root in roots)
+    return any(_is_relative_to(resolved, root) for root in resolved_roots)
+
+
 def deny_sensitive_path(path: Path) -> None:
     parts = set(path.parts)
     casefold_parts = {part.casefold() for part in path.parts}

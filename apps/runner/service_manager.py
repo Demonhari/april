@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -9,6 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol
+from urllib.parse import urlparse
 
 import httpx
 
@@ -186,8 +188,19 @@ class AprilServiceManager:
             if self.health_getter(url, 1.0):
                 return
             self.sleep(0.2)
+        parsed = urlparse(url)
+        port = parsed.port
+        port_detail = ""
+        if port is not None and self._port_in_use(parsed.hostname or "127.0.0.1", port):
+            port_detail = (
+                f"\nPort {port} is in use. Run `run april status`, inspect logs with "
+                "`run april logs --tail 100`, or stop stale services with `run april stop`."
+            )
         raise RuntimeError(
-            "APRIL service did not become healthy in time.\n\n" + self.logs(lines=40)
+            "APRIL service did not become healthy in time."
+            + port_detail
+            + "\n\n"
+            + self.logs(lines=40)
         )
 
     def _service_info(
@@ -278,3 +291,8 @@ class AprilServiceManager:
         except httpx.HTTPError:
             return False
         return 200 <= response.status_code < 500
+
+    def _port_in_use(self, host: str, port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            return sock.connect_ex((host, port)) == 0

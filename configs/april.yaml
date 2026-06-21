@@ -18,6 +18,8 @@ runtime:
 memory:
   database_path: data/april.db
   vector_index_path: data/vector_index
+  embedding_provider: hashed-token
+  embedding_model_id: null
 
 paths:
   logs_path: logs

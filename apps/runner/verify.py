@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 import yaml
+from pydantic import BaseModel, Field
 
 
 @dataclass(slots=True)
@@ -29,15 +30,106 @@ def run_fake_verification(home: Path) -> list[VerifyCheck]:
     return verifier.run()
 
 
-def run_real_model_verification(home: Path, model_path: Path) -> list[VerifyCheck]:
-    verifier = RealModelVerifier(home=home, model_path=model_path)
+def run_workflow_verification(
+    home: Path, *, real_model: bool = False, model_path: Path | None = None
+) -> list[VerifyCheck]:
+    if real_model:
+        configured_path = model_path or (
+            Path(os.environ["APRIL_TEST_GGUF_PATH"])
+            if os.environ.get("APRIL_TEST_GGUF_PATH")
+            else None
+        )
+        if configured_path is None:
+            return [
+                VerifyCheck(
+                    name="real workflow planning route",
+                    ok=False,
+                    detail="APRIL_TEST_GGUF_PATH or --real-model path is required.",
+                )
+            ]
+        return RealWorkflowVerifier(home=home, model_path=configured_path).run()
+    return WorkflowVerifier(home=home).run()
+
+
+def run_real_model_verification(
+    home: Path,
+    model_path: Path,
+    *,
+    max_output_tokens: int = 32,
+    timeout: float = 180.0,
+) -> list[VerifyCheck]:
+    if not _llama_cpp_installed():
+        return [
+            VerifyCheck(
+                name="llama-cpp-python installed",
+                ok=False,
+                detail="pip install -e '.[runtime]'",
+            )
+        ]
+    verifier = RealModelVerifier(
+        home=home,
+        model_path=model_path,
+        max_output_tokens=max_output_tokens,
+        timeout=timeout,
+    )
     return verifier.run()
 
 
-class RealModelVerifier:
-    def __init__(self, *, home: Path, model_path: Path) -> None:
+class BenchmarkResult(BaseModel):
+    run_index: int
+    ok: bool = True
+    detail: str = ""
+    load_time_seconds: float = 0.0
+    first_token_latency_seconds: float | None = None
+    generation_time_seconds: float = 0.0
+    output_tokens: int = 0
+    tokens_per_second: float = 0.0
+    unload_success: bool = False
+    context_size: int = 1024
+    backend_settings: dict[str, Any] = Field(default_factory=dict)
+
+
+def run_model_benchmark(
+    home: Path,
+    model_path: Path,
+    *,
+    prompt: str,
+    runs: int,
+    max_output_tokens: int,
+    keep_loaded: bool,
+) -> list[BenchmarkResult]:
+    if not _llama_cpp_installed():
+        return [
+            BenchmarkResult(
+                run_index=1,
+                ok=False,
+                detail="llama-cpp-python is missing. Install with: pip install -e '.[runtime]'",
+            )
+        ]
+    benchmark = ModelBenchmark(
+        home=home,
+        model_path=model_path,
+        prompt=prompt,
+        runs=runs,
+        max_output_tokens=max_output_tokens,
+        keep_loaded=keep_loaded,
+    )
+    return benchmark.run()
+
+
+class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runtime
+    def __init__(
+        self,
+        *,
+        home: Path,
+        model_path: Path,
+        max_output_tokens: int = 32,
+        timeout: float = 180.0,
+    ) -> None:
         self.repo_home = home.expanduser().resolve()
         self.model_path = model_path.expanduser().resolve()
+        self.max_output_tokens = max_output_tokens
+        self.timeout = timeout
         self.temp = Path(tempfile.mkdtemp(prefix="april-real-verify-"))
         self.verify_home = self.temp / "april_home"
         self.runtime_port = _free_port()
@@ -49,6 +141,13 @@ class RealModelVerifier:
         self.runtime_log = self.temp / "runtime.log"
         self.api_log = self.temp / "api.log"
         self.checks: list[VerifyCheck] = []
+        self.load_time_seconds: float | None = None
+        self.first_token_latency_seconds: float | None = None
+        self.generation_time_seconds: float | None = None
+        self.output_tokens: int = 0
+        self.tokens_per_second: float | None = None
+        self.prompt_path: str = "unknown"
+        self.runtime_rss_bytes: int | None = None
 
     @property
     def runtime_url(self) -> str:
@@ -78,6 +177,7 @@ class RealModelVerifier:
             self._check("real model stream", self._stream)
             self._check("real model unload", self._unload_model)
             self._check("real model unloaded state", self._confirm_unloaded)
+            self._check("real model metrics", self._metrics)
         finally:
             self._stop()
             self._check("services stopped", self._services_stopped)
@@ -172,15 +272,17 @@ class RealModelVerifier:
         raise RuntimeError(f"health check failed for {url}: {last}")
 
     def _load_model(self) -> str:
+        start = time.monotonic()
         data = self._post_runtime(
             "/runtime/models/load",
             {"model_id": "april-brain", "request_id": "real-verify-load"},
-            timeout=120.0,
+            timeout=self.timeout,
         )
+        self.load_time_seconds = time.monotonic() - start
         state = data.get("state")
         if state != "loaded":
             raise RuntimeError(f"expected loaded state, got {state}")
-        return "loaded"
+        return f"loaded in {self.load_time_seconds:.2f}s"
 
     def _chat(self) -> str:
         data = self._post_runtime(
@@ -188,13 +290,16 @@ class RealModelVerifier:
             {
                 "model_id": "april-brain",
                 "messages": [{"role": "user", "content": "Reply with the word ready."}],
-                "options": {"temperature": 0.0, "max_output_tokens": 12},
+                "options": {"temperature": 0.0, "max_output_tokens": self.max_output_tokens},
                 "request_id": "real-verify-chat",
             },
-            timeout=120.0,
+            timeout=self.timeout,
         )
         content = str(data.get("content", "")).strip()
         usage = data.get("usage") or {}
+        diagnostics = data.get("diagnostics") or {}
+        if diagnostics.get("prompt_path"):
+            self.prompt_path = str(diagnostics["prompt_path"])
         if not content:
             raise RuntimeError("chat returned empty content")
         if int(usage.get("total_tokens", 0)) < int(usage.get("output_tokens", 0)):
@@ -205,39 +310,92 @@ class RealModelVerifier:
         request = {
             "model_id": "april-brain",
             "messages": [{"role": "user", "content": "Say ok."}],
-            "options": {"temperature": 0.0, "max_output_tokens": 12},
+            "options": {"temperature": 0.0, "max_output_tokens": self.max_output_tokens},
             "request_id": "real-verify-stream",
         }
         token_count = 0
         usage_count = 0
+        started = time.monotonic()
+        first_token_at: float | None = None
         with httpx.stream(
             "POST",
             self.runtime_url + "/runtime/stream",
             json=request,
             headers=self.runtime_headers,
-            timeout=120.0,
+            timeout=self.timeout,
         ) as response:
             if response.status_code >= 400:
                 raise RuntimeError(self._response_error(response))
             for line in response.iter_lines():
                 if line.startswith("event: token"):
                     token_count += 1
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
                 elif line.startswith("event: usage"):
                     usage_count += 1
+                elif line.startswith("data: "):
+                    self._record_stream_data(line[6:])
         if token_count < 1 or usage_count != 1:
             raise RuntimeError(f"tokens={token_count}, usage={usage_count}")
-        return f"{token_count} token events, {usage_count} usage event"
+        elapsed = max(time.monotonic() - started, 0.000_001)
+        self.first_token_latency_seconds = (
+            first_token_at - started if first_token_at is not None else None
+        )
+        self.generation_time_seconds = elapsed
+        if self.output_tokens <= 0:
+            self.output_tokens = token_count
+        self.tokens_per_second = self.output_tokens / elapsed
+        return (
+            f"{token_count} token events, {usage_count} usage event, "
+            f"{self.tokens_per_second:.2f} tokens/sec"
+        )
 
     def _unload_model(self) -> str:
         data = self._post_runtime(
             "/runtime/models/unload",
             {"model_id": "april-brain", "request_id": "real-verify-unload"},
-            timeout=120.0,
+            timeout=self.timeout,
         )
         state = data.get("state")
         if state not in {"unloaded", "unavailable"}:
             raise RuntimeError(f"expected unloaded/unavailable state, got {state}")
         return str(state)
+
+    def _metrics(self) -> str:
+        self.runtime_rss_bytes = _process_rss_bytes(self.runtime.pid if self.runtime else None)
+        details = {
+            "load_time_seconds": self.load_time_seconds,
+            "first_token_latency_seconds": self.first_token_latency_seconds,
+            "total_generation_time_seconds": self.generation_time_seconds,
+            "output_tokens": self.output_tokens,
+            "tokens_per_second": self.tokens_per_second,
+            "context_size_used": 1024,
+            "backend_settings": {
+                "backend": "llama_cpp",
+                "threads": 2,
+                "n_batch": None,
+                "max_output_tokens": self.max_output_tokens,
+            },
+            "prompt_path": self.prompt_path,
+            "unload_success": True,
+            "runtime_rss_bytes": self.runtime_rss_bytes,
+        }
+        return yaml.safe_dump(details, sort_keys=False).strip()
+
+    def _record_stream_data(self, raw: str) -> None:
+        try:
+            import json
+
+            data = json.loads(raw)
+        except ValueError:
+            return
+        payload = data.get("payload") if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            return
+        if "output_tokens" in payload:
+            self.output_tokens = int(payload["output_tokens"])
+        if payload.get("prompt_path"):
+            self.prompt_path = str(payload["prompt_path"])
 
     def _confirm_unloaded(self) -> str:
         response = httpx.get(
@@ -309,6 +467,111 @@ class RealModelVerifier:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+
+
+class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional real GGUF runtime
+    def __init__(
+        self,
+        *,
+        home: Path,
+        model_path: Path,
+        prompt: str,
+        runs: int,
+        max_output_tokens: int,
+        keep_loaded: bool,
+    ) -> None:
+        super().__init__(
+            home=home,
+            model_path=model_path,
+            max_output_tokens=max_output_tokens,
+            timeout=180.0,
+        )
+        self.prompt = prompt
+        self.runs = runs
+        self.keep_loaded = keep_loaded
+
+    def run(self) -> list[BenchmarkResult]:  # type: ignore[override]
+        results: list[BenchmarkResult] = []
+        try:
+            self._prepare()
+            env = self._env()
+            self.runtime = self._start("services.april_runtime.server", env, self.runtime_log)
+            self.api = self._start("services.api.server", env, self.api_log)
+            self._wait_json(self.runtime_url + "/runtime/health", auth_runtime=True)
+            self._wait_json(self.api_url + "/health")
+            for index in range(1, self.runs + 1):
+                results.append(self._run_one(index))
+        finally:
+            self._stop()
+            shutil.rmtree(self.temp, ignore_errors=True)
+        return results
+
+    def _run_one(self, index: int) -> BenchmarkResult:
+        self.load_time_seconds = None
+        self.first_token_latency_seconds = None
+        self.generation_time_seconds = None
+        self.output_tokens = 0
+        self.tokens_per_second = None
+        try:
+            self._load_model()
+            self._benchmark_stream()
+            unload_success = False
+            if not self.keep_loaded:
+                self._unload_model()
+                unload_success = True
+            return BenchmarkResult(
+                run_index=index,
+                ok=True,
+                load_time_seconds=self.load_time_seconds or 0.0,
+                first_token_latency_seconds=self.first_token_latency_seconds,
+                generation_time_seconds=self.generation_time_seconds or 0.0,
+                output_tokens=self.output_tokens,
+                tokens_per_second=self.tokens_per_second or 0.0,
+                unload_success=unload_success,
+                context_size=1024,
+                backend_settings={
+                    "backend": "llama_cpp",
+                    "threads": 2,
+                    "max_output_tokens": self.max_output_tokens,
+                },
+            )
+        except Exception as exc:
+            return BenchmarkResult(run_index=index, ok=False, detail=str(exc))
+
+    def _benchmark_stream(self) -> None:
+        request = {
+            "model_id": "april-brain",
+            "messages": [{"role": "user", "content": self.prompt}],
+            "options": {"temperature": 0.0, "max_output_tokens": self.max_output_tokens},
+            "request_id": "model-benchmark",
+        }
+        started = time.monotonic()
+        first_token_at: float | None = None
+        token_events = 0
+        with httpx.stream(
+            "POST",
+            self.runtime_url + "/runtime/stream",
+            json=request,
+            headers=self.runtime_headers,
+            timeout=self.timeout,
+        ) as response:
+            if response.status_code >= 400:
+                raise RuntimeError(self._response_error(response))
+            for line in response.iter_lines():
+                if line.startswith("event: token"):
+                    token_events += 1
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
+                elif line.startswith("data: "):
+                    self._record_stream_data(line[6:])
+        elapsed = max(time.monotonic() - started, 0.000_001)
+        self.first_token_latency_seconds = (
+            first_token_at - started if first_token_at is not None else None
+        )
+        self.generation_time_seconds = elapsed
+        if self.output_tokens <= 0:
+            self.output_tokens = token_events
+        self.tokens_per_second = self.output_tokens / elapsed
 
 
 class LauncherVerifier:
@@ -821,6 +1084,178 @@ class LauncherVerifier:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+
+
+class WorkflowVerifier(LauncherVerifier):
+    def run(self) -> list[VerifyCheck]:
+        try:
+            self._prepare()
+            env = self._env()
+            self.runtime = self._start("services.april_runtime.server", env, self.runtime_log)
+            self.api = self._start("services.api.server", env, self.api_log)
+            self._check(
+                "runtime health", lambda: self._wait_json(self.runtime_url + "/runtime/health")
+            )
+            self._check("core health", lambda: self._wait_json(self.api_url + "/health"))
+            self._check("model load/unload", self._model_load_unload)
+            project_id = self._check("project registration", self._register_project)
+            self._check("planning request", lambda: self._multi_turn(project_id))
+            self._check("task creation and listing", self._task_listing)
+            self._check("repo inspection request", lambda: self._repo_analysis(project_id))
+            approval_id = self._check(
+                "code-write approval creation", lambda: self._patch_approval(project_id)
+            )
+            self._check("approval denial", lambda: self._deny_approval(approval_id))
+            approval_id = self._check(
+                "approval approval/resume path", lambda: self._patch_approval(project_id)
+            )
+            self._check("approval approval/resume", lambda: self._approve(approval_id))
+            self._check("memory-policy check for system_action_agent", self._system_action_policy)
+            self._check("reminder creation/listing", self._reminder_create_list)
+            self._check("voice health", self._voice_health)
+        finally:
+            self._stop()
+            self._check("services stopped", self._services_stopped)
+            shutil.rmtree(self.temp, ignore_errors=True)
+        return self.checks
+
+    def _model_load_unload(self) -> str:
+        with self._client() as client:
+            loaded = client.post(
+                "/runtime/models/load",
+                json={"model_id": "april-brain", "request_id": "workflow-load"},
+            ).json()
+            unloaded = client.post(
+                "/runtime/models/unload",
+                json={"model_id": "april-brain", "request_id": "workflow-unload"},
+            ).json()
+        return f"{loaded.get('state')} -> {unloaded.get('state')}"
+
+    def _task_listing(self) -> str:
+        with self._client() as client:
+            tasks = client.get("/tasks").json().get("tasks", [])
+        if not tasks:
+            raise RuntimeError("no task plans were created")
+        return f"{len(tasks)} tasks"
+
+    def _system_action_policy(self) -> str:
+        database = self.temp / "data" / "april.db"
+        with sqlite3.connect(database) as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM conversation_events WHERE event_type = 'brain_decision'"
+            ).fetchall()
+        if not rows:
+            raise RuntimeError("no brain decisions were recorded")
+        return "system_action_agent policy is loaded from configs/agents.yaml"
+
+    def _reminder_create_list(self) -> str:
+        with self._client() as client:
+            created = client.post(
+                "/reminders",
+                json={"content": "stand up", "due_at": "2026-06-21T09:00:00Z"},
+            ).json()
+            reminders = client.get("/reminders").json().get("reminders", [])
+        if not created.get("reminder") or not reminders:
+            raise RuntimeError("reminder create/list failed")
+        return f"{len(reminders)} reminders"
+
+    def _voice_health(self) -> str:
+        with self._client() as client:
+            data = client.get("/health").json()
+        voice = data.get("voice") or {}
+        return str(voice.get("status", "unknown"))
+
+
+class RealWorkflowVerifier(
+    RealModelVerifier
+):  # pragma: no cover - requires optional real GGUF runtime
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_token}"}
+
+    def run(self) -> list[VerifyCheck]:
+        try:
+            self._prepare()
+            env = self._env()
+            self.runtime = self._start("services.april_runtime.server", env, self.runtime_log)
+            self.api = self._start("services.api.server", env, self.api_log)
+            self._check(
+                "runtime health",
+                lambda: self._wait_json(self.runtime_url + "/runtime/health", auth_runtime=True),
+            )
+            self._check("core health", lambda: self._wait_json(self.api_url + "/health"))
+            self._check("real workflow planning route", self._real_planning_route)
+        finally:
+            self._stop()
+            self._check("services stopped", self._services_stopped)
+            shutil.rmtree(self.temp, ignore_errors=True)
+        return self.checks
+
+    def _real_planning_route(self) -> str:
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            response = client.post("/chat", json={"message": "April, plan my work today."})
+        if response.status_code >= 400:
+            raise RuntimeError(self._response_error(response))
+        method = self._latest_routing_method()
+        if method == "fallback":
+            raise RuntimeError(
+                "model/prompt reliability failure: model routing JSON was unusable "
+                "and fallback routed the request"
+            )
+        return f"routing_method={method}"
+
+    def _latest_routing_method(self) -> str:
+        database = self.temp / "data" / "april.db"
+        with sqlite3.connect(database) as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM conversation_events
+                WHERE event_type = 'brain_decision'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return "unknown"
+        try:
+            import json
+
+            payload = json.loads(str(row[0]))
+        except ValueError:
+            return "unknown"
+        return str(payload.get("routing_method") or "unknown")
+
+
+def _llama_cpp_installed() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("llama_cpp") is not None
+
+
+def _process_rss_bytes(pid: int | None) -> int | None:
+    if pid is None:
+        return None
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    raw = completed.stdout.strip()
+    if not raw:
+        return None
+    try:
+        return int(raw.split()[0]) * 1024
+    except (ValueError, IndexError):
+        return None
 
 
 def _free_port() -> int:

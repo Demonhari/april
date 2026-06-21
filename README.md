@@ -61,13 +61,74 @@ python3.11 -m venv .venv
 
 ## Local Models
 
-Place GGUF files manually under `models/` using the names configured in `configs/models.yaml`:
+APRIL never downloads models. Register existing local GGUF files with:
 
-- `models/granite3.3-2b-q4_k_m.gguf`
-- `models/qwen3-1.7b-q8_0.gguf`
-- `models/qwen3-0.6b-q8_0.gguf`
+```bash
+run april model import --role brain --id april-brain --name granite3.3-2b --path /absolute/path/model.gguf
+run april model import --role coding --id april-coding --name qwen3-1.7b --path /absolute/path/model.gguf
+run april model import --role reading --id april-reading --name qwen3-0.6b --path /absolute/path/model.gguf
+```
+
+If the source file is outside configured allowed roots, copy it into APRIL with:
+
+```bash
+run april model import --role brain --id april-brain --name granite3.3-2b --path /absolute/path/model.gguf --copy-into-models
+```
+
+CPU-only profiles are local config edits only:
+
+```bash
+run april model profile list
+run april model profile apply intel_macbook_cpu_low
+run april model doctor
+run april verify --real-model /absolute/path/model.gguf
+run april model benchmark /absolute/path/model.gguf --runs 1 --max-output-tokens 32
+```
 
 Missing files do not crash startup. Runtime health reports degraded status. Use `APRIL_RUNTIME_BACKEND=fake` for tests and development without model files.
+
+## Hari's Local Setup Path
+
+1. Install APRIL:
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+make install-global-force
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+2. Import local GGUF models with `run april model import`.
+3. Apply the Intel MacBook CPU profile:
+
+```bash
+run april model profile apply intel_macbook_cpu_low
+```
+
+4. Run model and fake verification:
+
+```bash
+run april model doctor
+run april verify --fake
+run april verify --real-model /absolute/path/model.gguf
+run april eval brain --real-model /absolute/path/model.gguf
+```
+
+5. Configure local voice paths in `configs/april.yaml`, then run:
+
+```bash
+run april voice doctor
+run april voice test-record --seconds 3
+run april voice test-stt /path/to/audio.wav
+run april voice test-tts "Hello Hari"
+```
+
+6. Start daily CLI usage:
+
+```bash
+run april --fake --oneshot ask "April, plan my work today."
+run april ask "April, plan my work today."
+```
 
 ## Start Services
 
@@ -133,10 +194,14 @@ april-run doctor
 run april doctor
 run april config validate
 run april verify --fake
+run april verify --workflow
+run april model doctor
+run april model profile list
+run april status --json
 run april status
 run april stop
 run april restart
-run april logs
+run april logs --tail 100
 run april ask "April, plan my work today."
 run april health
 run april models
@@ -150,9 +215,15 @@ run april reminder create "stand up" --due-at 2026-06-21T09:00:00Z
 run april reminder delete REMINDER_ID
 run april task list
 run april voice health
+run april voice doctor
 run april voice devices
+run april voice test-record --seconds 3
+run april voice test-stt /path/to/audio.wav
+run april voice test-tts "Hello Hari"
 run april voice ptt
 run april voice listen
+run april memory doctor
+run april eval brain --fake
 ```
 
 `run april --fake` starts missing services with `APRIL_RUNTIME_BACKEND=fake`

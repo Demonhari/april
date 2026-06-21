@@ -252,6 +252,10 @@ class ModelLifecycle:
             total_tokens=result.input_tokens + result.output_tokens,
         )
         warnings = ["Context was truncated."] if context.truncated else []
+        diagnostics = {
+            "prompt_path": getattr(state.backend, "last_prompt_path", None),
+            "context_size_used": state.model.context_size,
+        }
         return ChatResponse(
             request_id=request_id,
             model_id=request.model_id,
@@ -260,6 +264,7 @@ class ModelLifecycle:
             usage=usage,
             context_truncated=context.truncated,
             warnings=warnings,
+            diagnostics={key: value for key, value in diagnostics.items() if value is not None},
         )
 
     async def stream(
@@ -324,6 +329,8 @@ class ModelLifecycle:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
+                "prompt_path": getattr(state.backend, "last_prompt_path", None),
+                "context_size_used": state.model.context_size,
             },
         )
         yield "done", {"finish_reason": "stop"}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -7,7 +8,8 @@ from typer.testing import CliRunner
 from apps.runner.install import install_wrappers
 from apps.runner.main import app
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
-from apps.runner.verify import VerifyCheck
+from apps.runner.verify import BenchmarkResult, VerifyCheck
+from april_common.config_validation import validate_configuration
 
 
 class FakeManager:
@@ -63,6 +65,14 @@ def test_run_april_status_does_not_start_services(tmp_path: Path, monkeypatch) -
     assert "runtime" in result.output
 
 
+def test_run_april_status_json(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "status", "--json"])
+    assert result.exit_code == 0
+    assert '"ok"' in result.output
+
+
 def test_run_april_ask_delegates_after_services(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     delegated: list[list[str]] = []
@@ -71,6 +81,21 @@ def test_run_april_ask_delegates_after_services(tmp_path: Path, monkeypatch) -> 
     result = CliRunner().invoke(app, ["april", "ask", "April, plan my work today."])
     assert result.exit_code == 0
     assert manager.started == [False]
+    assert delegated == [["ask", "April, plan my work today."]]
+
+
+def test_run_april_oneshot_stops_started_services(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    delegated: list[list[str]] = []
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
+    result = CliRunner().invoke(
+        app,
+        ["april", "--fake", "--oneshot", "ask", "April, plan my work today."],
+    )
+    assert result.exit_code == 0
+    assert manager.started == [True]
+    assert manager.stopped is True
     assert delegated == [["ask", "April, plan my work today."]]
 
 
@@ -92,6 +117,9 @@ def test_run_april_logs_prints_recent_logs(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert "runtime log" in result.output
     assert "lines=150" in result.output
+    result = CliRunner().invoke(app, ["april", "logs", "--tail", "100"])
+    assert result.exit_code == 0
+    assert "lines=100" in result.output
 
 
 def test_run_april_stop_calls_manager(tmp_path: Path, monkeypatch) -> None:
@@ -138,6 +166,17 @@ def test_run_april_voice_reminder_and_task_commands_delegate(tmp_path: Path, mon
     assert runner.invoke(app, ["april", "voice", "health", "--fake"]).exit_code == 0
     assert runner.invoke(app, ["april", "voice", "doctor", "--fake"]).exit_code == 0
     assert runner.invoke(app, ["april", "voice", "ptt", "--seconds", "2", "--fake"]).exit_code == 0
+    assert (
+        runner.invoke(app, ["april", "voice", "test-record", "--seconds", "3", "--fake"]).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app, ["april", "voice", "test-stt", str(tmp_path / "a.wav"), "--fake"]
+        ).exit_code
+        == 0
+    )
+    assert runner.invoke(app, ["april", "voice", "test-tts", "Hello Hari", "--fake"]).exit_code == 0
     assert runner.invoke(app, ["april", "reminder", "list", "--fake"]).exit_code == 0
     assert (
         runner.invoke(
@@ -162,6 +201,9 @@ def test_run_april_voice_reminder_and_task_commands_delegate(tmp_path: Path, mon
         ["voice", "health"],
         ["voice", "doctor"],
         ["voice", "ptt", "--seconds", "2.0"],
+        ["voice", "test-record", "--seconds", "3.0"],
+        ["voice", "test-stt", str(tmp_path / "a.wav")],
+        ["voice", "test-tts", "Hello Hari"],
         ["reminder", "list"],
         ["reminder", "create", "stand up", "--due-at", "2026-06-21T09:00:00Z"],
         ["reminder", "delete", "reminder-1"],
@@ -227,6 +269,25 @@ def test_run_april_verify_fake_fails_on_failed_check(tmp_path: Path, monkeypatch
     assert "offline" in result.output
 
 
+def test_run_april_verify_workflow_json_and_failure(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.run_workflow_verification",
+        lambda home, **kwargs: [VerifyCheck(name="workflow", ok=True, detail=str(kwargs))],
+    )
+    result = CliRunner().invoke(app, ["april", "verify", "--workflow", "--json"])
+    assert result.exit_code == 0
+    assert "workflow" in result.output
+    monkeypatch.setattr(
+        "apps.runner.main.run_workflow_verification",
+        lambda home, **kwargs: [VerifyCheck(name="workflow", ok=False, detail="bad")],
+    )
+    failed = CliRunner().invoke(app, ["april", "verify", "--workflow"])
+    assert failed.exit_code == 1
+    assert "bad" in failed.output
+
+
 def test_run_april_verify_real_model_skips_without_path(monkeypatch) -> None:
     monkeypatch.delenv("APRIL_TEST_GGUF_PATH", raising=False)
     result = CliRunner().invoke(app, ["april", "verify", "--real-model"])
@@ -251,7 +312,7 @@ def test_run_april_verify_real_model_existing_path_runs_verifier(
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     monkeypatch.setattr(
         "apps.runner.main.run_real_model_verification",
-        lambda home, path: (
+        lambda home, path, **_kwargs: (
             calls.append(path) or [VerifyCheck(name="real model chat", ok=True, detail="ok")]
         ),
     )
@@ -259,6 +320,236 @@ def test_run_april_verify_real_model_existing_path_runs_verifier(
     assert result.exit_code == 0
     assert calls == [gguf]
     assert "APRIL Real Model Verification" in result.output
+
+
+def _copy_configs(home: Path) -> None:
+    shutil.copytree(Path.cwd() / "configs", home / "configs")
+
+
+def test_model_import_rejects_missing_path(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "model",
+            "import",
+            "--role",
+            "brain",
+            "--id",
+            "april-brain",
+            "--name",
+            "missing",
+            "--path",
+            str(tmp_path / "missing.gguf"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+
+
+def test_model_import_rejects_non_gguf(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    model = tmp_path / "model.txt"
+    model.write_text("not gguf", encoding="utf-8")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "model",
+            "import",
+            "--role",
+            "brain",
+            "--id",
+            "april-brain",
+            "--name",
+            "bad",
+            "--path",
+            str(model),
+        ],
+    )
+    assert result.exit_code == 1
+    assert ".gguf" in result.output
+
+
+def test_model_import_absolute_path_updates_config(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    model = tmp_path / "local.gguf"
+    model.write_bytes(b"gguf")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "model",
+            "import",
+            "--role",
+            "brain",
+            "--id",
+            "april-brain",
+            "--name",
+            "local",
+            "--path",
+            str(model),
+        ],
+    )
+    assert result.exit_code == 0
+    text = (tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8")
+    assert str(model) in text
+    assert "run april verify --real-model" in result.output
+    assert "local.gguf" in result.output
+    assert validate_configuration(tmp_path) == []
+
+
+def test_model_import_copy_into_models_and_no_overwrite(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    source = tmp_path / "outside" / "model.gguf"
+    source.parent.mkdir()
+    source.write_bytes(b"gguf")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "april",
+            "model",
+            "import",
+            "--role",
+            "brain",
+            "--id",
+            "april-brain",
+            "--name",
+            "local",
+            "--path",
+            str(source),
+            "--copy-into-models",
+        ],
+    )
+    assert result.exit_code == 0
+    assert (tmp_path / "models" / "model.gguf").exists()
+    again = runner.invoke(
+        app,
+        [
+            "april",
+            "model",
+            "import",
+            "--role",
+            "brain",
+            "--id",
+            "april-brain",
+            "--name",
+            "local",
+            "--path",
+            str(source),
+            "--copy-into-models",
+        ],
+    )
+    assert again.exit_code == 1
+    assert "--force" in again.output
+
+
+def test_model_profile_list_and_apply(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    runner = CliRunner()
+    listed = runner.invoke(app, ["april", "model", "profile", "list"])
+    assert listed.exit_code == 0
+    assert "intel_macbook_cpu_low" in listed.output
+    applied = runner.invoke(app, ["april", "model", "profile", "apply", "intel_macbook_cpu_low"])
+    assert applied.exit_code == 0
+    text = (tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8")
+    assert "context_size: 4096" in text
+    assert list((tmp_path / "configs").glob("models.yaml.bak-*"))
+
+
+def test_model_doctor_json(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "model", "doctor", "--json"])
+    assert result.exit_code == 0
+    assert "llama_cpp_python_installed" in result.output
+    table = CliRunner().invoke(app, ["april", "model", "doctor"])
+    assert table.exit_code == 0
+    assert "APRIL Model Doctor" in table.output
+    assert "Configured Models" in table.output
+
+
+def test_model_benchmark_json_and_failure(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"fake")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.run_model_benchmark",
+        lambda *args, **kwargs: [
+            BenchmarkResult(
+                run_index=1,
+                ok=True,
+                load_time_seconds=1.0,
+                output_tokens=2,
+                tokens_per_second=3.0,
+                unload_success=True,
+            )
+        ],
+    )
+    result = CliRunner().invoke(app, ["april", "model", "benchmark", str(gguf), "--json"])
+    assert result.exit_code == 0
+    assert '"tokens_per_second"' in result.output
+    monkeypatch.setattr(
+        "apps.runner.main.run_model_benchmark",
+        lambda *args, **kwargs: [BenchmarkResult(run_index=1, ok=False, detail="missing")],
+    )
+    failed = CliRunner().invoke(app, ["april", "model", "benchmark", str(gguf)])
+    assert failed.exit_code == 1
+    assert "missing" in failed.output
+
+
+def test_model_benchmark_rejects_missing_path(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "model", "benchmark", str(tmp_path / "no.gguf")])
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+
+
+def test_memory_doctor(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "memory", "doctor"])
+    assert result.exit_code == 0
+    assert "hashed-token" in result.output
+
+
+def test_eval_brain_fake_json_and_errors(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    fixtures = tmp_path / "tests" / "fixtures" / "evals"
+    fixtures.mkdir(parents=True)
+    shutil.copy2(Path.cwd() / "tests" / "fixtures" / "evals" / "brain_routes.yaml", fixtures)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "eval", "brain", "--fake", "--json"])
+    assert result.exit_code == 0
+    assert "normal_chat" in result.output
+    table = CliRunner().invoke(app, ["april", "eval", "brain", "--fake"])
+    assert table.exit_code == 0
+    assert "APRIL Brain Eval" in table.output
+    missing_mode = CliRunner().invoke(app, ["april", "eval", "brain"])
+    assert missing_mode.exit_code == 1
+    missing_model = CliRunner().invoke(
+        app,
+        ["april", "eval", "brain", "--real-model", str(tmp_path / "missing.gguf")],
+    )
+    assert missing_model.exit_code == 1
 
 
 def test_doctor_reports_missing_path(tmp_path: Path, monkeypatch) -> None:

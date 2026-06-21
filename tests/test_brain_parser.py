@@ -32,6 +32,37 @@ def test_valid_structured_tool_calls() -> None:
     assert decision.planned_tool_calls[0].args["content"] == "stand up"
 
 
+def test_parser_accepts_markdown_fence_and_trailing_commas() -> None:
+    decision = parse_brain_decision(
+        """
+        ```json
+        {"intent":"planning","agent":"general_agent","model_id":"april-brain",
+        "tools_needed":[],"memory_queries":[],"permission_level":0,"risk_level":"none",
+        "needs_confirmation":false,"task_steps":["Answer"],"decision_summary":"General",}
+        ```
+        """
+    )
+    assert decision.intent == "planning"
+
+
+def test_parser_extracts_single_object_from_prose() -> None:
+    decision = parse_brain_decision(f"Here is the route:\n{VALID}\nDone.")
+    assert decision.agent == "general_agent"
+
+
+def test_parser_fills_missing_optional_arrays() -> None:
+    decision = parse_brain_decision(
+        """
+        {"intent":"planning","agent":"general_agent","model_id":"april-brain",
+        "permission_level":0,"risk_level":"none","needs_confirmation":false,
+        "decision_summary":"General"}
+        """
+    )
+    assert decision.tools_needed == []
+    assert decision.memory_queries == []
+    assert decision.task_steps == []
+
+
 @pytest.mark.asyncio
 async def test_malformed_json_repair() -> None:
     async def repair(_: str) -> str:

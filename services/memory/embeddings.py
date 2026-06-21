@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
+from april_common.errors import ConfigError
+
 
 class EmbeddingProvider(ABC):
     @property
@@ -50,3 +52,39 @@ class HashedTokenEmbedding(EmbeddingProvider):
 
     def _tokens(self, text: str) -> list[str]:
         return re.findall(r"[a-z0-9_]+", text.lower())
+
+
+class RuntimeLocalEmbedding(EmbeddingProvider):
+    def __init__(self, model_id: str | None) -> None:
+        self.model_id = model_id
+
+    @property
+    def name(self) -> str:
+        return "runtime-local"
+
+    @property
+    def dimensions(self) -> int:
+        raise ConfigError(
+            "runtime-local embeddings are not enabled. Configure a tested local embedding model."
+        )
+
+    def embed(self, text: str) -> np.ndarray:
+        raise ConfigError(
+            "runtime-local embeddings are not enabled. Configure a tested local embedding model."
+        )
+
+
+def embedding_provider_from_config(
+    provider: str,
+    *,
+    model_id: str | None = None,
+) -> EmbeddingProvider:
+    if provider == "hashed-token":
+        return HashedTokenEmbedding()
+    if provider == "runtime-local":
+        raise ConfigError(
+            "memory.embedding_provider=runtime-local is disabled until a local embedding model "
+            "and backend support are explicitly configured.",
+            {"embedding_model_id": model_id},
+        )
+    raise ConfigError(f"Unknown memory embedding provider: {provider}")

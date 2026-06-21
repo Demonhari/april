@@ -16,6 +16,7 @@ class LlamaCppBackend(RuntimeBackend):
     def __init__(self) -> None:
         self._llm: Any | None = None
         self._model: ModelDefinition | None = None
+        self.last_prompt_path: str | None = None
 
     async def load(self, model: ModelDefinition) -> None:
         try:
@@ -109,6 +110,7 @@ class LlamaCppBackend(RuntimeBackend):
             raise RuntimeUnavailableError("Model is not loaded.")
         chat_completion = getattr(self._llm, "create_chat_completion", None)
         if not callable(chat_completion):
+            self.last_prompt_path = "fallback_prompt"
             return await self.generate(
                 prompt,
                 temperature=temperature,
@@ -134,6 +136,7 @@ class LlamaCppBackend(RuntimeBackend):
         try:
             output = await asyncio.to_thread(run)
         except Exception:
+            self.last_prompt_path = "fallback_prompt"
             return await self.generate(
                 prompt,
                 temperature=temperature,
@@ -142,6 +145,7 @@ class LlamaCppBackend(RuntimeBackend):
                 stop=stop,
                 seed=seed,
             )
+        self.last_prompt_path = "chat_template"
         return await self._chat_generation_result(output, prompt)
 
     async def stream(
@@ -216,6 +220,7 @@ class LlamaCppBackend(RuntimeBackend):
             raise RuntimeUnavailableError("Model is not loaded.")
         chat_completion = getattr(self._llm, "create_chat_completion", None)
         if not callable(chat_completion):
+            self.last_prompt_path = "fallback_prompt"
             async for token in self.stream(
                 prompt,
                 temperature=temperature,
@@ -252,6 +257,7 @@ class LlamaCppBackend(RuntimeBackend):
                     text = self._chat_stream_text(chunk)
                     if text:
                         emitted = True
+                        self.last_prompt_path = "chat_template"
                         put(text)
             except Exception as exc:
                 if emitted:
@@ -272,6 +278,7 @@ class LlamaCppBackend(RuntimeBackend):
                     ):
                         text = chunk["choices"][0].get("text", "")
                         if text:
+                            self.last_prompt_path = "fallback_prompt"
                             put(str(text))
                 except Exception as fallback_exc:
                     put(fallback_exc)

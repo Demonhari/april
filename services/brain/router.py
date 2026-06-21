@@ -8,12 +8,15 @@ from services.brain.parser import parse_with_repair
 from services.brain.schemas import BrainDecision
 from services.memory.schemas import Message
 
-ROUTER_SYSTEM_PROMPT = """Route this request. Return exactly one JSON object matching:
-{"intent": "...", "agent": "...", "model_id": "...", "tools_needed": [],
-"planned_tool_calls": [{"tool": "...", "args": {}, "reason": "..."}], "memory_queries": [],
-"permission_level": 0, "risk_level": "none", "needs_confirmation": false,
-"task_steps": ["short operational step"], "decision_summary": "concise summary"}.
-Do not include chain-of-thought."""
+ROUTER_SYSTEM_PROMPT = """Route the user request for APRIL.
+Return exactly one compact JSON object. No markdown, no prose, no chain-of-thought.
+Required keys: intent, agent, model_id, permission_level, risk_level,
+needs_confirmation, decision_summary.
+Optional array keys: tools_needed, planned_tool_calls, memory_queries, task_steps.
+Allowed agents: general_agent, coding_agent, reading_agent, creative_agent,
+reasoning_agent, system_action_agent.
+Allowed risk_level: none, read_only, safe_write, code_write, system_action,
+external_action."""
 
 
 class BrainRouter:

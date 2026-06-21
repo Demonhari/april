@@ -37,6 +37,15 @@ class RuntimeSettings(BaseModel):
 class MemorySettings(BaseModel):
     database_path: Path = Path("data/april.db")
     vector_index_path: Path = Path("data/vector_index")
+    embedding_provider: str = "hashed-token"
+    embedding_model_id: str | None = None
+
+    @field_validator("embedding_provider")
+    @classmethod
+    def validate_embedding_provider(cls, value: str) -> str:
+        if value not in {"hashed-token", "runtime-local"}:
+            raise ValueError("embedding_provider must be hashed-token or runtime-local")
+        return value
 
 
 class PathSettings(BaseModel):
@@ -141,6 +150,8 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     ),
     "APRIL_DATABASE_PATH": ("memory", "database_path"),
     "APRIL_VECTOR_INDEX_PATH": ("memory", "vector_index_path"),
+    "APRIL_MEMORY_EMBEDDING_PROVIDER": ("memory", "embedding_provider"),
+    "APRIL_MEMORY_EMBEDDING_MODEL_ID": ("memory", "embedding_model_id"),
     "APRIL_LOGS_PATH": ("paths", "logs_path"),
     "APRIL_AUDIT_PATH": ("paths", "audit_path"),
     "APRIL_ALLOWED_FILESYSTEM_ROOTS": ("paths", "allowed_filesystem_roots"),

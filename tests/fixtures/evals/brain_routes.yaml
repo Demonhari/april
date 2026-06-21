@@ -1,0 +1,29 @@
+cases:
+  - id: normal_chat
+    message: Hello April, how are you?
+    expected_intent: normal_conversation
+    expected_agent: general_agent
+  - id: coding_repo_analysis
+    message: Inspect this repository and explain the bug.
+    expected_intent: coding_repo_analysis
+    expected_agent: coding_agent
+  - id: read_only_file_question
+    message: Read the README file and summarize it.
+    expected_intent: document_reading
+    expected_agent: reading_agent
+  - id: code_modification_request
+    message: Modify the code and apply the fix.
+    expected_intent: code_modification
+    expected_agent: coding_agent
+  - id: system_action_request
+    message: Delete the old logs from my machine.
+    expected_intent: destructive_action
+    expected_agent: system_action_agent
+  - id: external_url_request
+    message: Open https://example.com and publish the result.
+    expected_intent: external_action
+    expected_agent: system_action_agent
+  - id: reminder_request
+    message: Remind me to stand up at 9 AM.
+    expected_intent: reminders
+    expected_agent: general_agent

@@ -16,12 +16,20 @@ Structured memory uses SQLite with migrations for:
 - suspended agent runs
 - schema migrations
 
-Vector memory is local and stored under `data/vector_index/`. The MVP embedding provider uses deterministic signed hashing over normalized tokens. It is stable across Python hash seeds and requires no downloads.
+Vector memory is local and stored under `data/vector_index/`. The default
+`memory.embedding_provider` is `hashed-token`, which uses deterministic signed
+hashing over normalized tokens. It is stable across Python hash seeds and
+requires no downloads.
 
 The hashed embedding is a baseline retrieval aid, not a semantic model.
-There is no selectable placeholder semantic provider; local GGUF semantic
-embeddings are a future extension and must be explicitly configured when added.
-APRIL does not call cloud embedding APIs.
+`runtime-local` is reserved for a future explicitly configured local embedding
+model and fails closed in this pass. APRIL does not call cloud embedding APIs.
+
+Inspect the active provider with:
+
+```bash
+run april memory doctor
+```
 
 The vector index stores metadata and matrix data separately as `records.json`,
 `metadata.json`, and `vectors.npy`. Writes are batched under a local file lock

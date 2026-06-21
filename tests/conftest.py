@@ -52,7 +52,7 @@ class FakeRuntimeClient:
         lower = joined.lower()
         if "return exactly one json object with type final_answer" in lower:
             content = self._structured_response(joined, lower)
-        elif "route this request" in lower:
+        elif "route this request" in lower or "route the user request" in lower:
             if "apply the fix" in lower:
                 content = (
                     '{"intent":"code_modification","agent":"coding_agent","model_id":"april-coding",'

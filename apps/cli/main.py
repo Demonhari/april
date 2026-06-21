@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Coroutine
+from pathlib import Path
 from typing import Any
 
 import typer
@@ -252,9 +253,9 @@ def voice_health_command() -> None:
 
 @voice_app.command("doctor")
 def voice_doctor_command() -> None:
-    from services.voice.health import voice_health
+    from services.voice.health import voice_doctor
 
-    report = voice_health(get_settings()).model_dump()
+    report = voice_doctor(get_settings())
     print_jsonish(report)
     if report["status"] != "ok":
         console.print("Voice listen will fall back to push-to-talk until missing components exist.")
@@ -262,12 +263,62 @@ def voice_doctor_command() -> None:
 
 @voice_app.command("devices")
 def voice_devices() -> None:
+    from services.voice.health import query_audio_devices
+
+    print_jsonish(query_audio_devices())
+
+
+@voice_app.command("test-record")
+def voice_test_record(seconds: float = typer.Option(3.0, "--seconds", min=0.1, max=30.0)) -> None:
+    from services.voice.microphone import SoundDeviceMicrophone
+
+    settings = get_settings()
+    output_path = settings.audio_cache_path / "test-record.wav"
+    mic = SoundDeviceMicrophone(
+        device=settings.voice.input_device,
+        max_seconds=seconds,
+    )
     try:
-        import sounddevice as sd
-    except ImportError as exc:
-        console.print("[red]sounddevice is not installed. Install APRIL voice extras.[/red]")
-        raise typer.Exit(1) from exc
-    print_jsonish({"devices": str(sd.query_devices())})
+        recorded = run(mic.record_push_to_talk(output_path))
+    finally:
+        if not settings.voice.retain_debug_audio:
+            output_path.unlink(missing_ok=True)
+    print_jsonish(
+        {
+            "recorded": True,
+            "seconds": seconds,
+            "path": str(recorded),
+            "retained": settings.voice.retain_debug_audio,
+        }
+    )
+
+
+@voice_app.command("test-stt")
+def voice_test_stt(audio_path: Path) -> None:
+    from services.voice.speech_to_text import WhisperCppSpeechToText
+
+    settings = get_settings()
+    stt = WhisperCppSpeechToText(
+        settings.voice.whisper_binary_path,
+        settings.voice.whisper_model_path,
+    )
+    text = run(stt.transcribe(audio_path.expanduser().resolve()))
+    print_jsonish({"text": text})
+
+
+@voice_app.command("test-tts")
+def voice_test_tts(text: str) -> None:
+    from services.voice.text_to_speech import PiperTextToSpeech
+
+    settings = get_settings()
+    output_path = settings.audio_cache_path / "test-tts.wav"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tts = PiperTextToSpeech(settings.voice.piper_binary_path, settings.voice.piper_model_path)
+    synthesized = run(tts.synthesize(text, output_path))
+    retained = settings.voice.retain_debug_audio
+    if not retained:
+        synthesized.unlink(missing_ok=True)
+    print_jsonish({"synthesized": True, "path": str(synthesized), "retained": retained})
 
 
 @voice_app.command("listen")

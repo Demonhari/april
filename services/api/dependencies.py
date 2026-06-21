@@ -16,6 +16,7 @@ from services.april_runtime.client import RuntimeClient
 from services.april_runtime.model_registry import ModelRegistry
 from services.brain.orchestrator import AprilOrchestrator
 from services.memory.database import Database
+from services.memory.embeddings import embedding_provider_from_config
 from services.memory.migrations import run_migrations
 from services.memory.retriever import MemoryRetriever
 from services.memory.sqlite_memory import SqliteMemory
@@ -51,7 +52,11 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
     await database.connect()
     await run_migrations(database)
     memory = SqliteMemory(database)
-    vector_memory = VectorMemory(active_settings.vector_index_path)
+    embedding = embedding_provider_from_config(
+        active_settings.memory.embedding_provider,
+        model_id=active_settings.memory.embedding_model_id,
+    )
+    vector_memory = VectorMemory(active_settings.vector_index_path, embedding=embedding)
     memory_retriever = MemoryRetriever(memory, vector_memory)
     runtime_client = RuntimeClient(
         active_settings.runtime.url,

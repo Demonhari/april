@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from services.memory.embeddings import HashedTokenEmbedding
+import pytest
+
+from april_common.errors import ConfigError
+from services.memory.embeddings import HashedTokenEmbedding, embedding_provider_from_config
 from services.memory.schemas import VectorMetadata
 from services.memory.vector_memory import VectorMemory
 
@@ -19,6 +22,11 @@ def metadata(content_hash: str, project_id: str | None = None) -> VectorMetadata
 def test_deterministic_embeddings() -> None:
     embedder = HashedTokenEmbedding(32)
     assert (embedder.embed("Hello world") == embedder.embed("hello world")).all()
+
+
+def test_runtime_local_embedding_fails_closed() -> None:
+    with pytest.raises(ConfigError, match="runtime-local"):
+        embedding_provider_from_config("runtime-local", model_id="local-embed")
 
 
 def test_persistence_and_similarity_search(tmp_path) -> None:

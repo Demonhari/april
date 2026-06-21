@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable
 
 from pydantic import ValidationError as PydanticValidationError
@@ -12,6 +13,7 @@ RepairCallback = Callable[[str], Awaitable[str]]
 
 
 def extract_single_json_object(text: str) -> str:
+    text = _strip_markdown_fence(text)
     objects: list[str] = []
     depth = 0
     start: int | None = None
@@ -44,10 +46,31 @@ def extract_single_json_object(text: str) -> str:
     return objects[0]
 
 
+def _strip_markdown_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return text
+    stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped
+
+
+def _remove_trailing_commas(text: str) -> str:
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+
+def _with_missing_optional_arrays(data: dict[str, object]) -> dict[str, object]:
+    for key in ("tools_needed", "planned_tool_calls", "memory_queries", "task_steps"):
+        data.setdefault(key, [])
+    return data
+
+
 def parse_brain_decision(text: str, *, method: str = "model") -> BrainDecision:
-    raw = extract_single_json_object(text)
+    raw = _remove_trailing_commas(extract_single_json_object(text))
     try:
         data = json.loads(raw)
+        if isinstance(data, dict):
+            data = _with_missing_optional_arrays(data)
         decision = BrainDecision.model_validate(data)
     except (json.JSONDecodeError, PydanticValidationError) as exc:
         raise ValidationError(
