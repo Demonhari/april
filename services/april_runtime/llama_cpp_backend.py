@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from april_common.errors import RuntimeUnavailableError
 from services.april_runtime.backend import BackendHealth, GenerationResult, RuntimeBackend
 from services.april_runtime.model_registry import ModelDefinition
+from services.april_runtime.schemas import ChatMessage, FinishReason
 
 
 class LlamaCppBackend(RuntimeBackend):
@@ -93,6 +94,56 @@ class LlamaCppBackend(RuntimeBackend):
         output_tokens = await self.count_tokens(text)
         return GenerationResult(text=text, input_tokens=input_tokens, output_tokens=output_tokens)
 
+    async def generate_messages(
+        self,
+        prompt: str,
+        *,
+        messages: list[ChatMessage],
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> GenerationResult:
+        if self._llm is None:
+            raise RuntimeUnavailableError("Model is not loaded.")
+        chat_completion = getattr(self._llm, "create_chat_completion", None)
+        if not callable(chat_completion):
+            return await self.generate(
+                prompt,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                top_p=top_p,
+                stop=stop,
+                seed=seed,
+            )
+
+        def run() -> Any:
+            return chat_completion(
+                messages=self._message_dicts(messages),
+                **self._completion_kwargs(
+                    max_output_tokens=max_output_tokens,
+                    temperature=temperature,
+                    stream=False,
+                    top_p=top_p,
+                    stop=stop,
+                    seed=seed,
+                ),
+            )
+
+        try:
+            output = await asyncio.to_thread(run)
+        except Exception:
+            return await self.generate(
+                prompt,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                top_p=top_p,
+                stop=stop,
+                seed=seed,
+            )
+        return await self._chat_generation_result(output, prompt)
+
     async def stream(
         self,
         prompt: str,
@@ -141,12 +192,101 @@ class LlamaCppBackend(RuntimeBackend):
         task = asyncio.create_task(asyncio.to_thread(produce))
         try:
             while True:
-                token = await queue.get()
-                if token is None:
+                queued = await queue.get()
+                if queued is None:
                     break
-                if isinstance(token, Exception):
-                    raise token
+                if isinstance(queued, Exception):
+                    raise queued
+                yield queued
+        finally:
+            await task
+
+    async def stream_messages(
+        self,
+        prompt: str,
+        *,
+        messages: list[ChatMessage],
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> AsyncIterator[str]:
+        if self._llm is None:
+            raise RuntimeUnavailableError("Model is not loaded.")
+        chat_completion = getattr(self._llm, "create_chat_completion", None)
+        if not callable(chat_completion):
+            async for token in self.stream(
+                prompt,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                top_p=top_p,
+                stop=stop,
+                seed=seed,
+            ):
                 yield token
+            return
+
+        llm = self._llm
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[str | Exception | None] = asyncio.Queue(maxsize=32)
+
+        def produce() -> None:
+            emitted = False
+
+            def put(item: str | Exception | None) -> None:
+                asyncio.run_coroutine_threadsafe(queue.put(item), loop).result()
+
+            try:
+                for chunk in chat_completion(
+                    messages=self._message_dicts(messages),
+                    **self._completion_kwargs(
+                        max_output_tokens=max_output_tokens,
+                        temperature=temperature,
+                        stream=True,
+                        top_p=top_p,
+                        stop=stop,
+                        seed=seed,
+                    ),
+                ):
+                    text = self._chat_stream_text(chunk)
+                    if text:
+                        emitted = True
+                        put(text)
+            except Exception as exc:
+                if emitted:
+                    put(exc)
+                    put(None)
+                    return
+                try:
+                    for chunk in llm(
+                        prompt,
+                        **self._completion_kwargs(
+                            max_output_tokens=max_output_tokens,
+                            temperature=temperature,
+                            stream=True,
+                            top_p=top_p,
+                            stop=stop,
+                            seed=seed,
+                        ),
+                    ):
+                        text = chunk["choices"][0].get("text", "")
+                        if text:
+                            put(str(text))
+                except Exception as fallback_exc:
+                    put(fallback_exc)
+            finally:
+                put(None)
+
+        task = asyncio.create_task(asyncio.to_thread(produce))
+        try:
+            while True:
+                queued = await queue.get()
+                if queued is None:
+                    break
+                if isinstance(queued, Exception):
+                    raise queued
+                yield queued
         finally:
             await task
 
@@ -159,3 +299,54 @@ class LlamaCppBackend(RuntimeBackend):
         if self._llm is None:
             return BackendHealth(ok=False, message="not loaded")
         return BackendHealth(ok=True, message="loaded")
+
+    def _completion_kwargs(
+        self,
+        *,
+        max_output_tokens: int,
+        temperature: float,
+        stream: bool,
+        top_p: float | None,
+        stop: list[str] | None,
+        seed: int | None,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "max_tokens": max_output_tokens,
+            "temperature": temperature,
+            "stream": stream,
+        }
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        if stop:
+            kwargs["stop"] = stop
+        if seed is not None:
+            kwargs["seed"] = seed
+        return kwargs
+
+    def _message_dicts(self, messages: list[ChatMessage]) -> list[dict[str, str]]:
+        return [{"role": message.role, "content": message.content} for message in messages]
+
+    async def _chat_generation_result(self, output: Any, prompt: str) -> GenerationResult:
+        choice = output["choices"][0]
+        message = choice.get("message") or {}
+        text = str(message.get("content") or choice.get("text") or "")
+        usage = output.get("usage") or {}
+        input_tokens = int(usage.get("prompt_tokens") or await self.count_tokens(prompt))
+        output_tokens = int(usage.get("completion_tokens") or await self.count_tokens(text))
+        return GenerationResult(
+            text=text,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            finish_reason=self._finish_reason(choice.get("finish_reason")),
+        )
+
+    def _chat_stream_text(self, chunk: Any) -> str:
+        choice = chunk["choices"][0]
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+        return str(delta.get("content") or message.get("content") or choice.get("text") or "")
+
+    def _finish_reason(self, raw: object) -> FinishReason:
+        if raw in {"stop", "length", "error", "cancelled"}:
+            return cast(FinishReason, raw)
+        return "stop"

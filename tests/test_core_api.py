@@ -348,6 +348,103 @@ def test_memory_retrieval_in_prompt(settings_tmp) -> None:
     assert "deep work" in prompt
 
 
+def test_system_action_agent_gets_no_prior_conversation_history(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    first = client.post(
+        "/chat",
+        json={"message": "April, plan my work today."},
+        headers=auth(settings_tmp),
+    ).json()
+    conversation_id = first["result"]["conversation_id"]
+    response = client.post(
+        "/agents/run",
+        json={
+            "agent": "system_action_agent",
+            "message": "Report current local action options.",
+            "conversation_id": conversation_id,
+            "options": {"structured": True},
+        },
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    prompt = "\n".join(
+        message.content
+        for message in container.runtime_client.last_messages  # type: ignore[attr-defined]
+    )
+    assert "Recent conversation history" not in prompt
+    assert "April, plan my work today." not in prompt
+
+
+def test_coding_agent_gets_project_chunks_only_for_selected_project(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+
+    async def add_other_project():
+        return await container.memory.add_project(str(settings_tmp.home / "other"))
+
+    other_project = anyio.run(add_other_project)
+    container.vector_memory.index_chunks(
+        source_type="repo",
+        source_id="selected",
+        project_id=project["id"],
+        chunks=[("selected.py", "selected project animation context", 1, 1)],
+    )
+    container.vector_memory.index_chunks(
+        source_type="repo",
+        source_id="other",
+        project_id=other_project.id,
+        chunks=[("other.py", "other project secret context", 1, 1)],
+    )
+    response = client.post(
+        "/agents/run",
+        json={
+            "agent": "coding_agent",
+            "message": "Inspect this repository animation context",
+            "project_id": project["id"],
+            "options": {"structured": True},
+        },
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    prompt = "\n".join(
+        message.content
+        for message in container.runtime_client.calls[0]  # type: ignore[attr-defined]
+    )
+    assert "selected project animation context" in prompt
+    assert "other project secret context" not in prompt
+
+
+def test_sensitive_memory_is_not_injected(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+
+    async def seed_memory() -> None:
+        await container.memory.create_memory("token should never be injected", reason="test")
+        await container.memory.create_memory("I prefer morning planning", reason="test")
+
+    anyio.run(seed_memory)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/chat", json={"message": "April, plan my work today."}, headers=auth(settings_tmp)
+    )
+    assert response.status_code == 200
+    prompt = "\n".join(
+        message.content
+        for message in container.runtime_client.last_messages  # type: ignore[attr-defined]
+    )
+    assert "morning planning" in prompt
+    assert "token should never be injected" not in prompt
+
+
 def test_vector_repo_chunks_return_citations(settings_tmp) -> None:
     import anyio
 
@@ -418,6 +515,40 @@ def test_health_degrades_when_runtime_unavailable(settings_tmp) -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "degraded"
     assert response.json()["runtime"]["status"] == "unavailable"
+
+
+def test_task_plan_created_listed_and_completed(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/chat", json={"message": "April, plan my work today."}, headers=auth(settings_tmp)
+    )
+    assert response.status_code == 200
+    tasks = client.get("/tasks", headers=auth(settings_tmp)).json()["tasks"]
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task["intent"] == "planning"
+    assert task["agent"] == "general_agent"
+    assert task["status"] == "completed"
+    assert task["steps"][0]["title"] == "Answer directly"
+
+
+def test_task_plan_error_status(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/chat",
+        json={"message": "April, check why the animation in this repository is broken."},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    tasks = client.get("/tasks", headers=auth(settings_tmp)).json()["tasks"]
+    assert tasks[0]["intent"] == "coding_repo_analysis"
+    assert tasks[0]["status"] == "error"
 
 
 def test_voice_input_preserves_conversation_id(settings_tmp) -> None:

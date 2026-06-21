@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from services.april_runtime.model_registry import ModelDefinition
-from services.april_runtime.schemas import FinishReason
+from services.april_runtime.schemas import ChatMessage, FinishReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +58,46 @@ class RuntimeBackend(ABC):
         seed: int | None = None,
     ) -> AsyncIterator[str]:
         raise NotImplementedError
+
+    async def generate_messages(
+        self,
+        prompt: str,
+        *,
+        messages: list[ChatMessage],
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> GenerationResult:
+        return await self.generate(
+            prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
+        )
+
+    def stream_messages(
+        self,
+        prompt: str,
+        *,
+        messages: list[ChatMessage],
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> AsyncIterator[str]:
+        return self.stream(
+            prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
+        )
 
     @abstractmethod
     async def tokenize(self, text: str) -> list[int]:

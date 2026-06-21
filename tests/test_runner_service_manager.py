@@ -16,7 +16,11 @@ from apps.runner.install import (
     add_path_block,
     install_wrappers,
     path_contains_dir,
+    shell_config_path,
     wrapper_content,
+)
+from apps.runner.install import (
+    main as install_main,
 )
 from apps.runner.service_manager import AprilServiceManager
 
@@ -147,6 +151,48 @@ def test_add_to_path_writes_zshrc_managed_block_once(tmp_path: Path) -> None:
     assert config_path.read_text(encoding="utf-8").count(PATH_BLOCK_START) == 1
 
 
+def test_add_to_path_writes_bashrc_when_requested(tmp_path: Path) -> None:
+    config_path, changed = add_path_block(shell="/bin/bash", home=tmp_path)
+    assert changed is True
+    assert config_path == tmp_path / ".bashrc"
+    assert PATH_BLOCK_START in config_path.read_text(encoding="utf-8")
+
+
+def test_shell_config_path_missing_shell_is_rejected_safely(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("SHELL", raising=False)
+    with pytest.raises(ValueError, match="zsh and bash"):
+        shell_config_path(home=tmp_path)
+
+
+def test_install_main_unknown_shell_prints_manual_export(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    home = tmp_path / "home"
+    repo.mkdir()
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("SHELL", "/bin/fish")
+    assert (
+        install_main(
+            [
+                "--install",
+                "--repo-root",
+                str(repo),
+                "--bin-dir",
+                str(bin_dir),
+                "--add-to-path",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "PATH config was not edited automatically" in output
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in output
+    assert not (home / ".config" / "fish").exists()
+
+
 def test_path_contains_dir_detects_local_bin(tmp_path: Path) -> None:
     local_bin = tmp_path / ".local" / "bin"
     local_bin.mkdir(parents=True)
@@ -262,6 +308,7 @@ def test_install_run_april_skip_pip_clean_checkout_does_not_create_venv(
             "PYTHON": sys.executable,
         }
     )
+    env.pop("SHELL", None)
     result = subprocess.run(
         ["bash", "scripts/install_run_april.sh", "--add-to-path"],
         cwd=repo,
@@ -273,7 +320,8 @@ def test_install_run_april_skip_pip_clean_checkout_does_not_create_venv(
     assert result.returncode == 0, result.stderr
     assert not (repo / ".venv").exists()
     assert (home / ".local" / "bin" / "run").exists()
-    assert PATH_BLOCK_START in (home / ".zshrc").read_text(encoding="utf-8")
+    expected_config = home / (".zshrc" if sys.platform == "darwin" else ".bashrc")
+    assert PATH_BLOCK_START in expected_config.read_text(encoding="utf-8")
 
 
 def test_wrapper_prefers_existing_venv_and_handles_spaces(tmp_path: Path) -> None:

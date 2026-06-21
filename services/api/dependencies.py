@@ -56,6 +56,7 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
     runtime_client = RuntimeClient(
         active_settings.runtime.url,
         timeout=active_settings.runtime.request_timeout_seconds,
+        token=active_settings.runtime.token,
     )
     model_registry = ModelRegistry.from_file(
         active_settings.home / "configs" / "models.yaml",

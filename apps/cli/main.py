@@ -230,7 +230,7 @@ def task_list() -> None:
 
 
 @voice_app.command("ptt")
-def voice_ptt() -> None:
+def voice_ptt(seconds: float | None = typer.Option(None, "--seconds", min=0.1, max=300.0)) -> None:
     from services.voice.conversation_loop import PushToTalkLoop
     from services.voice.health import voice_health
 
@@ -238,7 +238,8 @@ def voice_ptt() -> None:
     health_report = voice_health(settings)
     if health_report.status == "degraded":
         console.print(health_report.model_dump())
-    loop = PushToTalkLoop(api_client=client())
+    console.print("Recording. Speak after this prompt.")
+    loop = PushToTalkLoop(api_client=client(), record_seconds=seconds)
     run(loop.run_once())
 
 
@@ -247,6 +248,16 @@ def voice_health_command() -> None:
     from services.voice.health import voice_health
 
     print_jsonish(voice_health(get_settings()).model_dump())
+
+
+@voice_app.command("doctor")
+def voice_doctor_command() -> None:
+    from services.voice.health import voice_health
+
+    report = voice_health(get_settings()).model_dump()
+    print_jsonish(report)
+    if report["status"] != "ok":
+        console.print("Voice listen will fall back to push-to-talk until missing components exist.")
 
 
 @voice_app.command("devices")
@@ -269,7 +280,7 @@ def voice_listen() -> None:
     if health_report.status == "degraded":
         console.print(health_report.model_dump())
     loop = WakeWordConversationLoop(api_client=client())
-    run(loop.run_once())
+    run(loop.run_forever())
 
 
 if __name__ == "__main__":

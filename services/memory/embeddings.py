@@ -50,16 +50,3 @@ class HashedTokenEmbedding(EmbeddingProvider):
 
     def _tokens(self, text: str) -> list[str]:
         return re.findall(r"[a-z0-9_]+", text.lower())
-
-
-class LocalModelEmbeddingPlaceholder(EmbeddingProvider):
-    @property
-    def name(self) -> str:
-        return "local-model-placeholder"
-
-    @property
-    def dimensions(self) -> int:
-        raise NotImplementedError("Local GGUF embedding provider is an extension point.")
-
-    def embed(self, text: str) -> np.ndarray:
-        raise NotImplementedError("Local GGUF embedding provider is not implemented in the MVP.")

@@ -220,8 +220,9 @@ class ModelLifecycle:
             start = time.monotonic()
             try:
                 state.active_requests += 1
-                result = await state.backend.generate(
+                result = await state.backend.generate_messages(
                     prompt,
+                    messages=context.messages,
                     temperature=options.temperature,
                     max_output_tokens=options.max_output_tokens,
                     top_p=options.top_p,
@@ -287,8 +288,9 @@ class ModelLifecycle:
             state.active_requests += 1
             yield "meta", {"context_truncated": context.truncated}
             try:
-                async for token in state.backend.stream(
+                async for token in state.backend.stream_messages(
                     prompt,
+                    messages=context.messages,
                     temperature=options.temperature,
                     max_output_tokens=options.max_output_tokens,
                     top_p=options.top_p,

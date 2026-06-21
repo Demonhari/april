@@ -12,7 +12,7 @@ from rich.table import Table
 from apps.cli.render import console
 from apps.runner.install import is_april_wrapper, path_contains_dir
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
-from apps.runner.verify import run_fake_verification
+from apps.runner.verify import VerifyCheck, run_fake_verification, run_real_model_verification
 from april_common.config_validation import validate_configuration
 from april_common.effective_config import load_agents_file, load_permissions_file, load_tools_file
 from april_common.settings import load_settings
@@ -158,6 +158,16 @@ def _doctor() -> None:
         console.print("make install-global-force")
     elif path_contains_dir(local_bin):
         console.print("[green]OK: run resolves to an APRIL wrapper visible in PATH.[/green]")
+
+
+def _print_verification_table(title: str, checks: list[VerifyCheck]) -> None:
+    table = Table(title=title)
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for check in checks:
+        table.add_row(check.name, "pass" if check.ok else "fail", check.detail)
+    console.print(table)
 
 
 @april_app.callback(invoke_without_command=True)
@@ -390,6 +400,14 @@ def voice_health(
     _delegate(["voice", "health"], fake=_effective_fake(ctx, fake))
 
 
+@voice_app.command("doctor")
+def voice_doctor(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["voice", "doctor"], fake=_effective_fake(ctx, fake))
+
+
 @voice_app.command("devices")
 def voice_devices(
     ctx: typer.Context,
@@ -402,8 +420,12 @@ def voice_devices(
 def voice_ptt(
     ctx: typer.Context,
     fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+    seconds: float | None = typer.Option(None, "--seconds", min=0.1, max=300.0),
 ) -> None:
-    _delegate(["voice", "ptt"], fake=_effective_fake(ctx, fake))
+    args = ["voice", "ptt"]
+    if seconds is not None:
+        args.extend(["--seconds", str(seconds)])
+    _delegate(args, fake=_effective_fake(ctx, fake))
 
 
 @voice_app.command("listen")
@@ -458,6 +480,8 @@ def config_inspect() -> None:
     settings_data = settings.model_dump(mode="json")
     if isinstance(settings_data.get("api"), dict):
         settings_data["api"]["token"] = "[REDACTED]"
+    if isinstance(settings_data.get("runtime"), dict):
+        settings_data["runtime"]["token"] = "[REDACTED]"
     models = ModelRegistry.from_file(home / "configs" / "models.yaml", root=home)
     data = {
         "settings": settings_data,
@@ -489,21 +513,16 @@ def verify(
         if not configured_path.expanduser().exists():
             console.print(f"[red]GGUF path does not exist: {configured_path}[/red]")
             raise typer.Exit(1)
-        console.print(
-            "[yellow]Real-model launcher verification is not implemented in this pass.[/yellow]"
-        )
-        raise typer.Exit(1)
+        checks = run_real_model_verification(_manager().home, configured_path)
+        _print_verification_table("APRIL Real Model Verification", checks)
+        if not all(check.ok for check in checks):
+            raise typer.Exit(1)
+        raise typer.Exit(0)
     if not fake:
         console.print("[red]Use --fake for deterministic local verification.[/red]")
         raise typer.Exit(1)
     checks = run_fake_verification(_manager().home)
-    table = Table(title="APRIL Verification")
-    table.add_column("Check")
-    table.add_column("Status")
-    table.add_column("Detail")
-    for check in checks:
-        table.add_row(check.name, "pass" if check.ok else "fail", check.detail)
-    console.print(table)
+    _print_verification_table("APRIL Verification", checks)
     if not all(check.ok for check in checks):
         raise typer.Exit(1)
 

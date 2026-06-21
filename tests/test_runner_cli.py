@@ -136,7 +136,8 @@ def test_run_april_voice_reminder_and_task_commands_delegate(tmp_path: Path, mon
     monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
     runner = CliRunner()
     assert runner.invoke(app, ["april", "voice", "health", "--fake"]).exit_code == 0
-    assert runner.invoke(app, ["april", "voice", "ptt", "--fake"]).exit_code == 0
+    assert runner.invoke(app, ["april", "voice", "doctor", "--fake"]).exit_code == 0
+    assert runner.invoke(app, ["april", "voice", "ptt", "--seconds", "2", "--fake"]).exit_code == 0
     assert runner.invoke(app, ["april", "reminder", "list", "--fake"]).exit_code == 0
     assert (
         runner.invoke(
@@ -159,7 +160,8 @@ def test_run_april_voice_reminder_and_task_commands_delegate(tmp_path: Path, mon
     assert runner.invoke(app, ["april", "task", "list", "--fake"]).exit_code == 0
     assert delegated == [
         ["voice", "health"],
-        ["voice", "ptt"],
+        ["voice", "doctor"],
+        ["voice", "ptt", "--seconds", "2.0"],
         ["reminder", "list"],
         ["reminder", "create", "stand up", "--due-at", "2026-06-21T09:00:00Z"],
         ["reminder", "delete", "reminder-1"],
@@ -197,6 +199,7 @@ def test_run_april_config_inspect_redacts_token(tmp_path: Path, monkeypatch) -> 
     assert result.exit_code == 0
     assert "[REDACTED]" in result.output
     assert "local-dev-token" not in result.output
+    assert "local-dev-runtime-token" not in result.output
 
 
 def test_run_april_verify_fake_reports_table(tmp_path: Path, monkeypatch) -> None:
@@ -238,12 +241,24 @@ def test_run_april_verify_real_model_rejects_missing_path(tmp_path: Path) -> Non
     assert "does not exist" in result.output
 
 
-def test_run_april_verify_real_model_existing_path_is_not_fake_success(tmp_path: Path) -> None:
+def test_run_april_verify_real_model_existing_path_runs_verifier(
+    tmp_path: Path, monkeypatch
+) -> None:
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"not a real model")
+    manager = FakeManager(tmp_path)
+    calls: list[Path] = []
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.run_real_model_verification",
+        lambda home, path: (
+            calls.append(path) or [VerifyCheck(name="real model chat", ok=True, detail="ok")]
+        ),
+    )
     result = CliRunner().invoke(app, ["april", "verify", "--real-model", str(gguf)])
-    assert result.exit_code == 1
-    assert "not implemented" in result.output
+    assert result.exit_code == 0
+    assert calls == [gguf]
+    assert "APRIL Real Model Verification" in result.output
 
 
 def test_doctor_reports_missing_path(tmp_path: Path, monkeypatch) -> None:

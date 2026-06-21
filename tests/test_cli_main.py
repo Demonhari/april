@@ -31,6 +31,8 @@ class FakeApiClient:
             return {"reminders": []}
         if path == "/tasks":
             return {"tasks": []}
+        if path == "/voice/doctor":
+            return {"status": "disabled"}
         raise AssertionError(path)
 
     async def post(
@@ -87,6 +89,7 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         ["reminder", "delete", "reminder-1"],
         ["task", "list"],
         ["voice", "health"],
+        ["voice", "doctor"],
     ]
     for command in commands:
         result = runner.invoke(app, command)

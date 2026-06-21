@@ -6,6 +6,7 @@ from typing import Any
 
 from april_common.errors import PermissionDeniedError
 from april_common.time import utc_now_iso
+from services.brain.planner import TaskPlan, TaskStep
 from services.memory.database import Database
 from services.memory.schemas import (
     Conversation,
@@ -14,7 +15,6 @@ from services.memory.schemas import (
     Project,
     ReminderRecord,
     SuspendedAgentRun,
-    TaskRecord,
 )
 
 
@@ -270,9 +270,37 @@ class SqliteMemory:
         )
         return cursor.rowcount > 0
 
-    async def list_tasks(self) -> list[TaskRecord]:
+    async def create_task_plan(self, plan: TaskPlan) -> TaskPlan:
+        title = plan.steps[0].title if plan.steps else plan.intent
+        await self.database.execute(
+            """
+            INSERT INTO tasks(
+                id, title, status, conversation_id, request_id, intent, agent,
+                model_id, steps_json, created_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plan.id,
+                title,
+                plan.status,
+                plan.conversation_id,
+                plan.request_id,
+                plan.intent,
+                plan.agent,
+                plan.model_id,
+                json.dumps([step.model_dump() for step in plan.steps], sort_keys=True),
+                plan.created_at,
+            ),
+        )
+        return plan
+
+    async def update_task_status(self, task_id: str, status: str) -> None:
+        await self.database.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
+
+    async def list_tasks(self) -> list[TaskPlan]:
         rows = await self.database.fetchall("SELECT * FROM tasks ORDER BY created_at DESC")
-        return [TaskRecord.model_validate(dict(row)) for row in rows]
+        return [self._task_plan_from_row(row) for row in rows]
 
     async def record_agent_run(
         self,
@@ -550,3 +578,28 @@ class SqliteMemory:
         data["normalized_args"] = json.loads(data.pop("normalized_args_json"))
         data["context"] = json.loads(data.pop("context_json"))
         return SuspendedAgentRun.model_validate(data)
+
+    def _task_plan_from_row(self, row: Any) -> TaskPlan:
+        data = dict(row)
+        raw_steps = data.get("steps_json") or "[]"
+        try:
+            steps_data = json.loads(raw_steps)
+        except json.JSONDecodeError:
+            steps_data = []
+        steps = [TaskStep.model_validate(step) for step in steps_data if isinstance(step, dict)]
+        if not steps:
+            steps = [TaskStep(index=1, title=str(data.get("title") or "Task"))]
+        status = str(data.get("status") or "planned")
+        if status not in {"planned", "running", "completed", "pending_approval", "error"}:
+            status = "planned"
+        return TaskPlan(
+            id=str(data["id"]),
+            conversation_id=str(data.get("conversation_id") or ""),
+            request_id=str(data.get("request_id") or ""),
+            intent=str(data.get("intent") or data.get("title") or "task"),
+            agent=str(data.get("agent") or ""),
+            model_id=str(data.get("model_id") or ""),
+            steps=steps,
+            status=status,
+            created_at=str(data["created_at"]),
+        )

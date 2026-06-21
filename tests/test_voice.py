@@ -28,6 +28,21 @@ class FakeApi:
         return {"result": {"final_message": "voice answer"}}
 
 
+class FakeWakeDetector:
+    def __init__(self, *, available: bool) -> None:
+        self._available = available
+        self.detected = False
+
+    def available(self) -> bool:
+        return self._available
+
+    def detect(self, frame: bytes) -> bool:
+        if not self.detected:
+            self.detected = True
+            return True
+        return False
+
+
 def test_voice_degraded_without_dependencies(settings_tmp) -> None:
     enabled = settings_tmp.model_copy(
         update={"voice": settings_tmp.voice.model_copy(update={"enabled": True})}
@@ -50,6 +65,55 @@ async def test_fake_voice_conversation_loop(settings_tmp, tmp_path: Path) -> Non
     )
     assert await loop.run_once() == "voice answer"
     assert api.payloads == [{"message": "open the project", "conversation_id": "voice-conv-1"}]
+
+
+def test_push_to_talk_accepts_explicit_seconds(settings_tmp) -> None:
+    loop = PushToTalkLoop(api_client=FakeApi(), record_seconds=1.5)  # type: ignore[arg-type]
+    assert loop.record_seconds == 1.5
+
+
+@pytest.mark.asyncio
+async def test_wake_word_loop_segments_fake_frames(settings_tmp, tmp_path: Path) -> None:
+    from services.voice.conversation_loop import WakeWordConversationLoop
+
+    loud = (b"\xff\x7f") * 160
+    silent = (b"\x00\x00") * 160
+    api = FakeApi()
+    loop = WakeWordConversationLoop(
+        api_client=api,  # type: ignore[arg-type]
+        microphone=FakeMicrophone(
+            tmp_path / "unused.wav",
+            frames=[silent, loud, loud, loud, silent, silent, silent],
+        ),
+        stt=FakeSpeechToText("April, inspect this"),
+        tts=FakeTextToSpeech(),
+        player=FakeAudioPlayer(),
+        detector=FakeWakeDetector(available=True),  # type: ignore[arg-type]
+        conversation_id="listen-conv-1",
+        record_seconds=2.0,
+    )
+    assert await loop.run_once() == "voice answer"
+    assert api.payloads == [{"message": "inspect this", "conversation_id": "listen-conv-1"}]
+
+
+@pytest.mark.asyncio
+async def test_wake_word_loop_falls_back_to_push_to_talk(settings_tmp, tmp_path: Path) -> None:
+    from services.voice.conversation_loop import WakeWordConversationLoop
+
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"fake")
+    api = FakeApi()
+    loop = WakeWordConversationLoop(
+        api_client=api,  # type: ignore[arg-type]
+        microphone=FakeMicrophone(audio),
+        stt=FakeSpeechToText("April, fallback"),
+        tts=FakeTextToSpeech(),
+        player=FakeAudioPlayer(),
+        detector=FakeWakeDetector(available=False),  # type: ignore[arg-type]
+        conversation_id="fallback-conv-1",
+    )
+    assert await loop.run_once() == "voice answer"
+    assert api.payloads == [{"message": "fallback", "conversation_id": "fallback-conv-1"}]
 
 
 def test_transcript_normalization_preserves_paths_and_code() -> None:

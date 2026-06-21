@@ -108,12 +108,20 @@ class FakeRuntimeAsyncClient:
     async def __aexit__(self, *args: object) -> None:
         return None
 
-    async def get(self, url: str) -> httpx.Response:
+    async def get(self, url: str, *, headers: dict[str, str] | None = None) -> httpx.Response:
+        self.last_headers = headers
         if url.endswith("/runtime/health"):
             return httpx.Response(200, json={"status": "ok"})
         return httpx.Response(200, json={"models": []})
 
-    async def post(self, url: str, *, json: dict[str, Any]) -> httpx.Response:
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        self.last_headers = headers
         if url.endswith("/runtime/chat"):
             return httpx.Response(
                 200,
@@ -134,7 +142,15 @@ class FakeRuntimeAsyncClient:
             },
         )
 
-    def stream(self, method: str, url: str, *, json: dict[str, Any]) -> FakeRuntimeStream:
+    def stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> FakeRuntimeStream:
+        self.last_headers = headers
         return FakeRuntimeStream()
 
 

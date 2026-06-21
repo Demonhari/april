@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import pytest
+
+from services.april_runtime.llama_cpp_backend import LlamaCppBackend
+from services.april_runtime.schemas import ChatMessage
+
+
+class FakeLlama:
+    def __init__(self, *, fail_chat: bool = False) -> None:
+        self.fail_chat = fail_chat
+        self.chat_calls: list[dict[str, object]] = []
+        self.prompt_calls: list[str] = []
+
+    def create_chat_completion(self, *, messages: list[dict[str, str]], **kwargs: object) -> object:
+        self.chat_calls.append({"messages": messages, "kwargs": kwargs})
+        if self.fail_chat:
+            raise RuntimeError("chat unsupported")
+        if kwargs.get("stream"):
+            return iter(
+                [
+                    {"choices": [{"delta": {"content": "hello "}}]},
+                    {"choices": [{"delta": {"content": "world"}}]},
+                ]
+            )
+        return {
+            "choices": [{"message": {"content": "chat response"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+        }
+
+    def __call__(self, prompt: str, **kwargs: object) -> object:
+        self.prompt_calls.append(prompt)
+        if kwargs.get("stream"):
+            return iter(
+                [
+                    {"choices": [{"text": "fallback "}]},
+                    {"choices": [{"text": "stream"}]},
+                ]
+            )
+        return {"choices": [{"text": "fallback response", "finish_reason": "stop"}]}
+
+    def tokenize(self, text: bytes) -> list[int]:
+        return [index for index, _part in enumerate(text.decode("utf-8").split())]
+
+
+def backend_with(llm: FakeLlama) -> LlamaCppBackend:
+    backend = LlamaCppBackend()
+    backend._llm = llm
+    return backend
+
+
+@pytest.mark.asyncio
+async def test_llama_backend_prefers_chat_completion() -> None:
+    llm = FakeLlama()
+    backend = backend_with(llm)
+    result = await backend.generate_messages(
+        "USER: hello\nASSISTANT:",
+        messages=[ChatMessage(role="user", content="hello")],
+        temperature=0.0,
+        max_output_tokens=8,
+    )
+    assert result.text == "chat response"
+    assert result.input_tokens == 5
+    assert result.output_tokens == 2
+    assert llm.chat_calls
+    assert not llm.prompt_calls
+
+
+@pytest.mark.asyncio
+async def test_llama_backend_falls_back_to_prompt_completion() -> None:
+    llm = FakeLlama(fail_chat=True)
+    backend = backend_with(llm)
+    result = await backend.generate_messages(
+        "USER: hello\nASSISTANT:",
+        messages=[ChatMessage(role="user", content="hello")],
+        temperature=0.0,
+        max_output_tokens=8,
+    )
+    assert result.text == "fallback response"
+    assert llm.prompt_calls == ["USER: hello\nASSISTANT:"]
+    assert result.input_tokens > 0
+    assert result.output_tokens > 0
+
+
+@pytest.mark.asyncio
+async def test_llama_backend_streams_chat_completion() -> None:
+    llm = FakeLlama()
+    backend = backend_with(llm)
+    tokens = [
+        token
+        async for token in backend.stream_messages(
+            "USER: hello\nASSISTANT:",
+            messages=[ChatMessage(role="user", content="hello")],
+            temperature=0.0,
+            max_output_tokens=8,
+        )
+    ]
+    assert tokens == ["hello ", "world"]
+    assert llm.chat_calls
+
+
+@pytest.mark.asyncio
+async def test_llama_backend_stream_falls_back_safely() -> None:
+    llm = FakeLlama(fail_chat=True)
+    backend = backend_with(llm)
+    tokens = [
+        token
+        async for token in backend.stream_messages(
+            "USER: hello\nASSISTANT:",
+            messages=[ChatMessage(role="user", content="hello")],
+            temperature=0.0,
+            max_output_tokens=8,
+        )
+    ]
+    assert tokens == ["fallback ", "stream"]
+    assert llm.prompt_calls == ["USER: hello\nASSISTANT:"]

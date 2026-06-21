@@ -34,6 +34,7 @@ def settings_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AprilSettin
 class FakeRuntimeClient:
     def __init__(self) -> None:
         self.last_messages: list[ChatMessage] = []
+        self.calls: list[list[ChatMessage]] = []
         self.stream_called = False
 
     async def chat(
@@ -44,7 +45,9 @@ class FakeRuntimeClient:
         options: Any | None = None,
         request_id: str | None = None,
     ) -> ChatResponse:
-        self.last_messages = messages
+        snapshot = [message.model_copy() for message in messages]
+        self.last_messages = snapshot
+        self.calls.append(snapshot)
         joined = "\n".join(message.content for message in messages)
         lower = joined.lower()
         if "return exactly one json object with type final_answer" in lower:

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from apps.runner.verify import LauncherVerifier, VerifyCheck
+from apps.runner.verify import (
+    LauncherVerifier,
+    RealModelVerifier,
+    VerifyCheck,
+    run_real_model_verification,
+)
 
 
 def verifier_with_ports(monkeypatch) -> LauncherVerifier:
@@ -184,3 +190,83 @@ def test_verifier_run_records_failures_and_stops(tmp_path: Path, monkeypatch) ->
     assert checks
     assert all(isinstance(check, VerifyCheck) for check in checks)
     assert all(check.ok for check in checks)
+
+
+def test_real_model_verifier_runs_load_chat_stream_unload_and_stop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ports = iter([19001, 19002])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    verifier = RealModelVerifier(home=Path.cwd(), model_path=tmp_path / "model.gguf")
+    calls: list[str] = []
+    monkeypatch.setattr(verifier, "_prepare", lambda: calls.append("prepare"))
+    monkeypatch.setattr(verifier, "_env", lambda: {})
+    monkeypatch.setattr(verifier, "_start", lambda *args: subprocess.Popen(["true"]))
+    monkeypatch.setattr(verifier, "_wait_json", lambda *args, **kwargs: {"status": "ok"})
+    monkeypatch.setattr(verifier, "_load_model", lambda: calls.append("load") or "loaded")
+    monkeypatch.setattr(verifier, "_chat", lambda: calls.append("chat") or "ok")
+    monkeypatch.setattr(verifier, "_stream", lambda: calls.append("stream") or "tokens")
+    monkeypatch.setattr(verifier, "_unload_model", lambda: calls.append("unload") or "unloaded")
+    monkeypatch.setattr(
+        verifier, "_confirm_unloaded", lambda: calls.append("confirm") or "unloaded"
+    )
+
+    checks = verifier.run()
+    assert calls == ["prepare", "load", "chat", "stream", "unload", "confirm"]
+    assert all(check.ok for check in checks)
+    assert checks[-1].name == "services stopped"
+
+
+def test_real_model_verifier_prepare_and_env(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19101, 19102])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"fake")
+    verifier = RealModelVerifier(home=Path.cwd(), model_path=gguf)
+    try:
+        verifier._prepare()
+        models_text = (verifier.verify_home / "configs" / "models.yaml").read_text(encoding="utf-8")
+        assert "april-brain" in models_text
+        assert "april-coding" in models_text
+        assert str(gguf) in models_text
+        env = verifier._env()
+        assert env["APRIL_RUNTIME_BACKEND"] == "llama_cpp"
+        assert env["APRIL_RUNTIME_PRELOAD_KEEP_LOADED"] == "false"
+        assert env["APRIL_RUNTIME_TOKEN"] == verifier.runtime_token
+        assert env["APRIL_RUNTIME_URL"] == verifier.runtime_url
+    finally:
+        shutil.rmtree(verifier.temp, ignore_errors=True)
+
+
+def test_run_real_model_verification_uses_real_verifier(tmp_path: Path, monkeypatch) -> None:
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"fake")
+
+    class FakeRealModelVerifier:
+        def __init__(self, *, home: Path, model_path: Path) -> None:
+            self.home = home
+            self.model_path = model_path
+
+        def run(self) -> list[VerifyCheck]:
+            return [VerifyCheck(name=str(self.model_path), ok=True, detail=str(self.home))]
+
+    monkeypatch.setattr("apps.runner.verify.RealModelVerifier", FakeRealModelVerifier)
+    checks = run_real_model_verification(Path.cwd(), gguf)
+    assert checks == [VerifyCheck(name=str(gguf), ok=True, detail=str(Path.cwd()))]
+
+
+def test_real_model_verifier_response_error_and_stopped(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19201, 19202])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    verifier = RealModelVerifier(home=Path.cwd(), model_path=tmp_path / "model.gguf")
+    try:
+        json_error = httpx.Response(
+            503,
+            json={"error": {"message": "load failed", "details": {"cause": "missing llama"}}},
+        )
+        assert "missing llama" in verifier._response_error(json_error)
+        text_error = httpx.Response(500, text="plain failure")
+        assert verifier._response_error(text_error) == "plain failure"
+        assert verifier._services_stopped() == "stopped"
+    finally:
+        shutil.rmtree(verifier.temp, ignore_errors=True)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 async def run_migrations(database: Database) -> None:
@@ -103,6 +103,12 @@ async def run_migrations(database: Database) -> None:
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             status TEXT NOT NULL,
+            conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+            request_id TEXT,
+            intent TEXT,
+            agent TEXT,
+            model_id TEXT,
+            steps_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL
         );
 
@@ -190,6 +196,19 @@ async def run_migrations(database: Database) -> None:
         await conn.execute(
             "UPDATE conversations SET updated_at = created_at WHERE updated_at IS NULL"
         )
+    columns = await conn.execute("PRAGMA table_info(tasks)")
+    task_columns = {row[1] for row in await columns.fetchall()}
+    task_column_defs = {
+        "conversation_id": "TEXT REFERENCES conversations(id) ON DELETE CASCADE",
+        "request_id": "TEXT",
+        "intent": "TEXT",
+        "agent": "TEXT",
+        "model_id": "TEXT",
+        "steps_json": "TEXT NOT NULL DEFAULT '[]'",
+    }
+    for column, definition in task_column_defs.items():
+        if column not in task_columns:
+            await conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
     await conn.execute(
         """
         UPDATE approvals

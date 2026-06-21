@@ -170,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bin-dir", type=Path, default=Path.home() / ".local" / "bin")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--add-to-path", action="store_true")
+    parser.add_argument("--shell", choices=["zsh", "bash"], default=None)
     args = parser.parse_args(argv)
 
     if args.install:
@@ -191,13 +192,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{local_bin} in current PATH: {'yes' if in_path else 'no'}")
         if args.add_to_path:
             try:
-                config_path, changed = add_path_block()
+                shell = args.shell or os.environ.get("APRIL_INSTALL_SHELL")
+                config_path, changed = add_path_block(shell=shell)
             except ValueError as exc:
-                print(f"ERROR: {exc}")
-                return 1
-            action_text = "Updated" if changed else "Already configured"
-            print(f"{action_text}: {config_path}")
-            print(f"Reload your shell with: source {config_path}")
+                print(f"PATH config was not edited automatically: {exc}")
+                print(f"Manual command: {PATH_EXPORT_LINE}")
+            else:
+                action_text = "Updated" if changed else "Already configured"
+                print(f"{action_text}: {config_path}")
+                print(f"Reload your shell with: source {config_path}")
         if not in_path:
             print('Add this to your current shell now: export PATH="$HOME/.local/bin:$PATH"')
         print("Next command: run april --fake")

@@ -9,6 +9,7 @@ runtime:
   host: 127.0.0.1
   port: 8766
   url: http://127.0.0.1:8766
+  token: local-dev-runtime-token
   backend: llama_cpp
   preload_keep_loaded: true
   request_timeout_seconds: 120

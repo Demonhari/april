@@ -73,7 +73,7 @@ class AprilServiceManager:
         self.settings = self._settings_for_home(self.home)
         self.python_executable = python_executable or sys.executable
         self.popen_factory = popen_factory or subprocess.Popen
-        self.health_getter = health_getter or self._default_health_getter
+        self.health_getter = health_getter or self._authenticated_health_getter
         self.pid_exists = pid_exists or self._default_pid_exists
         self.pid_signal = pid_signal or os.kill
         self.sleep = sleep
@@ -265,6 +265,16 @@ class AprilServiceManager:
     def _default_health_getter(url: str, timeout: float) -> bool:
         try:
             response = httpx.get(url, timeout=timeout)
+        except httpx.HTTPError:
+            return False
+        return 200 <= response.status_code < 500
+
+    def _authenticated_health_getter(self, url: str, timeout: float) -> bool:
+        headers = None
+        if url.startswith(self.settings.runtime.url) and self.settings.runtime.token:
+            headers = {"Authorization": f"Bearer {self.settings.runtime.token}"}
+        try:
+            response = httpx.get(url, timeout=timeout, headers=headers)
         except httpx.HTTPError:
             return False
         return 200 <= response.status_code < 500

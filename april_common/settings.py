@@ -27,6 +27,7 @@ class RuntimeSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8766
     url: str = "http://127.0.0.1:8766"
+    token: str | None = None
     backend: str = "llama_cpp"
     preload_keep_loaded: bool = True
     request_timeout_seconds: float = 120.0
@@ -131,6 +132,7 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_RUNTIME_HOST": ("runtime", "host"),
     "APRIL_RUNTIME_PORT": ("runtime", "port"),
     "APRIL_RUNTIME_URL": ("runtime", "url"),
+    "APRIL_RUNTIME_TOKEN": ("runtime", "token"),
     "APRIL_RUNTIME_BACKEND": ("runtime", "backend"),
     "APRIL_RUNTIME_PRELOAD_KEEP_LOADED": ("runtime", "preload_keep_loaded"),
     "APRIL_RUNTIME_MAX_LOADED_SPECIALIST_MODELS": (

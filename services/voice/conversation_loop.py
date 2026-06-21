@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 import uuid
+import wave
 from pathlib import Path
 
 from apps.cli.client import AprilApiClient
@@ -30,13 +32,15 @@ class PushToTalkLoop:
         tts: TextToSpeech | None = None,
         player: AudioPlayer | None = None,
         conversation_id: str | None = None,
+        record_seconds: float | None = None,
     ) -> None:
         settings = get_settings()
         self.settings = settings
+        max_seconds = record_seconds or settings.voice.max_record_seconds
         self.api_client = api_client
         self.microphone = microphone or SoundDeviceMicrophone(
             device=settings.voice.input_device,
-            max_seconds=settings.voice.max_record_seconds,
+            max_seconds=max_seconds,
         )
         self.stt = stt or WhisperCppSpeechToText(
             settings.voice.whisper_binary_path,
@@ -48,6 +52,7 @@ class PushToTalkLoop:
         )
         self.player = player or SoundDeviceAudioPlayer(device=settings.voice.output_device)
         self.conversation_id = conversation_id or str(uuid.uuid4())
+        self.record_seconds = max_seconds
         self.vad = VoiceActivityDetector(
             energy_threshold=settings.voice.vad_energy_threshold,
             required_frames=settings.voice.vad_required_frames,
@@ -76,7 +81,9 @@ class PushToTalkLoop:
 
 
 class VoiceConversationLoop(PushToTalkLoop):
-    pass
+    async def run_forever(self) -> None:
+        while True:
+            await self.run_once()
 
 
 class WakeWordConversationLoop(PushToTalkLoop):
@@ -93,4 +100,62 @@ class WakeWordConversationLoop(PushToTalkLoop):
     async def run_once(self) -> str:
         if not self.detector.available():
             return await super().run_once()
-        return await super().run_once()
+        self.settings.audio_cache_path.mkdir(parents=True, exist_ok=True)
+        audio_path = self.settings.audio_cache_path / f"{uuid.uuid4()}-utterance.wav"
+        spoken_path = await self._capture_wake_utterance(audio_path)
+        text = normalize_transcript(await self.stt.transcribe(spoken_path), wake_word="april")
+        if not text:
+            raise ValueError("Voice transcript was empty.")
+        response = await self.api_client.post(
+            "/voice/input",
+            {"message": text, "conversation_id": self.conversation_id},
+        )
+        answer = response["result"]["final_message"]
+        tts_path = self.settings.audio_cache_path / f"{uuid.uuid4()}-reply.wav"
+        output_path = await self.tts.synthesize(answer, tts_path)
+        await self.player.play(output_path)
+        if not self.settings.voice.retain_debug_audio:
+            for path in (audio_path, tts_path):
+                if Path(path).exists():
+                    Path(path).unlink()
+        return answer
+
+    async def run_forever(self) -> None:
+        try:
+            while True:
+                await self.run_once()
+        except KeyboardInterrupt:
+            return
+
+    async def _capture_wake_utterance(self, output_path: Path) -> Path:
+        frames: list[bytes] = []
+        wake_seen = False
+        speech_seen = False
+        silence_frames = 0
+        started = time.monotonic()
+        async for frame in self.microphone.frames():
+            if not wake_seen:
+                if self.detector.detect(frame):
+                    wake_seen = True
+                continue
+            speech = self.vad.is_speech(frame)
+            if speech:
+                speech_seen = True
+                silence_frames = 0
+                frames.append(frame)
+            elif speech_seen:
+                silence_frames += 1
+                frames.append(frame)
+                if silence_frames >= self.settings.voice.vad_required_frames:
+                    break
+            if time.monotonic() - started >= self.record_seconds:
+                break
+        if not frames:
+            raise ValueError("Voice utterance was empty.")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(output_path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16_000)
+            wav.writeframes(b"".join(frames))
+        return output_path

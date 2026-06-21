@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import secrets
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from april_common.errors import AprilError, error_payload
+from april_common.errors import AprilError, PermissionDeniedError, error_payload
 from april_common.settings import get_settings
 from services.april_runtime.health import runtime_health
 from services.april_runtime.model_lifecycle import ModelLifecycle
@@ -43,6 +45,22 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
     app = FastAPI(title="April Runtime", version="0.1.0", lifespan=lifespan)
     app.state.lifecycle = active_lifecycle
     app.state.settings = settings
+
+    @app.middleware("http")
+    async def enforce_runtime_auth(request: Request, call_next: Any) -> object:
+        token = settings.runtime.token
+        if token and request.url.path.startswith("/runtime"):
+            authorization = request.headers.get("authorization")
+            supplied = (
+                authorization.removeprefix("Bearer ").strip()
+                if authorization and authorization.startswith("Bearer ")
+                else None
+            )
+            if supplied is None or not secrets.compare_digest(supplied, token):
+                request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+                error = PermissionDeniedError("Valid Runtime bearer token is required.")
+                return JSONResponse(error_payload(error, request_id), status_code=403)
+        return await call_next(request)
 
     @app.exception_handler(AprilError)
     async def april_error_handler(request: Request, exc: AprilError) -> JSONResponse:

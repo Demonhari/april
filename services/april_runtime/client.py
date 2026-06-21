@@ -17,9 +17,22 @@ from services.april_runtime.schemas import (
 
 
 class RuntimeClient:
-    def __init__(self, base_url: str, *, timeout: float = 120.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout: float = 120.0,
+        token: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.token = token
+
+    @property
+    def headers(self) -> dict[str, str] | None:
+        if not self.token:
+            return None
+        return {"Authorization": f"Bearer {self.token}"}
 
     async def chat(
         self,
@@ -40,6 +53,7 @@ class RuntimeClient:
                 response = await client.post(
                     f"{self.base_url}/runtime/chat",
                     json=request.model_dump(),
+                    headers=self.headers,
                 )
         except httpx.HTTPError as exc:
             raise RuntimeUnavailableError(
@@ -52,7 +66,7 @@ class RuntimeClient:
     async def models(self) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(f"{self.base_url}/runtime/models")
+                response = await client.get(f"{self.base_url}/runtime/models", headers=self.headers)
         except httpx.HTTPError as exc:
             raise RuntimeUnavailableError(
                 "April Runtime is offline.", {"url": self.base_url}
@@ -64,7 +78,7 @@ class RuntimeClient:
     async def health(self, *, timeout: float | None = None) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=timeout or self.timeout) as client:
-                response = await client.get(f"{self.base_url}/runtime/health")
+                response = await client.get(f"{self.base_url}/runtime/health", headers=self.headers)
         except httpx.HTTPError as exc:
             raise RuntimeUnavailableError(
                 "April Runtime is offline.", {"url": self.base_url}
@@ -94,6 +108,7 @@ class RuntimeClient:
                 response = await client.post(
                     f"{self.base_url}/runtime/models/{operation}",
                     json=request.model_dump(),
+                    headers=self.headers,
                 )
         except httpx.HTTPError as exc:
             raise RuntimeUnavailableError(
@@ -124,6 +139,7 @@ class RuntimeClient:
                     "POST",
                     f"{self.base_url}/runtime/stream",
                     json=request.model_dump(),
+                    headers=self.headers,
                 ) as response,
             ):
                 if response.status_code >= 400:

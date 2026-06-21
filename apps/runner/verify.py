@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import yaml
 
 
 @dataclass(slots=True)
@@ -28,6 +29,288 @@ def run_fake_verification(home: Path) -> list[VerifyCheck]:
     return verifier.run()
 
 
+def run_real_model_verification(home: Path, model_path: Path) -> list[VerifyCheck]:
+    verifier = RealModelVerifier(home=home, model_path=model_path)
+    return verifier.run()
+
+
+class RealModelVerifier:
+    def __init__(self, *, home: Path, model_path: Path) -> None:
+        self.repo_home = home.expanduser().resolve()
+        self.model_path = model_path.expanduser().resolve()
+        self.temp = Path(tempfile.mkdtemp(prefix="april-real-verify-"))
+        self.verify_home = self.temp / "april_home"
+        self.runtime_port = _free_port()
+        self.api_port = _free_port()
+        self.api_token = "real-verify-api-token"
+        self.runtime_token = "real-verify-runtime-token"
+        self.runtime: subprocess.Popen[bytes] | None = None
+        self.api: subprocess.Popen[bytes] | None = None
+        self.runtime_log = self.temp / "runtime.log"
+        self.api_log = self.temp / "api.log"
+        self.checks: list[VerifyCheck] = []
+
+    @property
+    def runtime_url(self) -> str:
+        return f"http://127.0.0.1:{self.runtime_port}"
+
+    @property
+    def api_url(self) -> str:
+        return f"http://127.0.0.1:{self.api_port}"
+
+    @property
+    def runtime_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.runtime_token}"}
+
+    def run(self) -> list[VerifyCheck]:
+        try:
+            self._prepare()
+            env = self._env()
+            self.runtime = self._start("services.april_runtime.server", env, self.runtime_log)
+            self.api = self._start("services.api.server", env, self.api_log)
+            self._check(
+                "runtime health",
+                lambda: self._wait_json(self.runtime_url + "/runtime/health", auth_runtime=True),
+            )
+            self._check("core health", lambda: self._wait_json(self.api_url + "/health"))
+            self._check("real model load", self._load_model)
+            self._check("real model chat", self._chat)
+            self._check("real model stream", self._stream)
+            self._check("real model unload", self._unload_model)
+            self._check("real model unloaded state", self._confirm_unloaded)
+        finally:
+            self._stop()
+            self._check("services stopped", self._services_stopped)
+            shutil.rmtree(self.temp, ignore_errors=True)
+        return self.checks
+
+    def _prepare(self) -> None:
+        self.verify_home.mkdir(parents=True)
+        shutil.copytree(self.repo_home / "configs", self.verify_home / "configs")
+        model_entry = {
+            "name": "real-smoke",
+            "path": str(self.model_path),
+            "backend": "llama_cpp",
+            "threads": 2,
+            "context_size": 1024,
+            "temperature": 0.0,
+            "max_output_tokens": 64,
+            "keep_loaded": False,
+            "idle_unload_seconds": None,
+            "priority": 50,
+        }
+        models = {
+            "brain": {
+                **model_entry,
+                "id": "april-brain",
+                "role": "brain",
+                "priority": 100,
+            },
+            "coding": {
+                **model_entry,
+                "id": "april-coding",
+                "role": "coding",
+            },
+            "reading": {
+                **model_entry,
+                "id": "april-reading",
+                "role": "reading",
+            },
+        }
+        (self.verify_home / "configs" / "models.yaml").write_text(
+            yaml.safe_dump({"models": models}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+    def _env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env.update(
+            {
+                "APRIL_HOME": str(self.verify_home),
+                "PYTHONPATH": str(self.repo_home),
+                "APRIL_RUNTIME_BACKEND": "llama_cpp",
+                "APRIL_RUNTIME_PRELOAD_KEEP_LOADED": "false",
+                "APRIL_RUNTIME_PORT": str(self.runtime_port),
+                "APRIL_API_PORT": str(self.api_port),
+                "APRIL_RUNTIME_URL": self.runtime_url,
+                "APRIL_RUNTIME_TOKEN": self.runtime_token,
+                "APRIL_API_TOKEN": self.api_token,
+                "APRIL_DATABASE_PATH": str(self.temp / "data" / "april.db"),
+                "APRIL_VECTOR_INDEX_PATH": str(self.temp / "data" / "vector_index"),
+                "APRIL_AUDIT_PATH": str(self.temp / "logs" / "audit.jsonl"),
+                "APRIL_LOGS_PATH": str(self.temp / "logs"),
+                "APRIL_ALLOWED_FILESYSTEM_ROOTS": str(self.temp),
+            }
+        )
+        return env
+
+    def _start(self, module: str, env: dict[str, str], log_path: Path) -> subprocess.Popen[bytes]:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab") as log_file:
+            return subprocess.Popen(
+                [sys.executable, "-m", module],
+                cwd=str(self.repo_home),
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+    def _wait_json(self, url: str, *, auth_runtime: bool = False) -> dict[str, Any]:
+        deadline = time.monotonic() + 30.0
+        last = ""
+        headers = self.runtime_headers if auth_runtime else None
+        while time.monotonic() < deadline:
+            try:
+                response = httpx.get(url, timeout=1.0, headers=headers)
+                if response.status_code == 200:
+                    return response.json()
+                last = response.text[:500]
+            except httpx.HTTPError as exc:
+                last = str(exc)
+            time.sleep(0.2)
+        raise RuntimeError(f"health check failed for {url}: {last}")
+
+    def _load_model(self) -> str:
+        data = self._post_runtime(
+            "/runtime/models/load",
+            {"model_id": "april-brain", "request_id": "real-verify-load"},
+            timeout=120.0,
+        )
+        state = data.get("state")
+        if state != "loaded":
+            raise RuntimeError(f"expected loaded state, got {state}")
+        return "loaded"
+
+    def _chat(self) -> str:
+        data = self._post_runtime(
+            "/runtime/chat",
+            {
+                "model_id": "april-brain",
+                "messages": [{"role": "user", "content": "Reply with the word ready."}],
+                "options": {"temperature": 0.0, "max_output_tokens": 12},
+                "request_id": "real-verify-chat",
+            },
+            timeout=120.0,
+        )
+        content = str(data.get("content", "")).strip()
+        usage = data.get("usage") or {}
+        if not content:
+            raise RuntimeError("chat returned empty content")
+        if int(usage.get("total_tokens", 0)) < int(usage.get("output_tokens", 0)):
+            raise RuntimeError(f"invalid usage payload: {usage}")
+        return content[:80]
+
+    def _stream(self) -> str:
+        request = {
+            "model_id": "april-brain",
+            "messages": [{"role": "user", "content": "Say ok."}],
+            "options": {"temperature": 0.0, "max_output_tokens": 12},
+            "request_id": "real-verify-stream",
+        }
+        token_count = 0
+        usage_count = 0
+        with httpx.stream(
+            "POST",
+            self.runtime_url + "/runtime/stream",
+            json=request,
+            headers=self.runtime_headers,
+            timeout=120.0,
+        ) as response:
+            if response.status_code >= 400:
+                raise RuntimeError(self._response_error(response))
+            for line in response.iter_lines():
+                if line.startswith("event: token"):
+                    token_count += 1
+                elif line.startswith("event: usage"):
+                    usage_count += 1
+        if token_count < 1 or usage_count != 1:
+            raise RuntimeError(f"tokens={token_count}, usage={usage_count}")
+        return f"{token_count} token events, {usage_count} usage event"
+
+    def _unload_model(self) -> str:
+        data = self._post_runtime(
+            "/runtime/models/unload",
+            {"model_id": "april-brain", "request_id": "real-verify-unload"},
+            timeout=120.0,
+        )
+        state = data.get("state")
+        if state not in {"unloaded", "unavailable"}:
+            raise RuntimeError(f"expected unloaded/unavailable state, got {state}")
+        return str(state)
+
+    def _confirm_unloaded(self) -> str:
+        response = httpx.get(
+            self.runtime_url + "/runtime/models",
+            headers=self.runtime_headers,
+            timeout=10.0,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._response_error(response))
+        models = response.json().get("models", [])
+        state = next(
+            (model.get("state") for model in models if model.get("id") == "april-brain"),
+            None,
+        )
+        if state not in {"unloaded", "unavailable"}:
+            raise RuntimeError(f"model state is {state}")
+        return str(state)
+
+    def _post_runtime(
+        self, path: str, payload: dict[str, Any], *, timeout: float
+    ) -> dict[str, Any]:
+        response = httpx.post(
+            self.runtime_url + path,
+            json=payload,
+            headers=self.runtime_headers,
+            timeout=timeout,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._response_error(response))
+        return response.json()
+
+    def _response_error(self, response: httpx.Response) -> str:
+        try:
+            data = response.json()
+        except ValueError:
+            return response.text[:1000]
+        error = data.get("error", {}) if isinstance(data, dict) else {}
+        message = error.get("message") or response.text[:1000]
+        details = error.get("details") or {}
+        return f"{message} {details}".strip()
+
+    def _services_stopped(self) -> str:
+        alive = []
+        for name, proc in (("runtime", self.runtime), ("api", self.api)):
+            if proc is not None and proc.poll() is None:
+                alive.append(name)
+        if alive:
+            raise RuntimeError(f"still running: {', '.join(alive)}")
+        return "stopped"
+
+    def _check(self, name: str, action: Callable[[], Any]) -> Any:
+        try:
+            detail = action()
+        except Exception as exc:
+            self.checks.append(VerifyCheck(name=name, ok=False, detail=str(exc)))
+            return None
+        self.checks.append(VerifyCheck(name=name, ok=True, detail=str(detail)))
+        return detail
+
+    def _stop(self) -> None:
+        for proc in (self.api, self.runtime):
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+        for proc in (self.api, self.runtime):
+            if proc is None:
+                continue
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+
+
 class LauncherVerifier:
     def __init__(self, *, home: Path) -> None:
         self.repo_home = home.expanduser().resolve()
@@ -38,6 +321,7 @@ class LauncherVerifier:
         self.runtime_port = _free_port()
         self.api_port = _free_port()
         self.api_token = "verify-token"
+        self.runtime_token = "verify-runtime-token"
         self.runtime: subprocess.Popen[bytes] | None = None
         self.api: subprocess.Popen[bytes] | None = None
         self.runtime_log = self.temp / "runtime.log"
@@ -121,6 +405,10 @@ class LauncherVerifier:
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_token}"}
 
+    @property
+    def runtime_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.runtime_token}"}
+
     def _prepare(self) -> None:
         self.verify_home.mkdir(parents=True)
         shutil.copytree(self.repo_home / "configs", self.verify_home / "configs")
@@ -145,6 +433,7 @@ class LauncherVerifier:
                 "APRIL_RUNTIME_PORT": str(self.runtime_port),
                 "APRIL_API_PORT": str(self.api_port),
                 "APRIL_RUNTIME_URL": self.runtime_url,
+                "APRIL_RUNTIME_TOKEN": self.runtime_token,
                 "APRIL_API_TOKEN": self.api_token,
                 "APRIL_DATABASE_PATH": str(self.temp / "data" / "april.db"),
                 "APRIL_VECTOR_INDEX_PATH": str(self.temp / "data" / "vector_index"),
@@ -172,7 +461,8 @@ class LauncherVerifier:
         last = ""
         while time.monotonic() < deadline:
             try:
-                response = httpx.get(url, timeout=1.0)
+                headers = self.runtime_headers if url.startswith(self.runtime_url) else None
+                response = httpx.get(url, timeout=1.0, headers=headers)
                 if response.status_code == 200:
                     return response.json()
                 last = response.text[:200]
@@ -452,6 +742,7 @@ class LauncherVerifier:
             "POST",
             self.runtime_url + "/runtime/stream",
             json=request,
+            headers=self.runtime_headers,
             timeout=10.0,
         ) as response:
             response.raise_for_status()
