@@ -10,7 +10,13 @@ import typer
 from rich.prompt import Prompt
 
 from apps.cli.client import ApiOfflineError, AprilApiClient
-from apps.cli.render import console, print_approvals, print_jsonish, print_models
+from apps.cli.render import (
+    console,
+    print_approvals,
+    print_briefing,
+    print_jsonish,
+    print_models,
+)
 from april_common.settings import get_settings
 
 app = typer.Typer(help="APRIL local assistant CLI.")
@@ -111,6 +117,12 @@ def model_load(model_id: str) -> None:
 def model_unload(model_id: str) -> None:
     data = run(client().post("/runtime/models/unload", {"model_id": model_id}))
     print_jsonish(data)
+
+
+@app.command()
+def briefing() -> None:
+    data = run(client().briefing())
+    print_briefing(data)
 
 
 @app.command()

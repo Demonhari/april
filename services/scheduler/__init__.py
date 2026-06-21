@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from services.scheduler.briefing import compose_briefing
 from services.scheduler.clock import Clock, FakeClock, SystemClock
 from services.scheduler.notifications import (
     FakeNotificationSink,
@@ -21,5 +22,6 @@ __all__ = [
     "NotificationSink",
     "SchedulerService",
     "SystemClock",
+    "compose_briefing",
     "notification_sink_from_settings",
 ]

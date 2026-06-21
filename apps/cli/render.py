@@ -27,6 +27,12 @@ def print_models(data: dict[str, Any]) -> None:
     console.print(table)
 
 
+def print_briefing(data: dict[str, Any]) -> None:
+    title = str(data.get("title", "APRIL Daily Briefing"))
+    console.print(f"[bold]{title}[/bold]")
+    console.print(str(data.get("body", "")))
+
+
 def print_approvals(data: dict[str, Any]) -> None:
     table = Table(title="Pending Approvals")
     for column in ("id", "tool", "permission", "risk", "expires_at"):

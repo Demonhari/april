@@ -4,6 +4,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from april_common.errors import (
 )
 from april_common.path_security import PathPolicy, normalize_existing_path
 from april_common.settings import AprilSettings, get_settings
+from april_common.time import utc_now
 from services.api.auth import require_bearer_token
 from services.api.dependencies import ApiContainer, build_container
 from services.api.schemas import (
@@ -32,14 +34,23 @@ from services.api.schemas import (
     ToolRequestEnvelope,
 )
 from services.april_runtime.schemas import LoadModelRequest
+from services.scheduler import compose_briefing
 from services.voice.health import voice_health
 
 
 def create_app(container: ApiContainer | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if app.state.container is None:
+            app.state.container = await build_container()
+        scheduler = app.state.container.scheduler
+        if scheduler is not None:
+            # start() is a no-op unless scheduler.enabled, so this is safe in tests.
+            await scheduler.start()
         yield
         if app.state.container is not None:
+            if app.state.container.scheduler is not None:
+                await app.state.container.scheduler.stop()
             await app.state.container.database.close()
 
     app = FastAPI(title="APRIL Core API", version="0.1.0", lifespan=lifespan)
@@ -106,6 +117,14 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             "database": {"ok": active.database.path.exists(), "path": str(active.database.path)},
             "vector_index": active.vector_memory.health(),
             "voice": voice_health(active.settings).model_dump(),
+            "scheduler": {
+                "enabled": active.settings.scheduler.enabled,
+                "running": active.scheduler.running if active.scheduler else False,
+                "briefing_enabled": active.settings.scheduler.briefing_enabled,
+                "fired_reminders": (
+                    active.scheduler.fired_reminder_count if active.scheduler else 0
+                ),
+            },
             "runtime_url": active.settings.runtime.url,
             "runtime": runtime,
         }
@@ -276,6 +295,19 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.get("/tasks")
     async def tasks(active: ApiContainer = Depends(authorized)) -> object:
         return {"tasks": [task.model_dump() for task in await active.memory.list_tasks()]}
+
+    @app.get("/scheduler/briefing/preview")
+    async def scheduler_briefing_preview(
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        now = utc_now()
+        until = now + timedelta(hours=24)
+        notification = await compose_briefing(
+            active.memory,
+            now_iso=now.isoformat().replace("+00:00", "Z"),
+            until_iso=until.isoformat().replace("+00:00", "Z"),
+        )
+        return notification.model_dump()
 
     @app.delete("/conversations/{conversation_id}")
     async def conversation_delete(

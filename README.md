@@ -214,6 +214,7 @@ run april reminder list
 run april reminder create "stand up" --due-at 2026-06-21T09:00:00Z
 run april reminder delete REMINDER_ID
 run april task list
+run april briefing
 run april voice health
 run april voice doctor
 run april voice devices
@@ -374,6 +375,39 @@ april voice listen
 Push-to-talk starts only from explicit CLI invocation. Wake-word mode is also an
 explicit command and falls back to push-to-talk behavior when wake-word support
 is unavailable. API startup never activates the microphone.
+
+## Proactive Scheduler
+
+The scheduler is optional and **off by default**. When enabled it runs a
+background poll loop that fires due reminders through a notification sink, and an
+optional daily briefing summarizing open tasks, reminders due in the next 24
+hours, and the project count. It is never activated implicitly by API startup;
+both the loop and briefings stay inert unless explicitly enabled in settings.
+
+Enable it in `configs/april.yaml` (or the matching `APRIL_SCHEDULER_*`
+environment variables):
+
+```yaml
+scheduler:
+  enabled: true            # start the background reminder loop
+  poll_interval_seconds: 30
+  notification_sink: log   # "log" (logs/scheduler.log) or "macos" (native banner)
+  briefing_enabled: true   # fire a daily briefing
+  briefing_time: "08:00"   # local time, once per local day
+```
+
+The daily briefing is restart-safe: the last briefing date is persisted, so it
+fires at most once per local day even if the process restarts. You can preview
+today's briefing on demand at any time, regardless of whether the scheduler is
+enabled:
+
+```bash
+run april briefing
+```
+
+This calls the authenticated `GET /scheduler/briefing/preview` endpoint and
+renders the title and body. `GET /health` reports the scheduler block
+(`enabled`, `running`, `briefing_enabled`, `fired_reminders`).
 
 ## Quality Gates
 

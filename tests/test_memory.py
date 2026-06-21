@@ -94,3 +94,34 @@ async def test_reminders_are_stored_in_sqlite(settings_tmp) -> None:
     assert await memory.delete_reminder(reminder.id)
     assert await memory.list_reminders() == []
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_state_round_trip(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    assert await memory.get_scheduler_state("last_briefing_date") is None
+    await memory.set_scheduler_state("last_briefing_date", "2026-06-21")
+    assert await memory.get_scheduler_state("last_briefing_date") == "2026-06-21"
+    # Upsert: a second write overwrites rather than duplicating.
+    await memory.set_scheduler_state("last_briefing_date", "2026-06-22")
+    assert await memory.get_scheduler_state("last_briefing_date") == "2026-06-22"
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_list_upcoming_reminders_window(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    now_iso = "2026-06-21T08:00:00Z"
+    until_iso = "2026-06-22T08:00:00Z"
+    overdue = await memory.create_reminder("overdue", due_at="2026-06-20T09:00:00Z")
+    in_window = await memory.create_reminder("in window", due_at="2026-06-21T18:00:00Z")
+    await memory.create_reminder("out of window", due_at="2026-06-23T09:00:00Z")
+    upcoming = await memory.list_upcoming_reminders(now_iso, until_iso)
+    assert [reminder.id for reminder in upcoming] == [overdue.id, in_window.id]
+    await database.close()

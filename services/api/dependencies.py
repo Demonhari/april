@@ -24,6 +24,7 @@ from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
 from services.permissions.engine import PermissionEngine
 from services.permissions.tool_execution import ToolExecutionService
+from services.scheduler import SchedulerService, notification_sink_from_settings
 from skills.registry import ToolRegistry, default_registry
 
 
@@ -41,6 +42,7 @@ class ApiContainer:
     tool_executor: ToolExecutionService
     agent_registry: AgentRegistry
     orchestrator: AprilOrchestrator
+    scheduler: SchedulerService | None = None
 
 
 async def build_container(settings: AprilSettings | None = None) -> ApiContainer:
@@ -109,6 +111,13 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         agent_registry=agent_registry,
         memory_retriever=memory_retriever,
     )
+    sink = notification_sink_from_settings(active_settings, audit)
+    scheduler = SchedulerService(
+        settings=active_settings,
+        memory=memory,
+        audit=audit,
+        sink=sink,
+    )
     return ApiContainer(
         settings=active_settings,
         database=database,
@@ -122,4 +131,5 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         tool_executor=tool_executor,
         agent_registry=agent_registry,
         orchestrator=orchestrator,
+        scheduler=scheduler,
     )

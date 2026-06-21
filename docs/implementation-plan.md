@@ -28,6 +28,13 @@
    - Provide safe scripts for setup, runtime, API, CLI, model placement help, and repository indexing.
    - Run tests, Ruff, mypy, and required source scans.
 
+7. Proactive scheduler
+   - Add a pure-asyncio poll loop that fires due reminders through a pluggable notification sink (log by default, optional native macOS banner).
+   - Add daily briefings: a plain-text summary of open tasks, reminders due in the next 24 hours, and project count, composed without any LLM or external I/O.
+   - Off by default: neither reminders nor briefings run unless `scheduler.enabled` / `scheduler.briefing_enabled` are set; the loop and briefings are never activated implicitly.
+   - Restart-safe: the last briefing date is persisted in a `scheduler_state` table so a briefing fires at most once per local day even across process restarts.
+   - Reminder and briefing paths are independent inside each tick; a failure in one is audited and never blocks the other. A `GET /scheduler/briefing/preview` endpoint and `run april briefing` command let the user view today's briefing on demand regardless of enabled state.
+
 ## Architectural Assumptions
 
 - The repository root is the default APRIL home unless `APRIL_HOME` points elsewhere.

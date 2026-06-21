@@ -4,8 +4,9 @@ import asyncio
 import json
 import platform
 import shutil
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from april_common.audit import AuditLogger
 from april_common.errors import RuntimeUnavailableError
@@ -21,6 +22,10 @@ class Notification:
     body: str
     reference_id: str | None = None
     created_at: str = ""
+
+    def model_dump(self) -> dict[str, Any]:
+        """Pydantic-compatible serialization so API handlers can treat this like a model."""
+        return asdict(self)
 
 
 class NotificationSink:

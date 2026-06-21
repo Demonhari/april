@@ -401,6 +401,14 @@ def models(
 
 
 @april_app.command()
+def briefing(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(["briefing"], fake=_effective_fake(ctx, fake), oneshot=_effective_oneshot(ctx))
+
+
+@april_app.command()
 def approvals(
     ctx: typer.Context,
     fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),

@@ -282,12 +282,43 @@ class SqliteMemory:
         )
         return cursor.rowcount > 0
 
+    async def list_upcoming_reminders(self, now_iso: str, until_iso: str) -> list[ReminderRecord]:
+        rows = await self.database.fetchall(
+            """
+            SELECT *
+            FROM reminders
+            WHERE due_at IS NOT NULL AND fired_at IS NULL AND due_at <= ?
+            ORDER BY due_at ASC
+            """,
+            (until_iso,),
+        )
+        return [ReminderRecord.model_validate(dict(row)) for row in rows]
+
     async def delete_reminder(self, reminder_id: str) -> bool:
         cursor = await self.database.execute(
             "DELETE FROM reminders WHERE id = ?",
             (reminder_id,),
         )
         return cursor.rowcount > 0
+
+    async def get_scheduler_state(self, key: str) -> str | None:
+        row = await self.database.fetchone(
+            "SELECT value FROM scheduler_state WHERE key = ?",
+            (key,),
+        )
+        if row is None:
+            return None
+        return str(row["value"])
+
+    async def set_scheduler_state(self, key: str, value: str) -> None:
+        await self.database.execute(
+            """
+            INSERT INTO scheduler_state(key, value, updated_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, utc_now_iso()),
+        )
 
     async def create_task_plan(self, plan: TaskPlan) -> TaskPlan:
         title = plan.steps[0].title if plan.steps else plan.intent

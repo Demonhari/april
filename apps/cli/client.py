@@ -53,6 +53,9 @@ class AprilApiClient:
             raise ApiOfflineError(self.startup_hint()) from exc
         return self._json(response)
 
+    async def briefing(self) -> Any:
+        return await self.get("/scheduler/briefing/preview")
+
     def _json(self, response: httpx.Response) -> Any:
         data = response.json()
         if response.status_code >= 400:

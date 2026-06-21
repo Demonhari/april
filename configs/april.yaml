@@ -48,9 +48,17 @@ voice:
   piper_model_path: null
   wake_word_model_path: null
 
+# Proactive scheduler. OFF by default: with these safe defaults APRIL never fires
+# reminders or daily briefings on its own. The background loop only starts when
+# enabled is true, and briefings only fire when briefing_enabled is true.
 scheduler:
+  # Master switch for the background poll loop that fires due reminders.
   enabled: false
+  # How often the loop wakes to check for due reminders / briefing time (seconds).
   poll_interval_seconds: 30
+  # Where notifications go: "log" (audit + logs/scheduler.log) or "macos" (native banner).
   notification_sink: log
+  # Daily briefing switch. Independent of `enabled`; the briefing path is gated by this.
   briefing_enabled: false
+  # Local time of day (HH:MM, 24h) to fire the daily briefing, once per local day.
   briefing_time: "08:00"
