@@ -49,6 +49,28 @@ latency, recent tokens per second, load/unload timestamps, and the active
 eviction policy. A loaded model with active requests cannot be unloaded or
 evicted, and keep-loaded brain models are not idle-unloaded.
 
+Prompt rendering stays centralized in April Runtime. Model config should set an
+explicit `chat_format` (`granite`, `qwen`, or `generic`) where known. If absent,
+Runtime first accepts trustworthy backend/GGUF chat-template metadata when
+available, then falls back only for recognized Granite or Qwen model names.
+Unknown models without a configured or metadata-provided template fail with a
+clear unsupported-template error instead of silently using a generic format.
+
+Context budgeting reserves configured output tokens before generation and
+estimates the rendered prompt, including role/template overhead. The governing
+system prompt and latest user request are required; if they cannot fit, Runtime
+fails clearly. Older low-priority turns are removed first, oversized tool
+results are truncated with a marker, and chat/stream responses expose structured
+`context_budget` metadata with estimated input tokens, reserved output tokens,
+removed message count, truncated tool-result count, and selected context limit.
+
+`GET /runtime/health` is fast and does not load models. It reports process RSS
+when available, peak RSS, loaded model count, active inference count,
+load/unload timestamps, last load duration, request/error counters, token
+throughput, context size, threads, batch settings, and idle-unload settings. RSS
+fields are process-level, not per-model physical memory; estimated values are
+flagged as estimates.
+
 Non-keep-loaded specialist models are eligible for idle unload after their
 configured timeout. When the loaded specialist count exceeds
 `runtime.max_loaded_specialist_models`, APRIL evicts inactive specialists by

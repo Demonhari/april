@@ -27,7 +27,7 @@ def git_diff_definition() -> ToolDefinition:
         description="Read Git diff.",
         permission_level=1,
         risk_level="read_only",
-        allowed_agents={"coding_agent"},
+        allowed_agents={"coding_agent", "reasoning_agent"},
         executor=git_diff,
         affected_paths=git_paths,
     )

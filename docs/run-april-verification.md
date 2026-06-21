@@ -7,6 +7,7 @@ run april config validate
 run april config inspect
 run april verify --fake
 run april verify --workflow
+run april verify --target-mac
 run april model doctor
 run april model profile list
 run april status
@@ -21,6 +22,7 @@ run april task list --fake
 run april voice health --fake
 run april voice doctor --fake
 run april memory doctor
+run april eval brain --fake
 ```
 
 Project workflow smoke:
@@ -43,6 +45,7 @@ APRIL_TEST_GGUF_PATH=/absolute/path/to/small-local-model.gguf run april verify -
 APRIL_TEST_GGUF_PATH=/absolute/path/to/small-local-model.gguf run april verify --workflow --real-model
 run april eval brain --real-model /absolute/path/to/small-local-model.gguf
 run april model benchmark /absolute/path/to/small-local-model.gguf --runs 1 --max-output-tokens 32
+run april verify --target-mac /absolute/path/to/small-local-model.gguf --require-real-model
 ```
 
 The real verifier starts isolated Runtime and Core API services on loopback
@@ -58,3 +61,18 @@ reports it. If `llama-cpp-python` is missing, install the local runtime extra:
 ```bash
 pip install -e '.[runtime]'
 ```
+
+Target-Mac validation is a local checklist for the intended laptop. It reports
+`pass`, `fail`, `skip`, and `manual` statuses; skipped optional checks do not
+fail the command unless `--require-real-model` is used. It never downloads
+models, installs packages, changes system settings, or starts persistent
+services. Voice push-to-talk remains a manual check because it needs local
+microphone permission, configured whisper.cpp/Piper assets, and user-observable
+audio I/O.
+
+The fake brain eval uses the deterministic fallback router and validates schema
+validity plus routing expectations for ordinary chat, planning, coding,
+reading, creative, reasoning, memory search/write, Git reads, patch proposals,
+code edits, command execution, destructive/external requests, prompt injection,
+path escape, secrets, unsupported tools, and malformed-routing recovery
+coverage. Real-model evals run only with an explicit local GGUF path.

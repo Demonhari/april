@@ -46,9 +46,11 @@ object:
 - `structured_error`
 
 APRIL permits one repair attempt for malformed structured output. Tool output
-fed back to a model is sanitized and truncated. Reasoning agents without an
-explicit configured model return `unavailable` instead of silently using another
-model.
+fed back to a model is sanitized and truncated. Reasoning is always available:
+APRIL uses an available configured `reasoning` role model when one exists and
+otherwise runs the Reasoning Agent on the normal brain model. Agent run metadata
+records the requested role, selected role, selected model ID, fallback model ID,
+and resolution reason without storing prompt content.
 
 Suspension stores sanitized loop messages and the exact pending tool request.
 After approval, APRIL appends a sanitized tool result and resumes the same run

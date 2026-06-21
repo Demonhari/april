@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import AsyncIterator
 
@@ -99,6 +100,34 @@ class FakeBackend(RuntimeBackend):
                     '"task_steps":["Generate patch","Request exact patch approval"],'
                     '"decision_summary":"Code modification through structured loop"}'
                 )
+            if route_text.strip().startswith("remember ") or "save this preference" in route_text:
+                content = self._memory_content(route_text)
+                memory_type = "preference" if "prefer" in content.lower() else "fact"
+                return json.dumps(
+                    {
+                        "intent": "memory_write",
+                        "agent": "general_agent",
+                        "model_id": "april-brain",
+                        "tools_needed": ["remember_memory"],
+                        "planned_tool_calls": [
+                            {
+                                "tool": "remember_memory",
+                                "args": {
+                                    "content": content,
+                                    "memory_type": memory_type,
+                                    "reason": "Explicit user-requested durable local memory.",
+                                },
+                                "reason": "Store explicit local durable memory.",
+                            }
+                        ],
+                        "memory_queries": [],
+                        "permission_level": 2,
+                        "risk_level": "safe_write",
+                        "needs_confirmation": False,
+                        "task_steps": ["Store explicit durable memory"],
+                        "decision_summary": "Explicit durable local memory write.",
+                    }
+                )
             if "animation" in route_text or "repository" in route_text or "code" in route_text:
                 return (
                     '{"intent":"coding_repo_analysis","agent":"coding_agent",'
@@ -156,6 +185,18 @@ class FakeBackend(RuntimeBackend):
         if "<|im_start|>user" in prompt:
             return prompt.rsplit("<|im_start|>user", maxsplit=1)[-1]
         return prompt
+
+    def _memory_content(self, route_text: str) -> str:
+        text = route_text.strip()
+        for pattern in (
+            r"^(?:april,\s*)?remember(?: that)?\s+(.+)$",
+            r"^(?:april,\s*)?save this preference\s*:?\s+(.+)$",
+            r"^(?:april,\s*)?save my preference\s*:?\s+(.+)$",
+        ):
+            match = re.match(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                return " ".join(match.group(1).split())
+        return " ".join(text.split())
 
     def _structured_agent_response(self, prompt: str, lower: str) -> str:
         if "approved tool result" in lower or "tool result" in lower:

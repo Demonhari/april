@@ -69,7 +69,7 @@ def search_files_definition() -> ToolDefinition:
         description="Search text files under an allowed root.",
         permission_level=1,
         risk_level="read_only",
-        allowed_agents={"coding_agent", "reading_agent"},
+        allowed_agents={"coding_agent", "reading_agent", "reasoning_agent"},
         executor=search_files,
         affected_paths=lambda args: [str(args.get("path", ""))],
     )

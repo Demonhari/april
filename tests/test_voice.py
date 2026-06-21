@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 import sys
 import types
 import wave
@@ -15,7 +16,7 @@ from services.voice.health import query_audio_devices, voice_doctor, voice_healt
 from services.voice.microphone import FakeMicrophone, SoundDeviceMicrophone
 from services.voice.speech_to_text import FakeSpeechToText
 from services.voice.text_to_speech import FakeTextToSpeech
-from services.voice.vad import VoiceActivityDetector
+from services.voice.vad import VoiceActivityDetector, pcm16le_rms
 from services.voice.wake_word import OpenWakeWordDetector
 
 
@@ -158,6 +159,35 @@ def test_energy_vad_requires_configured_speech_frames() -> None:
     assert detector.is_speech(loud_frame) is False
     assert detector.is_speech(loud_frame) is True
     assert detector.is_speech(b"\x00\x00" * 160) is False
+
+
+def test_pcm16le_rms_known_vectors() -> None:
+    assert pcm16le_rms(b"") == 0.0
+    assert pcm16le_rms(struct.pack("<hhh", 0, 0, 0)) == 0.0
+    assert pcm16le_rms(struct.pack("<hh", 3, 4)) == pytest.approx((12.5**0.5) / 32768.0)
+    assert pcm16le_rms(struct.pack("<hh", -3, -4)) == pytest.approx((12.5**0.5) / 32768.0)
+
+
+def test_pcm16le_rms_clipping_boundaries() -> None:
+    assert pcm16le_rms(struct.pack("<h", 32767)) == pytest.approx(32767 / 32768.0)
+    assert pcm16le_rms(struct.pack("<h", -32768)) == 1.0
+    assert pcm16le_rms(struct.pack("<hh", -32768, 32767)) == pytest.approx(
+        (((32768**2) + (32767**2)) / 2) ** 0.5 / 32768.0
+    )
+
+
+def test_pcm16le_rms_rejects_malformed_frame() -> None:
+    detector = VoiceActivityDetector(energy_threshold=0.01, required_frames=1)
+    with pytest.raises(ValueError, match="16-bit PCM"):
+        pcm16le_rms(b"\x00")
+    with pytest.raises(ValueError, match="16-bit PCM"):
+        detector.is_speech(b"\x00")
+
+
+def test_energy_vad_threshold_boundary_is_inclusive() -> None:
+    detector = VoiceActivityDetector(energy_threshold=0.5, required_frames=1)
+    assert detector.is_speech(struct.pack("<h", 16383)) is False
+    assert detector.is_speech(struct.pack("<h", 16384)) is True
 
 
 @pytest.mark.asyncio

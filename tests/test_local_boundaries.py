@@ -11,7 +11,7 @@ from apps.runner import install as runner_install
 from april_common.errors import PermissionDeniedError, RuntimeUnavailableError
 from april_common.logging import JsonFormatter, configure_logging
 from services.april_runtime.client import RuntimeClient
-from services.april_runtime.health import runtime_health
+from services.april_runtime.health import ProcessMemoryMetrics, runtime_health
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_loader import ModelLoader
 from services.april_runtime.model_registry import ModelRegistry
@@ -207,7 +207,7 @@ def test_fallback_router_covers_local_intents() -> None:
         "apply the fix": "code_modification",
         "why is the repository animation broken": "coding_repo_analysis",
         "summarize this file": "document_reading",
-        "remember my project preference": "memory_lookup",
+        "remember my project preference": "memory_write",
         "remind me to stand up": "reminders",
         "write a story": "creative_writing",
         "plan today": "planning",
@@ -258,7 +258,7 @@ async def test_memory_retriever_writer_and_skill_wrappers(settings_tmp, tmp_path
     writer = MemoryWriter(memory)
     with pytest.raises(PermissionDeniedError):
         await writer.write("password is secret", reason="bad")
-    durable = await writer.write("I prefer local models", reason="", requested_by_user=False)
+    durable = await writer.write("I prefer local models", reason="", requested_by_user=True)
     assert durable.content == "I prefer local models"
     await memory.create_memory("token should not appear", reason="sensitive")
     vector.index_chunks(
@@ -365,7 +365,9 @@ async def test_model_loader_and_runtime_health(settings_tmp) -> None:
                     "path": "models/missing.gguf",
                     "backend": "fake",
                     "role": "brain",
+                    "chat_format": "generic",
                     "threads": 1,
+                    "n_batch": 32,
                     "context_size": 512,
                     "temperature": 0.0,
                     "max_output_tokens": 16,
@@ -379,7 +381,23 @@ async def test_model_loader_and_runtime_health(settings_tmp) -> None:
     loader = ModelLoader(lifecycle)
     state = await loader.load("brain")
     assert state.state == "loaded"
-    health = runtime_health(lifecycle, backend="fake", request_id="health-1")
+    health = runtime_health(
+        lifecycle,
+        backend="fake",
+        request_id="health-1",
+        metric_provider=lambda: ProcessMemoryMetrics(
+            rss_bytes=1234,
+            peak_rss_bytes=4096,
+            estimated=False,
+        ),
+    )
     assert health.request_id == "health-1"
     assert health.loaded_model_count == 1
+    assert health.active_requests == 0
+    assert health.process_rss_bytes == 1234
+    assert health.process_peak_rss_bytes == 4096
+    assert health.process_memory_estimated is False
+    assert health.models[0].load_duration_ms is not None
+    assert health.models[0].threads == 1
+    assert health.models[0].n_batch == 32
     assert await loader.unload("brain")

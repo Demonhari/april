@@ -42,7 +42,7 @@ def read_file_definition() -> ToolDefinition:
         description="Read bounded text from an allowed file.",
         permission_level=1,
         risk_level="read_only",
-        allowed_agents={"coding_agent", "reading_agent"},
+        allowed_agents={"coding_agent", "reading_agent", "reasoning_agent"},
         executor=read_file,
         affected_paths=lambda args: [str(args.get("path", ""))],
     )

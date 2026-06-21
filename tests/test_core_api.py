@@ -445,6 +445,188 @@ def test_sensitive_memory_is_not_injected(settings_tmp) -> None:
     assert "token should never be injected" not in prompt
 
 
+def test_memory_create_search_export_delete_and_duplicate(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    payload = {
+        "content": "I prefer concise answers",
+        "memory_type": "preference",
+        "reason": "explicit user request",
+    }
+    first = client.post("/memory", json=payload, headers=auth(settings_tmp))
+    second = client.post("/memory", json=payload, headers=auth(settings_tmp))
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_memory = first.json()["memory"]
+    second_memory = second.json()["memory"]
+    assert first_memory["id"] == second_memory["id"]
+    assert first.json()["stored"] == "Stored preference memory."
+
+    search = client.get(
+        "/memory/search",
+        params={"q": "concise"},
+        headers=auth(settings_tmp),
+    )
+    assert search.status_code == 200
+    assert [record["id"] for record in search.json()["results"]] == [first_memory["id"]]
+
+    exported = client.get("/memory/export", headers=auth(settings_tmp)).json()["export"]
+    assert "I prefer concise answers" in exported
+
+    delete_response = client.delete(f"/memory/{first_memory['id']}", headers=auth(settings_tmp))
+    assert delete_response.status_code == 200
+    assert delete_response.json()["deleted"] is True
+    assert (
+        client.get("/memory/search", params={"q": "*"}, headers=auth(settings_tmp)).json()[
+            "results"
+        ]
+        == []
+    )
+
+
+def test_memory_write_requires_auth_and_valid_schema(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/memory",
+        json={"content": "I prefer concise answers", "reason": "explicit"},
+    )
+    assert response.status_code == 403
+
+    invalid = client.post(
+        "/memory",
+        json={"content": "x", "memory_type": "unsupported", "reason": "explicit"},
+        headers=auth(settings_tmp),
+    )
+    assert invalid.status_code == 422
+
+
+def test_non_explicit_preference_chat_is_not_written(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/chat",
+        json={"message": "I prefer concise answers."},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    memories = anyio.run(container.memory.list_memories)
+    assert memories == []
+
+
+def test_memory_rejects_secret_and_audit_omits_content(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    rejected = client.post(
+        "/memory",
+        json={
+            "content": "api token abc123 should not be stored",
+            "memory_type": "fact",
+            "reason": "explicit",
+        },
+        headers=auth(settings_tmp),
+    )
+    assert rejected.status_code == 403
+
+    response = client.post(
+        "/memory",
+        json={
+            "content": "I prefer concise answers",
+            "memory_type": "preference",
+            "reason": "explicit",
+        },
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    audit_text = settings_tmp.audit_path.read_text(encoding="utf-8")
+    assert "memory_written" in audit_text
+    assert "I prefer concise answers" not in audit_text
+    assert "api token abc123" not in audit_text
+
+
+def test_project_scoped_memory_search_and_export_are_isolated(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project_one = client.post(
+        "/projects", json={"path": str(settings_tmp.home)}, headers=auth(settings_tmp)
+    ).json()
+
+    async def add_other_project():
+        other = settings_tmp.home / "other-project"
+        other.mkdir()
+        return await container.memory.add_project(str(other))
+
+    project_two = anyio.run(add_other_project)
+    response = client.post(
+        "/memory",
+        json={
+            "content": "Project alpha uses local SQLite",
+            "memory_type": "project",
+            "project_id": project_one["id"],
+            "reason": "explicit",
+        },
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+
+    isolated = client.get(
+        "/memory/search",
+        params={"q": "SQLite", "project_id": project_two.id},
+        headers=auth(settings_tmp),
+    )
+    assert isolated.status_code == 200
+    assert isolated.json()["results"] == []
+
+    scoped = client.get(
+        "/memory/search",
+        params={"q": "SQLite", "project_id": project_one["id"]},
+        headers=auth(settings_tmp),
+    )
+    assert len(scoped.json()["results"]) == 1
+    exported = client.get(
+        "/memory/export",
+        params={"project_id": project_two.id},
+        headers=auth(settings_tmp),
+    ).json()["export"]
+    assert "Project alpha" not in exported
+
+
+def test_fake_backend_end_to_end_remember_request(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/chat",
+        json={"message": "Remember I prefer concise answers"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["status"] == "ok"
+    assert result["final_message"] == "Stored preference memory."
+    memories = anyio.run(container.memory.search_memories, "concise")
+    assert len(memories) == 1
+    assert memories[0].content == "I prefer concise answers"
+    rows = anyio.run(
+        container.database.fetchall,
+        "SELECT args_json FROM tool_calls WHERE tool = ?",
+        ("remember_memory",),
+    )
+    assert rows
+    assert "I prefer concise answers" not in rows[0]["args_json"]
+
+
 def test_vector_repo_chunks_return_citations(settings_tmp) -> None:
     import anyio
 
@@ -496,8 +678,16 @@ def test_health_response(settings_tmp) -> None:
     client = TestClient(create_app(container))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["database"]["ok"] is True
-    assert response.json()["runtime"]["status"] == "ok"
+    health = response.json()
+    assert health["database"]["ok"] is True
+    assert health["database"]["path"] == "[REDACTED]"
+    assert health["vector_index"]["path"] == "[REDACTED]"
+    assert str(settings_tmp.home) not in json.dumps(health)
+    assert health["runtime"]["status"] == "ok"
+
+    diagnostics = client.get("/diagnostics", headers=auth(settings_tmp))
+    assert diagnostics.status_code == 200
+    assert str(settings_tmp.database_path) in diagnostics.text
 
 
 def test_health_degrades_when_runtime_unavailable(settings_tmp) -> None:

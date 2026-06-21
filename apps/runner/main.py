@@ -27,12 +27,14 @@ from apps.runner.verify import (
     run_fake_verification,
     run_model_benchmark,
     run_real_model_verification,
+    run_target_mac_validation,
     run_workflow_verification,
 )
 from april_common.config_validation import validate_configuration
 from april_common.effective_config import load_agents_file, load_permissions_file, load_tools_file
 from april_common.errors import ConfigError
 from april_common.settings import load_settings
+from april_common.token_setup import generate_tokens, write_token_env_file
 from services.april_runtime.model_registry import ModelRegistry
 
 app = typer.Typer(help="Global command dispatcher.")
@@ -47,6 +49,7 @@ voice_app = typer.Typer(help="Voice operations.")
 reminder_app = typer.Typer(help="Reminder operations.")
 task_app = typer.Typer(help="Task inspection operations.")
 eval_app = typer.Typer(help="Local evaluation operations.")
+setup_app = typer.Typer(help="Local setup utilities.")
 app.add_typer(april_app, name="april")
 april_app.add_typer(model_app, name="model")
 april_app.add_typer(project_app, name="project")
@@ -58,6 +61,7 @@ april_app.add_typer(voice_app, name="voice")
 april_app.add_typer(reminder_app, name="reminder")
 april_app.add_typer(task_app, name="task")
 april_app.add_typer(eval_app, name="eval")
+april_app.add_typer(setup_app, name="setup")
 
 
 def _manager() -> AprilServiceManager:
@@ -222,7 +226,7 @@ def _print_verification_table(title: str, checks: list[VerifyCheck]) -> None:
     table.add_column("Status")
     table.add_column("Detail")
     for check in checks:
-        table.add_row(check.name, "pass" if check.ok else "fail", check.detail)
+        table.add_row(check.name, check.status or ("pass" if check.ok else "fail"), check.detail)
     console.print(table)
 
 
@@ -889,16 +893,43 @@ def config_inspect() -> None:
     console.print_json(data=data)
 
 
+@setup_app.command("tokens")
+def setup_tokens(
+    output: Path = typer.Option(Path(".env"), "--output", help="Local env file to update."),
+) -> None:
+    target = output if output.is_absolute() else _manager().home / output
+    write_token_env_file(target, generate_tokens())
+    console.print(f"Generated APRIL API and Runtime tokens in {target}.")
+    console.print("Full token values were not printed.")
+
+
 @april_app.command()
 def verify(
     model_path: Path | None = typer.Argument(None),
     fake: bool = typer.Option(False, "--fake", help="Run deterministic fake-backend verification."),
     real_model: bool = typer.Option(False, "--real-model"),
     workflow: bool = typer.Option(False, "--workflow"),
+    target_mac: bool = typer.Option(False, "--target-mac"),
+    require_real_model: bool = typer.Option(False, "--require-real-model"),
     json_output: bool = typer.Option(False, "--json"),
     max_output_tokens: int = typer.Option(32, "--max-output-tokens", min=1, max=4096),
     timeout: float = typer.Option(180.0, "--timeout", min=1.0),
 ) -> None:
+    if target_mac:
+        checks = run_target_mac_validation(
+            _manager().home,
+            model_path=model_path,
+            require_real_model=require_real_model,
+            max_output_tokens=max_output_tokens,
+            timeout=timeout,
+        )
+        if json_output:
+            console.print_json(data={"checks": [asdict(check) for check in checks]})
+        else:
+            _print_verification_table("APRIL Target Mac Validation", checks)
+        if not all(check.ok for check in checks):
+            raise typer.Exit(1)
+        raise typer.Exit(0)
     if workflow:
         checks = run_workflow_verification(
             _manager().home,

@@ -16,9 +16,7 @@ class RepoActivity:
     new_commits: bool
 
 
-async def compute_repo_activity(
-    memory: SqliteMemory, *, persist: bool
-) -> list[RepoActivity]:
+async def compute_repo_activity(memory: SqliteMemory, *, persist: bool) -> list[RepoActivity]:
     """Read-only git scan of every registered project.
 
     For each project, reads HEAD and `status --porcelain` through the validated
@@ -49,9 +47,7 @@ async def compute_repo_activity(
         )
 
         if persist:
-            await memory.upsert_repo_snapshot(
-                project.id, head_sha, dirty_count, utc_now_iso()
-            )
+            await memory.upsert_repo_snapshot(project.id, head_sha, dirty_count, utc_now_iso())
 
         activities.append(
             RepoActivity(

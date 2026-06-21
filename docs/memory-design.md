@@ -31,6 +31,15 @@ Inspect the active provider with:
 run april memory doctor
 ```
 
+Durable memories are written only through explicit user intent, either via the
+authenticated `POST /memory` API or the internal `remember_memory` Level 2 tool.
+APRIL does not promote ordinary conversation turns into durable memory. The
+writer rejects sensitive-looking values such as passwords, tokens, API keys,
+credentials, and private keys, stores the minimum submitted text, and returns an
+existing record for exact duplicate content/type/project writes. Memory write
+audit records include IDs, type, project/conversation scope, and content length,
+but not the stored content itself.
+
 The vector index stores metadata and matrix data separately as `records.json`,
 `metadata.json`, and `vectors.npy`. Writes are batched under a local file lock
 and committed through atomic temporary-file replacement. Search uses the
@@ -38,6 +47,13 @@ persisted matrix directly instead of reparsing vectors from JSON records.
 Indexing is scoped by source type, source ID, project ID, path, and content
 hash so deleted files are removed, changed files are replaced, unchanged files
 are reused, and repeated indexing is idempotent.
+
+Document ingestion uses typed local extractors. Text/source files are supported
+by default. PDF text extraction is optional through the `documents` extra
+(`pypdf`) and does not perform OCR. Unsupported binary formats return structured
+unsupported entries rather than being decoded as arbitrary text. Indexed
+document responses include source path, content hash, extraction type, chunk
+count, and indexing timestamp.
 
 Runtime retrieval:
 

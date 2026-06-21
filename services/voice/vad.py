@@ -1,6 +1,24 @@
 from __future__ import annotations
 
-import audioop
+import math
+import struct
+
+_INT16_SCALE = 32768.0
+
+
+def pcm16le_rms(frame: bytes) -> float:
+    """Return normalized RMS for signed 16-bit little-endian PCM."""
+    if not frame:
+        return 0.0
+    if len(frame) % 2:
+        raise ValueError("VoiceActivityDetector requires signed 16-bit PCM frames.")
+
+    total = 0
+    samples = 0
+    for (sample,) in struct.iter_unpack("<h", frame):
+        total += sample * sample
+        samples += 1
+    return math.sqrt(total / samples) / _INT16_SCALE
 
 
 class VoiceActivityDetector:
@@ -13,7 +31,7 @@ class VoiceActivityDetector:
         if not frame:
             self._speech_frames = 0
             return False
-        rms = audioop.rms(frame, 2) / 32768.0
+        rms = pcm16le_rms(frame)
         if rms >= self.energy_threshold:
             self._speech_frames += 1
         else:

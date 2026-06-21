@@ -20,7 +20,7 @@ from services.april_runtime.schemas import ChatMessage
 from services.brain.agent_loop import StructuredAgentLoop
 from services.brain.memory_policy import AgentMemoryContext, build_agent_memory_context
 from services.brain.planner import task_plan_from_decision
-from services.brain.reasoning_resolver import resolve_reasoning_model_id
+from services.brain.reasoning_resolver import resolve_reasoning_model
 from services.brain.router import BrainRouter
 from services.brain.schemas import BrainDecision, PlannedToolCall
 from services.memory.retriever import MemoryRetriever
@@ -63,6 +63,7 @@ class PreparedTurn:
     pending_approval: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     final_message: str | None = None
+    final_status: Literal["ok", "error"] = "error"
     proposed_changes: list[ProposedChange] = field(default_factory=list)
     project_id: str | None = None
     actor: str = "local-user"
@@ -70,6 +71,7 @@ class PreparedTurn:
     context_sections: list[str] = field(default_factory=list)
     structured_agent: bool = False
     task_plan_id: str | None = None
+    run_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class AprilOrchestrator:
@@ -152,6 +154,7 @@ class AprilOrchestrator:
             status=result.status,
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
+            metadata=prepared.run_metadata,
         )
         await self._update_task_status(prepared, "completed")
         return result
@@ -184,6 +187,7 @@ class AprilOrchestrator:
                 "model_id": prepared.model_id,
                 "routing_method": prepared.decision.routing_method,
                 "citations": [citation.model_dump() for citation in prepared.citations],
+                "run_metadata": prepared.run_metadata,
             },
         )
         yield (
@@ -194,6 +198,7 @@ class AprilOrchestrator:
                 "model_id": prepared.model_id,
                 "routing_method": prepared.decision.routing_method,
                 "decision_summary": prepared.decision.decision_summary,
+                "run_metadata": prepared.run_metadata,
             },
         )
         if prepared.structured_agent:
@@ -252,6 +257,13 @@ class AprilOrchestrator:
             yield ("done", {"finish_reason": "approval_required"})
             return
         if prepared.final_message is not None:
+            if prepared.final_status == "ok":
+                yield ("final_answer", {"message": prepared.final_message})
+                yield ("token", {"text": prepared.final_message})
+                yield ("usage", {})
+                await self._finish_message(prepared, prepared.final_message)
+                yield ("done", {"finish_reason": "stop"})
+                return
             yield ("error", {"message": prepared.final_message, "warnings": prepared.warnings})
             await self._finish_message(prepared, prepared.final_message)
             yield ("done", {"finish_reason": "error"})
@@ -294,6 +306,7 @@ class AprilOrchestrator:
             status="ok" if finish_reason != "error" else "error",
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
+            metadata=prepared.run_metadata,
         )
         await self._update_task_status(
             prepared,
@@ -342,13 +355,16 @@ class AprilOrchestrator:
                 "Unknown agent selected by brain.", {"agent": decision.agent}
             )
         model_id = agent.model_id or decision.model_id
+        run_metadata: dict[str, Any] = {}
         if agent.model_id is not None and decision.model_id != agent.model_id:
             decision = decision.model_copy(update={"model_id": agent.model_id})
         if agent.name == "reasoning_agent":
-            model_id = await resolve_reasoning_model_id(
+            resolution = await resolve_reasoning_model(
                 runtime_client=self.runtime_client,
                 fallback_model_id=model_id,
             )
+            model_id = resolution.model_id
+            run_metadata["model_resolution"] = resolution.metadata()
         task_plan = task_plan_from_decision(
             decision,
             conversation_id=active_conversation_id,
@@ -384,6 +400,7 @@ class AprilOrchestrator:
                 history=memory_context.history,
                 context_sections=context_sections,
                 task_plan_id=task_plan.id,
+                run_metadata=run_metadata,
             )
 
         if structured_specialists and self._uses_structured_loop(agent.name, decision):
@@ -400,6 +417,7 @@ class AprilOrchestrator:
                 context_sections=context_sections,
                 structured_agent=True,
                 task_plan_id=task_plan.id,
+                run_metadata=run_metadata,
             )
 
         if decision.intent == "code_modification" and project is not None:
@@ -422,6 +440,7 @@ class AprilOrchestrator:
         citations: list[LocalCitation] = []
         pending_approval: dict[str, Any] | None = None
         warnings: list[str] = []
+        memory_write_message: str | None = None
         for planned in planned_calls[: self.settings.permissions.maximum_agent_tool_iterations]:
             missing = self._missing_required_args(planned)
             if missing:
@@ -455,6 +474,8 @@ class AprilOrchestrator:
                 continue
             if tool_result.stdout:
                 tool_outputs.append(f"{planned.tool}:\n{tool_result.stdout[:4000]}")
+            if planned.tool == "remember_memory" and tool_result.ok:
+                memory_write_message = tool_result.stdout
             if planned.tool == "read_file" and tool_result.ok:
                 citations.append(
                     LocalCitation(
@@ -463,6 +484,26 @@ class AprilOrchestrator:
                         end_line=tool_result.data.get("end_line"),
                     )
                 )
+
+        if decision.intent == "memory_write" and pending_approval is None:
+            return PreparedTurn(
+                request_id=active_request_id,
+                conversation_id=active_conversation_id,
+                decision=decision,
+                agent_name=agent.name,
+                model_id=model_id,
+                messages=[],
+                citations=citations,
+                final_message=memory_write_message or "Stored memory.",
+                final_status="ok",
+                warnings=warnings,
+                project_id=project.id if project else None,
+                actor=actor,
+                history=memory_context.history,
+                context_sections=context_sections,
+                task_plan_id=task_plan.id,
+                run_metadata=run_metadata,
+            )
 
         prompt_parts, prompt_citations = await self._prompt_parts(
             message=message,
@@ -490,6 +531,7 @@ class AprilOrchestrator:
             history=memory_context.history,
             context_sections=context_sections,
             task_plan_id=task_plan.id,
+            run_metadata=run_metadata,
         )
 
     async def run_agent(
@@ -507,7 +549,7 @@ class AprilOrchestrator:
         agent = self.agent_registry.get(agent_id)
         if agent is None:
             raise PermissionDeniedError("Unknown agent.", {"agent": agent_id})
-        agent = await self._effective_agent(agent)
+        agent, run_metadata = await self._effective_agent(agent)
         project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
         if self._agent_requires_project(agent_id) and project is None:
             raise PermissionDeniedError(
@@ -551,6 +593,7 @@ class AprilOrchestrator:
             request_id=active_request_id,
             history=memory_context.history,
             context_sections=context_sections,
+            run_metadata=run_metadata,
         )
         if result.status != "pending_approval":
             await self.memory.add_message(active_conversation_id, "assistant", result.final_message)
@@ -698,6 +741,7 @@ class AprilOrchestrator:
             request_id=prepared.request_id,
             history=prepared.history,
             context_sections=prepared.context_sections,
+            run_metadata=prepared.run_metadata,
         )
         if result.status != "pending_approval":
             await self.memory.add_message(
@@ -711,7 +755,7 @@ class AprilOrchestrator:
         )
         return result
 
-    async def _effective_agent(self, agent: BaseAgent) -> BaseAgent:
+    async def _effective_agent(self, agent: BaseAgent) -> tuple[BaseAgent, dict[str, Any]]:
         """Resolve the model the agent should run with for a direct run.
 
         Only ``reasoning_agent`` is affected: it is upgraded to a registered
@@ -720,12 +764,14 @@ class AprilOrchestrator:
         """
 
         if agent.name != "reasoning_agent":
-            return agent
-        resolved = await resolve_reasoning_model_id(
+            return agent, {}
+        resolution = await resolve_reasoning_model(
             runtime_client=self.runtime_client,
             fallback_model_id=agent.model_id or self.settings.brain.model_id,
         )
-        return self._with_resolved_model(agent, resolved)
+        return self._with_resolved_model(agent, resolution.model_id), {
+            "model_resolution": resolution.metadata()
+        }
 
     def _with_resolved_model(self, agent: BaseAgent, model_id: str) -> BaseAgent:
         """Return a reasoning agent bound to ``model_id``; others unchanged."""
@@ -1126,13 +1172,14 @@ class AprilOrchestrator:
             status=result.status,
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
+            metadata=prepared.run_metadata,
         )
         await self._update_task_status(prepared, "pending_approval")
         return result
 
     async def _finish_message(self, prepared: PreparedTurn, message: str) -> AgentResult:
         result = AgentResult(
-            status="error",
+            status=prepared.final_status,
             final_message=message,
             conversation_id=prepared.conversation_id,
             local_citations=prepared.citations,
@@ -1144,8 +1191,9 @@ class AprilOrchestrator:
             status=result.status,
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
+            metadata=prepared.run_metadata,
         )
-        await self._update_task_status(prepared, "error")
+        await self._update_task_status(prepared, "completed" if result.status == "ok" else "error")
         return result
 
     async def _update_task_status(self, prepared: PreparedTurn, status: str) -> None:

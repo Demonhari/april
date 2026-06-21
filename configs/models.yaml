@@ -5,6 +5,7 @@ models:
     path: models/granite3.3-2b-q4_k_m.gguf
     backend: llama_cpp
     role: brain
+    chat_format: granite
     threads: 8
     context_size: 8192
     temperature: 0.3
@@ -19,6 +20,7 @@ models:
     path: models/qwen3-1.7b-q8_0.gguf
     backend: llama_cpp
     role: coding
+    chat_format: qwen
     threads: 8
     context_size: 8192
     temperature: 0.2
@@ -33,6 +35,7 @@ models:
     path: models/qwen3-0.6b-q8_0.gguf
     backend: llama_cpp
     role: reading
+    chat_format: qwen
     threads: 6
     context_size: 4096
     temperature: 0.2
@@ -55,6 +58,7 @@ models:
   #   path: models/your-reasoning-model-q4_k_m.gguf
   #   backend: llama_cpp
   #   role: reasoning
+  #   chat_format: qwen
   #   threads: 8
   #   context_size: 8192
   #   temperature: 0.4

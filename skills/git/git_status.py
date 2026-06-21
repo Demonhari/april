@@ -27,7 +27,7 @@ def git_status_definition() -> ToolDefinition:
         description="Read Git working tree status.",
         permission_level=1,
         risk_level="read_only",
-        allowed_agents={"coding_agent"},
+        allowed_agents={"coding_agent", "reasoning_agent"},
         executor=git_status,
         affected_paths=git_paths,
     )

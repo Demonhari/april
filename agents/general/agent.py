@@ -14,7 +14,7 @@ def general_agent() -> BaseAgent:
             description="Chat, planning, and small answers.",
             model_id="april-brain",
             system_prompt_path=str(prompt_path),
-            allowed_tools=set(),
+            allowed_tools={"remember_memory"},
             blocked_tools=set(),
             memory_access_policy="conversation_and_safe_memory",
             maximum_tool_iterations=5,

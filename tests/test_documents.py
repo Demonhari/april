@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+import types
+
 import anyio
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +15,7 @@ from skills.documents.document_search import document_search
 from tests.test_core_api import auth, make_container
 
 
-def _make_corpus(settings_tmp) -> "object":
+def _make_corpus(settings_tmp) -> object:
     folder = settings_tmp.home / "docs"
     folder.mkdir()
     (folder / "guide.md").write_text("# Local guide\nanimation pipeline notes\n", encoding="utf-8")
@@ -35,6 +38,8 @@ def test_document_indexer_skips_binary_and_rejects_out_of_root(settings_tmp) -> 
 
     result = anyio.run(document_indexer, {"folder_path": str(folder)})
     assert result.ok
+    assert result.data["unsupported"]
+    assert any(item["path"].endswith("blob.bin") for item in result.data["unsupported"])
     vector = VectorMemory(settings_tmp.vector_index_path)
     indexed_paths = {
         path for source in vector.sources(source_type="document") for path in source["paths"]
@@ -44,6 +49,50 @@ def test_document_indexer_skips_binary_and_rejects_out_of_root(settings_tmp) -> 
 
     with pytest.raises(PermissionDeniedError):
         anyio.run(document_indexer, {"folder_path": str(settings_tmp.home.parent)})
+
+
+def test_document_indexer_extracts_pdf_when_optional_dependency_exists(
+    settings_tmp, monkeypatch
+) -> None:
+    folder = settings_tmp.home / "pdfs"
+    folder.mkdir()
+    pdf = folder / "guide.pdf"
+    pdf.write_bytes(b"%PDF local fixture")
+
+    class FakePage:
+        def extract_text(self) -> str:
+            return "pdf animation notes"
+
+    class FakeReader:
+        def __init__(self, path: str) -> None:
+            assert path == str(pdf)
+            self.pages = [FakePage()]
+
+    monkeypatch.setitem(sys.modules, "pypdf", types.SimpleNamespace(PdfReader=FakeReader))
+    result = anyio.run(document_indexer, {"folder_path": str(folder)})
+    assert result.ok
+    assert result.data["chunks"] == 1
+    assert result.data["documents"][0]["extraction_type"] == "pdf"
+    assert result.data["unsupported"] == []
+
+    vector = VectorMemory(settings_tmp.vector_index_path)
+    chunks = vector.search("animation", source_type="document")
+    assert chunks
+    assert chunks[0].metadata["path"] == str(pdf)
+
+
+def test_document_reindex_removes_deleted_files(settings_tmp) -> None:
+    folder = settings_tmp.home / "docs-delete"
+    folder.mkdir()
+    note = folder / "note.txt"
+    note.write_text("temporary document text\n", encoding="utf-8")
+    first = anyio.run(document_indexer, {"folder_path": str(folder)})
+    assert first.data["chunks"] == 1
+    note.unlink()
+    second = anyio.run(document_indexer, {"folder_path": str(folder)})
+    assert second.data["chunks"] == 0
+    vector = VectorMemory(settings_tmp.vector_index_path)
+    assert vector.sources(source_type="document") == []
 
 
 def test_document_search_and_retriever_carry_line_metadata(settings_tmp) -> None:

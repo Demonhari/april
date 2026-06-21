@@ -102,8 +102,15 @@ class ModelInfo(BaseModel):
     recent_tokens_per_second: float | None = None
     loaded_at: str | None = None
     unloaded_at: str | None = None
+    load_duration_ms: float | None = None
     idle_unload_seconds: float | None = None
     priority: int = 0
+    threads: int | None = None
+    n_batch: int | None = None
+    n_ubatch: int | None = None
+    n_gpu_layers: int | None = None
+    use_mmap: bool | None = None
+    use_mlock: bool | None = None
 
 
 class RuntimeHealth(BaseModel):
@@ -116,6 +123,9 @@ class RuntimeHealth(BaseModel):
     active_requests: int = 0
     generation_error_count: int = 0
     lifecycle_policy: dict[str, Any] = Field(default_factory=dict)
+    process_rss_bytes: int | None = None
+    process_peak_rss_bytes: int | None = None
+    process_memory_estimated: bool = True
 
 
 class StreamEvent(BaseModel):

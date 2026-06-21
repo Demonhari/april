@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -50,6 +50,16 @@ class ToolRequestEnvelope(BaseModel):
 
 class MemorySearchResponse(BaseModel):
     results: list[dict[str, Any]]
+
+
+class MemoryCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=10_000)
+    memory_type: Literal["fact", "preference", "project", "note"] = "fact"
+    project_id: str | None = None
+    source_conversation_id: str | None = None
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class ProjectCreateRequest(BaseModel):

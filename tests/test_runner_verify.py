@@ -3,6 +3,8 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import subprocess
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ from apps.runner.verify import (
     WorkflowVerifier,
     run_model_benchmark,
     run_real_model_verification,
+    run_target_mac_validation,
 )
 
 
@@ -297,6 +300,90 @@ def test_run_model_benchmark_reports_runtime_extra_when_missing(
     assert "pip install -e" in results[0].detail
 
 
+def test_target_mac_validation_skips_optional_model_and_voice(monkeypatch) -> None:
+    monkeypatch.setattr("apps.runner.verify.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("apps.runner.verify.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("apps.runner.verify._llama_cpp_installed", lambda: False)
+    monkeypatch.setattr(
+        "apps.runner.verify.query_audio_devices",
+        lambda: {
+            "sounddevice_installed": False,
+            "input_devices": [],
+            "output_devices": [],
+            "error": "missing",
+        },
+    )
+    checks = run_target_mac_validation(Path.cwd())
+    assert all(check.ok for check in checks)
+    assert any(
+        check.name == "llama-cpp-python import" and check.status == "skip" for check in checks
+    )
+    assert any(check.name == "configured GGUF existence and readability" for check in checks)
+    assert any(check.status == "manual" for check in checks)
+
+
+def test_target_mac_validation_can_require_real_model(monkeypatch) -> None:
+    monkeypatch.setattr("apps.runner.verify.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("apps.runner.verify.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("apps.runner.verify._llama_cpp_installed", lambda: False)
+    checks = run_target_mac_validation(Path.cwd(), require_real_model=True)
+    assert any(check.name == "llama-cpp-python import" and check.ok is False for check in checks)
+    assert not all(check.ok for check in checks)
+
+
+def test_target_mac_validation_runs_real_model_checks_when_ready(
+    tmp_path: Path, monkeypatch
+) -> None:
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"fake")
+    fake_llama = types.SimpleNamespace(
+        __version__="test",
+        llama_print_system_info=lambda: b"metal=1",
+    )
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_llama)
+    monkeypatch.setattr("apps.runner.verify.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("apps.runner.verify.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("apps.runner.verify._llama_cpp_installed", lambda: True)
+    monkeypatch.setattr(
+        "apps.runner.verify.query_audio_devices",
+        lambda: {
+            "sounddevice_installed": True,
+            "input_devices": [{"index": 0, "name": "Mic"}],
+            "output_devices": [{"index": 1, "name": "Speaker"}],
+        },
+    )
+    monkeypatch.setattr(
+        "apps.runner.verify.voice_doctor",
+        lambda settings: {
+            "components": [
+                {"name": "whisper binary", "status": "ok", "message": "whisper"},
+                {"name": "whisper model", "status": "ok", "message": "model"},
+                {"name": "piper binary", "status": "ok", "message": "piper"},
+                {"name": "piper model", "status": "ok", "message": "voice"},
+                {"name": "wake-word model", "status": "ok", "message": "wake"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "apps.runner.verify.run_real_model_verification",
+        lambda home, model_path, **kwargs: [
+            VerifyCheck(name="real model load", ok=True, detail=str(model_path))
+        ],
+    )
+    monkeypatch.setattr(
+        "apps.runner.verify.run_workflow_verification",
+        lambda home, **kwargs: [
+            VerifyCheck(name="real workflow specialist-agent request", ok=True, detail="ok")
+        ],
+    )
+    checks = run_target_mac_validation(Path.cwd(), model_path=gguf)
+    names = {check.name for check in checks}
+    assert "real model load" in names
+    assert "real workflow specialist-agent request" in names
+    assert any(check.name == "backend acceleration/build information" for check in checks)
+    assert all(check.ok for check in checks)
+
+
 def test_model_benchmark_run_and_single_success(tmp_path: Path, monkeypatch) -> None:
     ports = iter([19301, 19302])
     monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
@@ -398,6 +485,33 @@ def test_real_workflow_latest_routing_method(tmp_path: Path, monkeypatch) -> Non
                 ("brain_decision", '{"routing_method":"model"}', "2026-01-01T00:00:00Z"),
             )
         assert verifier._latest_routing_method() == "model"
+    finally:
+        shutil.rmtree(verifier.temp, ignore_errors=True)
+
+
+def test_real_workflow_specialist_agent_request(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19511, 19512])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    verifier = RealWorkflowVerifier(home=Path.cwd(), model_path=tmp_path / "model.gguf")
+
+    class SpecialistClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> SpecialistClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def post(self, path: str, json: dict[str, Any]) -> FakeResponse:
+            assert path == "/agents/run"
+            assert json["agent"] == "reading_agent"
+            return FakeResponse({"result": {"status": "ok", "conversation_id": "conv"}})
+
+    monkeypatch.setattr("apps.runner.verify.httpx.Client", SpecialistClient)
+    try:
+        assert verifier._real_specialist_agent() == "reading_agent ok"
     finally:
         shutil.rmtree(verifier.temp, ignore_errors=True)
 

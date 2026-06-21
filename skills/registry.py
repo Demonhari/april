@@ -59,6 +59,7 @@ def default_registry() -> ToolRegistry:
     from skills.git.git_diff import git_diff_definition
     from skills.git.git_log import git_log_definition
     from skills.git.git_status import git_status_definition
+    from skills.memory.remember_memory import remember_memory_definition
     from skills.notes.create_note import create_note_definition
     from skills.notes.search_notes import search_notes_definition
     from skills.reminders.create_reminder import create_reminder_definition
@@ -83,6 +84,7 @@ def default_registry() -> ToolRegistry:
         patch_generator_definition(),
         patch_applier_definition(),
         test_runner_definition(),
+        remember_memory_definition(),
         create_note_definition(),
         search_notes_definition(),
         create_reminder_definition(),

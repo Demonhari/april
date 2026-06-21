@@ -288,6 +288,22 @@ def test_run_april_verify_workflow_json_and_failure(tmp_path: Path, monkeypatch)
     assert "bad" in failed.output
 
 
+def test_run_april_verify_target_mac_json(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.run_target_mac_validation",
+        lambda home, **kwargs: [
+            VerifyCheck(name="machine architecture", ok=True, detail=str(kwargs)),
+            VerifyCheck(name="voice smoke", ok=True, detail="manual", status="manual"),
+        ],
+    )
+    result = CliRunner().invoke(app, ["april", "verify", "--target-mac", "--json"])
+    assert result.exit_code == 0
+    assert '"status": "manual"' in result.output
+    assert "machine architecture" in result.output
+
+
 def test_run_april_verify_real_model_skips_without_path(monkeypatch) -> None:
     monkeypatch.delenv("APRIL_TEST_GGUF_PATH", raising=False)
     result = CliRunner().invoke(app, ["april", "verify", "--real-model"])

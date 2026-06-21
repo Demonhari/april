@@ -3,12 +3,16 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from april_common.errors import ConfigError
+
+KNOWN_DEFAULT_API_TOKENS = {"local-dev-token"}
+KNOWN_DEFAULT_RUNTIME_TOKENS = {"local-dev-runtime-token"}
+SAFE_TOKEN_ENVIRONMENTS = {"development", "test"}
 
 
 def project_root() -> Path:
@@ -115,6 +119,7 @@ class SchedulerSettings(BaseModel):
 
 class AprilSettings(BaseModel):
     home: Path
+    environment: Literal["development", "test", "production"] = "development"
     api: ApiSettings = Field(default_factory=ApiSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
@@ -166,6 +171,8 @@ class AprilSettings(BaseModel):
 
 ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_HOME": ("home",),
+    "APRIL_ENV": ("environment",),
+    "APRIL_ENVIRONMENT": ("environment",),
     "APRIL_API_HOST": ("api", "host"),
     "APRIL_API_PORT": ("api", "port"),
     "APRIL_API_TOKEN": ("api", "token"),
@@ -263,6 +270,7 @@ def load_settings(config_path: Path | None = None, *, root: Path | None = None) 
                 value = _parse_env_value(os.environ[env_name])
             _set_nested(data, field_path, value)
     settings = AprilSettings.model_validate(data)
+    _validate_default_tokens(settings)
     return settings
 
 
@@ -273,3 +281,18 @@ def get_settings() -> AprilSettings:
 
 def reset_settings_cache() -> None:
     get_settings.cache_clear()
+
+
+def _validate_default_tokens(settings: AprilSettings) -> None:
+    if settings.environment in SAFE_TOKEN_ENVIRONMENTS:
+        return
+    insecure: list[str] = []
+    if settings.api.token in KNOWN_DEFAULT_API_TOKENS:
+        insecure.append("APRIL_API_TOKEN")
+    if settings.runtime.token is None or settings.runtime.token in KNOWN_DEFAULT_RUNTIME_TOKENS:
+        insecure.append("APRIL_RUNTIME_TOKEN")
+    if insecure:
+        raise ConfigError(
+            "Known development tokens are not allowed outside development/test mode.",
+            {"environment": settings.environment, "settings": insecure},
+        )

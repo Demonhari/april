@@ -46,6 +46,7 @@ class ModelRuntimeState:
     recent_tokens_per_second: float | None = None
     loaded_at: str | None = None
     unloaded_at: str | None = None
+    load_duration_ms: float | None = None
     last_used_monotonic: float = 0.0
 
 
@@ -113,8 +114,15 @@ class ModelLifecycle:
             recent_tokens_per_second=state.recent_tokens_per_second,
             loaded_at=state.loaded_at,
             unloaded_at=state.unloaded_at,
+            load_duration_ms=state.load_duration_ms,
             idle_unload_seconds=state.model.idle_unload_seconds,
             priority=state.model.priority,
+            threads=state.model.threads,
+            n_batch=state.model.n_batch,
+            n_ubatch=state.model.n_ubatch,
+            n_gpu_layers=state.model.n_gpu_layers,
+            use_mmap=state.model.use_mmap,
+            use_mlock=state.model.use_mlock,
         )
 
     def policy_snapshot(self) -> dict[str, object]:
@@ -155,6 +163,7 @@ class ModelLifecycle:
                 update={"path": state.model.resolved_path(self.registry.root)}
             )
             backend = self._backend_factory(resolved_model)
+            started = time.monotonic()
             try:
                 await backend.load(resolved_model)
             except Exception as exc:
@@ -167,6 +176,7 @@ class ModelLifecycle:
             state.backend = backend
             state.state = "loaded"
             state.loaded_at = utc_now_iso()
+            state.load_duration_ms = (time.monotonic() - started) * 1000
             state.unloaded_at = None
             state.last_used_monotonic = time.monotonic()
             return state
@@ -255,6 +265,7 @@ class ModelLifecycle:
         diagnostics = {
             "prompt_path": getattr(state.backend, "last_prompt_path", None),
             "context_size_used": state.model.context_size,
+            "context_budget": context.metadata(),
         }
         return ChatResponse(
             request_id=request_id,
@@ -281,7 +292,7 @@ class ModelLifecycle:
             max_output_tokens=options.max_output_tokens,
         )
         prompt = render_prompt(state.model, context.messages)
-        input_tokens = await state.backend.count_tokens(prompt)
+        input_tokens = context.input_tokens
         output_tokens = 0
         start = time.monotonic()
         lock = (
@@ -291,7 +302,10 @@ class ModelLifecycle:
         )
         async with lock:
             state.active_requests += 1
-            yield "meta", {"context_truncated": context.truncated}
+            yield (
+                "meta",
+                {"context_truncated": context.truncated, "context_budget": context.metadata()},
+            )
             try:
                 async for token in state.backend.stream_messages(
                     prompt,
@@ -331,6 +345,7 @@ class ModelLifecycle:
                 "total_tokens": input_tokens + output_tokens,
                 "prompt_path": getattr(state.backend, "last_prompt_path", None),
                 "context_size_used": state.model.context_size,
+                "context_budget": context.metadata(),
             },
         )
         yield "done", {"finish_reason": "stop"}

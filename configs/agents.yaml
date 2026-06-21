@@ -3,7 +3,7 @@ agents:
     description: Chat, planning, and small answers.
     model_id: april-brain
     prompt_path: agents/general/prompt.md
-    allowed_tools: []
+    allowed_tools: [remember_memory]
     blocked_tools: []
     memory_access: conversation_and_safe_memory
     maximum_tool_iterations: 5
@@ -30,16 +30,16 @@ agents:
     description: Ideas, scripts, concepts, and local notes.
     model_id: april-brain
     prompt_path: agents/creative/prompt.md
-    allowed_tools: [create_note, search_notes]
+    allowed_tools: [create_note, search_notes, remember_memory]
     blocked_tools: [open_url]
     memory_access: conversation_and_safe_memory
     maximum_tool_iterations: 3
     output_schema: AgentResult
   reasoning_agent:
-    description: Architecture decisions and deeper analysis when configured.
+    description: Architecture decisions and deeper analysis.
     model_id: april-brain
     prompt_path: agents/reasoning/prompt.md
-    allowed_tools: [read_file, search_files, git_status, git_diff]
+    allowed_tools: [read_file, search_files, git_status, git_diff, remember_memory]
     blocked_tools: [write_file, run_command, git_commit]
     memory_access: conversation_and_safe_memory
     maximum_tool_iterations: 5

@@ -469,7 +469,7 @@ class ToolExecutionService:
     ) -> None:
         await self.memory.record_tool_call(
             tool=tool,
-            args=self._sanitize_mapping(args),
+            args=self._sanitize_tool_args(tool, args),
             status="ok" if result.ok else "failed",
             permission_level=permission.permission_level,
             risk_level=permission.risk_level,
@@ -496,7 +496,7 @@ class ToolExecutionService:
                 "audit_correlation_id": context.audit_correlation_id,
                 "event_type": event_type,
                 "tool": tool,
-                "arguments": self._sanitize_mapping(args),
+                "arguments": self._sanitize_tool_args(tool, args),
                 "agent": context.agent_id,
                 "project_id": context.project_id,
                 "approval_id": context.approval_id,
@@ -521,6 +521,12 @@ class ToolExecutionService:
         data["stderr"] = self._truncate_secret_text(str(data.get("stderr", "")))
         data["data"] = self._sanitize_mapping(data.get("data", {}))
         return data
+
+    def _sanitize_tool_args(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        sanitized = self._sanitize_mapping(args)
+        if tool == "remember_memory" and isinstance(sanitized, dict):
+            sanitized["content"] = "[REDACTED]"
+        return sanitized
 
     def _sanitize_mapping(self, value: Any) -> Any:
         if isinstance(value, dict):

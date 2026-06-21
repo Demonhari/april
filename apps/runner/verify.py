@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import socket
 import sqlite3
@@ -11,11 +12,19 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import yaml
 from pydantic import BaseModel, Field
+
+from april_common.errors import ConfigError
+from april_common.settings import load_settings
+from services.april_runtime.model_registry import ModelRegistry
+from services.brain.schemas import BrainDecision
+from services.voice.health import query_audio_devices, voice_doctor
+
+VerifyStatus = Literal["pass", "fail", "skip", "manual"]
 
 
 @dataclass(slots=True)
@@ -23,6 +32,11 @@ class VerifyCheck:
     name: str
     ok: bool
     detail: str = ""
+    status: VerifyStatus | None = None
+
+    def __post_init__(self) -> None:
+        if self.status is None:
+            self.status = "pass" if self.ok else "fail"
 
 
 def run_fake_verification(home: Path) -> list[VerifyCheck]:
@@ -75,6 +89,24 @@ def run_real_model_verification(
     return verifier.run()
 
 
+def run_target_mac_validation(
+    home: Path,
+    *,
+    model_path: Path | None = None,
+    require_real_model: bool = False,
+    max_output_tokens: int = 32,
+    timeout: float = 180.0,
+) -> list[VerifyCheck]:
+    validator = TargetMacValidator(
+        home=home,
+        model_path=model_path,
+        require_real_model=require_real_model,
+        max_output_tokens=max_output_tokens,
+        timeout=timeout,
+    )
+    return validator.run()
+
+
 class BenchmarkResult(BaseModel):
     run_index: int
     ok: bool = True
@@ -115,6 +147,222 @@ def run_model_benchmark(
         keep_loaded=keep_loaded,
     )
     return benchmark.run()
+
+
+class TargetMacValidator:
+    def __init__(
+        self,
+        *,
+        home: Path,
+        model_path: Path | None,
+        require_real_model: bool,
+        max_output_tokens: int,
+        timeout: float,
+    ) -> None:
+        self.home = home.expanduser().resolve()
+        self.model_path = model_path.expanduser().resolve() if model_path else None
+        self.require_real_model = require_real_model
+        self.max_output_tokens = max_output_tokens
+        self.timeout = timeout
+        self.checks: list[VerifyCheck] = []
+        self.settings_error: str | None = None
+
+    def run(self) -> list[VerifyCheck]:
+        self._machine_architecture()
+        self._python_version()
+        self._configuration_load()
+        llama_available = self._llama_cpp_import()
+        self._backend_build_info(llama_available)
+        selected_model = self._configured_gguf_path()
+        if selected_model is not None and selected_model.exists() and llama_available:
+            self.checks.extend(
+                run_real_model_verification(
+                    self.home,
+                    selected_model,
+                    max_output_tokens=self.max_output_tokens,
+                    timeout=self.timeout,
+                )
+            )
+            self.checks.extend(
+                run_workflow_verification(
+                    self.home,
+                    real_model=True,
+                    model_path=selected_model,
+                )
+            )
+        else:
+            self._model_dependent_skips()
+        self._voice_checks()
+        self._manual(
+            "push-to-talk record/transcribe/speak smoke",
+            "Run `run april voice ptt --seconds 3` on the target Mac after configuring voice.",
+        )
+        self._pass("cleanup and service shutdown", "No persistent services are started by skips.")
+        return self.checks
+
+    def _machine_architecture(self) -> None:
+        system = platform.system()
+        machine = platform.machine()
+        if system != "Darwin":
+            self._manual(
+                "machine architecture",
+                f"Run on the target Mac. Current host reports {system}/{machine}.",
+            )
+            return
+        if machine not in {"arm64", "x86_64"}:
+            self._fail("machine architecture", f"Unsupported Mac architecture: {machine}")
+            return
+        self._pass("machine architecture", f"{system}/{machine}")
+
+    def _python_version(self) -> None:
+        version = sys.version_info
+        detail = f"{version.major}.{version.minor}.{version.micro}"
+        if (version.major, version.minor) < (3, 11) or (version.major, version.minor) > (3, 13):
+            self._fail("Python version", f"{detail}; APRIL supports Python 3.11 through 3.13")
+            return
+        self._pass("Python version", detail)
+
+    def _configuration_load(self) -> None:
+        try:
+            load_settings(root=self.home)
+            ModelRegistry.from_file(self.home / "configs" / "models.yaml", root=self.home)
+        except ConfigError as exc:
+            self.settings_error = str(exc)
+            self._fail("configuration load", str(exc))
+            return
+        self._pass("configuration load", "settings and model registry loaded")
+
+    def _llama_cpp_import(self) -> bool:
+        if not _llama_cpp_installed():
+            self._required_or_skip(
+                "llama-cpp-python import",
+                "Install the optional runtime extra with `pip install -e '.[runtime]'`.",
+            )
+            return False
+        self._pass("llama-cpp-python import", "module spec found")
+        return True
+
+    def _backend_build_info(self, llama_available: bool) -> None:
+        if not llama_available:
+            self._skip("backend acceleration/build information", "llama-cpp-python unavailable")
+            return
+        self._manual(
+            "backend acceleration/build information",
+            "Detailed llama.cpp build information is available through Runtime-backed "
+            "real-model diagnostics.",
+        )
+
+    def _configured_gguf_path(self) -> Path | None:
+        selected = self._select_model_path()
+        if selected is None:
+            self._required_or_skip(
+                "configured GGUF existence and readability",
+                "No --model path, APRIL_TEST_GGUF_PATH, or configured llama_cpp brain model.",
+            )
+            return None
+        if not selected.exists():
+            self._required_or_skip(
+                "configured GGUF existence and readability", f"Missing: {selected}"
+            )
+            return selected
+        if not os.access(selected, os.R_OK):
+            self._required_or_skip(
+                "configured GGUF existence and readability", f"Not readable: {selected}"
+            )
+            return selected
+        self._pass("configured GGUF existence and readability", str(selected))
+        return selected
+
+    def _select_model_path(self) -> Path | None:
+        if self.model_path is not None:
+            return self.model_path
+        env_path = os.environ.get("APRIL_TEST_GGUF_PATH")
+        if env_path:
+            return Path(env_path).expanduser().resolve(strict=False)
+        try:
+            registry = ModelRegistry.from_file(
+                self.home / "configs" / "models.yaml", root=self.home
+            )
+        except ConfigError:
+            return None
+        for model in registry.list():
+            if model.role == "brain" and model.backend == "llama_cpp":
+                return model.resolved_path(registry.root)
+        return None
+
+    def _model_dependent_skips(self) -> None:
+        status: VerifyStatus = "fail" if self.require_real_model else "skip"
+        ok = not self.require_real_model
+        detail = "Requires readable local GGUF and llama-cpp-python."
+        for name in (
+            "model load",
+            "non-streaming completion",
+            "streaming completion",
+            "strict brain JSON parse",
+            "specialist-agent request",
+            "load-on-demand and unload",
+            "runtime RSS before load/after load/after unload",
+        ):
+            self.checks.append(VerifyCheck(name=name, ok=ok, detail=detail, status=status))
+
+    def _voice_checks(self) -> None:
+        try:
+            settings = load_settings(root=self.home)
+        except ConfigError as exc:
+            self._skip("voice configuration", str(exc))
+            return
+        devices = query_audio_devices()
+        if not devices.get("sounddevice_installed"):
+            self._skip("microphone enumeration", str(devices.get("error", "sounddevice missing")))
+        else:
+            input_count = len(devices.get("input_devices", []))
+            output_count = len(devices.get("output_devices", []))
+            if input_count:
+                self._pass("microphone enumeration", f"{input_count} input devices")
+            else:
+                self._manual("microphone enumeration", "No input devices reported by sounddevice.")
+            if output_count:
+                self._pass("speaker enumeration", f"{output_count} output devices")
+            else:
+                self._manual("speaker enumeration", "No output devices reported by sounddevice.")
+        report = voice_doctor(settings)
+        components = {
+            str(component.get("name")): component for component in report.get("components", [])
+        }
+        for check_name, component_name in (
+            ("whisper.cpp executable availability", "whisper binary"),
+            ("whisper.cpp model availability", "whisper model"),
+            ("Piper executable availability", "piper binary"),
+            ("Piper voice availability", "piper model"),
+            ("wake-word model availability", "wake-word model"),
+        ):
+            component = components.get(component_name)
+            status = str(component.get("status")) if component else "degraded"
+            message = str(component.get("message")) if component else "not reported"
+            if status == "ok":
+                self._pass(check_name, message)
+            elif settings.voice.enabled:
+                self._fail(check_name, message)
+            else:
+                self._skip(check_name, message)
+
+    def _required_or_skip(self, name: str, detail: str) -> None:
+        if self.require_real_model:
+            self._fail(name, detail)
+        else:
+            self._skip(name, detail)
+
+    def _pass(self, name: str, detail: str) -> None:
+        self.checks.append(VerifyCheck(name=name, ok=True, detail=detail, status="pass"))
+
+    def _fail(self, name: str, detail: str) -> None:
+        self.checks.append(VerifyCheck(name=name, ok=False, detail=detail, status="fail"))
+
+    def _skip(self, name: str, detail: str) -> None:
+        self.checks.append(VerifyCheck(name=name, ok=True, detail=detail, status="skip"))
+
+    def _manual(self, name: str, detail: str) -> None:
+        self.checks.append(VerifyCheck(name=name, ok=True, detail=detail, status="manual"))
 
 
 class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runtime
@@ -1185,6 +1433,7 @@ class RealWorkflowVerifier(
             )
             self._check("core health", lambda: self._wait_json(self.api_url + "/health"))
             self._check("real workflow planning route", self._real_planning_route)
+            self._check("real workflow specialist-agent request", self._real_specialist_agent)
         finally:
             self._stop()
             self._check("services stopped", self._services_stopped)
@@ -1198,7 +1447,8 @@ class RealWorkflowVerifier(
             response = client.post("/chat", json={"message": "April, plan my work today."})
         if response.status_code >= 400:
             raise RuntimeError(self._response_error(response))
-        method = self._latest_routing_method()
+        decision = BrainDecision.model_validate(self._latest_decision())
+        method = decision.routing_method
         if method == "fallback":
             raise RuntimeError(
                 "model/prompt reliability failure: model routing JSON was unusable "
@@ -1206,7 +1456,29 @@ class RealWorkflowVerifier(
             )
         return f"routing_method={method}"
 
+    def _real_specialist_agent(self) -> str:
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            response = client.post(
+                "/agents/run",
+                json={
+                    "agent": "reading_agent",
+                    "message": "Summarize this local validation note: APRIL is ready.",
+                },
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(self._response_error(response))
+        result = response.json().get("result") or {}
+        if result.get("status") != "ok":
+            raise RuntimeError(str(result))
+        return "reading_agent ok"
+
     def _latest_routing_method(self) -> str:
+        payload = self._latest_decision()
+        return str(payload.get("routing_method") or "unknown")
+
+    def _latest_decision(self) -> dict[str, Any]:
         database = self.temp / "data" / "april.db"
         with sqlite3.connect(database) as conn:
             row = conn.execute(
@@ -1219,14 +1491,14 @@ class RealWorkflowVerifier(
                 """
             ).fetchone()
         if row is None:
-            return "unknown"
+            return {}
         try:
             import json
 
             payload = json.loads(str(row[0]))
         except ValueError:
-            return "unknown"
-        return str(payload.get("routing_method") or "unknown")
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
 
 def _llama_cpp_installed() -> bool:

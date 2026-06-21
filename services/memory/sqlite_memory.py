@@ -82,29 +82,82 @@ class SqliteMemory:
             created_at=created_at,
         )
 
-    async def list_memories(self) -> list[MemoryRecord]:
-        rows = await self.database.fetchall("SELECT * FROM memories ORDER BY created_at DESC")
-        return [MemoryRecord.model_validate(dict(row)) for row in rows]
-
-    async def search_memories(self, query: str) -> list[MemoryRecord]:
-        if query.strip() in {"", "*"}:
-            return await self.list_memories()
+    async def find_duplicate_memory(
+        self,
+        content: str,
+        *,
+        kind: str,
+        project_id: str | None = None,
+    ) -> MemoryRecord | None:
+        normalized = " ".join(content.casefold().split())
         rows = await self.database.fetchall(
             """
-            SELECT m.*
-            FROM memories_fts f
-            JOIN memories m ON m.id = f.id
-            WHERE memories_fts MATCH ?
-            ORDER BY rank
-            LIMIT 20
+            SELECT * FROM memories
+            WHERE kind = ? AND (project_id IS ? OR project_id = ?)
+            ORDER BY created_at DESC
             """,
-            (query,),
+            (kind, project_id, project_id),
         )
-        if not rows:
+        for row in rows:
+            record = MemoryRecord.model_validate(dict(row))
+            if " ".join(record.content.casefold().split()) == normalized:
+                return record
+        return None
+
+    async def list_memories(self, *, project_id: str | None = None) -> list[MemoryRecord]:
+        if project_id is None:
+            rows = await self.database.fetchall("SELECT * FROM memories ORDER BY created_at DESC")
+        else:
             rows = await self.database.fetchall(
-                "SELECT * FROM memories WHERE content LIKE ? OR reason LIKE ? LIMIT 20",
-                (f"%{query}%", f"%{query}%"),
+                "SELECT * FROM memories WHERE project_id = ? ORDER BY created_at DESC",
+                (project_id,),
             )
+        return [MemoryRecord.model_validate(dict(row)) for row in rows]
+
+    async def search_memories(
+        self, query: str, *, project_id: str | None = None
+    ) -> list[MemoryRecord]:
+        if query.strip() in {"", "*"}:
+            return await self.list_memories(project_id=project_id)
+        if project_id is None:
+            rows = await self.database.fetchall(
+                """
+                SELECT m.*
+                FROM memories_fts f
+                JOIN memories m ON m.id = f.id
+                WHERE memories_fts MATCH ?
+                ORDER BY rank
+                LIMIT 20
+                """,
+                (query,),
+            )
+        else:
+            rows = await self.database.fetchall(
+                """
+                SELECT m.*
+                FROM memories_fts f
+                JOIN memories m ON m.id = f.id
+                WHERE memories_fts MATCH ? AND m.project_id = ?
+                ORDER BY rank
+                LIMIT 20
+                """,
+                (query, project_id),
+            )
+        if not rows:
+            if project_id is None:
+                rows = await self.database.fetchall(
+                    "SELECT * FROM memories WHERE content LIKE ? OR reason LIKE ? LIMIT 20",
+                    (f"%{query}%", f"%{query}%"),
+                )
+            else:
+                rows = await self.database.fetchall(
+                    """
+                    SELECT * FROM memories
+                    WHERE project_id = ? AND (content LIKE ? OR reason LIKE ?)
+                    LIMIT 20
+                    """,
+                    (project_id, f"%{query}%", f"%{query}%"),
+                )
         return [MemoryRecord.model_validate(dict(row)) for row in rows]
 
     async def delete_memory(self, memory_id: str) -> bool:
@@ -113,8 +166,10 @@ class SqliteMemory:
             cursor = await conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         return cursor.rowcount > 0
 
-    async def export_memories(self) -> str:
-        memories = [memory.model_dump() for memory in await self.list_memories()]
+    async def export_memories(self, *, project_id: str | None = None) -> str:
+        memories = [
+            memory.model_dump() for memory in await self.list_memories(project_id=project_id)
+        ]
         return json.dumps({"memories": memories}, indent=2)
 
     async def create_conversation(
@@ -393,16 +448,26 @@ class SqliteMemory:
         status: str,
         model_id: str | None,
         summary: str | None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         run_id = str(uuid.uuid4())
         await self.database.execute(
             """
             INSERT INTO agent_runs(
-                id, conversation_id, agent, status, model_id, summary, created_at
+                id, conversation_id, agent, status, model_id, summary, metadata_json, created_at
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, conversation_id, agent, status, model_id, summary, utc_now_iso()),
+            (
+                run_id,
+                conversation_id,
+                agent,
+                status,
+                model_id,
+                summary,
+                json.dumps(metadata or {}, sort_keys=True),
+                utc_now_iso(),
+            ),
         )
         return run_id
 

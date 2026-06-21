@@ -78,6 +78,7 @@ class StructuredAgentLoop:
         request_id: str,
         history: list[Message] | None = None,
         context_sections: list[str] | None = None,
+        run_metadata: dict[str, Any] | None = None,
     ) -> AgentResult:
         if agent.model_id is None:
             return AgentResult(
@@ -91,6 +92,7 @@ class StructuredAgentLoop:
             status="running",
             model_id=agent.model_id,
             summary="structured agent loop",
+            metadata=run_metadata,
         )
         loop_messages = self._initial_messages(
             agent,

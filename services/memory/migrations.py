@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 async def run_migrations(database: Database) -> None:
@@ -148,6 +148,7 @@ async def run_migrations(database: Database) -> None:
             status TEXT NOT NULL,
             model_id TEXT,
             summary TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             completed_at TEXT
         );
@@ -223,6 +224,12 @@ async def run_migrations(database: Database) -> None:
     for column, definition in task_column_defs.items():
         if column not in task_columns:
             await conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+    columns = await conn.execute("PRAGMA table_info(agent_runs)")
+    agent_run_columns = {row[1] for row in await columns.fetchall()}
+    if "metadata_json" not in agent_run_columns:
+        await conn.execute(
+            "ALTER TABLE agent_runs ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+        )
     columns = await conn.execute("PRAGMA table_info(reminders)")
     reminder_columns = {row[1] for row in await columns.fetchall()}
     if "fired_at" not in reminder_columns:

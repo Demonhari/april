@@ -129,9 +129,7 @@ async def test_non_git_project_is_skipped(settings_tmp) -> None:
 def _enable_repo_monitor(settings_tmp):
     return settings_tmp.model_copy(
         update={
-            "scheduler": settings_tmp.scheduler.model_copy(
-                update={"repo_monitor_enabled": True}
-            )
+            "scheduler": settings_tmp.scheduler.model_copy(update={"repo_monitor_enabled": True})
         }
     )
 

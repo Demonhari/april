@@ -30,7 +30,9 @@ Implemented adapters:
 - `SoundDeviceAudioPlayer` validates WAV input, supports a configured output
   device, and plays through `sounddevice` only when explicitly invoked.
 - `VoiceActivityDetector` provides deterministic energy-based VAD with
-  configurable threshold and required speech frames.
+  configurable threshold and required speech frames. It computes signed 16-bit
+  little-endian PCM RMS locally and does not depend on Python's removed
+  `audioop` module.
 - `OpenWakeWordDetector` lazily imports openWakeWord, requires an explicitly
   configured local ONNX model, validates 16-bit PCM frames, and never downloads
   models.

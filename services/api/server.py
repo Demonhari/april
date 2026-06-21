@@ -29,12 +29,14 @@ from services.api.schemas import (
     ChatRequest,
     ChatResponse,
     DocumentCreateRequest,
+    MemoryCreateRequest,
     ProjectCreateRequest,
     ReminderCreateRequest,
     ToolApprovalAction,
     ToolRequestEnvelope,
 )
 from services.april_runtime.schemas import LoadModelRequest
+from services.memory.writer import MemoryWriter
 from services.scheduler import compose_briefing, compute_repo_activity
 from services.voice.health import voice_health
 
@@ -113,8 +115,40 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         except AprilError as exc:
             runtime = {"status": "unavailable", "error": exc.message}
             status = "degraded"
+        return _redact_health_payload(
+            {
+                "status": status,
+                "database": {
+                    "ok": active.database.path.exists(),
+                    "path": str(active.database.path),
+                },
+                "vector_index": active.vector_memory.health(),
+                "voice": voice_health(active.settings).model_dump(),
+                "scheduler": {
+                    "enabled": active.settings.scheduler.enabled,
+                    "running": active.scheduler.running if active.scheduler else False,
+                    "briefing_enabled": active.settings.scheduler.briefing_enabled,
+                    "fired_reminders": (
+                        active.scheduler.fired_reminder_count if active.scheduler else 0
+                    ),
+                },
+                "runtime_url": active.settings.runtime.url,
+                "runtime": runtime,
+            }
+        )
+
+    @app.get("/diagnostics")
+    async def diagnostics(active: ApiContainer = Depends(authorized)) -> object:
+        diagnostic_status = "ok"
+        try:
+            runtime = await active.runtime_client.health(timeout=1.0)
+            if str(runtime.get("status", "ok")) not in {"ok", "degraded"}:
+                diagnostic_status = "degraded"
+        except AprilError as exc:
+            runtime = {"status": "unavailable", "error": exc.message}
+            diagnostic_status = "degraded"
         return {
-            "status": status,
+            "status": diagnostic_status,
             "database": {"ok": active.database.path.exists(), "path": str(active.database.path)},
             "vector_index": active.vector_memory.health(),
             "voice": voice_health(active.settings).model_dump(),
@@ -259,9 +293,73 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             "approvals": [record.model_dump() for record in await active.approvals.list_pending()]
         }
 
+    @app.post("/memory")
+    async def memory_create(
+        request: MemoryCreateRequest,
+        active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+    ) -> object:
+        if (
+            request.project_id is not None
+            and await active.memory.get_project(request.project_id) is None
+        ):
+            raise PermissionDeniedError(
+                "Unknown project for project-scoped memory.",
+                {"project_id": request.project_id},
+            )
+        if request.source_conversation_id is not None:
+            conversation = await active.memory.get_conversation(request.source_conversation_id)
+            if conversation is None:
+                raise PermissionDeniedError(
+                    "Unknown source conversation for memory write.",
+                    {"conversation_id": request.source_conversation_id},
+                )
+            if conversation.project_id != request.project_id:
+                raise PermissionDeniedError(
+                    "Memory source conversation project scope does not match.",
+                    {
+                        "conversation_project_id": conversation.project_id,
+                        "memory_project_id": request.project_id,
+                    },
+                )
+
+        writer = MemoryWriter(active.memory)
+        record = await writer.write(
+            request.content,
+            reason=request.reason,
+            memory_type=request.memory_type,
+            requested_by_user=True,
+            project_id=request.project_id,
+        )
+        active.approvals.audit.write(
+            {
+                "event_type": "memory_written",
+                "request_id": x_request_id or str(uuid.uuid4()),
+                "actor": "local-user",
+                "memory_id": record.id,
+                "memory_type": record.kind,
+                "project_id": record.project_id,
+                "source_conversation_id": request.source_conversation_id,
+                "content_length": len(record.content),
+                "reason_length": len(record.reason),
+            }
+        )
+        return {
+            "memory": record.model_dump(),
+            "stored": f"Stored {record.kind} memory.",
+        }
+
     @app.get("/memory/search")
-    async def memory_search(q: str, active: ApiContainer = Depends(authorized)) -> object:
-        results = await active.memory.search_memories(q)
+    async def memory_search(
+        q: str,
+        project_id: str | None = None,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        if project_id is not None and await active.memory.get_project(project_id) is None:
+            raise PermissionDeniedError(
+                "Unknown project for memory search.", {"project_id": project_id}
+            )
+        results = await active.memory.search_memories(q, project_id=project_id)
         return {"results": [result.model_dump() for result in results]}
 
     @app.delete("/memory/{memory_id}")
@@ -269,8 +367,14 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         return {"deleted": await active.memory.delete_memory(memory_id)}
 
     @app.get("/memory/export")
-    async def memory_export(active: ApiContainer = Depends(authorized)) -> object:
-        return {"export": await active.memory.export_memories()}
+    async def memory_export(
+        project_id: str | None = None, active: ApiContainer = Depends(authorized)
+    ) -> object:
+        if project_id is not None and await active.memory.get_project(project_id) is None:
+            raise PermissionDeniedError(
+                "Unknown project for memory export.", {"project_id": project_id}
+            )
+        return {"export": await active.memory.export_memories(project_id=project_id)}
 
     @app.get("/reminders")
     async def reminders(active: ApiContainer = Depends(authorized)) -> object:
@@ -412,6 +516,20 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         return await active.runtime_client.unload(request.model_id, request_id=request.request_id)
 
     return app
+
+
+def _redact_health_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"path", "model_path", "binary_path"}:
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = _redact_health_payload(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_health_payload(item) for item in value]
+    return value
 
 
 async def _execute_approved_tool(

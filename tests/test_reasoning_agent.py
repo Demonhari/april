@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,7 @@ import anyio
 import pytest
 from fastapi.testclient import TestClient
 
+from april_common.errors import ConfigError
 from services.api.server import create_app
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelRegistry
@@ -61,13 +63,13 @@ def test_deep_reasoning_chat_is_available_on_brain_model(settings_tmp) -> None:
     assert result["final_message"]
     assert result["status"] != "unavailable"
 
-    rows = anyio.run(
-        container.database.fetchall,
-        "SELECT model_id FROM agent_runs WHERE agent = ? AND summary = ?",
-        ("reasoning_agent", "structured agent loop"),
-    )
+    rows = _reasoning_run_rows(container)
     assert len(rows) == 1
     assert rows[0]["model_id"] == "april-brain"
+    metadata = json.loads(rows[0]["metadata_json"])["model_resolution"]
+    assert metadata["selected_model_id"] == "april-brain"
+    assert metadata["selected_role"] == "brain"
+    assert metadata["reason"] == "no_available_reasoning_model"
 
 
 def _reasoning_models_payload(tmp_path: Path) -> dict[str, Any]:
@@ -101,6 +103,34 @@ def _reasoning_models_payload(tmp_path: Path) -> dict[str, Any]:
     return {"models": [info.model_dump() for info in lifecycle.list_models()]}
 
 
+def test_invalid_reasoning_model_role_configuration_fails_clearly(tmp_path: Path) -> None:
+    config = tmp_path / "models.yaml"
+    config.write_text(
+        "models:\n"
+        "  reasoning:\n"
+        "    id: april-deep\n"
+        "    name: deep\n"
+        "    path: models/deep.gguf\n"
+        "    backend: fake\n"
+        "    role: deep_reasoning\n"
+        "    threads: 4\n"
+        "    context_size: 8192\n"
+        "    temperature: 0.4\n"
+        "    max_output_tokens: 1024\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="Invalid model registry"):
+        ModelRegistry.from_file(config, root=tmp_path)
+
+
+def _reasoning_run_rows(container) -> list[Any]:
+    return anyio.run(
+        container.database.fetchall,
+        "SELECT model_id, metadata_json FROM agent_runs WHERE agent = ? AND summary = ?",
+        ("reasoning_agent", "structured agent loop"),
+    )
+
+
 class ReasoningUpgradeRuntimeClient(FakeRuntimeClient):
     def __init__(self, payload: dict[str, Any]) -> None:
         super().__init__()
@@ -127,6 +157,24 @@ def test_resolver_upgrades_to_registered_reasoning_model(tmp_path: Path) -> None
     assert resolved == "april-deep"
 
 
+def test_resolver_falls_back_when_registered_reasoning_model_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    payload = _reasoning_models_payload(tmp_path)
+    for entry in payload["models"]:
+        if entry["role"] == "reasoning":
+            entry["state"] = "unavailable"
+            entry["missing_path"] = True
+    client = ReasoningUpgradeRuntimeClient(payload)
+    resolved = anyio.run(
+        lambda: resolve_reasoning_model_id(
+            runtime_client=client,  # type: ignore[arg-type]
+            fallback_model_id="april-brain",
+        )
+    )
+    assert resolved == "april-brain"
+
+
 def test_agent_run_uses_upgraded_reasoning_model(settings_tmp, tmp_path: Path) -> None:
     payload = _reasoning_models_payload(tmp_path)
     runtime_client = ReasoningUpgradeRuntimeClient(payload)
@@ -139,13 +187,13 @@ def test_agent_run_uses_upgraded_reasoning_model(settings_tmp, tmp_path: Path) -
     )
     assert response.status_code == 200
     assert response.json()["result"]["status"] == "ok"
-    rows = anyio.run(
-        container.database.fetchall,
-        "SELECT model_id FROM agent_runs WHERE agent = ? AND summary = ?",
-        ("reasoning_agent", "structured agent loop"),
-    )
+    rows = _reasoning_run_rows(container)
     assert len(rows) == 1
     assert rows[0]["model_id"] == "april-deep"
+    metadata = json.loads(rows[0]["metadata_json"])["model_resolution"]
+    assert metadata["selected_model_id"] == "april-deep"
+    assert metadata["selected_role"] == "reasoning"
+    assert metadata["reason"] == "available_reasoning_model"
 
 
 def test_resolver_fails_safe_to_brain_when_listing_errors() -> None:
@@ -170,10 +218,10 @@ def test_agent_run_completes_when_model_listing_errors(settings_tmp) -> None:
     )
     assert response.status_code == 200
     assert response.json()["result"]["status"] == "ok"
-    rows = anyio.run(
-        container.database.fetchall,
-        "SELECT model_id FROM agent_runs WHERE agent = ? AND summary = ?",
-        ("reasoning_agent", "structured agent loop"),
-    )
+    rows = _reasoning_run_rows(container)
     assert len(rows) == 1
     assert rows[0]["model_id"] == "april-brain"
+    metadata = json.loads(rows[0]["metadata_json"])["model_resolution"]
+    assert metadata["selected_model_id"] == "april-brain"
+    assert metadata["selected_role"] == "brain"
+    assert metadata["reason"] == "runtime_model_listing_failed"

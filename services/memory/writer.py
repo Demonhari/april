@@ -16,14 +16,23 @@ class MemoryWriter:
         content: str,
         *,
         reason: str,
+        memory_type: str = "fact",
         requested_by_user: bool = False,
         project_id: str | None = None,
     ) -> MemoryRecord:
         decision = self.policy.evaluate(content, requested_by_user=requested_by_user)
         if not decision.allowed:
             raise PermissionDeniedError(decision.reason)
+        duplicate = await self.memory.find_duplicate_memory(
+            content,
+            kind=memory_type,
+            project_id=project_id,
+        )
+        if duplicate is not None:
+            return duplicate
         return await self.memory.create_memory(
             content,
+            kind=memory_type,
             reason=reason or decision.reason,
             project_id=project_id,
         )

@@ -30,7 +30,8 @@ async def test_migrations_write_read_delete_and_export(settings_tmp) -> None:
 def test_memory_policy_decision() -> None:
     policy = MemoryPolicy()
     assert policy.evaluate("my password is secret", requested_by_user=True).allowed is False
-    assert policy.evaluate("I prefer concise answers").allowed is True
+    assert policy.evaluate("I prefer concise answers").allowed is False
+    assert policy.evaluate("I prefer concise answers", requested_by_user=True).allowed is True
 
 
 @pytest.mark.asyncio

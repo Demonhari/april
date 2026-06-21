@@ -16,6 +16,7 @@ from services.april_runtime.schemas import ChatMessage, ChatResponse, Usage
 @pytest.fixture
 def settings_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AprilSettings:
     monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    monkeypatch.setenv("APRIL_ENV", "test")
     monkeypatch.setenv("APRIL_RUNTIME_BACKEND", "fake")
     monkeypatch.setenv("APRIL_DATABASE_PATH", str(tmp_path / "data" / "april.db"))
     monkeypatch.setenv("APRIL_VECTOR_INDEX_PATH", str(tmp_path / "data" / "vector_index"))
@@ -85,6 +86,32 @@ class FakeRuntimeClient:
                     '"memory_queries":[],"permission_level":1,"risk_level":"read_only",'
                     '"needs_confirmation":false,"task_steps":["Analyze trade-offs"],'
                     '"decision_summary":"Deep reasoning and architecture analysis"}'
+                )
+            elif "remember i prefer concise answers" in lower:
+                content = json.dumps(
+                    {
+                        "intent": "memory_write",
+                        "agent": "general_agent",
+                        "model_id": "april-brain",
+                        "tools_needed": ["remember_memory"],
+                        "planned_tool_calls": [
+                            {
+                                "tool": "remember_memory",
+                                "args": {
+                                    "content": "I prefer concise answers",
+                                    "memory_type": "preference",
+                                    "reason": "Explicit user-requested durable local memory.",
+                                },
+                                "reason": "Store explicit local durable memory.",
+                            }
+                        ],
+                        "memory_queries": [],
+                        "permission_level": 2,
+                        "risk_level": "safe_write",
+                        "needs_confirmation": False,
+                        "task_steps": ["Store explicit durable memory"],
+                        "decision_summary": "Explicit durable local memory write.",
+                    }
                 )
             else:
                 content = (

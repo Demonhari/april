@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import builtins
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from april_common.errors import ConfigError, NotFoundError
 from services.april_runtime.schemas import ModelRole
+
+ChatFormat = Literal["generic", "granite", "qwen"]
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -58,7 +60,7 @@ class ModelDefinition(BaseModel):
     n_ubatch: int | None = Field(default=None, gt=0)
     use_mmap: bool | None = None
     use_mlock: bool | None = None
-    chat_format: str | None = None
+    chat_format: ChatFormat | None = None
     idle_unload_seconds: float | None = Field(default=None, gt=0)
     priority: int = 0
 

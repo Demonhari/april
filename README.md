@@ -22,6 +22,9 @@ Only `services/april_runtime/llama_cpp_backend.py` imports `llama_cpp`. Agents a
 
 ## Install
 
+APRIL supports Python 3.11 through 3.13 for the Core MVP. Optional local
+runtime and voice dependencies remain adapter-isolated.
+
 ```bash
 python3.11 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
@@ -50,6 +53,15 @@ export APRIL_ALLOWED_FILESYSTEM_ROOTS="$PWD"
 ```
 
 Both APIs bind to `127.0.0.1` by default. CORS is disabled by default.
+The example tokens are development-only. For a non-development local setup,
+generate random local tokens without printing them:
+
+```bash
+run april setup tokens --output .env
+```
+
+Set `APRIL_ENV=production` only after replacing the example tokens. In
+production mode APRIL rejects known development tokens at startup.
 
 Development installs can use direct dependency constraints without pulling in
 optional runtime or voice wheels:
@@ -195,6 +207,7 @@ run april doctor
 run april config validate
 run april verify --fake
 run april verify --workflow
+run april verify --target-mac
 run april model doctor
 run april model profile list
 run april status --json
@@ -210,6 +223,7 @@ run april approve APPROVAL_ID
 run april deny APPROVAL_ID
 run april agent run coding_agent "Inspect this repository" --project-id PROJECT_ID
 run april config inspect
+run april setup tokens --output .env
 run april reminder list
 run april reminder create "stand up" --due-at 2026-06-21T09:00:00Z
 run april reminder delete REMINDER_ID
@@ -362,6 +376,8 @@ run april model import --role reasoning --id april-reasoning \
 See the commented `reasoning:` example in `configs/models.yaml`. The Reasoning
 Agent is read-only (it keeps `read_file`, `search_files`, `git_status`, and
 `git_diff`; it cannot write files or run commands).
+Reasoning agent run metadata records the requested role, selected model, and
+fallback reason without storing prompt content.
 
 ## Memory
 
@@ -374,9 +390,19 @@ april memory export
 april conversation delete CONVERSATION_ID
 ```
 
-Durable memory is not created automatically from every message. Sensitive-looking content is rejected by policy.
+Durable memory is not created automatically from every message. Explicit
+requests such as "remember..." or `POST /memory` use the local `remember_memory`
+Level 2 flow, reject sensitive-looking content by policy, and deduplicate exact
+content/type/project repeats. Project-scoped memory search/export can be
+filtered by `project_id` so unrelated projects stay isolated.
 
 When the brain supplies `memory_queries`, APRIL retrieves local memories by policy and includes them in the agent prompt under a clearly marked context section. General planning requests also receive a small set of recent durable memories. Coding requests with a selected indexed project retrieve project-scoped vector chunks with local citations.
+
+Document ingestion is offline. Text/source files are supported by default; PDF
+text extraction is local and optional via `pip install -e '.[documents]'`.
+Unsupported binary formats are reported as unsupported instead of being decoded
+as arbitrary text. OCR, cloud parsing, DOCX, and HTML extraction are future
+extensions.
 
 ## Voice
 
@@ -444,6 +470,7 @@ make typecheck
 make check
 run april config validate
 run april verify --fake
+run april verify --target-mac
 ```
 
 Tests use fake model/audio components and do not require GGUF files, network access, microphones, speakers, whisper.cpp, Piper, openWakeWord, or `llama-cpp-python`.
@@ -452,6 +479,14 @@ Tests use fake model/audio components and do not require GGUF files, network acc
 conversations, immutable patch application, tampered artifact rejection, repo
 override rejection, forced command working directories, audit records,
 tool-call rows, and exactly one runtime streaming usage event.
+
+`run april verify --target-mac` is the local target-laptop checklist. It reports
+pass, fail, skip, and manual-check rows for architecture, Python, llama.cpp
+availability, configured GGUF readability, real model load/chat/stream/unload
+when a local model is supplied, voice dependencies, and push-to-talk smoke
+steps. It never downloads models or changes system settings. Use
+`--require-real-model` with a GGUF path or `APRIL_TEST_GGUF_PATH` when missing
+real-model support should fail the command.
 
 ## Security Model
 

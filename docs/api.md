@@ -10,6 +10,7 @@ Core API:
 - `POST /tools/approve`
 - `POST /tools/deny`
 - `GET /approvals`
+- `POST /memory`
 - `GET /memory/search`
 - `GET /memory/export`
 - `DELETE /memory/{memory_id}`
@@ -23,8 +24,10 @@ Core API:
 - `POST /projects/{project_id}/index`
 - `GET /runtime/models`
 - `GET /health`
+- `GET /diagnostics`
 
-`/health` is unauthenticated. Mutation and memory endpoints require:
+`/health` is unauthenticated and redacts local filesystem paths. Mutation,
+memory, and diagnostic endpoints require:
 
 ```http
 Authorization: Bearer APRIL_API_TOKEN
@@ -79,6 +82,24 @@ scope.
 
 Request bodies larger than `api.max_request_bytes` are rejected with `REQUEST_TOO_LARGE`.
 
+`POST /memory` stores explicit durable local memory only:
+
+```json
+{
+  "content": "I prefer concise answers",
+  "memory_type": "preference",
+  "project_id": "optional-project-id",
+  "source_conversation_id": "optional-conversation-id",
+  "reason": "explicit user request"
+}
+```
+
+`memory_type` is one of `fact`, `preference`, `project`, or `note`. Sensitive-looking
+values such as tokens, passwords, API keys, credentials, and private keys are rejected.
+Exact duplicate content/type/project writes return the existing memory record. `GET
+/memory/search` and `GET /memory/export` accept optional `project_id` filters so
+project-scoped memories stay isolated from unrelated projects.
+
 Specialist `/chat` requests are Brain-routed but run through
 `StructuredAgentLoop` after agent selection. General Agent chat remains a direct
 model response.
@@ -97,10 +118,12 @@ model response.
 }
 ```
 
-The endpoint rejects unknown agents, returns `unavailable` for agents with no
-configured model such as the default Reasoning Agent, validates project scope
-for project-required agents, and returns `ok`, `pending_approval`,
-`unavailable`, or `error` in `result.status`.
+The endpoint rejects unknown agents, validates project scope for
+project-required agents, and returns `ok`, `pending_approval`, `unavailable`,
+or `error` in `result.status`. Reasoning requests are always available: APRIL
+uses an available `reasoning` model when configured, otherwise it runs the
+normal brain model in reasoning mode and records the final model choice in run
+metadata.
 
 `POST /tools/approve` preserves direct tool approval behavior. When the approval
 belongs to a suspended specialist run, the response is:
@@ -174,6 +197,8 @@ run april voice devices
 run april voice ptt
 run april voice listen
 run april verify --fake
+run april verify --target-mac
+run april setup tokens --output .env
 ```
 
 `--fake` affects only newly started child services by setting
@@ -182,9 +207,16 @@ run april verify --fake
 `run april config validate` validates YAML shape, model references, agent
 references, tool references, and loopback defaults. `run april config inspect`
 prints effective non-secret config with the API token redacted. `run april
-verify --fake` uses isolated temporary data paths and dynamic ports so it can
+setup tokens --output .env` generates random local API/Runtime tokens, writes
+them only to the chosen local env file, and does not print full token values.
+`run april verify --fake` uses isolated temporary data paths and dynamic ports so it can
 exercise the local structured specialist workflow without modifying user
 projects or requiring GGUF files.
+`run april verify --target-mac` reports pass, fail, skip, and manual-check rows
+for target laptop validation. It never downloads models or changes system
+settings. Add `--require-real-model` with a local GGUF path or
+`APRIL_TEST_GGUF_PATH` when model load/chat/stream/unload checks should be
+required.
 
 `POST /tools/request`, `POST /tools/approve`, orchestrator planned tools, and
 project indexing share the same trusted execution service. Repository roots and
