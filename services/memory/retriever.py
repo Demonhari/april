@@ -72,3 +72,25 @@ class MemoryRetriever:
             if len(chunks) >= limit:
                 break
         return chunks
+
+    def document_chunks(
+        self,
+        query: str,
+        *,
+        limit: int = 4,
+        max_chars: int = 6000,
+    ) -> list[SearchResult]:
+        chunks: list[SearchResult] = []
+        total_chars = 0
+        for result in self.vector_memory.search(query, limit=limit * 3, source_type="document"):
+            remaining = max_chars - total_chars
+            if remaining <= 0:
+                break
+            content = result.content[:remaining]
+            if not content:
+                continue
+            chunks.append(result.model_copy(update={"content": content}))
+            total_chars += len(content)
+            if len(chunks) >= limit:
+                break
+        return chunks

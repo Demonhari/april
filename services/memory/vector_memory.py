@@ -120,7 +120,12 @@ class VectorMemory:
             return removed
 
     def search(
-        self, query: str, *, limit: int = 10, project_id: str | None = None
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        project_id: str | None = None,
+        source_type: str | None = None,
     ) -> list[SearchResult]:
         query_vector = self.embedding.embed(query).astype(np.float32)
         results: list[SearchResult] = []
@@ -130,6 +135,8 @@ class VectorMemory:
         scores = vectors @ query_vector
         for index, record in enumerate(records):
             if project_id is not None and record["metadata"].get("project_id") != project_id:
+                continue
+            if source_type is not None and record["metadata"].get("source_type") != source_type:
                 continue
             results.append(
                 SearchResult(
@@ -141,6 +148,30 @@ class VectorMemory:
             )
         results.sort(key=lambda item: item.score, reverse=True)
         return results[:limit]
+
+    def sources(self, *, source_type: str) -> list[dict[str, Any]]:
+        records, _vectors = self._read_index()
+        by_source: dict[str, dict[str, Any]] = {}
+        for record in records:
+            metadata = record["metadata"]
+            if metadata.get("source_type") != source_type:
+                continue
+            source_id = str(metadata.get("source_id"))
+            entry = by_source.setdefault(
+                source_id, {"source_id": source_id, "paths": set(), "chunk_count": 0}
+            )
+            entry["chunk_count"] += 1
+            path = metadata.get("path")
+            if path:
+                entry["paths"].add(str(path))
+        return [
+            {
+                "source_id": entry["source_id"],
+                "paths": sorted(entry["paths"]),
+                "chunk_count": entry["chunk_count"],
+            }
+            for entry in sorted(by_source.values(), key=lambda item: item["source_id"])
+        ]
 
     def index_chunks(
         self,

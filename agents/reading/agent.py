@@ -14,7 +14,7 @@ def reading_agent() -> BaseAgent:
             description="Document and chunk summarization.",
             model_id="april-reading",
             system_prompt_path=str(prompt_path),
-            allowed_tools={"read_file", "search_files"},
+            allowed_tools={"read_file", "search_files", "document_search"},
             blocked_tools={"write_file", "run_command", "git_commit"},
             memory_access_policy="conversation_and_safe_memory",
             maximum_tool_iterations=3,

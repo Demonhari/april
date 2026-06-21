@@ -57,6 +57,12 @@ class ProjectCreateRequest(BaseModel):
     name: str | None = None
 
 
+class DocumentCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+
+
 class ReminderCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -14,6 +14,12 @@ class AgentMemoryContext:
     history: list[Message] = field(default_factory=list)
     durable_memories: list[SearchResult] = field(default_factory=list)
     project_chunks: list[SearchResult] = field(default_factory=list)
+    document_chunks: list[SearchResult] = field(default_factory=list)
+
+
+def _is_document_intent(intent: str) -> bool:
+    lowered = intent.lower()
+    return any(token in lowered for token in ("read", "document", "summary"))
 
 
 async def build_agent_memory_context(
@@ -48,10 +54,19 @@ async def build_agent_memory_context(
             max_chars=6000,
         )
 
+    document_chunks: list[SearchResult] = []
+    if (
+        policy == "conversation_and_safe_memory"
+        and memory_retriever is not None
+        and _is_document_intent(intent)
+    ):
+        document_chunks = memory_retriever.document_chunks(message)
+
     return AgentMemoryContext(
         history=bounded_history,
         durable_memories=durable_memories,
         project_chunks=project_chunks,
+        document_chunks=document_chunks,
     )
 
 

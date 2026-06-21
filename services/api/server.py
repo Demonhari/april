@@ -28,6 +28,7 @@ from services.api.schemas import (
     AgentRunRequest,
     ChatRequest,
     ChatResponse,
+    DocumentCreateRequest,
     ProjectCreateRequest,
     ReminderCreateRequest,
     ToolApprovalAction,
@@ -353,6 +354,44 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             context=context,
         )
         return {"result": outcome.result}
+
+    @app.post("/documents")
+    async def document_add(
+        request: DocumentCreateRequest, active: ApiContainer = Depends(authorized)
+    ) -> object:
+        request_id = str(uuid.uuid4())
+        context = await active.tool_executor.context(
+            request_id=request_id,
+            actor="local-user",
+            agent_id="reading_agent",
+            source="api",
+        )
+        outcome = await active.tool_executor.request_or_execute(
+            tool="document_indexer",
+            args={"folder_path": request.path},
+            context=context,
+        )
+        return {"result": outcome.result}
+
+    @app.get("/documents")
+    async def documents(active: ApiContainer = Depends(authorized)) -> object:
+        return {"documents": active.vector_memory.sources(source_type="document")}
+
+    @app.get("/documents/search")
+    async def documents_search(q: str, active: ApiContainer = Depends(authorized)) -> object:
+        chunks = active.memory_retriever.document_chunks(q)
+        return {
+            "chunks": [chunk.model_dump() for chunk in chunks],
+            "citations": [
+                {
+                    "path": chunk.metadata.get("path"),
+                    "start_line": chunk.metadata.get("start_line"),
+                    "end_line": chunk.metadata.get("end_line"),
+                }
+                for chunk in chunks
+                if chunk.metadata.get("path")
+            ],
+        }
 
     @app.get("/runtime/models")
     async def runtime_models(active: ApiContainer = Depends(authorized)) -> object:

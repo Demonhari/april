@@ -48,6 +48,8 @@ def default_registry() -> ToolRegistry:
     from skills.code.patch_generator import patch_generator_definition
     from skills.code.repo_indexer import repo_indexer_definition
     from skills.code.test_runner import test_runner_definition
+    from skills.documents.document_indexer import document_indexer_definition
+    from skills.documents.document_search import document_search_definition
     from skills.filesystem.list_files import list_files_definition
     from skills.filesystem.read_file import read_file_definition
     from skills.filesystem.search_files import search_files_definition
@@ -76,6 +78,8 @@ def default_registry() -> ToolRegistry:
         git_commit_definition(),
         run_command_definition(),
         repo_indexer_definition(),
+        document_indexer_definition(),
+        document_search_definition(),
         patch_generator_definition(),
         patch_applier_definition(),
         test_runner_definition(),

@@ -28,6 +28,7 @@ conversation_app = typer.Typer(help="Conversation operations.")
 agent_app = typer.Typer(help="Direct specialist agent operations.")
 reminder_app = typer.Typer(help="Reminder operations.")
 task_app = typer.Typer(help="Task inspection operations.")
+doc_app = typer.Typer(help="Document operations.")
 app.add_typer(model_app, name="model")
 app.add_typer(project_app, name="project")
 app.add_typer(memory_app, name="memory")
@@ -36,6 +37,7 @@ app.add_typer(conversation_app, name="conversation")
 app.add_typer(agent_app, name="agent")
 app.add_typer(reminder_app, name="reminder")
 app.add_typer(task_app, name="task")
+app.add_typer(doc_app, name="doc")
 
 
 def client() -> AprilApiClient:
@@ -182,6 +184,24 @@ def project_add(path: str, name: str | None = None) -> None:
 @project_app.command("index")
 def project_index(project_id: str) -> None:
     data = run(client().post(f"/projects/{project_id}/index", {}))
+    print_jsonish(data)
+
+
+@doc_app.command("add")
+def doc_add(path: str) -> None:
+    data = run(client().post("/documents", {"path": path}))
+    print_jsonish(data)
+
+
+@doc_app.command("list")
+def doc_list() -> None:
+    data = run(client().get("/documents"))
+    print_jsonish(data)
+
+
+@doc_app.command("search")
+def doc_search(query: str) -> None:
+    data = run(client().get("/documents/search", params={"q": query}))
     print_jsonish(data)
 
 
