@@ -78,6 +78,14 @@ class FakeRuntimeClient:
                     '"needs_confirmation":false,"task_steps":["Read file"],'
                     '"decision_summary":"Read requested local document"}'
                 )
+            elif "reason through" in lower or "trade-off" in lower or "compare approaches" in lower:
+                content = (
+                    '{"intent":"deep_reasoning","agent":"reasoning_agent",'
+                    '"model_id":"april-brain","tools_needed":[],'
+                    '"memory_queries":[],"permission_level":1,"risk_level":"read_only",'
+                    '"needs_confirmation":false,"task_steps":["Analyze trade-offs"],'
+                    '"decision_summary":"Deep reasoning and architecture analysis"}'
+                )
             else:
                 content = (
                     '{"intent":"planning","agent":"general_agent","model_id":"april-brain",'

@@ -116,6 +116,18 @@ class FakeBackend(RuntimeBackend):
                     '"needs_confirmation":false,"task_steps":["Read file"],'
                     '"decision_summary":"Read requested local document"}'
                 )
+            if (
+                "reason through" in route_text
+                or "trade-off" in route_text
+                or "compare approaches" in route_text
+            ):
+                return (
+                    '{"intent":"deep_reasoning","agent":"reasoning_agent",'
+                    '"model_id":"april-brain","tools_needed":[],'
+                    '"memory_queries":[],"permission_level":1,"risk_level":"read_only",'
+                    '"needs_confirmation":false,"task_steps":["Analyze trade-offs"],'
+                    '"decision_summary":"Deep reasoning and architecture analysis"}'
+                )
             return (
                 '{"intent":"planning","agent":"general_agent","model_id":"april-brain",'
                 '"tools_needed":[],"memory_queries":[],"permission_level":0,'

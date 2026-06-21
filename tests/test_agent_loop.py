@@ -196,10 +196,14 @@ async def test_structured_agent_loop_iteration_limit_is_enforced(settings_tmp) -
 
 
 @pytest.mark.asyncio
-async def test_reasoning_agent_without_model_unavailable(settings_tmp) -> None:
+async def test_agent_without_model_unavailable(settings_tmp) -> None:
+    from agents.base import BaseAgent
+
     loop, context, _memory, database, _runtime = await make_loop(settings_tmp, [])
+    base = reasoning_agent()
+    model_less = BaseAgent(base.config.model_copy(update={"model_id": None}))
     result = await loop.run(
-        agent=reasoning_agent(),
+        agent=model_less,
         message="think deeply",
         context=context,
         request_id="request",

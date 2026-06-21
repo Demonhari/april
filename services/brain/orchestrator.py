@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from agents.base import BaseAgent
 from agents.registry import AgentRegistry
 from agents.schemas import AgentResult, LocalCitation, ProposedChange
 from april_common.errors import PermissionDeniedError
@@ -19,6 +20,7 @@ from services.april_runtime.schemas import ChatMessage
 from services.brain.agent_loop import StructuredAgentLoop
 from services.brain.memory_policy import AgentMemoryContext, build_agent_memory_context
 from services.brain.planner import task_plan_from_decision
+from services.brain.reasoning_resolver import resolve_reasoning_model_id
 from services.brain.router import BrainRouter
 from services.brain.schemas import BrainDecision, PlannedToolCall
 from services.memory.retriever import MemoryRetriever
@@ -342,6 +344,11 @@ class AprilOrchestrator:
         model_id = agent.model_id or decision.model_id
         if agent.model_id is not None and decision.model_id != agent.model_id:
             decision = decision.model_copy(update={"model_id": agent.model_id})
+        if agent.name == "reasoning_agent":
+            model_id = await resolve_reasoning_model_id(
+                runtime_client=self.runtime_client,
+                fallback_model_id=model_id,
+            )
         task_plan = task_plan_from_decision(
             decision,
             conversation_id=active_conversation_id,
@@ -500,6 +507,7 @@ class AprilOrchestrator:
         agent = self.agent_registry.get(agent_id)
         if agent is None:
             raise PermissionDeniedError("Unknown agent.", {"agent": agent_id})
+        agent = await self._effective_agent(agent)
         project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
         if self._agent_requires_project(agent_id) and project is None:
             raise PermissionDeniedError(
@@ -674,6 +682,7 @@ class AprilOrchestrator:
         agent = self.agent_registry.get(prepared.agent_name)
         if agent is None:
             raise PermissionDeniedError("Unknown agent selected by brain.")
+        agent = self._with_resolved_model(agent, prepared.model_id)
         context = await self.tool_executor.context(
             request_id=prepared.request_id,
             conversation_id=prepared.conversation_id,
@@ -701,6 +710,29 @@ class AprilOrchestrator:
             else ("completed" if result.status == "ok" else "error"),
         )
         return result
+
+    async def _effective_agent(self, agent: BaseAgent) -> BaseAgent:
+        """Resolve the model the agent should run with for a direct run.
+
+        Only ``reasoning_agent`` is affected: it is upgraded to a registered
+        ``reasoning``-role model when one is available, otherwise it keeps its
+        configured fallback model. Every other agent is returned unchanged.
+        """
+
+        if agent.name != "reasoning_agent":
+            return agent
+        resolved = await resolve_reasoning_model_id(
+            runtime_client=self.runtime_client,
+            fallback_model_id=agent.model_id or self.settings.brain.model_id,
+        )
+        return self._with_resolved_model(agent, resolved)
+
+    def _with_resolved_model(self, agent: BaseAgent, model_id: str) -> BaseAgent:
+        """Return a reasoning agent bound to ``model_id``; others unchanged."""
+
+        if agent.name != "reasoning_agent" or agent.model_id == model_id:
+            return agent
+        return BaseAgent(agent.config.model_copy(update={"model_id": model_id}))
 
     def _uses_structured_loop(self, agent_name: str, decision: BrainDecision) -> bool:
         if os.environ.get("APRIL_LEGACY_ORCHESTRATOR") == "1":

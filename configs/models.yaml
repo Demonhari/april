@@ -40,3 +40,25 @@ models:
     keep_loaded: false
     idle_unload_seconds: 300
     priority: 40
+
+  # Optional: register a larger model for deep reasoning / architecture mode.
+  # The reasoning agent runs on the brain model by default and automatically
+  # upgrades to a registered role: reasoning model whenever one is available.
+  # Import a real GGUF with:
+  #   run april model import --role reasoning --id april-reasoning \
+  #     --path models/your-reasoning-model-q4_k_m.gguf
+  # then uncomment and adjust the entry below (commented out so it does not
+  # point at a missing file and degrade runtime health).
+  # reasoning:
+  #   id: april-reasoning
+  #   name: your-reasoning-model
+  #   path: models/your-reasoning-model-q4_k_m.gguf
+  #   backend: llama_cpp
+  #   role: reasoning
+  #   threads: 8
+  #   context_size: 8192
+  #   temperature: 0.4
+  #   max_output_tokens: 2048
+  #   keep_loaded: false
+  #   idle_unload_seconds: 300
+  #   priority: 60

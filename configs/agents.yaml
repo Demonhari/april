@@ -37,7 +37,7 @@ agents:
     output_schema: AgentResult
   reasoning_agent:
     description: Architecture decisions and deeper analysis when configured.
-    model_id: null
+    model_id: april-brain
     prompt_path: agents/reasoning/prompt.md
     allowed_tools: [read_file, search_files, git_status, git_diff]
     blocked_tools: [write_file, run_command, git_commit]

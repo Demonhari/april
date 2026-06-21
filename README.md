@@ -343,6 +343,26 @@ suspended run. Approving the ID executes the exact tool once, appends the
 sanitized result, and resumes the same run. `APRIL_LEGACY_ORCHESTRATOR=1`
 temporarily restores the previous planned-tool path for compatibility testing.
 
+### Deep Reasoning
+
+Deep reasoning ("architecture mode") is always available. The Reasoning Agent
+runs on the brain model by default, so requests like "reason through the
+trade-offs", "compare approaches", or "weigh the options on this architectural
+decision" route to it and return a real answer with no extra setup.
+
+If you register a larger model with `role: reasoning`, APRIL automatically uses
+it for reasoning runs whenever the runtime reports it as available, and falls
+back to the brain model on any error. Register one with:
+
+```bash
+run april model import --role reasoning --id april-reasoning \
+  --path models/your-reasoning-model-q4_k_m.gguf
+```
+
+See the commented `reasoning:` example in `configs/models.yaml`. The Reasoning
+Agent is read-only (it keeps `read_file`, `search_files`, `git_status`, and
+`git_diff`; it cannot write files or run commands).
+
 ## Memory
 
 Memory is local SQLite plus a local vector index:

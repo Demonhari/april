@@ -53,6 +53,32 @@ class FallbackRouter:
                 confirmation=False,
                 summary="Read-only repository investigation.",
             )
+        if self._contains(
+            normalized,
+            "think deeply",
+            "deep dive",
+            "reason through",
+            "trade-off",
+            "trade-offs",
+            "tradeoff",
+            "trade offs",
+            "pros and cons",
+            "design decision",
+            "weigh the options",
+            "evaluate options",
+            "compare approaches",
+            "architectural decision",
+        ):
+            return self._decision(
+                intent="deep_reasoning",
+                agent="reasoning_agent",
+                model_id="april-brain",
+                tools=[],
+                level=1,
+                risk="read_only",
+                confirmation=False,
+                summary="Deep reasoning and architecture analysis (read-only).",
+            )
         if self._contains(normalized, "read", "summarize", "document", "pdf", "file"):
             return self._decision(
                 intent="document_reading",

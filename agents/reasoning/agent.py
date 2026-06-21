@@ -12,7 +12,7 @@ def reasoning_agent() -> BaseAgent:
         AgentConfig(
             name="reasoning_agent",
             description="Architecture decisions and deeper analysis when configured.",
-            model_id=None,
+            model_id="april-brain",
             system_prompt_path=str(prompt_path),
             allowed_tools={"read_file", "search_files", "git_status", "git_diff"},
             blocked_tools={"write_file", "run_command", "git_commit"},

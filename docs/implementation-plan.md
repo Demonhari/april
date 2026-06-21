@@ -42,6 +42,7 @@
 - Model files are referenced only by registered model IDs from `configs/models.yaml`.
 - Tests and local development can use `APRIL_RUNTIME_BACKEND=fake`.
 - Specialist agent loops are intentionally conservative in the MVP: tool execution is deterministic and bounded, while generated responses come through the runtime client.
+- Deep reasoning (architecture mode) is functional: the Reasoning Agent defaults to the brain model and automatically upgrades to a registered `role: reasoning` model when the runtime reports one as available, failing safe to the brain model on any error.
 - The default vector embedding is a deterministic hashed-token baseline, not a semantic local embedding model.
 
 ## Important Security Decisions

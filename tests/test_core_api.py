@@ -736,7 +736,7 @@ def test_direct_agent_run_rejects_unstructured_option(settings_tmp) -> None:
     assert response.status_code == 403
 
 
-def test_direct_reasoning_agent_without_model_is_unavailable(settings_tmp) -> None:
+def test_direct_reasoning_agent_runs_on_brain_model(settings_tmp) -> None:
     import anyio
 
     container = anyio.run(make_container, settings_tmp)
@@ -747,7 +747,14 @@ def test_direct_reasoning_agent_without_model_is_unavailable(settings_tmp) -> No
         headers=auth(settings_tmp),
     )
     assert response.status_code == 200
-    assert response.json()["result"]["status"] == "unavailable"
+    assert response.json()["result"]["status"] == "ok"
+    rows = anyio.run(
+        container.database.fetchall,
+        "SELECT model_id FROM agent_runs WHERE agent = ? AND summary = ?",
+        ("reasoning_agent", "structured agent loop"),
+    )
+    assert len(rows) == 1
+    assert rows[0]["model_id"] == "april-brain"
 
 
 def test_direct_coding_agent_requires_project(settings_tmp) -> None:
