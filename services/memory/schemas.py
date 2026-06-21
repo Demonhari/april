@@ -78,6 +78,7 @@ class ReminderRecord(BaseModel):
     content: str
     due_at: str | None = None
     created_at: str
+    fired_at: str | None = None
 
 
 class TaskRecord(BaseModel):

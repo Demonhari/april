@@ -263,6 +263,25 @@ class SqliteMemory:
         rows = await self.database.fetchall("SELECT * FROM reminders ORDER BY created_at DESC")
         return [ReminderRecord.model_validate(dict(row)) for row in rows]
 
+    async def list_due_reminders(self, now_iso: str) -> list[ReminderRecord]:
+        rows = await self.database.fetchall(
+            """
+            SELECT *
+            FROM reminders
+            WHERE due_at IS NOT NULL AND fired_at IS NULL AND due_at <= ?
+            ORDER BY due_at ASC
+            """,
+            (now_iso,),
+        )
+        return [ReminderRecord.model_validate(dict(row)) for row in rows]
+
+    async def mark_reminder_fired(self, reminder_id: str, fired_at: str) -> bool:
+        cursor = await self.database.execute(
+            "UPDATE reminders SET fired_at = ? WHERE id = ? AND fired_at IS NULL",
+            (fired_at, reminder_id),
+        )
+        return cursor.rowcount > 0
+
     async def delete_reminder(self, reminder_id: str) -> bool:
         cursor = await self.database.execute(
             "DELETE FROM reminders WHERE id = ?",

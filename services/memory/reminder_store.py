@@ -26,8 +26,14 @@ class ReminderStore:
     async def create(self, content: str, due_at: str | None = None) -> ReminderRecord:
         return await self.memory.create_reminder(content, due_at)
 
+    async def list_due(self, now_iso: str) -> list[ReminderRecord]:
+        return await self.memory.list_due_reminders(now_iso)
+
     async def list(self) -> list[ReminderRecord]:
         return await self.memory.list_reminders()
+
+    async def mark_fired(self, reminder_id: str, fired_at: str) -> bool:
+        return await self.memory.mark_reminder_fired(reminder_id, fired_at)
 
     async def delete(self, reminder_id: str) -> bool:
         return await self.memory.delete_reminder(reminder_id)

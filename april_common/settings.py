@@ -85,6 +85,33 @@ class VoiceSettings(BaseModel):
     wake_word_model_path: Path | None = None
 
 
+class SchedulerSettings(BaseModel):
+    enabled: bool = False
+    poll_interval_seconds: float = 30.0
+    notification_sink: str = "log"
+    briefing_enabled: bool = False
+    briefing_time: str = "08:00"
+
+    @field_validator("notification_sink")
+    @classmethod
+    def validate_notification_sink(cls, value: str) -> str:
+        if value not in {"log", "macos"}:
+            raise ValueError("notification_sink must be log or macos")
+        return value
+
+    @field_validator("briefing_time")
+    @classmethod
+    def validate_briefing_time(cls, value: str) -> str:
+        hours, _, minutes = value.partition(":")
+        try:
+            hour, minute = int(hours), int(minutes)
+        except ValueError as exc:
+            raise ValueError("briefing_time must be HH:MM") from exc
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            raise ValueError("briefing_time must be within 00:00-23:59")
+        return f"{hour:02d}:{minute:02d}"
+
+
 class AprilSettings(BaseModel):
     home: Path
     api: ApiSettings = Field(default_factory=ApiSettings)
@@ -94,6 +121,7 @@ class AprilSettings(BaseModel):
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
 
     @field_validator("home")
     @classmethod
@@ -125,6 +153,10 @@ class AprilSettings(BaseModel):
     @property
     def audio_cache_path(self) -> Path:
         return self.resolve_path(self.voice.audio_cache_path)
+
+    @property
+    def scheduler_log_path(self) -> Path:
+        return self.resolve_path(self.paths.logs_path / "scheduler.log")
 
     @property
     def allowed_roots(self) -> list[Path]:
@@ -172,6 +204,11 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_PIPER_BINARY_PATH": ("voice", "piper_binary_path"),
     "APRIL_PIPER_MODEL_PATH": ("voice", "piper_model_path"),
     "APRIL_WAKE_WORD_MODEL_PATH": ("voice", "wake_word_model_path"),
+    "APRIL_SCHEDULER_ENABLED": ("scheduler", "enabled"),
+    "APRIL_SCHEDULER_POLL_INTERVAL_SECONDS": ("scheduler", "poll_interval_seconds"),
+    "APRIL_SCHEDULER_NOTIFICATION_SINK": ("scheduler", "notification_sink"),
+    "APRIL_SCHEDULER_BRIEFING_ENABLED": ("scheduler", "briefing_enabled"),
+    "APRIL_SCHEDULER_BRIEFING_TIME": ("scheduler", "briefing_time"),
 }
 
 

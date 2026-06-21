@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 async def run_migrations(database: Database) -> None:
@@ -116,7 +116,8 @@ async def run_migrations(database: Database) -> None:
             id TEXT PRIMARY KEY,
             content TEXT NOT NULL,
             due_at TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            fired_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS repo_indexes (
@@ -209,6 +210,10 @@ async def run_migrations(database: Database) -> None:
     for column, definition in task_column_defs.items():
         if column not in task_columns:
             await conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+    columns = await conn.execute("PRAGMA table_info(reminders)")
+    reminder_columns = {row[1] for row in await columns.fetchall()}
+    if "fired_at" not in reminder_columns:
+        await conn.execute("ALTER TABLE reminders ADD COLUMN fired_at TEXT")
     await conn.execute(
         """
         UPDATE approvals

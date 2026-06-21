@@ -47,3 +47,10 @@ voice:
   piper_binary_path: null
   piper_model_path: null
   wake_word_model_path: null
+
+scheduler:
+  enabled: false
+  poll_interval_seconds: 30
+  notification_sink: log
+  briefing_enabled: false
+  briefing_time: "08:00"
