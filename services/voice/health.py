@@ -73,26 +73,38 @@ def voice_health(settings: AprilSettings) -> VoiceHealth:
 def query_audio_devices() -> dict[str, Any]:
     try:
         import sounddevice as sd
-    except ImportError:
+    except (ImportError, OSError) as exc:
+        # ImportError: package not installed. OSError: the sounddevice package is
+        # present but the PortAudio native library is missing/unloadable.
         return {
             "sounddevice_installed": False,
             "input_devices": [],
             "output_devices": [],
-            "error": "sounddevice is not installed",
+            "error": f"sounddevice/PortAudio unavailable: {exc}",
         }
-    devices = sd.query_devices()
-    if not isinstance(devices, list):
-        devices = list(devices)
-    input_devices = []
-    output_devices = []
-    for index, device in enumerate(devices):
-        if not isinstance(device, dict):
-            continue
-        record = {"index": index, "name": device.get("name")}
-        if int(device.get("max_input_channels", 0) or 0) > 0:
-            input_devices.append(record)
-        if int(device.get("max_output_channels", 0) or 0) > 0:
-            output_devices.append(record)
+    try:
+        devices = sd.query_devices()
+        if not isinstance(devices, list):
+            devices = list(devices)
+        input_devices = []
+        output_devices = []
+        for index, device in enumerate(devices):
+            if not isinstance(device, dict):
+                continue
+            record = {"index": index, "name": device.get("name")}
+            if int(device.get("max_input_channels", 0) or 0) > 0:
+                input_devices.append(record)
+            if int(device.get("max_output_channels", 0) or 0) > 0:
+                output_devices.append(record)
+    except Exception as exc:
+        # PortAudioError (and any backend error) at query time: degrade to the same
+        # shape rather than crashing the voice doctor/health report.
+        return {
+            "sounddevice_installed": False,
+            "input_devices": [],
+            "output_devices": [],
+            "error": f"sounddevice/PortAudio unavailable: {exc}",
+        }
     return {
         "sounddevice_installed": True,
         "input_devices": input_devices,

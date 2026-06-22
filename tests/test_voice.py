@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import struct
 import sys
 import types
@@ -65,6 +66,52 @@ def test_voice_doctor_reports_devices(settings_tmp, monkeypatch) -> None:
     assert report["sounddevice_installed"] is True
     assert report["input_devices"]
     assert report["output_devices"]
+
+
+def test_query_audio_devices_degrades_when_portaudio_missing(settings_tmp, monkeypatch) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args, **kwargs):
+        if name == "sounddevice":
+            raise OSError("PortAudio library not found")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    devices = query_audio_devices()
+    assert devices["sounddevice_installed"] is False
+    assert devices["input_devices"] == []
+    assert devices["output_devices"] == []
+    assert "PortAudio" in devices["error"]
+
+    report = voice_doctor(settings_tmp)
+    assert report["sounddevice_installed"] is False
+    assert report["input_devices"] == []
+    assert report["output_devices"] == []
+    assert report["status"] in {"ok", "degraded"}
+
+
+def test_query_audio_devices_degrades_when_query_raises(settings_tmp, monkeypatch) -> None:
+    class PortAudioError(Exception):
+        pass
+
+    def raise_query_devices():
+        raise PortAudioError("Error querying device -1")
+
+    fake_sounddevice = types.SimpleNamespace(query_devices=raise_query_devices)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+
+    devices = query_audio_devices()
+    assert devices["sounddevice_installed"] is False
+    assert devices["input_devices"] == []
+    assert devices["output_devices"] == []
+    assert "PortAudio" in devices["error"]
+
+    report = voice_doctor(settings_tmp)
+    assert report["sounddevice_installed"] is False
+    assert report["input_devices"] == []
+    assert report["output_devices"] == []
 
 
 @pytest.mark.asyncio
