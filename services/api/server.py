@@ -376,6 +376,15 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             )
         return {"export": await active.memory.export_memories(project_id=project_id)}
 
+    @app.post("/memory/reindex")
+    async def memory_reindex(active: ApiContainer = Depends(authorized)) -> object:
+        reindexed = active.vector_memory.reindex()
+        return {
+            "reindexed": reindexed,
+            "provider": active.vector_memory.embedding.name,
+            "dimensions": active.vector_memory.embedding.dimensions,
+        }
+
     @app.get("/reminders")
     async def reminders(active: ApiContainer = Depends(authorized)) -> object:
         return {

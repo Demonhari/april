@@ -639,17 +639,35 @@ def memory_export(
     )
 
 
+@memory_app.command("reindex")
+def memory_reindex(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    _delegate(
+        ["memory", "reindex"],
+        fake=_effective_fake(ctx, fake),
+        oneshot=_effective_oneshot(ctx),
+    )
+
+
 @memory_app.command("doctor")
 def memory_doctor() -> None:
     settings = load_settings(root=_manager().home)
-    enabled = settings.memory.embedding_provider == "hashed-token"
+    provider = settings.memory.embedding_provider
+    semantic = provider == "runtime-local"
+    if provider == "hashed-token":
+        status = "ok: deterministic hashed-token embeddings (default)"
+    else:
+        status = (
+            "ok: runtime-local semantic embeddings active when a role=embedding model is "
+            "registered, otherwise it falls back to hashed-token"
+        )
     data = {
-        "embedding_provider": settings.memory.embedding_provider,
+        "embedding_provider": provider,
         "embedding_model_id": settings.memory.embedding_model_id,
-        "semantic_embeddings_enabled": enabled,
-        "status": "ok"
-        if enabled
-        else "disabled: runtime-local requires explicit local embedding backend support",
+        "semantic_embeddings_enabled": semantic,
+        "status": status,
     }
     console.print_json(data=data)
 

@@ -48,6 +48,10 @@ class LlamaCppBackend(RuntimeBackend):
             "chat_format": model.chat_format,
         }
         kwargs.update({key: value for key, value in optional_values.items() if value is not None})
+        if model.role == "embedding":
+            # A chat Llama instance cannot also embed; an embedding-role model is
+            # loaded as its own dedicated instance with embedding mode enabled.
+            kwargs["embedding"] = True
         self._llm = await asyncio.to_thread(Llama, **kwargs)
 
     async def unload(self) -> None:
@@ -302,6 +306,19 @@ class LlamaCppBackend(RuntimeBackend):
             return [index for index, _ in enumerate(text.split())]
         return list(await asyncio.to_thread(self._llm.tokenize, text.encode("utf-8")))
 
+    async def embed(self, text: str) -> list[float]:
+        if self._llm is None:
+            raise RuntimeUnavailableError("Model is not loaded.")
+        if self._model is not None and self._model.role != "embedding":
+            raise RuntimeUnavailableError(
+                "Loaded model is not an embedding model; load a role=embedding model to embed."
+            )
+        embedder = getattr(self._llm, "embed", None)
+        if not callable(embedder):
+            raise RuntimeUnavailableError("backend does not support embeddings")
+        raw = await asyncio.to_thread(embedder, text)
+        return _flatten_embedding(raw)
+
     async def health(self) -> BackendHealth:
         if self._llm is None:
             return BackendHealth(ok=False, message="not loaded")
@@ -357,3 +374,11 @@ class LlamaCppBackend(RuntimeBackend):
         if raw in {"stop", "length", "error", "cancelled"}:
             return cast(FinishReason, raw)
         return "stop"
+
+
+def _flatten_embedding(raw: Any) -> list[float]:
+    # llama-cpp-python may return a flat vector or a list of per-token vectors.
+    values = list(raw)
+    if values and isinstance(values[0], (list, tuple)):
+        return [float(component) for component in values[0]]
+    return [float(component) for component in values]

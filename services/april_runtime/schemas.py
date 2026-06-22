@@ -4,7 +4,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-ModelRole = Literal["brain", "coding", "reading", "creative", "reasoning", "system_action"]
+ModelRole = Literal[
+    "brain", "coding", "reading", "creative", "reasoning", "system_action", "embedding"
+]
 ModelState = Literal["unavailable", "unloaded", "loading", "loaded", "unloading", "error"]
 FinishReason = Literal["stop", "length", "error", "cancelled"]
 
@@ -122,10 +124,24 @@ class RuntimeHealth(BaseModel):
     loaded_model_count: int = 0
     active_requests: int = 0
     generation_error_count: int = 0
+    embedding_model_id: str | None = None
     lifecycle_policy: dict[str, Any] = Field(default_factory=dict)
     process_rss_bytes: int | None = None
     process_peak_rss_bytes: int | None = None
     process_memory_estimated: bool = True
+
+
+class EmbedRequest(BaseModel):
+    text: str = Field(min_length=1)
+    model_id: str | None = None
+    request_id: str | None = None
+
+
+class EmbedResponse(BaseModel):
+    request_id: str
+    model_id: str
+    dimensions: int
+    embedding: list[float]
 
 
 class StreamEvent(BaseModel):

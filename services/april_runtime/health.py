@@ -42,6 +42,7 @@ def runtime_health(
         loaded_model_count=len(loaded),
         active_requests=sum(model.active_requests for model in models),
         generation_error_count=sum(model.generation_errors for model in models),
+        embedding_model_id=lifecycle.embedding_model_id(),
         lifecycle_policy=lifecycle.policy_snapshot(),
         process_rss_bytes=metrics.rss_bytes,
         process_peak_rss_bytes=metrics.peak_rss_bytes,

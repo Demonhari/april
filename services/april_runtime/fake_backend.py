@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 import re
 from collections.abc import AsyncIterator
 
@@ -11,6 +13,7 @@ from services.april_runtime.model_registry import ModelDefinition
 
 class FakeBackend(RuntimeBackend):
     supports_concurrent_generation = False
+    EMBEDDING_DIMENSIONS = 64
 
     def __init__(self, *, fail_stream: bool = False, fail_generate: bool = False) -> None:
         self.loaded_model: ModelDefinition | None = None
@@ -77,6 +80,22 @@ class FakeBackend(RuntimeBackend):
 
     async def tokenize(self, text: str) -> list[int]:
         return [index for index, _ in enumerate(re.findall(r"\S+", text))]
+
+    async def embed(self, text: str) -> list[float]:
+        await asyncio.sleep(0)
+        return self._deterministic_embedding(text)
+
+    def _deterministic_embedding(self, text: str) -> list[float]:
+        vector = [0.0] * self.EMBEDDING_DIMENSIONS
+        for token in re.findall(r"[a-z0-9_]+", text.lower()):
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            index = int.from_bytes(digest[:8], "big") % self.EMBEDDING_DIMENSIONS
+            sign = 1.0 if digest[8] % 2 == 0 else -1.0
+            vector[index] += sign
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm == 0.0:
+            return vector
+        return [value / norm for value in vector]
 
     async def health(self) -> BackendHealth:
         return BackendHealth(ok=True, message="fake backend ready")

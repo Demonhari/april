@@ -229,6 +229,16 @@ def memory_export() -> None:
     print_jsonish(data)
 
 
+@memory_app.command("reindex")
+def memory_reindex() -> None:
+    console.print("Reindexing vector memory under the current embedding provider...")
+    data = run(client().post("/memory/reindex", {}))
+    console.print(
+        f"Reindexed {data['reindexed']} records using "
+        f"{data['provider']} ({data['dimensions']} dimensions)."
+    )
+
+
 @conversation_app.command("delete")
 def conversation_delete(conversation_id: str) -> None:
     data = run(client().delete(f"/conversations/{conversation_id}"))

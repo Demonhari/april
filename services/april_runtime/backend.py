@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from april_common.errors import RuntimeUnavailableError
 from services.april_runtime.model_registry import ModelDefinition
 from services.april_runtime.schemas import ChatMessage, FinishReason
 
@@ -105,6 +106,9 @@ class RuntimeBackend(ABC):
 
     async def count_tokens(self, text: str) -> int:
         return len(await self.tokenize(text))
+
+    async def embed(self, text: str) -> list[float]:
+        raise RuntimeUnavailableError("backend does not support embeddings")
 
     @abstractmethod
     async def health(self) -> BackendHealth:

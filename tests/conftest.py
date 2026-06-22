@@ -9,7 +9,9 @@ from typing import Any
 
 import pytest
 
+from april_common.errors import ModelUnavailableError
 from april_common.settings import AprilSettings, load_settings, reset_settings_cache
+from services.april_runtime.fake_backend import FakeBackend
 from services.april_runtime.schemas import ChatMessage, ChatResponse, Usage
 
 
@@ -33,10 +35,18 @@ def settings_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AprilSettin
 
 
 class FakeRuntimeClient:
-    def __init__(self) -> None:
+    def __init__(self, *, embedding_available: bool = True) -> None:
         self.last_messages: list[ChatMessage] = []
         self.calls: list[list[ChatMessage]] = []
         self.stream_called = False
+        self.embedding_available = embedding_available
+        self.embed_calls: list[str] = []
+
+    async def embed(self, text: str, *, model_id: str | None = None) -> list[float]:
+        self.embed_calls.append(text)
+        if not self.embedding_available:
+            raise ModelUnavailableError("embedding", "No embedding-role model is registered.")
+        return FakeBackend()._deterministic_embedding(text)
 
     async def chat(
         self,

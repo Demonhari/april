@@ -43,6 +43,7 @@ class ModelDefinition(BaseModel):
         "creative",
         "reasoning",
         "system_action",
+        "embedding",
     }
 
     id: str = Field(min_length=1)

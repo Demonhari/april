@@ -6,11 +6,13 @@ import hashlib
 import json
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from april_common.errors import ConfigError
 from april_common.time import utc_now_iso
 from services.memory.embeddings import EmbeddingProvider, HashedTokenEmbedding
 from services.memory.schemas import SearchResult, VectorMetadata
@@ -29,13 +31,60 @@ class VectorMemory:
 
     def health(self) -> dict[str, Any]:
         records, _vectors = self._read_index()
+        header = self._index_header()
+        compatible = True
+        persisted_provider: str | None = None
+        persisted_dimensions: int | None = None
+        if header is not None:
+            persisted_provider = header.get("provider")
+            persisted_dimensions = header.get("dimensions")
+            if persisted_provider is not None or persisted_dimensions is not None:
+                compatible = (
+                    persisted_provider == self.embedding.name
+                    and persisted_dimensions == self.embedding.dimensions
+                )
         return {
             "ok": self.path.exists(),
             "path": str(self.path),
             "embedding": self.embedding.name,
             "dimensions": self.embedding.dimensions,
             "record_count": len(records),
+            "compatible": compatible,
+            "persisted_provider": persisted_provider,
+            "persisted_dimensions": persisted_dimensions,
         }
+
+    def _index_header(self) -> dict[str, Any] | None:
+        if not self.metadata_path.exists():
+            return None
+        try:
+            return json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _ensure_compatible(self) -> None:
+        header = self._index_header()
+        if header is None:
+            return
+        provider = header.get("provider")
+        dimensions = header.get("dimensions")
+        if provider is None and dimensions is None:
+            return
+        if provider == self.embedding.name and dimensions == self.embedding.dimensions:
+            return
+        raise ConfigError(
+            "Vector index was built with a different embedding configuration "
+            f"(index provider/dimensions = {provider}/{dimensions}, "
+            f"configured = {self.embedding.name}/{self.embedding.dimensions}). "
+            "Refusing to mix vector spaces. Run `run april memory reindex` to rebuild "
+            "the index under the current embedding provider.",
+            {
+                "persisted_provider": provider,
+                "persisted_dimensions": dimensions,
+                "configured_provider": self.embedding.name,
+                "configured_dimensions": self.embedding.dimensions,
+            },
+        )
 
     def upsert(
         self,
@@ -47,6 +96,7 @@ class VectorMemory:
         self.upsert_many([(record_id, content, metadata)])
 
     def upsert_many(self, items: list[tuple[str, str, VectorMetadata]]) -> None:
+        self._ensure_compatible()
         with self._locked():
             records, vectors = self._read_index_unlocked()
             by_id = {record["id"]: index for index, record in enumerate(records)}
@@ -69,6 +119,7 @@ class VectorMemory:
             self._write_index_unlocked(records, _matrix(vector_rows, self.embedding.dimensions))
 
     def delete(self, record_id: str) -> bool:
+        self._ensure_compatible()
         with self._locked():
             records, vectors = self._read_index_unlocked()
             kept_indexes = [
@@ -93,6 +144,7 @@ class VectorMemory:
         source_id: str | None = None,
         project_id: str | None = None,
     ) -> int:
+        self._ensure_compatible()
         with self._locked():
             records, vectors = self._read_index_unlocked()
             kept_indexes: list[int] = []
@@ -127,6 +179,7 @@ class VectorMemory:
         project_id: str | None = None,
         source_type: str | None = None,
     ) -> list[SearchResult]:
+        self._ensure_compatible()
         query_vector = self.embedding.embed(query).astype(np.float32)
         results: list[SearchResult] = []
         records, vectors = self._read_index()
@@ -181,6 +234,7 @@ class VectorMemory:
         chunks: list[tuple[str, str, int | None, int | None]],
         project_id: str | None = None,
     ) -> None:
+        self._ensure_compatible()
         paths = {chunk_path for chunk_path, _, _, _ in chunks}
         items: list[tuple[str, str, VectorMetadata]] = []
         for path, content, start_line, end_line in chunks:
@@ -226,6 +280,32 @@ class VectorMemory:
         if self.path.exists():
             shutil.rmtree(self.path)
         self.path.mkdir(parents=True, exist_ok=True)
+
+    def reindex(self, *, progress: Callable[[int, int], None] | None = None) -> int:
+        """Rebuild the index under the current embedding provider.
+
+        Existing record content and metadata are read raw (bypassing the
+        compatibility guard), the index is reset, and every record is re-embedded
+        with the configured provider. This is the intended trigger when switching
+        embedding providers.
+        """
+        with self._locked():
+            records, _vectors = self._read_index_unlocked()
+        items: list[tuple[str, str, VectorMetadata]] = [
+            (
+                record["id"],
+                record["content"],
+                VectorMetadata.model_validate(record["metadata"]),
+            )
+            for record in records
+        ]
+        self.reset()
+        total = len(items)
+        for index, item in enumerate(items, start=1):
+            self.upsert_many([item])
+            if progress is not None:
+                progress(index, total)
+        return total
 
     def _read_index(self) -> tuple[list[dict[str, Any]], np.ndarray]:
         with self._locked():

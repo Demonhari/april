@@ -54,17 +54,20 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
     await database.connect()
     await run_migrations(database)
     memory = SqliteMemory(database)
-    embedding = embedding_provider_from_config(
-        active_settings.memory.embedding_provider,
-        model_id=active_settings.memory.embedding_model_id,
-    )
-    vector_memory = VectorMemory(active_settings.vector_index_path, embedding=embedding)
-    memory_retriever = MemoryRetriever(memory, vector_memory)
     runtime_client = RuntimeClient(
         active_settings.runtime.url,
         timeout=active_settings.runtime.request_timeout_seconds,
         token=active_settings.runtime.token,
     )
+    audit = AuditLogger(active_settings.audit_path)
+    embedding = embedding_provider_from_config(
+        active_settings.memory.embedding_provider,
+        model_id=active_settings.memory.embedding_model_id,
+        runtime_client=runtime_client,
+        audit=audit,
+    )
+    vector_memory = VectorMemory(active_settings.vector_index_path, embedding=embedding)
+    memory_retriever = MemoryRetriever(memory, vector_memory)
     model_registry = ModelRegistry.from_file(
         active_settings.home / "configs" / "models.yaml",
         root=active_settings.home,
@@ -87,7 +90,6 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         tool_registry,
         approval_required_at=permissions_config.approval_required_at_level,
     )
-    audit = AuditLogger(active_settings.audit_path)
     approvals = ApprovalStore(
         database,
         audit,

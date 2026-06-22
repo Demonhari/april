@@ -80,6 +80,17 @@ class ModelLifecycle:
             return FakeBackend()
         return LlamaCppBackend()
 
+    def _is_specialist(self, model: ModelDefinition) -> bool:
+        # keep_loaded models (e.g. the brain) and embedding-role models are
+        # exempt from specialist load/eviction accounting.
+        return not model.keep_loaded and model.role != "embedding"
+
+    def embedding_model_id(self) -> str | None:
+        for state in self._states.values():
+            if state.model.role == "embedding":
+                return state.model.id
+        return None
+
     def get_state(self, model_id: str) -> ModelRuntimeState:
         try:
             return self._states[model_id]
@@ -144,7 +155,7 @@ class ModelLifecycle:
 
     async def load_model(self, model_id: str) -> ModelRuntimeState:
         state = self.get_state(model_id)
-        if not state.model.keep_loaded:
+        if self._is_specialist(state.model):
             await self._enforce_lifecycle(target_model_id=model_id)
         async with state.lifecycle_lock:
             if state.state == "loaded":
@@ -278,6 +289,36 @@ class ModelLifecycle:
             diagnostics={key: value for key, value in diagnostics.items() if value is not None},
         )
 
+    async def embed(self, text: str, *, model_id: str | None = None) -> tuple[str, list[float]]:
+        resolved_id = model_id or self.embedding_model_id()
+        if resolved_id is None:
+            raise ModelUnavailableError(
+                "embedding",
+                "No embedding-role model is registered.",
+            )
+        state = self.get_state(resolved_id)
+        if state.model.role != "embedding":
+            raise ModelUnavailableError(
+                resolved_id,
+                "Model is not an embedding-role model.",
+                {"role": state.model.role},
+            )
+        loaded = await self.load_model(resolved_id)
+        if loaded.backend is None:
+            raise ModelUnavailableError(resolved_id, "Model backend is not available.")
+        try:
+            vector = await loaded.backend.embed(text)
+        except AprilError:
+            raise
+        except Exception as exc:
+            loaded.generation_errors += 1
+            raise ModelUnavailableError(
+                resolved_id, "Embedding failed.", {"cause": str(exc)}
+            ) from exc
+        loaded.last_used_at = utc_now_iso()
+        loaded.last_used_monotonic = time.monotonic()
+        return resolved_id, vector
+
     async def stream(
         self, request: ChatRequest
     ) -> AsyncIterator[tuple[RuntimeStreamEventName, dict[str, object]]]:
@@ -358,7 +399,7 @@ class ModelLifecycle:
     async def _unload_idle_specialists(self) -> None:
         now = time.monotonic()
         for state in self._states.values():
-            if state.model.keep_loaded or state.state != "loaded":
+            if not self._is_specialist(state.model) or state.state != "loaded":
                 continue
             if state.active_requests > 0:
                 continue
@@ -372,12 +413,12 @@ class ModelLifecycle:
         if self.max_loaded_specialist_models <= 0:
             return
         target = self.get_state(target_model_id)
-        if target.model.keep_loaded:
+        if not self._is_specialist(target.model):
             return
         loaded_specialists = [
             state
             for state in self._states.values()
-            if state.state == "loaded" and not state.model.keep_loaded
+            if state.state == "loaded" and self._is_specialist(state.model)
         ]
         if target.state != "loaded":
             projected_count = len(loaded_specialists) + 1

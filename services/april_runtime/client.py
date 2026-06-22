@@ -10,6 +10,8 @@ from services.april_runtime.schemas import (
     ChatMessage,
     ChatRequest,
     ChatResponse,
+    EmbedRequest,
+    EmbedResponse,
     GenerationOptions,
     LoadModelRequest,
     ModelOperationResponse,
@@ -62,6 +64,23 @@ class RuntimeClient:
         if response.status_code >= 400:
             raise RuntimeUnavailableError("April Runtime returned an error.", response.json())
         return ChatResponse.model_validate(response.json())
+
+    async def embed(self, text: str, *, model_id: str | None = None) -> list[float]:
+        request = EmbedRequest(text=text, model_id=model_id)
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/runtime/embed",
+                    json=request.model_dump(),
+                    headers=self.headers,
+                )
+        except httpx.HTTPError as exc:
+            raise RuntimeUnavailableError(
+                "April Runtime is offline.", {"url": self.base_url}
+            ) from exc
+        if response.status_code >= 400:
+            raise RuntimeUnavailableError("April Runtime returned an error.", response.json())
+        return EmbedResponse.model_validate(response.json()).embedding
 
     async def models(self) -> dict[str, Any]:
         try:

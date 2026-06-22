@@ -66,3 +66,25 @@ models:
   #   keep_loaded: false
   #   idle_unload_seconds: 300
   #   priority: 60
+
+  # Optional: register a local embedding model to enable runtime-local semantic
+  # memory embeddings. Without it, memory uses deterministic hashed-token
+  # embeddings (the default). Import a real GGUF embedding model with:
+  #   run april model import --role embedding --id april-embedding \
+  #     --path models/your-embedding-model-q4_k_m.gguf
+  # then set memory.embedding_provider=runtime-local (APRIL_MEMORY_EMBEDDING_PROVIDER)
+  # and run `run april memory reindex`. Keep this commented out until a real file
+  # exists so runtime health is not degraded by a missing path.
+  # embedding:
+  #   id: april-embedding
+  #   name: your-embedding-model
+  #   path: models/your-embedding-model-q4_k_m.gguf
+  #   backend: llama_cpp
+  #   role: embedding
+  #   threads: 4
+  #   context_size: 512
+  #   temperature: 0.0
+  #   max_output_tokens: 1
+  #   keep_loaded: true
+  #   idle_unload_seconds: null
+  #   priority: 30

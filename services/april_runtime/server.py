@@ -15,7 +15,13 @@ from april_common.settings import get_settings
 from services.april_runtime.health import runtime_health
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelRegistry
-from services.april_runtime.schemas import ChatRequest, LoadModelRequest, ModelOperationResponse
+from services.april_runtime.schemas import (
+    ChatRequest,
+    EmbedRequest,
+    EmbedResponse,
+    LoadModelRequest,
+    ModelOperationResponse,
+)
 from services.april_runtime.streaming import stream_event
 
 
@@ -87,6 +93,19 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
                 )
 
         return StreamingResponse(events(), media_type="text/event-stream")
+
+    @app.post("/runtime/embed")
+    async def embed(request: EmbedRequest) -> EmbedResponse:
+        request_id = request.request_id or str(uuid.uuid4())
+        model_id, vector = await active_lifecycle.embed(
+            request.text, model_id=request.model_id
+        )
+        return EmbedResponse(
+            request_id=request_id,
+            model_id=model_id,
+            dimensions=len(vector),
+            embedding=vector,
+        )
 
     @app.post("/runtime/models/load")
     async def load_model(request: LoadModelRequest) -> ModelOperationResponse:

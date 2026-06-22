@@ -398,6 +398,41 @@ filtered by `project_id` so unrelated projects stay isolated.
 
 When the brain supplies `memory_queries`, APRIL retrieves local memories by policy and includes them in the agent prompt under a clearly marked context section. General planning requests also receive a small set of recent durable memories. Coding requests with a selected indexed project retrieve project-scoped vector chunks with local citations.
 
+### Embeddings
+
+The vector index defaults to a deterministic, dependency-free **hashed-token**
+embedding. To use real **runtime-local** semantic embeddings served by a local
+GGUF model through April Runtime:
+
+```bash
+# 1. Register a local embedding-role GGUF model
+run april model import --role embedding --id april-embedding \
+  --path models/your-embedding-model-q4_k_m.gguf
+
+# 2. Select the runtime-local provider
+export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
+export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding   # optional; auto-detected
+
+# 3. Rebuild the index under the new provider
+run april memory reindex
+```
+
+The embedding model is loaded as its own dedicated instance (a chat model
+cannot also embed) and is exempt from chat-specialist load/eviction limits, so
+enabling it does not evict your coding or reading models.
+
+Graceful degradation is built in: if `embedding_provider=runtime-local` is set
+but no embedding-role model is registered (or the runtime reports it
+unavailable), APRIL logs and audits a clear note and **falls back to
+hashed-token embeddings** instead of crashing.
+
+Switching embedding providers changes the vector space, so APRIL refuses to
+silently mix spaces: searches/writes against an index built with a different
+provider/dimension raise an actionable error pointing you to
+`run april memory reindex`. Reindexing re-embeds existing memories and known
+sources under the current provider — it never wipes your index without this
+explicit command.
+
 Document ingestion is offline. Text/source files are supported by default; PDF
 text extraction is local and optional via `pip install -e '.[documents]'`.
 Unsupported binary formats are reported as unsupported instead of being decoded
@@ -515,7 +550,7 @@ real-model support should fail the command.
 ## Limitations
 
 - The MVP fake backend is deterministic and not intelligent.
-- The default vector embedding is a lightweight hashed-token baseline, not a semantic embedding model.
+- The default vector embedding is a lightweight hashed-token baseline. Real semantic embeddings are available by registering a local embedding model and setting `embedding_provider=runtime-local` (see Memory → Embeddings).
 - Desktop UI is documented as a future surface.
 - The global launcher starts Runtime and the Core API. Desktop UI remains a
   future surface.
