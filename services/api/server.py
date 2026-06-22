@@ -11,6 +11,7 @@ from typing import Any
 import uvicorn
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 
 from april_common.errors import (
@@ -39,6 +40,70 @@ from services.april_runtime.schemas import LoadModelRequest
 from services.memory.writer import MemoryWriter
 from services.scheduler import compose_briefing, compute_repo_activity
 from services.voice.health import voice_health
+
+_DESKTOP_WEB_DIR = Path(__file__).resolve().parents[2] / "apps" / "desktop" / "web"
+
+_ACTIVITY_MAX_LIMIT = 200
+
+# Strict allowlist for the Activity/Logs feed. Only these keys are ever exposed,
+# so audit fields that may carry prompt content, file contents, tool arguments,
+# metadata, reminder/notification text, tokens, or secrets are dropped even if
+# new event types add them later. This is deny-by-default, not redact-by-key.
+_ACTIVITY_ALLOWED_KEYS = frozenset(
+    {
+        "timestamp",
+        "event_type",
+        "event",
+        "actor",
+        "request_id",
+        "audit_correlation_id",
+        "approval_id",
+        "reference_id",
+        "reminder_id",
+        "memory_id",
+        "memory_type",
+        "agent",
+        "tool",
+        "permission_level",
+        "risk",
+        "risk_level",
+        "outcome",
+        "status",
+        "project_id",
+        "content_length",
+        "reason_length",
+        "kind",
+        "sink",
+        "date",
+    }
+)
+
+
+def _read_activity_events(audit_path: Path, limit: int) -> list[dict[str, Any]]:
+    if not audit_path.exists():
+        return []
+    try:
+        lines = audit_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        projected = {
+            key: value for key, value in record.items() if key in _ACTIVITY_ALLOWED_KEYS
+        }
+        if projected:
+            events.append(projected)
+        if len(events) >= limit:
+            break
+    return events
 
 
 def create_app(container: ApiContainer | None = None) -> FastAPI:
@@ -163,6 +228,15 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             "runtime_url": active.settings.runtime.url,
             "runtime": runtime,
         }
+
+    @app.get("/diagnostics/activity")
+    async def diagnostics_activity(
+        limit: int = 50,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        capped = max(1, min(limit, _ACTIVITY_MAX_LIMIT))
+        events = _read_activity_events(active.settings.audit_path, capped)
+        return {"events": events, "count": len(events)}
 
     @app.post("/chat")
     async def chat(
@@ -523,6 +597,16 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         active: ApiContainer = Depends(authorized),
     ) -> object:
         return await active.runtime_client.unload(request.model_id, request_id=request.request_id)
+
+    # Serve the local Desktop SPA from the Core API (same-origin, loopback only).
+    # The static assets ship no secrets; all data still flows through the
+    # authenticated endpoints above. Mounted last so it never shadows API routes.
+    if _DESKTOP_WEB_DIR.is_dir():
+        app.mount(
+            "/desktop",
+            StaticFiles(directory=str(_DESKTOP_WEB_DIR), html=True),
+            name="desktop",
+        )
 
     return app
 

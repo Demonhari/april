@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>APRIL Desktop</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <noscript>APRIL Desktop requires JavaScript. It runs entirely on 127.0.0.1.</noscript>
+    <div id="app">
+      <nav>
+        <div class="brand">APRIL</div>
+        <button class="navitem" data-screen="chat">Chat</button>
+        <button class="navitem" data-screen="projects">Projects</button>
+        <button class="navitem" data-screen="approvals">Approvals</button>
+        <button class="navitem" data-screen="memory">Memory</button>
+        <button class="navitem" data-screen="reminders">Reminders &amp; Tasks</button>
+        <button class="navitem" data-screen="status">Status &amp; Models</button>
+        <button class="navitem" data-screen="activity">Activity</button>
+        <div class="conn" id="conn">connecting…</div>
+      </nav>
+      <main>
+        <div class="banner" id="banner">
+          <span id="banner-text"></span>
+          <button id="banner-dismiss">dismiss</button>
+        </div>
+        <div id="screen"></div>
+      </main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

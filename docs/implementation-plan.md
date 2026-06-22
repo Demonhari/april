@@ -35,6 +35,13 @@
    - Restart-safe: the last briefing date is persisted in a `scheduler_state` table so a briefing fires at most once per local day even across process restarts.
    - Reminder and briefing paths are independent inside each tick; a failure in one is audited and never blocks the other. A `GET /scheduler/briefing/preview` endpoint and `run april briefing` command let the user view today's briefing on demand regardless of enabled state.
 
+8. Desktop UI
+   - Serve a local single-page UI from the Core API at `GET /desktop` using a `StaticFiles` mount of `apps/desktop/web/`. The SPA is plain static HTML/CSS/JS — no Node, npm, or build step — and reuses the existing authenticated endpoints; it adds no public surface and keeps `/health` the only unauthenticated, redacted route.
+   - Add one authenticated, strictly allowlisted endpoint, `GET /diagnostics/activity?limit=N` (capped at 200), that projects the sanitized audit JSONL down to event type, timestamp, reference IDs, and risk level — never prompt content, file contents, tool arguments, tokens, or secrets.
+   - Add a `run april desktop` launcher that ensures Runtime + Core API (honoring `--fake`), never starts voice/wake-word/microphone, resolves the API token from the same settings/.env source as the CLI, and opens `http://127.0.0.1:<api_port>/desktop#token=<TOKEN>` with the token in the URL fragment only. An optional native window behind the `[desktop]` extra (pywebview) injects the token via the JS bridge so it never appears in a URL; absent pywebview it falls back to the browser path.
+   - The SPA holds the token in memory only (never `localStorage`/`sessionStorage`), strips the fragment via `history.replaceState` on load, streams Chat via `fetch()` + `ReadableStream` against `POST /chat/stream`, routes `approval_required` to the exact-ID Approvals screen (a chat "yes" is never approval), and surfaces 401/403/network errors in a non-crashing banner. Screens: Chat, Projects, Approvals, Memory, Reminders & Tasks (+ briefing), Status & Models, and Activity/Logs.
+   - Tests run on the fake backend with no GGUF/network/microphone: the static mount returns `index.html`, `/diagnostics/activity` requires auth and is redacted, and the `desktop` subcommand resolves config and target URL without launching a real browser.
+
 ## Architectural Assumptions
 
 - The repository root is the default APRIL home unless `APRIL_HOME` points elsewhere.

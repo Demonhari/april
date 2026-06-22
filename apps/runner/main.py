@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -66,6 +68,34 @@ april_app.add_typer(setup_app, name="setup")
 
 def _manager() -> AprilServiceManager:
     return AprilServiceManager()
+
+
+def _desktop_base_url(manager: AprilServiceManager) -> str:
+    settings = manager.settings
+    return f"http://{settings.api.host}:{settings.api.port}/desktop"
+
+
+def _open_desktop_browser(url: str) -> bool:
+    # Token travels in the URL fragment only; fragments are never sent to the
+    # server, and the SPA strips it from the address bar immediately on load.
+    return webbrowser.open(url, new=2)
+
+
+def _open_desktop_native(url: str, token: str) -> bool:
+    # Optional native window via the [desktop] extra (pywebview). The token is
+    # injected through the JS bridge so it never appears in any URL. Returns
+    # False when pywebview is not installed so the caller can fall back.
+    try:
+        import webview
+    except ImportError:
+        return False
+
+    def _inject() -> None:
+        window.evaluate_js(f"window.__APRIL_TOKEN__ = {json.dumps(token)};")
+
+    window = webview.create_window("APRIL Desktop", url)
+    webview.start(_inject)
+    return True
 
 
 def _effective_fake(ctx: typer.Context, explicit: bool) -> bool:
@@ -410,6 +440,53 @@ def briefing(
     fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
 ) -> None:
     _delegate(["briefing"], fake=_effective_fake(ctx, fake), oneshot=_effective_oneshot(ctx))
+
+
+@april_app.command()
+def desktop(
+    ctx: typer.Context,
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+    native: bool = typer.Option(
+        False,
+        "--native",
+        help="Open a native window via the optional [desktop] extra (pywebview) "
+        "instead of the default browser.",
+    ),
+    no_open: bool = typer.Option(
+        False,
+        "--no-open",
+        help="Resolve services and the local URL but do not open anything.",
+    ),
+) -> None:
+    """Launch the local Desktop UI over authenticated loopback HTTP.
+
+    Never starts voice, wake-word, or the microphone. The API token is passed via
+    the URL fragment (browser) or the JS bridge (native), never as a query string.
+    """
+    _ensure_services(_effective_fake(ctx, fake))
+    manager = _manager()
+    token = manager.settings.api.token
+    base_url = _desktop_base_url(manager)
+    if not token:
+        console.print("[red]No API token configured. Run `run april setup tokens` first.[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]APRIL Desktop is available at {base_url}[/green]")
+    console.print("The API token is passed locally (URL fragment / JS bridge) and never logged.")
+    if no_open:
+        return
+    if native:
+        if _open_desktop_native(base_url, token):
+            return
+        console.print(
+            "[yellow]pywebview is not installed. Install the optional native window with "
+            "`pip install -e '.[desktop]'`, or use the default browser path.[/yellow]"
+        )
+    fragment_url = f"{base_url}#token={token}"
+    if not _open_desktop_browser(fragment_url):
+        console.print(
+            f"[yellow]Could not open a browser automatically. Open {base_url} and append "
+            "your token as #token=... in the address bar.[/yellow]"
+        )
 
 
 @april_app.command()

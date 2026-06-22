@@ -8,7 +8,7 @@ No model files are downloaded automatically. No cloud AI APIs, Ollama integratio
 
 ```mermaid
 flowchart TD
-  UI[CLI / future desktop] --> API[Core APRIL API<br/>127.0.0.1:8765]
+  UI[CLI / Desktop UI] --> API[Core APRIL API<br/>127.0.0.1:8765]
   API --> Brain[April Brain Router]
   Brain --> Agents[Specialist Agents]
   Agents --> Tools[Typed Tool Registry]
@@ -330,6 +330,28 @@ override the selected project.
 
 `POST /chat/stream` uses real runtime streaming. The Core API routes the request, runs permitted tools, stops immediately for approvals, and then forwards token events from April Runtime without buffering the full response. SSE events include `meta`, `token`, `approval_required`, `usage`, `done`, and `error`.
 
+## Desktop UI
+
+A local single-page Desktop UI ships as plain static HTML/CSS/JS (no Node, npm,
+or build step). The Core API serves it at `GET /desktop` over authenticated
+loopback HTTP; the static assets are the only unauthenticated surface besides the
+redacted `GET /health`.
+
+```bash
+run april desktop          # ensure services, open the browser to the UI
+run april desktop --fake   # same with the deterministic fake runtime
+run april desktop --native # optional native window (pip install -e '.[desktop]')
+```
+
+The launcher never starts voice/wake-word/microphone. The API token is passed in
+the URL **fragment** (`/desktop#token=...`), which is never sent to the server; the
+SPA reads it into memory and immediately strips it from the address bar, and never
+persists it to `localStorage`/`sessionStorage`. The native window injects the token
+through the JS bridge instead of any URL. Screens: Chat (streamed), Projects,
+Approvals (exact-ID, never an implicit "yes"), Memory, Reminders & Tasks with
+today's briefing, Status & Models, and a redacted Activity/Logs feed from
+`GET /diagnostics/activity`. See `apps/desktop/README.md` for details.
+
 ## Conversations
 
 `POST /chat` accepts an optional `conversation_id`. If omitted, APRIL creates a
@@ -551,8 +573,8 @@ real-model support should fail the command.
 
 - The MVP fake backend is deterministic and not intelligent.
 - The default vector embedding is a lightweight hashed-token baseline. Real semantic embeddings are available by registering a local embedding model and setting `embedding_provider=runtime-local` (see Memory → Embeddings).
-- Desktop UI is documented as a future surface.
-- The global launcher starts Runtime and the Core API. Desktop UI remains a
-  future surface.
+- The Desktop UI is a local static SPA served by the Core API at `/desktop` and
+  launched with `run april desktop`. It has no Node/npm/build step and adds no
+  public surface; the optional native window needs the `[desktop]` extra.
 - Real wake-word, STT, and TTS require user-installed local binaries/models.
 - Real GGUF inference requires manually installed model files and the optional `llama-cpp-python` dependency.
