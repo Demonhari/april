@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 
 from services.april_runtime.backend import BackendHealth, GenerationResult, RuntimeBackend
 from services.april_runtime.model_registry import ModelDefinition
+from services.april_runtime.schemas import ChatMessage, ResponseFormat
 
 
 class FakeBackend(RuntimeBackend):
@@ -19,6 +20,9 @@ class FakeBackend(RuntimeBackend):
         self.loaded_model: ModelDefinition | None = None
         self.fail_stream = fail_stream
         self.fail_generate = fail_generate
+        # Records the most recent structured-output request so deterministic tests
+        # can assert that response_format/json_schema propagated end to end.
+        self.last_response_format: ResponseFormat | None = None
 
     async def load(self, model: ModelDefinition) -> None:
         await asyncio.sleep(0)
@@ -77,6 +81,51 @@ class FakeBackend(RuntimeBackend):
             await asyncio.sleep(0)
             suffix = " " if index < len(words) - 1 else ""
             yield word + suffix
+
+    async def generate_messages(
+        self,
+        prompt: str,
+        *,
+        messages: list[ChatMessage],
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+        response_format: ResponseFormat | None = None,
+    ) -> GenerationResult:
+        self.last_response_format = response_format
+        return await self.generate(
+            prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
+        )
+
+    async def stream_messages(
+        self,
+        prompt: str,
+        *,
+        messages: list[ChatMessage],
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+        response_format: ResponseFormat | None = None,
+    ) -> AsyncIterator[str]:
+        self.last_response_format = response_format
+        async for token in self.stream(
+            prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
+        ):
+            yield token
 
     async def tokenize(self, text: str) -> list[int]:
         return [index for index, _ in enumerate(re.findall(r"\S+", text))]

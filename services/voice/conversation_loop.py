@@ -2,17 +2,27 @@ from __future__ import annotations
 
 import time
 import uuid
-import wave
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 
 from apps.cli.client import AprilApiClient
 from april_common.settings import get_settings
 from services.voice.audio_player import AudioPlayer, SoundDeviceAudioPlayer
-from services.voice.microphone import Microphone, SoundDeviceMicrophone
+from services.voice.microphone import (
+    Microphone,
+    SoundDeviceMicrophone,
+    aclose_frame_source,
+    write_pcm_wav,
+)
 from services.voice.speech_to_text import SpeechToText, WhisperCppSpeechToText
 from services.voice.text_to_speech import PiperTextToSpeech, TextToSpeech
 from services.voice.vad import VoiceActivityDetector
 from services.voice.wake_word import OpenWakeWordDetector
+
+
+class VoiceTimeout(RuntimeError):
+    """Raised when no wake word arrives within the wake-word waiting timeout."""
 
 
 def normalize_transcript(text: str, *, wake_word: str | None = None) -> str:
@@ -127,35 +137,59 @@ class WakeWordConversationLoop(PushToTalkLoop):
         except KeyboardInterrupt:
             return
 
-    async def _capture_wake_utterance(self, output_path: Path) -> Path:
+    async def _capture_wake_utterance(
+        self, output_path: Path, *, clock: Callable[[], float] = time.monotonic
+    ) -> Path:
+        voice = self.settings.voice
+        # Reset detector and VAD at the conversation boundary so a prior
+        # utterance cannot leak into this one.
+        self.vad.reset()
+        detector_reset = getattr(self.detector, "reset", None)
+        if callable(detector_reset):
+            detector_reset()
+
+        pre_roll: deque[bytes] = deque(maxlen=max(0, voice.wake_pre_roll_frames))
         frames: list[bytes] = []
         wake_seen = False
         speech_seen = False
         silence_frames = 0
-        started = time.monotonic()
-        async for frame in self.microphone.frames():
-            if not wake_seen:
-                if self.detector.detect(frame):
-                    wake_seen = True
-                continue
-            speech = self.vad.is_speech(frame)
-            if speech:
-                speech_seen = True
-                silence_frames = 0
+        # The wake-word waiting timeout runs from the start; the utterance timeout
+        # only begins once the wake word (or push-to-talk) has activated.
+        wake_deadline = clock() + voice.wake_wait_seconds
+        utterance_deadline: float | None = None
+
+        frame_source = self.microphone.frames()
+        try:
+            async for frame in frame_source:
+                if not wake_seen:
+                    pre_roll.append(frame)
+                    if self.detector.detect(frame):
+                        wake_seen = True
+                        # Pre-roll recovers the audio captured while the wake word
+                        # was being confirmed, so the onset is not discarded.
+                        frames.extend(pre_roll)
+                        pre_roll.clear()
+                        self.vad.reset()
+                        utterance_deadline = clock() + voice.utterance_max_seconds
+                    elif clock() >= wake_deadline:
+                        raise VoiceTimeout("No wake word detected before the wake timeout.")
+                    continue
+                # Capture every post-wake frame so the start of speech survives the
+                # VAD onset confirmation; VAD only decides when speech has ended.
                 frames.append(frame)
-            elif speech_seen:
-                silence_frames += 1
-                frames.append(frame)
-                if silence_frames >= self.settings.voice.vad_required_frames:
+                if self.vad.is_speech(frame):
+                    speech_seen = True
+                    silence_frames = 0
+                elif speech_seen:
+                    silence_frames += 1
+                    if silence_frames >= voice.vad_required_frames:
+                        break
+                if utterance_deadline is not None and clock() >= utterance_deadline:
                     break
-            if time.monotonic() - started >= self.record_seconds:
-                break
+        finally:
+            # Release the microphone stream on every exit path (break, timeout,
+            # cancellation, or shutdown).
+            await aclose_frame_source(frame_source)
         if not frames:
             raise ValueError("Voice utterance was empty.")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with wave.open(str(output_path), "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(16_000)
-            wav.writeframes(b"".join(frames))
-        return output_path
+        return write_pcm_wav(output_path, frames, sample_rate=16_000)

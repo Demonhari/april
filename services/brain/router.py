@@ -6,6 +6,7 @@ from services.april_runtime.schemas import ChatMessage
 from services.brain.fallback_router import FallbackRouter
 from services.brain.parser import parse_with_repair
 from services.brain.schemas import BrainDecision
+from services.brain.structured_output import BRAIN_DECISION_RESPONSE_FORMAT
 from services.memory.schemas import Message
 
 ROUTER_SYSTEM_PROMPT = """Route the user request for APRIL.
@@ -50,6 +51,7 @@ class BrainRouter:
                     ChatMessage(role="system", content=ROUTER_SYSTEM_PROMPT),
                     ChatMessage(role="user", content=routing_input),
                 ],
+                response_format=BRAIN_DECISION_RESPONSE_FORMAT,
                 request_id=request_id,
             )
 
@@ -65,6 +67,7 @@ class BrainRouter:
                         ),
                         ChatMessage(role="user", content=response.content),
                     ],
+                    response_format=BRAIN_DECISION_RESPONSE_FORMAT,
                     request_id=request_id,
                 )
                 return repaired.content

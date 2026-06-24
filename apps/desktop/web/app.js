@@ -1,26 +1,20 @@
 "use strict";
 
 // --- Token bootstrap -------------------------------------------------------
-// The token is held in memory ONLY. It is never written to localStorage,
-// sessionStorage, cookies, or any persistent store. It arrives either through
-// the native JS bridge (pywebview sets window.__APRIL_TOKEN__) or, in the
-// browser path, through the URL fragment (#token=...). The fragment is never
-// sent to the server; we strip it from the address bar immediately on load.
+// The token lives in memory ONLY. It is never written to localStorage,
+// sessionStorage, cookies, the page HTML, the console, or any URL we build.
+//
+// Native desktop (pywebview): the token is fetched asynchronously through the
+// minimal JS bridge, window.pywebview.api.get_token(), only after the
+// `pywebviewready` event. The SPA never assumes a synchronously-injected global.
+//
+// Browser-served desktop: the existing safe flow delivers the token in the URL
+// fragment (#token=...). Fragments are never sent to the server; we read it once
+// and strip it from the address bar/history immediately.
+//
+// The actual acquisition logic lives in the DOM-free token_bridge.js module
+// (window.AprilDesktopAuth) so it can be unit tested in isolation.
 let TOKEN = "";
-(function bootstrapToken() {
-  if (typeof window.__APRIL_TOKEN__ === "string" && window.__APRIL_TOKEN__) {
-    TOKEN = window.__APRIL_TOKEN__;
-    try { delete window.__APRIL_TOKEN__; } catch (_) { window.__APRIL_TOKEN__ = ""; }
-    return;
-  }
-  const hash = window.location.hash || "";
-  const match = hash.match(/(?:^#|&)token=([^&]+)/);
-  if (match) {
-    TOKEN = decodeURIComponent(match[1]);
-  }
-  // Strip the fragment so the token does not linger in the address bar / history.
-  history.replaceState(null, "", window.location.pathname + window.location.search);
-})();
 
 const BASE = window.location.origin;
 const CONVERSATION_ID = (crypto.randomUUID && crypto.randomUUID()) ||
@@ -621,9 +615,31 @@ screens.activity = async function () {
 };
 
 // --- Boot ------------------------------------------------------------------
-if (!TOKEN) {
-  showBanner("No API token present. Launch with `run april desktop` so the token is provided via the URL fragment or native bridge.");
+function tokenErrorMessage(source) {
+  if (source === "bridge-error") {
+    return "Could not retrieve the API token from the desktop bridge. Re-open APRIL Desktop via `run april desktop`.";
+  }
+  if (source === "bridge-empty") {
+    return "The desktop bridge returned an empty token. Re-open APRIL Desktop via `run april desktop`.";
+  }
+  return "No API token present. Launch with `run april desktop` so the token is delivered via the native bridge or the URL fragment.";
 }
-refreshConnection();
-setInterval(refreshConnection, 10000);
+
+(async function boot() {
+  let result;
+  try {
+    result = await window.AprilDesktopAuth.acquireToken(window);
+  } catch (_err) {
+    result = { token: "", source: "bridge-error" };
+  }
+  TOKEN = result.token;
+  if (!TOKEN) {
+    // Never start authenticated API clients without a token.
+    showBanner(tokenErrorMessage(result.source));
+    return;
+  }
+  // Authenticated work begins only after the token has been retrieved.
+  refreshConnection();
+  setInterval(refreshConnection, 10000);
+})();
 navigate("chat");

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -14,6 +15,9 @@ KNOWN_DEFAULT_API_TOKENS = {"local-dev-token"}
 KNOWN_DEFAULT_RUNTIME_TOKENS = {"local-dev-runtime-token"}
 SAFE_TOKEN_ENVIRONMENTS = {"development", "test"}
 
+# A POSIX-style environment variable name.
+_DOTENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -22,7 +26,10 @@ def project_root() -> Path:
 class ApiSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
-    token: str = "local-dev-token"
+    # repr=False keeps the bearer token out of repr()/str() so it cannot leak
+    # into logs, tracebacks or diagnostics. model_dump() still includes it so
+    # callers that need it (and redact explicitly) keep working.
+    token: str = Field(default="local-dev-token", repr=False)
     cors_enabled: bool = False
     max_request_bytes: int = 1_048_576
 
@@ -31,7 +38,7 @@ class RuntimeSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8766
     url: str = "http://127.0.0.1:8766"
-    token: str | None = None
+    token: str | None = Field(default=None, repr=False)
     backend: str = "llama_cpp"
     preload_keep_loaded: bool = True
     request_timeout_seconds: float = 120.0
@@ -82,6 +89,11 @@ class VoiceSettings(BaseModel):
     vad_required_frames: int = 3
     wake_word_threshold: float = 0.5
     wake_word_cooldown_seconds: float = 2.0
+    # Separate, independently bounded timeouts for the wake/listen lifecycle.
+    wake_wait_seconds: float = 30.0
+    utterance_max_seconds: float = 15.0
+    # Bounded pre-roll so the onset of speech is not lost while VAD confirms it.
+    wake_pre_roll_frames: int = 8
     whisper_binary_path: Path | None = None
     whisper_model_path: Path | None = None
     piper_binary_path: Path | None = None
@@ -221,6 +233,63 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
 }
 
 
+# Keys honoured from ${APRIL_HOME}/.env. APRIL_HOME itself is excluded: the file
+# lives inside APRIL_HOME, so it must not be able to relocate its own directory.
+_DOTENV_SUPPORTED_KEYS = frozenset(ENV_OVERRIDES) - {"APRIL_HOME"}
+
+
+def _strip_inline_comment(value: str) -> str:
+    # Drop a trailing `# comment` only when it follows whitespace, matching common
+    # dotenv behaviour. A bare `#` inside an unquoted value stays literal.
+    for index, char in enumerate(value):
+        if char == "#" and index > 0 and value[index - 1] in " \t":
+            return value[:index].rstrip()
+    return value
+
+
+def _parse_dotenv_value(raw: str) -> str:
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        inner = value[1:-1]
+        if value[0] == '"':
+            inner = (
+                inner.replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace('\\"', '"')
+                .replace("\\\\", "\\")
+            )
+        return inner
+    return _strip_inline_comment(value)
+
+
+def _read_dotenv(path: Path, supported_keys: frozenset[str]) -> dict[str, str]:
+    """Parse a ${APRIL_HOME}/.env file into supported APRIL_* keys.
+
+    The parser is intentionally inert: it never executes, interpolates, or
+    shell-evaluates content. Lines that are blank, comments, or malformed are
+    skipped silently rather than raising, and only known APRIL keys are returned.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export ") or line.startswith("export\t"):
+            line = line[len("export") :].lstrip()
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        key = key.strip()
+        if not _DOTENV_KEY_RE.match(key) or key not in supported_keys:
+            continue
+        values[key] = _parse_dotenv_value(value)
+    return values
+
+
 def _parse_env_value(raw: str) -> Any:
     lower = raw.lower()
     if lower in {"true", "false"}:
@@ -259,16 +328,22 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 def load_settings(config_path: Path | None = None, *, root: Path | None = None) -> AprilSettings:
     home = Path(os.environ.get("APRIL_HOME", root or project_root()))
+    # Effective-settings precedence, highest first:
+    #   1. process environment   2. ${APRIL_HOME}/.env   3. YAML   4. model defaults
+    dotenv = _read_dotenv(home / ".env", _DOTENV_SUPPORTED_KEYS)
     path = config_path or home / "configs" / "april.yaml"
     data = _read_yaml(path)
     data.setdefault("home", str(home))
     for env_name, field_path in ENV_OVERRIDES.items():
-        if env_name in os.environ:
-            if env_name == "APRIL_ALLOWED_FILESYSTEM_ROOTS":
-                value = [part.strip() for part in os.environ[env_name].split(",") if part.strip()]
-            else:
-                value = _parse_env_value(os.environ[env_name])
-            _set_nested(data, field_path, value)
+        # os.environ always wins; .env only fills keys absent from the process env.
+        raw = os.environ[env_name] if env_name in os.environ else dotenv.get(env_name)
+        if raw is None:
+            continue
+        if env_name == "APRIL_ALLOWED_FILESYSTEM_ROOTS":
+            value: Any = [part.strip() for part in raw.split(",") if part.strip()]
+        else:
+            value = _parse_env_value(raw)
+        _set_nested(data, field_path, value)
     settings = AprilSettings.model_validate(data)
     _validate_default_tokens(settings)
     return settings

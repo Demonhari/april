@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from agents.base import BaseAgent
 from agents.schemas import AgentResult, LocalCitation, ProposedChange
 from services.april_runtime.client import RuntimeClient
-from services.april_runtime.schemas import ChatMessage
+from services.april_runtime.schemas import ChatMessage, ResponseFormat
 from services.memory.schemas import Message, SuspendedAgentRun
 from services.memory.sqlite_memory import SqliteMemory
 from services.permissions.tool_execution import ToolExecutionContext, ToolExecutionService
@@ -54,6 +54,11 @@ AgentIterationOutput = Annotated[
     Field(discriminator="type"),
 ]
 AGENT_OUTPUT_ADAPTER: TypeAdapter[AgentIterationOutput] = TypeAdapter(AgentIterationOutput)
+# Structured agents request their exact output union, derived from the adapter so
+# the schema cannot drift from the type the loop validates against.
+AGENT_OUTPUT_RESPONSE_FORMAT = ResponseFormat(
+    type="json_object", json_schema=AGENT_OUTPUT_ADAPTER.json_schema()
+)
 MAX_TOOL_RESULT_CHARS = 4000
 
 
@@ -303,6 +308,7 @@ class StructuredAgentLoop:
         response = await self.runtime_client.chat(
             model_id=agent.model_id,
             messages=messages,
+            response_format=AGENT_OUTPUT_RESPONSE_FORMAT,
             request_id=request_id,
         )
         try:
@@ -320,6 +326,7 @@ class StructuredAgentLoop:
                     ),
                     ChatMessage(role="user", content=response.content),
                 ],
+                response_format=AGENT_OUTPUT_RESPONSE_FORMAT,
                 request_id=request_id,
             )
             try:

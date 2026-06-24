@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 async def run_migrations(database: Database) -> None:
@@ -234,6 +234,28 @@ async def run_migrations(database: Database) -> None:
     reminder_columns = {row[1] for row in await columns.fetchall()}
     if "fired_at" not in reminder_columns:
         await conn.execute("ALTER TABLE reminders ADD COLUMN fired_at TEXT")
+    columns = await conn.execute("PRAGMA table_info(users)")
+    user_columns = {row[1] for row in await columns.fetchall()}
+    user_column_defs = {
+        "address": "TEXT",
+        "timezone": "TEXT",
+        "preferences_json": "TEXT NOT NULL DEFAULT '{}'",
+        "updated_at": "TEXT",
+    }
+    for column, definition in user_column_defs.items():
+        if column not in user_columns:
+            await conn.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+    columns = await conn.execute("PRAGMA table_info(repo_indexes)")
+    repo_index_columns = {row[1] for row in await columns.fetchall()}
+    repo_index_column_defs = {
+        "source_id": "TEXT",
+        "git_commit": "TEXT",
+        "mtime": "REAL",
+        "indexed_at": "TEXT",
+    }
+    for column, definition in repo_index_column_defs.items():
+        if column not in repo_index_columns:
+            await conn.execute(f"ALTER TABLE repo_indexes ADD COLUMN {column} {definition}")
     await conn.execute(
         """
         UPDATE approvals

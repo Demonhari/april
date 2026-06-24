@@ -3,16 +3,52 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from april_common.errors import ModelUnavailableError
 from april_common.settings import AprilSettings, load_settings, reset_settings_cache
 from services.april_runtime.fake_backend import FakeBackend
 from services.april_runtime.schemas import ChatMessage, ChatResponse, Usage
+from services.memory.database import Database
+
+
+@pytest.fixture(autouse=True)
+def _close_tracked_databases(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Deterministically close every aiosqlite connection opened during a test.
+
+    Many tests build an ``ApiContainer``/``Database`` on a throwaway event loop
+    (``anyio.run``) and never enter the FastAPI lifespan that would normally close
+    the connection. That leaves the aiosqlite worker thread to emit a
+    ``ResourceWarning`` when the connection is finalised. Rather than suppress the
+    warning globally, we record every live connection and close it at teardown.
+    aiosqlite (>=0.20) is event-loop agnostic, so closing from a fresh teardown
+    loop is safe.
+    """
+    tracked: list[Database] = []
+    original_connect = Database.connect
+
+    async def _tracking_connect(self: Database) -> None:
+        await original_connect(self)
+        if all(self is not seen for seen in tracked):
+            tracked.append(self)
+
+    monkeypatch.setattr(Database, "connect", _tracking_connect)
+    try:
+        yield
+    finally:
+        pending = [db for db in tracked if db.is_connected]
+        if pending:
+
+            async def _close_all() -> None:
+                for db in pending:
+                    await db.close()
+
+            anyio.run(_close_all)
 
 
 @pytest.fixture
@@ -41,6 +77,7 @@ class FakeRuntimeClient:
         self.stream_called = False
         self.embedding_available = embedding_available
         self.embed_calls: list[str] = []
+        self.response_formats: list[Any] = []
 
     async def embed(self, text: str, *, model_id: str | None = None) -> list[float]:
         self.embed_calls.append(text)
@@ -54,8 +91,10 @@ class FakeRuntimeClient:
         model_id: str,
         messages: list[ChatMessage],
         options: Any | None = None,
+        response_format: Any | None = None,
         request_id: str | None = None,
     ) -> ChatResponse:
+        self.response_formats.append(response_format)
         snapshot = [message.model_copy() for message in messages]
         self.last_messages = snapshot
         self.calls.append(snapshot)
@@ -232,9 +271,11 @@ class FakeRuntimeClient:
         model_id: str,
         messages: list[ChatMessage],
         options: Any | None = None,
+        response_format: Any | None = None,
         request_id: str | None = None,
     ) -> AsyncIterator[str]:
         self.stream_called = True
+        self.response_formats.append(response_format)
         self.last_messages = messages
         for token in ("streamed ", "answer"):
             yield json.dumps(

@@ -17,7 +17,11 @@ class ReminderStore:
     async def open(cls, database_path: Path) -> ReminderStore:
         database = Database(database_path)
         await database.connect()
-        await run_migrations(database)
+        try:
+            await run_migrations(database)
+        except BaseException:
+            await database.close()
+            raise
         return cls(database)
 
     async def close(self) -> None:

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from april_common.errors import RuntimeUnavailableError
 from services.april_runtime.model_registry import ModelDefinition
-from services.april_runtime.schemas import ChatMessage, FinishReason
+from services.april_runtime.schemas import ChatMessage, FinishReason, ResponseFormat
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +70,10 @@ class RuntimeBackend(ABC):
         top_p: float | None = None,
         stop: list[str] | None = None,
         seed: int | None = None,
+        response_format: ResponseFormat | None = None,
     ) -> GenerationResult:
+        # Backends that only implement prompt completion ignore response_format and
+        # rely on prompt-plus-validation; chat-capable backends override this.
         return await self.generate(
             prompt,
             temperature=temperature,
@@ -90,6 +93,7 @@ class RuntimeBackend(ABC):
         top_p: float | None = None,
         stop: list[str] | None = None,
         seed: int | None = None,
+        response_format: ResponseFormat | None = None,
     ) -> AsyncIterator[str]:
         return self.stream(
             prompt,

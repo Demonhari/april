@@ -249,6 +249,7 @@ class ModelLifecycle:
                     top_p=options.top_p,
                     stop=options.stop,
                     seed=options.seed,
+                    response_format=request.response_format,
                 )
             except Exception as exc:
                 state.state = "error"
@@ -356,6 +357,7 @@ class ModelLifecycle:
                     top_p=options.top_p,
                     stop=options.stop,
                     seed=options.seed,
+                    response_format=request.response_format,
                 ):
                     output_tokens += len(await state.backend.tokenize(token))
                     yield "token", {"text": token}
@@ -369,9 +371,13 @@ class ModelLifecycle:
                 yield "error", {"code": "GENERATION_FAILED", "message": "Generation failed."}
                 return
             finally:
+                # Reset per-request lifecycle state on every exit path (normal
+                # completion, client disconnect, cancellation, or error) so a
+                # cancelled stream cannot strand active_requests or make the model
+                # look idle the instant it was last used.
                 state.active_requests = max(0, state.active_requests - 1)
-        state.last_used_at = utc_now_iso()
-        state.last_used_monotonic = time.monotonic()
+                state.last_used_at = utc_now_iso()
+                state.last_used_monotonic = time.monotonic()
         state.generations += 1
         state.input_tokens += input_tokens
         state.output_tokens += output_tokens

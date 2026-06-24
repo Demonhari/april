@@ -15,6 +15,7 @@ from services.april_runtime.schemas import (
     GenerationOptions,
     LoadModelRequest,
     ModelOperationResponse,
+    ResponseFormat,
 )
 
 
@@ -42,12 +43,14 @@ class RuntimeClient:
         model_id: str,
         messages: list[ChatMessage],
         options: GenerationOptions | None = None,
+        response_format: ResponseFormat | None = None,
         request_id: str | None = None,
     ) -> ChatResponse:
         request = ChatRequest(
             model_id=model_id,
             messages=messages,
             options=options or GenerationOptions(),
+            response_format=response_format,
             request_id=request_id,
         )
         try:
@@ -143,12 +146,14 @@ class RuntimeClient:
         model_id: str,
         messages: list[ChatMessage],
         options: GenerationOptions | None = None,
+        response_format: ResponseFormat | None = None,
         request_id: str | None = None,
     ) -> AsyncIterator[str]:
         request = ChatRequest(
             model_id=model_id,
             messages=messages,
             options=options or GenerationOptions(),
+            response_format=response_format,
             request_id=request_id,
         )
         try:

@@ -22,6 +22,7 @@ class SequenceRuntimeClient:
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses
         self.calls: list[list[ChatMessage]] = []
+        self.response_formats: list[Any] = []
 
     async def chat(
         self,
@@ -29,9 +30,11 @@ class SequenceRuntimeClient:
         model_id: str,
         messages: list[ChatMessage],
         options: Any | None = None,
+        response_format: Any | None = None,
         request_id: str | None = None,
     ) -> ChatResponse:
         self.calls.append(messages)
+        self.response_formats.append(response_format)
         content = self.responses.pop(0)
         return ChatResponse(
             request_id=request_id or "request",

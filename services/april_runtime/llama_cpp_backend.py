@@ -1,13 +1,28 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any, cast
 
 from april_common.errors import RuntimeUnavailableError
 from services.april_runtime.backend import BackendHealth, GenerationResult, RuntimeBackend
 from services.april_runtime.model_registry import ModelDefinition
-from services.april_runtime.schemas import ChatMessage, FinishReason
+from services.april_runtime.schemas import ChatMessage, FinishReason, ResponseFormat
+from services.april_runtime.stream_pump import pump_token_stream
+
+
+def llama_response_format(response_format: ResponseFormat | None) -> dict[str, Any] | None:
+    """Translate an APRIL ResponseFormat into llama-cpp-python's response_format.
+
+    llama-cpp-python expects ``{"type": "json_object", "schema": <json schema>}``
+    (the schema is optional). Returns None when no JSON constraint was requested.
+    """
+    if response_format is None or response_format.type == "text":
+        return None
+    payload: dict[str, Any] = {"type": "json_object"}
+    if response_format.json_schema is not None:
+        payload["schema"] = response_format.json_schema
+    return payload
 
 
 class LlamaCppBackend(RuntimeBackend):
@@ -109,6 +124,7 @@ class LlamaCppBackend(RuntimeBackend):
         top_p: float | None = None,
         stop: list[str] | None = None,
         seed: int | None = None,
+        response_format: ResponseFormat | None = None,
     ) -> GenerationResult:
         if self._llm is None:
             raise RuntimeUnavailableError("Model is not loaded.")
@@ -124,7 +140,12 @@ class LlamaCppBackend(RuntimeBackend):
                 seed=seed,
             )
 
+        format_kwarg = llama_response_format(response_format)
+
         def run() -> Any:
+            extra: dict[str, Any] = {}
+            if format_kwarg is not None:
+                extra["response_format"] = format_kwarg
             return chat_completion(
                 messages=self._message_dicts(messages),
                 **self._completion_kwargs(
@@ -135,11 +156,14 @@ class LlamaCppBackend(RuntimeBackend):
                     stop=stop,
                     seed=seed,
                 ),
+                **extra,
             )
 
         try:
             output = await asyncio.to_thread(run)
         except Exception:
+            # A backend/model that cannot honour response_format (or chat at all)
+            # degrades to prompt completion plus downstream validation.
             self.last_prompt_path = "fallback_prompt"
             return await self.generate(
                 prompt,
@@ -166,48 +190,25 @@ class LlamaCppBackend(RuntimeBackend):
             raise RuntimeUnavailableError("Model is not loaded.")
         llm = self._llm
 
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[str | Exception | None] = asyncio.Queue(maxsize=32)
+        def make_iterator(is_cancelled: Callable[[], bool]) -> Iterator[str]:
+            kwargs = self._completion_kwargs(
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+                stream=True,
+                top_p=top_p,
+                stop=stop,
+                seed=seed,
+            )
+            self._add_stopping_criteria(kwargs, is_cancelled)
+            for chunk in llm(prompt, **kwargs):
+                if is_cancelled():
+                    return
+                text = chunk["choices"][0].get("text", "")
+                if text:
+                    yield str(text)
 
-        def produce() -> None:
-            def put(item: str | Exception | None) -> None:
-                asyncio.run_coroutine_threadsafe(queue.put(item), loop).result()
-
-            try:
-                kwargs: dict[str, Any] = {
-                    "max_tokens": max_output_tokens,
-                    "temperature": temperature,
-                    "stream": True,
-                }
-                if top_p is not None:
-                    kwargs["top_p"] = top_p
-                if stop:
-                    kwargs["stop"] = stop
-                if seed is not None:
-                    kwargs["seed"] = seed
-                for chunk in llm(
-                    prompt,
-                    **kwargs,
-                ):
-                    text = chunk["choices"][0].get("text", "")
-                    if text:
-                        put(str(text))
-            except Exception as exc:
-                put(exc)
-            finally:
-                put(None)
-
-        task = asyncio.create_task(asyncio.to_thread(produce))
-        try:
-            while True:
-                queued = await queue.get()
-                if queued is None:
-                    break
-                if isinstance(queued, Exception):
-                    raise queued
-                yield queued
-        finally:
-            await task
+        async for token in pump_token_stream(make_iterator):
+            yield token
 
     async def stream_messages(
         self,
@@ -219,6 +220,7 @@ class LlamaCppBackend(RuntimeBackend):
         top_p: float | None = None,
         stop: list[str] | None = None,
         seed: int | None = None,
+        response_format: ResponseFormat | None = None,
     ) -> AsyncIterator[str]:
         if self._llm is None:
             raise RuntimeUnavailableError("Model is not loaded.")
@@ -237,69 +239,73 @@ class LlamaCppBackend(RuntimeBackend):
             return
 
         llm = self._llm
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[str | Exception | None] = asyncio.Queue(maxsize=32)
+        format_kwarg = llama_response_format(response_format)
 
-        def produce() -> None:
+        def make_iterator(is_cancelled: Callable[[], bool]) -> Iterator[str]:
+            chat_kwargs = self._completion_kwargs(
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+                stream=True,
+                top_p=top_p,
+                stop=stop,
+                seed=seed,
+            )
+            if format_kwarg is not None:
+                chat_kwargs["response_format"] = format_kwarg
+            self._add_stopping_criteria(chat_kwargs, is_cancelled)
             emitted = False
-
-            def put(item: str | Exception | None) -> None:
-                asyncio.run_coroutine_threadsafe(queue.put(item), loop).result()
-
             try:
                 for chunk in chat_completion(
                     messages=self._message_dicts(messages),
-                    **self._completion_kwargs(
-                        max_output_tokens=max_output_tokens,
-                        temperature=temperature,
-                        stream=True,
-                        top_p=top_p,
-                        stop=stop,
-                        seed=seed,
-                    ),
+                    **chat_kwargs,
                 ):
+                    if is_cancelled():
+                        return
                     text = self._chat_stream_text(chunk)
                     if text:
                         emitted = True
                         self.last_prompt_path = "chat_template"
-                        put(text)
-            except Exception as exc:
+                        yield text
+            except Exception:
+                # If nothing was emitted yet, degrade to prompt completion; once
+                # tokens are flowing a mid-stream failure is surfaced to the caller.
                 if emitted:
-                    put(exc)
-                    put(None)
-                    return
-                try:
-                    for chunk in llm(
-                        prompt,
-                        **self._completion_kwargs(
-                            max_output_tokens=max_output_tokens,
-                            temperature=temperature,
-                            stream=True,
-                            top_p=top_p,
-                            stop=stop,
-                            seed=seed,
-                        ),
-                    ):
-                        text = chunk["choices"][0].get("text", "")
-                        if text:
-                            self.last_prompt_path = "fallback_prompt"
-                            put(str(text))
-                except Exception as fallback_exc:
-                    put(fallback_exc)
-            finally:
-                put(None)
+                    raise
+                prompt_kwargs = self._completion_kwargs(
+                    max_output_tokens=max_output_tokens,
+                    temperature=temperature,
+                    stream=True,
+                    top_p=top_p,
+                    stop=stop,
+                    seed=seed,
+                )
+                self._add_stopping_criteria(prompt_kwargs, is_cancelled)
+                for chunk in llm(prompt, **prompt_kwargs):
+                    if is_cancelled():
+                        return
+                    text = chunk["choices"][0].get("text", "")
+                    if text:
+                        self.last_prompt_path = "fallback_prompt"
+                        yield str(text)
 
-        task = asyncio.create_task(asyncio.to_thread(produce))
+        async for token in pump_token_stream(make_iterator):
+            yield token
+
+    def _add_stopping_criteria(
+        self, kwargs: dict[str, Any], is_cancelled: Callable[[], bool]
+    ) -> None:
+        # Wire llama.cpp's per-token stopping hook so cancellation is observed
+        # mid-generation where the build supports it. Absence of the symbol is a
+        # safe fallback: the pump's between-token checks still bound generation.
         try:
-            while True:
-                queued = await queue.get()
-                if queued is None:
-                    break
-                if isinstance(queued, Exception):
-                    raise queued
-                yield queued
-        finally:
-            await task
+            from llama_cpp import StoppingCriteriaList
+        except Exception:
+            return
+
+        def _criteria(input_ids: Any, logits: Any) -> bool:
+            return is_cancelled()
+
+        kwargs["stopping_criteria"] = StoppingCriteriaList([_criteria])
 
     async def tokenize(self, text: str) -> list[int]:
         if self._llm is None:

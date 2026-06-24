@@ -96,9 +96,7 @@ def _read_activity_events(audit_path: Path, limit: int) -> list[dict[str, Any]]:
             continue
         if not isinstance(record, dict):
             continue
-        projected = {
-            key: value for key, value in record.items() if key in _ACTIVITY_ALLOWED_KEYS
-        }
+        projected = {key: value for key, value in record.items() if key in _ACTIVITY_ALLOWED_KEYS}
         if projected:
             events.append(projected)
         if len(events) >= limit:
@@ -117,9 +115,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             await scheduler.start()
         yield
         if app.state.container is not None:
-            if app.state.container.scheduler is not None:
-                await app.state.container.scheduler.stop()
-            await app.state.container.database.close()
+            await app.state.container.aclose()
 
     app = FastAPI(title="APRIL Core API", version="0.1.0", lifespan=lifespan)
     app.state.container = container

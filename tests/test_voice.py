@@ -319,4 +319,5 @@ def test_openwakeword_detects_with_fake_model(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setitem(sys.modules, "openwakeword", types.ModuleType("openwakeword"))
     monkeypatch.setitem(sys.modules, "openwakeword.model", fake_module)
     detector = OpenWakeWordDetector(model, threshold=0.5)
-    assert detector.detect(b"\x00\x00" * 80) is True
+    # A full 80 ms window (1280 samples) is required before a prediction runs.
+    assert detector.detect(b"\x00\x00" * 1280) is True

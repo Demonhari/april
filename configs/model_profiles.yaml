@@ -1,20 +1,58 @@
 profiles:
   intel_macbook_cpu_low:
-    description: Intel MacBook CPU-only conservative profile
+    description: >-
+      Intel MacBook Pro, CPU-only. Conservative context and threads, one
+      always-loaded small brain model, specialists loaded on demand and unloaded
+      when idle. No Metal acceleration (n_gpu_layers: 0).
     brain:
       context_size: 4096
       threads: 8
       n_batch: 128
+      n_gpu_layers: 0
+      use_mmap: true
       keep_loaded: true
     coding:
       context_size: 4096
       threads: 8
       n_batch: 128
+      n_gpu_layers: 0
+      use_mmap: true
       keep_loaded: false
       idle_unload_seconds: 180
     reading:
       context_size: 2048
       threads: 6
       n_batch: 64
+      n_gpu_layers: 0
+      use_mmap: true
       keep_loaded: false
       idle_unload_seconds: 120
+  apple_silicon_macbook:
+    description: >-
+      Apple Silicon MacBook Pro. Metal-accelerated llama.cpp (n_gpu_layers: -1
+      offloads all layers), unified-memory-aware context sizes, brain kept
+      resident, specialists evicted on idle. Requires an arm64 Python and a
+      Metal-enabled llama-cpp-python build.
+    brain:
+      context_size: 8192
+      threads: 6
+      n_batch: 256
+      n_gpu_layers: -1
+      use_mmap: true
+      keep_loaded: true
+    coding:
+      context_size: 8192
+      threads: 6
+      n_batch: 256
+      n_gpu_layers: -1
+      use_mmap: true
+      keep_loaded: false
+      idle_unload_seconds: 300
+    reading:
+      context_size: 4096
+      threads: 6
+      n_batch: 128
+      n_gpu_layers: -1
+      use_mmap: true
+      keep_loaded: false
+      idle_unload_seconds: 240

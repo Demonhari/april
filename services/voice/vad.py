@@ -27,6 +27,10 @@ class VoiceActivityDetector:
         self.required_frames = required_frames
         self._speech_frames = 0
 
+    def reset(self) -> None:
+        """Clear the speech-onset counter between utterances."""
+        self._speech_frames = 0
+
     def is_speech(self, frame: bytes) -> bool:
         if not frame:
             self._speech_frames = 0

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import os
 import shutil
 import subprocess
 import sys
 import webbrowser
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import typer
 from rich.table import Table
@@ -21,6 +22,7 @@ from apps.runner.model_tools import (
     import_model,
     load_model_profiles,
     model_doctor,
+    recommend_model_profile,
 )
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
 from apps.runner.verify import (
@@ -38,6 +40,11 @@ from april_common.errors import ConfigError
 from april_common.settings import load_settings
 from april_common.token_setup import generate_tokens, write_token_env_file
 from services.april_runtime.model_registry import ModelRegistry
+from services.memory.database import Database
+from services.memory.migrations import run_migrations
+from services.memory.user_profile import UserProfileStore
+
+_T = TypeVar("_T")
 
 app = typer.Typer(help="Global command dispatcher.")
 april_app = typer.Typer(help="Run APRIL from any folder.", invoke_without_command=True)
@@ -52,6 +59,7 @@ reminder_app = typer.Typer(help="Reminder operations.")
 task_app = typer.Typer(help="Task inspection operations.")
 eval_app = typer.Typer(help="Local evaluation operations.")
 setup_app = typer.Typer(help="Local setup utilities.")
+user_profile_app = typer.Typer(help="Local user-profile operations.")
 app.add_typer(april_app, name="april")
 april_app.add_typer(model_app, name="model")
 april_app.add_typer(project_app, name="project")
@@ -64,6 +72,7 @@ april_app.add_typer(reminder_app, name="reminder")
 april_app.add_typer(task_app, name="task")
 april_app.add_typer(eval_app, name="eval")
 april_app.add_typer(setup_app, name="setup")
+april_app.add_typer(user_profile_app, name="profile")
 
 
 def _manager() -> AprilServiceManager:
@@ -81,20 +90,32 @@ def _open_desktop_browser(url: str) -> bool:
     return webbrowser.open(url, new=2)
 
 
+class DesktopTokenBridge:
+    """Minimal pywebview JS API: the page may only fetch the API token.
+
+    Exposed to the page as ``window.pywebview.api``. Keeping the surface to a
+    single ``get_token`` method means the SPA cannot reach arbitrary Python.
+    """
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    def get_token(self) -> str:
+        return self._token
+
+
 def _open_desktop_native(url: str, token: str) -> bool:
     # Optional native window via the [desktop] extra (pywebview). The token is
-    # injected through the JS bridge so it never appears in any URL. Returns
-    # False when pywebview is not installed so the caller can fall back.
+    # delivered only through the async JS bridge (window.pywebview.api.get_token),
+    # never via a URL, the page HTML, or an injected global. Returns False when
+    # pywebview is not installed so the caller can fall back to the browser.
     try:
         import webview
     except ImportError:
         return False
 
-    def _inject() -> None:
-        window.evaluate_js(f"window.__APRIL_TOKEN__ = {json.dumps(token)};")
-
-    window = webview.create_window("APRIL Desktop", url)
-    webview.start(_inject)
+    webview.create_window("APRIL Desktop", url, js_api=DesktopTokenBridge(token))
+    webview.start()
     return True
 
 
@@ -308,6 +329,31 @@ def _print_model_doctor(payload: dict[str, Any]) -> None:
             str(model["realism"]),
         )
     console.print(models)
+
+
+def _print_model_recommendation(payload: dict[str, Any]) -> None:
+    table = Table(title="APRIL Model Recommendation")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Architecture", str(payload["architecture"]))
+    table.add_row("Platform", str(payload["platform"]))
+    table.add_row("Python machine", str(payload["python_machine"]))
+    table.add_row("arm64 Python", "yes" if payload["arm64_python"] else "no")
+    table.add_row("CPU count", str(payload["cpu_count"]))
+    table.add_row("Available memory", str(payload["available_memory"]))
+    table.add_row("Recommended profile", str(payload["recommended_profile"]))
+    table.add_row("Expected backend", str(payload["expected_backend"]))
+    console.print(table)
+    console.print("[bold]Notes[/bold]")
+    for note in payload["notes"]:
+        console.print(f"- {note}")
+    console.print("[bold]Commands you may run manually[/bold]")
+    for command in payload["manual_commands"]:
+        console.print(f"  {command}")
+    console.print(
+        "[dim]This command only inspects local hardware. It does not install packages, "
+        "download models, modify shell files, switch configuration, or send data.[/dim]"
+    )
 
 
 def _print_benchmark(results: list[BenchmarkResult]) -> None:
@@ -560,6 +606,20 @@ def model_doctor_command(json_output: bool = typer.Option(False, "--json")) -> N
         console.print_json(data=payload)
         return
     _print_model_doctor(payload)
+
+
+@model_app.command("recommend")
+def model_recommend_command(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Report a non-mutating model-profile recommendation for this Mac.
+
+    Inspects only local hardware. It never installs, downloads, switches
+    configuration, edits shell files, or sends data anywhere.
+    """
+    payload = recommend_model_profile(_manager().home)
+    if json_output:
+        console.print_json(data=payload)
+        return
+    _print_model_recommendation(payload)
 
 
 @model_app.command("import")
@@ -986,6 +1046,51 @@ def config_inspect() -> None:
         "permissions": load_permissions_file(home).model_dump(mode="json"),
     }
     console.print_json(data=data)
+
+
+def _run_profile_op(operation: Callable[[UserProfileStore], Awaitable[_T]]) -> _T:
+    async def _run() -> _T:
+        settings = load_settings(root=_manager().home)
+
+        async with Database(settings.database_path) as database:
+            await run_migrations(database)
+            return await operation(UserProfileStore(database))
+
+    return asyncio.run(_run())
+
+
+@user_profile_app.command("show")
+def profile_show() -> None:
+    """Inspect the local user profile. It is stored only on this machine."""
+    profile = _run_profile_op(lambda store: store.get())
+    if profile is None:
+        console.print("No local profile is set. Use `run april profile set --display-name ...`.")
+        return
+    console.print_json(data=profile.model_dump())
+
+
+@user_profile_app.command("set")
+def profile_set(
+    display_name: str = typer.Option(..., "--display-name"),
+    address: str | None = typer.Option(
+        None, "--address", help="Preferred form of address (e.g. a first name)."
+    ),
+    timezone: str | None = typer.Option(None, "--timezone"),
+) -> None:
+    """Create or update the local user profile (explicit fields only)."""
+    profile = _run_profile_op(
+        lambda store: store.set(
+            display_name=display_name, preferred_address=address, timezone=timezone
+        )
+    )
+    console.print_json(data=profile.model_dump())
+
+
+@user_profile_app.command("delete")
+def profile_delete() -> None:
+    """Delete the local user profile."""
+    deleted = _run_profile_op(lambda store: store.delete())
+    console.print(f"Deleted local profile: {deleted}")
 
 
 @setup_app.command("tokens")

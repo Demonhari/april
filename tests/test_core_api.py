@@ -90,6 +90,18 @@ def test_authentication(settings_tmp) -> None:
     assert response.status_code == 200
 
 
+def test_lifespan_shutdown_closes_database(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    assert container.database.is_connected is True
+    # Entering the TestClient context runs the FastAPI lifespan, whose shutdown
+    # must release the database connection via ApiContainer.aclose().
+    with TestClient(create_app(container)) as client:
+        assert client.get("/health").status_code == 200
+    assert container.database.is_connected is False
+
+
 def test_normal_chat_with_fake_backend(settings_tmp) -> None:
     import anyio
 

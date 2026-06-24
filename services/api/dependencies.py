@@ -44,6 +44,12 @@ class ApiContainer:
     orchestrator: AprilOrchestrator
     scheduler: SchedulerService | None = None
 
+    async def aclose(self) -> None:
+        """Release every owned resource. Safe to call more than once."""
+        if self.scheduler is not None:
+            await self.scheduler.stop()
+        await self.database.close()
+
 
 async def build_container(settings: AprilSettings | None = None) -> ApiContainer:
     active_settings = settings or get_settings()
@@ -52,6 +58,15 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
         raise ConfigError("APRIL configuration is invalid.", {"errors": errors})
     database = Database(active_settings.database_path)
     await database.connect()
+    try:
+        return await _assemble_container(active_settings, database)
+    except BaseException:
+        # A failure partway through assembly must not leak the open connection.
+        await database.close()
+        raise
+
+
+async def _assemble_container(active_settings: AprilSettings, database: Database) -> ApiContainer:
     await run_migrations(database)
     memory = SqliteMemory(database)
     runtime_client = RuntimeClient(

@@ -27,14 +27,11 @@ runtime and voice dependencies remain adapter-isolated.
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+.venv/bin/pip install -e '.[dev]' -c constraints-dev.txt
 ```
 
-Or:
-
-```bash
-make install-dev
-```
+Using the pinned `constraints-dev.txt` keeps NumPy and the type-checking toolchain
+identical to CI. `make install-dev` installs the same `.[dev]` extra.
 
 ## Configuration
 
@@ -98,6 +95,92 @@ run april model benchmark /absolute/path/model.gguf --runs 1 --max-output-tokens
 ```
 
 Missing files do not crash startup. Runtime health reports degraded status. Use `APRIL_RUNTIME_BACKEND=fake` for tests and development without model files.
+
+## Backends, Verification, and Honest Status
+
+APRIL has three clearly separated execution paths. Do not assume one is verified
+because another is.
+
+- **Fake-backend development (`APRIL_RUNTIME_BACKEND=fake`).** Deterministic,
+  needs no model files, and is what the automated suite and `run april verify
+  --fake` exercise. A green test suite verifies the orchestration, permissions,
+  memory, indexing, and API contracts — it does **not** verify any real model,
+  audio device, or native window. Passing fake/mocked tests does not make a
+  component production-ready.
+- **Real llama.cpp runtime (`APRIL_RUNTIME_BACKEND=llama_cpp`, the default).**
+  Requires the optional `.[runtime]` extra (`llama-cpp-python`) and local GGUF
+  files that **you** provide. APRIL never downloads or commits models; the
+  `models/` directory ships empty.
+- **Optional voice dependencies.** Voice is off by default. It requires the
+  `.[voice]` extra (`sounddevice`, `openwakeword`) plus whisper.cpp and Piper
+  binaries/models you install yourself. It is entirely local. The voice pipeline
+  has unit tests against synthetic PCM only; live microphone, openWakeWord,
+  whisper.cpp, and Piper have not been verified in this environment.
+
+`.env.example` documents `APRIL_RUNTIME_BACKEND` as commented-out: the effective
+default is `llama_cpp` to match `configs/models.yaml`. Uncomment `=fake` only for
+development and the deterministic verification flows.
+
+### Real-model verification
+
+The optional GGUF test and the real-model verification flow read
+`APRIL_TEST_GGUF_PATH`. They skip clearly when it is unset and never download a
+model:
+
+```bash
+# Run only the optional real-GGUF pytest (skips cleanly when the var is unset):
+APRIL_TEST_GGUF_PATH=/absolute/path/to/model.gguf .venv/bin/python -m pytest tests/test_real_model_optional.py
+
+# End-to-end real-model verification (load / chat / stream / unload):
+run april verify --real-model /absolute/path/to/model.gguf
+run april model benchmark /absolute/path/to/model.gguf --runs 1 --max-output-tokens 32
+run april verify --target-mac --require-real-model /absolute/path/to/model.gguf
+```
+
+### Reproducible development environment
+
+Development and CI both install with the same pinned constraints so NumPy and the
+type-checking toolchain do not drift:
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/pip install -e '.[dev]' -c constraints-dev.txt
+```
+
+`constraints-dev.txt` intentionally excludes `llama-cpp-python`, voice wheels, and
+GGUF files; install those separately when you opt into the real runtime or voice.
+
+### Intel vs Apple Silicon setup
+
+`run april model recommend` inspects this machine (architecture, CPU count,
+memory) and prints a profile recommendation, the expected backend, and the exact
+commands you may run. It never installs, downloads, switches configuration, edits
+shell files, or sends data.
+
+- **Intel MacBook Pro (CPU-only).** No Metal. Keep contexts/batches conservative,
+  one small brain model resident, specialists loaded on demand:
+
+  ```bash
+  run april model profile apply intel_macbook_cpu_low
+  ```
+
+- **Apple Silicon MacBook Pro.** Use an **arm64** Python and a Metal-enabled
+  `llama-cpp-python` build (`n_gpu_layers: -1` offloads all layers). Unified
+  memory is shared with the GPU; specialists are evicted on idle:
+
+  ```bash
+  python3 -c "import platform; print(platform.machine())"  # expect: arm64
+  run april model profile apply apple_silicon_macbook
+  ```
+
+### Native desktop limitations
+
+`run april desktop` serves a local SPA over authenticated loopback HTTP. The
+optional `--native` window uses `pywebview` (`.[desktop]` extra) and fetches the
+token through a minimal JS bridge. The app is **not** a signed/notarized macOS
+application and does not launch at login. Those, like git push, email, payments,
+deployment, cloud sync, telemetry, and model downloading, are explicitly out of
+scope (see "Out of scope / later milestones").
 
 ## Hari's Local Setup Path
 
@@ -578,3 +661,18 @@ real-model support should fail the command.
   public surface; the optional native window needs the `[desktop]` extra.
 - Real wake-word, STT, and TTS require user-installed local binaries/models.
 - Real GGUF inference requires manually installed model files and the optional `llama-cpp-python` dependency.
+
+## Out of scope / later milestones
+
+These are intentionally **not** implemented and are documented as later
+milestones rather than hidden gaps:
+
+- git push, email sending, deployment, payments, and other external actions
+- arbitrary package installation and unrestricted command execution
+- broad/recursive file deletion
+- cloud sync, telemetry, and any automatic model downloading
+- signed/notarized macOS application packaging and launch-at-login
+- external connectors
+
+Model files are never committed to this repository and are never downloaded
+automatically; you provide them locally.

@@ -253,6 +253,80 @@ def _model_realism(model_size: int | None, ram_bytes: int | None) -> str:
     return "ok"
 
 
+def recommend_model_profile(home: Path) -> dict[str, Any]:
+    """Report a safe, non-mutating model-profile recommendation for this machine.
+
+    Inspects only local hardware (architecture, CPU count, physical memory) and
+    the bundled profiles. It never installs packages, downloads models, edits
+    shell startup files, switches configuration, or sends data anywhere.
+    """
+    root = home.expanduser().resolve()
+    architecture = machine_kind()
+    machine = platform.machine().lower()
+    is_arm64 = machine in {"arm64", "aarch64"}
+    ram = estimate_ram_bytes()
+    profiles = load_model_profiles(root)
+
+    if architecture == "macOS Apple Silicon":
+        profile = "apple_silicon_macbook"
+        expected_backend = "llama.cpp with Metal acceleration"
+        notes = [
+            'Use an arm64 Python: `python3 -c "import platform; print(platform.machine())"`'
+            " should print arm64.",
+            "Install a Metal-enabled llama-cpp-python build so layers offload to the GPU.",
+            "Unified memory is shared with the GPU; leave headroom for other apps.",
+            "Specialists are evicted on idle (idle_unload_seconds); the brain stays resident.",
+        ]
+    elif architecture == "macOS Intel":
+        profile = "intel_macbook_cpu_low"
+        expected_backend = "llama.cpp CPU-only (no Metal)"
+        notes = [
+            "Intel Macs run CPU-only; keep context and batch sizes conservative.",
+            "One small brain model stays resident; specialists load on demand.",
+        ]
+    else:
+        profile = "intel_macbook_cpu_low"
+        expected_backend = "llama.cpp CPU-only"
+        notes = [
+            f"No tuned profile for {architecture}; the conservative CPU profile is a safe default.",
+        ]
+
+    if architecture == "macOS Apple Silicon" and not is_arm64:
+        notes.insert(
+            0,
+            "WARNING: this Python is not arm64 (likely Rosetta); reinstall an arm64 Python "
+            "to get Metal acceleration.",
+        )
+
+    if profile not in profiles:
+        # Never recommend a profile that is not actually defined.
+        profile = next(iter(profiles), profile)
+
+    manual_commands = [
+        f"run april model profile apply {profile}",
+        "pip install -e '.[runtime]'",
+        "run april model import --role brain --id april-brain --name <name> "
+        "--path /path/to/model.gguf",
+        "run april model doctor",
+        "run april verify --real-model /path/to/model.gguf",
+    ]
+    return {
+        "architecture": architecture,
+        "platform": platform.platform(),
+        "python_machine": platform.machine(),
+        "arm64_python": is_arm64,
+        "cpu_count": os.cpu_count(),
+        "available_memory_bytes": ram,
+        "available_memory": format_bytes(ram),
+        "recommended_profile": profile,
+        "available_profiles": sorted(profiles),
+        "expected_backend": expected_backend,
+        "manual_commands": manual_commands,
+        "notes": notes,
+        "mutating": False,
+    }
+
+
 def model_doctor(home: Path) -> dict[str, Any]:
     root = home.expanduser().resolve()
     settings = load_settings(root=root)

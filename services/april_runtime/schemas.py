@@ -1,14 +1,66 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ModelRole = Literal[
     "brain", "coding", "reading", "creative", "reasoning", "system_action", "embedding"
 ]
 ModelState = Literal["unavailable", "unloaded", "loading", "loaded", "unloading", "error"]
 FinishReason = Literal["stop", "length", "error", "cancelled"]
+
+# Bounds applied to caller-supplied JSON schemas before they reach the low-level
+# grammar compiler. They keep an untrusted request from handing llama.cpp an
+# unbounded or pathologically nested document.
+MAX_RESPONSE_FORMAT_SCHEMA_BYTES = 16_384
+MAX_RESPONSE_FORMAT_SCHEMA_DEPTH = 24
+
+
+def _json_schema_depth(value: Any, depth: int = 0) -> int:
+    if depth > MAX_RESPONSE_FORMAT_SCHEMA_DEPTH:
+        return depth
+    if isinstance(value, dict):
+        children = value.values()
+    elif isinstance(value, list):
+        children = value  # type: ignore[assignment]
+    else:
+        return depth
+    return max((_json_schema_depth(child, depth + 1) for child in children), default=depth)
+
+
+class ResponseFormat(BaseModel):
+    """Optional structured-output constraint for a chat generation.
+
+    ``type="json_object"`` asks the backend to emit a single JSON object. When
+    ``json_schema`` is supplied the backend constrains output to that JSON Schema
+    where supported, degrading to prompt-plus-validation otherwise. The schema is
+    size- and depth-limited so a caller cannot hand the grammar compiler an
+    unbounded document.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text", "json_object"] = "json_object"
+    json_schema: dict[str, Any] | None = None
+
+    @field_validator("json_schema")
+    @classmethod
+    def validate_json_schema(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return value
+        try:
+            encoded = json.dumps(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("json_schema must be JSON-serialisable") from exc
+        if len(encoded.encode("utf-8")) > MAX_RESPONSE_FORMAT_SCHEMA_BYTES:
+            raise ValueError(
+                f"json_schema exceeds the {MAX_RESPONSE_FORMAT_SCHEMA_BYTES}-byte limit"
+            )
+        if _json_schema_depth(value) > MAX_RESPONSE_FORMAT_SCHEMA_DEPTH:
+            raise ValueError("json_schema nesting is too deep")
+        return value
 
 
 class ChatMessage(BaseModel):
@@ -49,6 +101,7 @@ class ChatRequest(BaseModel):
     model_id: str
     messages: list[ChatMessage]
     options: GenerationOptions = Field(default_factory=GenerationOptions)
+    response_format: ResponseFormat | None = None
     request_id: str | None = None
 
 

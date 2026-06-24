@@ -1,12 +1,39 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import wave
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from april_common.errors import RuntimeUnavailableError
+
+MICROPHONE_QUEUE_MAXSIZE = 64
+
+
+async def aclose_frame_source(source: AsyncIterator[bytes]) -> None:
+    """Close a microphone frame iterator if it supports it (async generators do)."""
+    aclose = getattr(source, "aclose", None)
+    if callable(aclose):
+        await aclose()
+
+
+def write_pcm_wav(
+    output_path: Path,
+    frames: Sequence[bytes],
+    *,
+    sample_rate: int = 16_000,
+    channels: int = 1,
+) -> Path:
+    """Write signed 16-bit little-endian PCM frames to a WAV file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(output_path), "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"".join(frames))
+    return output_path
 
 
 class Microphone:
@@ -37,6 +64,23 @@ class SoundDeviceMicrophone(Microphone):
         self.sample_rate = sample_rate
         self.channels = channels
         self.max_seconds = max_seconds
+        # Count of frames discarded by the overflow policy. Never log audio bytes.
+        self.dropped_frames = 0
+
+    def _enqueue_frame(self, queue: asyncio.Queue[bytes], frame: bytes) -> None:
+        # Runs on the event-loop thread via call_soon_threadsafe, so it can safely
+        # mutate the queue. Drop-oldest keeps the most recent audio and guarantees
+        # the audio callback never raises QueueFull.
+        try:
+            queue.put_nowait(frame)
+            return
+        except asyncio.QueueFull:
+            pass
+        with contextlib.suppress(asyncio.QueueEmpty):
+            queue.get_nowait()
+        with contextlib.suppress(asyncio.QueueFull):
+            queue.put_nowait(frame)
+        self.dropped_frames += 1
 
     async def record_push_to_talk(self, output_path: Path) -> Path:
         if self.max_seconds <= 0 or self.max_seconds > 300:
@@ -85,11 +129,14 @@ class SoundDeviceMicrophone(Microphone):
                 "sounddevice is not installed. Install APRIL voice extras to stream audio."
             ) from exc
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=32)
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=MICROPHONE_QUEUE_MAXSIZE)
 
         def callback(indata: Any, frames: int, time: Any, status: Any) -> None:
             del frames, time, status
-            loop.call_soon_threadsafe(queue.put_nowait, bytes(indata))
+            # Hand the bytes to the loop thread; the bounded queue applies the
+            # explicit drop-oldest overflow policy there. The callback itself
+            # never blocks and never raises QueueFull.
+            loop.call_soon_threadsafe(self._enqueue_frame, queue, bytes(indata))
 
         def open_stream() -> Any:
             return sd.RawInputStream(

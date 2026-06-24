@@ -325,11 +325,44 @@ class FallbackRouter:
 
     def _git_read_tools(self, text: str) -> list[str]:
         tools: list[str] = []
-        if self._contains(text, "git status", "show git status"):
-            tools.append("git_status")
-        if self._contains(text, "git diff", "show git diff"):
+        if self._contains(
+            text,
+            "git log",
+            "show git log",
+            "recent commits",
+            "latest commits",
+            "last commits",
+            "commit history",
+        ):
+            tools.append("git_log")
+        if self._contains(
+            text,
+            "git branch",
+            "current branch",
+            "list branches",
+            "which branch",
+            "show branches",
+            "all branches",
+        ):
+            tools.append("git_branch")
+        if self._contains(
+            text,
+            "git diff",
+            "show git diff",
+            "what changed",
+            "what has changed",
+            "unstaged changes",
+            "uncommitted changes",
+        ):
             tools.append("git_diff")
-        if self._contains(text, "git log", "git branch"):
+        if self._contains(
+            text,
+            "git status",
+            "show git status",
+            "working tree status",
+            "repo status",
+            "repository status",
+        ):
             tools.append("git_status")
         return tools
 

@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: install install-dev test coverage lint format typecheck check run-runtime run-api cli install-global install-global-path install-global-force install-global-force-path verify-global uninstall-global
+.PHONY: install install-dev test coverage lint format format-check typecheck check ci run-runtime run-api cli install-global install-global-path install-global-force install-global-force-path verify-global uninstall-global
 
 install:
 	$(PYTHON) -m venv $(VENV)
@@ -11,13 +11,13 @@ install:
 
 install-dev:
 	$(PYTHON) -m venv $(VENV)
-	$(PIP) install -e '.[dev]'
+	$(PIP) install -e '.[dev]' -c constraints-dev.txt
 
 test:
 	$(PY) -m pytest
 
 coverage:
-	$(PY) -m pytest --cov=april_common --cov=services --cov=agents --cov=skills --cov=apps --cov-report=term-missing
+	$(PY) -m pytest --cov=april_common --cov=services --cov=agents --cov=skills --cov=apps --cov-report=term-missing --cov-fail-under=85
 
 lint:
 	$(PY) -m ruff check .
@@ -25,10 +25,21 @@ lint:
 format:
 	$(PY) -m ruff format .
 
+format-check:
+	$(PY) -m ruff format --check .
+
 typecheck:
 	$(PY) -m mypy april_common apps services agents skills
 
-check: lint typecheck test
+# Mirror the important CI quality gates: lint, format check, type check, tests.
+check: lint format-check typecheck test
+
+# Full CI-equivalent gate, including coverage threshold, compile, config
+# validation and the fake-backend verification run.
+ci: lint format-check typecheck coverage
+	$(PY) -m compileall -q april_common apps services agents skills tests
+	$(PY) -m apps.runner.main april config validate
+	$(PY) -m apps.runner.main april verify --fake
 
 run-runtime:
 	$(PY) -m services.april_runtime.server

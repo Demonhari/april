@@ -97,9 +97,7 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
     @app.post("/runtime/embed")
     async def embed(request: EmbedRequest) -> EmbedResponse:
         request_id = request.request_id or str(uuid.uuid4())
-        model_id, vector = await active_lifecycle.embed(
-            request.text, model_id=request.model_id
-        )
+        model_id, vector = await active_lifecycle.embed(request.text, model_id=request.model_id)
         return EmbedResponse(
             request_id=request_id,
             model_id=model_id,
