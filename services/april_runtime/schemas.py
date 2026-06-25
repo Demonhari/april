@@ -171,6 +171,12 @@ class ModelInfo(BaseModel):
 class RuntimeHealth(BaseModel):
     status: Literal["ok", "degraded"]
     backend: str
+    # True when the backend is the deterministic fake runtime. In that mode a
+    # missing GGUF path is informational (still listed in ``missing_models``) and
+    # does not degrade health, because the fake backend needs no model files.
+    # This is never True for a real backend, so it cannot mask real-model
+    # readiness.
+    simulated: bool = False
     models: list[ModelInfo]
     missing_models: list[str] = Field(default_factory=list)
     request_id: str

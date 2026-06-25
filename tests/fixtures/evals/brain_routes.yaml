@@ -164,10 +164,10 @@ cases:
     expected_needs_confirmation: true
   - id: destructive_file_request
     message: Delete the old logs from my machine.
-    expected_intent: destructive_action
+    expected_intent: log_cleanup
     expected_agent: system_action_agent
     expected_model_id: april-brain
-    expected_tools: []
+    expected_tools: [plan_log_cleanup]
     expected_permission_level: 4
     expected_risk_level: system_action
     expected_needs_confirmation: true
@@ -305,4 +305,40 @@ cases:
     expected_tools: []
     expected_permission_level: 5
     expected_risk_level: external_action
+    expected_needs_confirmation: true
+  - id: ambiguous_fix_is_modification
+    message: Fix this bug in the repository.
+    expected_intent: code_modification
+    expected_agent: coding_agent
+    expected_model_id: april-coding
+    expected_tools: []
+    expected_permission_level: 3
+    expected_risk_level: code_write
+    expected_needs_confirmation: true
+  - id: ambiguous_explain_is_read_only
+    message: Explain this code in the repository.
+    expected_intent: coding_repo_analysis
+    expected_agent: coding_agent
+    expected_model_id: april-coding
+    expected_tools: [git_status, search_files]
+    expected_permission_level: 1
+    expected_risk_level: read_only
+    expected_needs_confirmation: false
+  - id: git_log_read_only
+    message: Show the recent commits in this repository.
+    expected_intent: coding_repo_analysis
+    expected_agent: coding_agent
+    expected_model_id: april-coding
+    expected_tools: [git_log]
+    expected_permission_level: 1
+    expected_risk_level: read_only
+    expected_needs_confirmation: false
+  - id: apply_patch_request
+    message: Apply the patch to the project.
+    expected_intent: code_modification
+    expected_agent: coding_agent
+    expected_model_id: april-coding
+    expected_tools: []
+    expected_permission_level: 3
+    expected_risk_level: code_write
     expected_needs_confirmation: true

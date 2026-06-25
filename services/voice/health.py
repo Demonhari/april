@@ -158,4 +158,9 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         ),
         "audio_cache_path": str(settings.audio_cache_path),
         "audio_cache_writable": os.access(settings.audio_cache_path, os.W_OK),
+        "wake_word_guidance": (
+            "Wake-word ('April') listening needs a custom local openWakeWord model "
+            "configured at voice.wake_word_model_path; APRIL never downloads or trains one. "
+            "Push-to-talk (run april voice ptt) works without any wake-word model."
+        ),
     }

@@ -1,8 +1,23 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, Field
+
+# Single source of truth for the specialist agents APRIL can route to. Using a
+# Literal makes the set part of the type system (so BrainDecision.agent rejects
+# anything else and its JSON Schema exposes an enum) and lets every other module
+# derive the names from AGENT_NAMES instead of re-listing them.
+AgentName = Literal[
+    "general_agent",
+    "coding_agent",
+    "reading_agent",
+    "creative_agent",
+    "reasoning_agent",
+    "system_action_agent",
+]
+
+AGENT_NAMES: tuple[AgentName, ...] = get_args(AgentName)
 
 
 class LocalCitation(BaseModel):

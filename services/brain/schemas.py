@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from agents.schemas import AgentName
+
 RiskLevel = Literal[
     "none", "read_only", "safe_write", "code_write", "system_action", "external_action"
 ]
@@ -17,7 +19,7 @@ class PlannedToolCall(BaseModel):
 
 class BrainDecision(BaseModel):
     intent: str
-    agent: str
+    agent: AgentName
     model_id: str
     tools_needed: list[str] = Field(default_factory=list)
     planned_tool_calls: list[PlannedToolCall] = Field(default_factory=list)

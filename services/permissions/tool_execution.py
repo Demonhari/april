@@ -17,6 +17,10 @@ from services.permissions.artifacts import (
     build_patch_approval_metadata,
     verify_approval_artifact,
 )
+from services.permissions.cleanup import (
+    apply_approved_log_cleanup,
+    build_log_cleanup_approval_metadata,
+)
 from services.permissions.engine import PermissionEngine
 from services.permissions.schemas import ApprovalRequest, ApprovalResponse, PermissionDecision
 from skills.registry import ToolRegistry
@@ -264,6 +268,8 @@ class ToolExecutionService:
         try:
             if approved.tool == "patch_applier":
                 result = await apply_approved_patch(approved)
+            elif approved.tool == "apply_log_cleanup":
+                result = await apply_approved_log_cleanup(approved)
             else:
                 result = await self.tool_registry.execute(approved.tool, approved.args)
         except Exception as exc:
@@ -405,6 +411,11 @@ class ToolExecutionService:
                 message=str(args.get("message")) if args.get("message") is not None else None,
                 project_id=str(args["project_id"]) if args.get("project_id") is not None else None,
             )
+        if tool == "apply_log_cleanup":
+            return await build_log_cleanup_approval_metadata(
+                manifest_id=str(args["manifest_id"]),
+                expected_side_effects=expected_side_effects,
+            )
         return {}
 
     def side_effects(self, tool: str) -> list[str]:
@@ -416,6 +427,8 @@ class ToolExecutionService:
             return ["Create a local Git commit."]
         if tool == "repo_indexer":
             return ["Update APRIL's local repository index."]
+        if tool == "apply_log_cleanup":
+            return ["Delete exactly the files in an approved local cleanup manifest."]
         return ["Perform a restricted local action."]
 
     async def _execute_no_approval(

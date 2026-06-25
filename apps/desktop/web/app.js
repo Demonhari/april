@@ -549,6 +549,17 @@ screens.status = async function () {
 
   const health = await api("GET", "/health").catch(() => null);
   if (health) {
+    const rt = health.runtime || {};
+    const simulated = rt.simulated === true;
+    const badge = simulated
+      ? "<span class='pill'>SIMULATED runtime (fake backend) — not real-model verified</span>"
+      : "<span class='pill ok'>real backend</span>";
+    let note = "<strong>Runtime mode</strong> " + badge;
+    if (Array.isArray(rt.missing_models) && rt.missing_models.length) {
+      note += "<div class='spacer'></div><span class='muted'>Configured but missing model files: " +
+        esc(rt.missing_models.join(", ")) + "</span>";
+    }
+    screenEl.appendChild(card(note));
     screenEl.appendChild(card("<strong>Health (redacted /health)</strong><pre>" + esc(JSON.stringify(health, null, 2)) + "</pre>"));
   }
 

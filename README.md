@@ -60,6 +60,30 @@ run april setup tokens --output .env
 Set `APRIL_ENV=production` only after replacing the example tokens. In
 production mode APRIL rejects known development tokens at startup.
 
+### First-run bootstrap
+
+`run april setup bootstrap` is a consolidated, **non-destructive, local-only**
+first-run helper:
+
+```bash
+run april setup bootstrap                 # safe defaults
+run april setup bootstrap --apply-profile # also apply the recommended profile
+run april setup bootstrap --force         # regenerate tokens even if present
+run april setup bootstrap --json          # machine-readable report
+```
+
+It creates APRIL's data/logs/models/vector-index/audit/audio-cache directories
+with owner-only permissions; generates API/Runtime tokens into the chosen `.env`
+only if absent (never printing full tokens, and refusing to overwrite existing
+secrets without `--force`); inspects architecture, CPU count, and memory;
+**recommends** a model profile without applying it (apply only with
+`--apply-profile`); reports registered models and missing paths, llama-cpp-python
+availability, voice dependency/binary/model paths, and configured allowed
+filesystem roots; warns about known development tokens; runs configuration
+validation; and prints the exact next commands for fake and real-model
+verification. It never installs Homebrew, Python packages, models, or voice
+binaries, and never edits shell startup files.
+
 Development installs can use direct dependency constraints without pulling in
 optional runtime or voice wheels:
 
@@ -94,7 +118,38 @@ run april verify --real-model /absolute/path/model.gguf
 run april model benchmark /absolute/path/model.gguf --runs 1 --max-output-tokens 32
 ```
 
-Missing files do not crash startup. Runtime health reports degraded status. Use `APRIL_RUNTIME_BACKEND=fake` for tests and development without model files.
+Missing files do not crash startup. With the real `llama_cpp` backend, runtime
+health reports `degraded` and lists the missing model ids. With the fake backend
+(`APRIL_RUNTIME_BACKEND=fake`), health reports `status: ok` with `simulated:
+true` — a missing GGUF is informational (still listed under `missing_models`),
+because the fake backend never loads model files. Genuine backend/model errors
+still report `degraded` in both modes. The `simulated` flag means a fake run can
+never be mistaken for real-model readiness; the Desktop Status screen shows a
+clear "SIMULATED runtime" badge. Use `APRIL_RUNTIME_BACKEND=fake` for tests and
+development without model files.
+
+## What is implemented vs. verified
+
+APRIL separates "implemented and tested against the fake/deterministic backend"
+from "exercised against real hardware". The automated suite is large and green,
+but a green suite verifies orchestration, permissions, and contracts — **not**
+real models, live audio, or native Mac packaging.
+
+| Capability | Status |
+|---|---|
+| Runtime, Brain routing, agents, permissions, memory, scheduler, documents, desktop SPA | Implemented, fake-backend tested |
+| Brain agent-name schema constraint + repair/fallback | Implemented, fake-backend tested |
+| Simulated vs. real runtime health (`simulated` flag) | Implemented, fake-backend tested |
+| Scoped log/cache cleanup (plan + Level 4 approved apply) | Implemented, security-tested |
+| Secure first-run bootstrap (`setup bootstrap`) | Implemented, tested with temp homes |
+| Interactive push-to-talk (stop-controlled capture) | Implemented, tested with fake mic + mocked input |
+| Real GGUF model load/chat/stream/unload | **Not verified here** — requires your local GGUF + `[runtime]` extra |
+| Live microphone, whisper.cpp, Piper, wake-word | **Not verified here** — requires your local binaries/models |
+| Real-model target-Mac acceptance report | Implemented; runs real checks only when you supply a GGUF |
+| Signed/notarized packaging, launch-at-login | Out of scope (see below) |
+
+Nothing in this repository has been run against a real GGUF model, a live
+microphone, or native Mac packaging in the environment that produced it.
 
 ## Backends, Verification, and Honest Status
 
@@ -136,6 +191,33 @@ run april verify --real-model /absolute/path/to/model.gguf
 run april model benchmark /absolute/path/to/model.gguf --runs 1 --max-output-tokens 32
 run april verify --target-mac --require-real-model /absolute/path/to/model.gguf
 ```
+
+#### Machine-readable acceptance report
+
+`run april verify --target-mac` accepts `--report PATH` to write a redacted JSON
+acceptance report:
+
+```bash
+run april verify --target-mac \
+  --require-real-model /absolute/path/to/model.gguf \
+  --report data/verification/mac-report.json
+```
+
+The report contains **no** prompt content, generated text, tokens, secrets, or
+absolute paths (only a model path *basename*). It records timestamp, OS/CPU
+architecture, Python version, selected backend, model id/role/basename/
+quantization, load success and duration, chat/structured-JSON/streaming/unload
+success, first-token latency, output token count and tokens-per-second, context
+size, process RSS, routing-eval totals and accuracy, explicitly skipped checks
+with reasons, and a final `pass` / `degraded` / `fail` summary.
+
+Structural correctness is the default acceptance criterion (Macs vary widely in
+speed). Optional `--min-tokens-per-second`, `--max-load-seconds`, and
+`--max-first-token-latency-seconds` thresholds only **downgrade** an otherwise
+structurally-passing run to `degraded`; they never hard-fail on speed alone. When
+no real model is supplied the real-model section is marked `attempted: false`, the
+checks are listed as skipped with reasons, and the summary can never be `pass` —
+the run is never silently relabeled as real-model verified.
 
 ### Reproducible development environment
 
@@ -307,6 +389,8 @@ run april deny APPROVAL_ID
 run april agent run coding_agent "Inspect this repository" --project-id PROJECT_ID
 run april config inspect
 run april setup tokens --output .env
+run april setup bootstrap
+run april verify --target-mac --report data/verification/mac-report.json
 run april reminder list
 run april reminder create "stand up" --due-at 2026-06-21T09:00:00Z
 run april reminder delete REMINDER_ID
@@ -558,9 +642,24 @@ april voice ptt
 april voice listen
 ```
 
-Push-to-talk starts only from explicit CLI invocation. Wake-word mode is also an
-explicit command and falls back to push-to-talk behavior when wake-word support
-is unavailable. API startup never activates the microphone.
+`run april voice ptt` (no `--seconds`) is genuinely interactive: press Enter to
+start capture and Enter again to stop. Capture also ends on the configured
+maximum duration, the frame source ending, cancellation (Ctrl+C), or error, and
+the microphone frame source is closed on every exit path. Empty audio produces a
+clear error, and temporary capture audio is deleted unless `retain_debug_audio`
+is enabled. `run april voice ptt --seconds N` remains a deterministic
+fixed-duration mode for scripts and smoke tests. (Interactive PTT is verified
+with a fake microphone and mocked input; it has not been exercised against a live
+microphone in this environment.)
+
+Wake-word ("April") listening needs a **custom local openWakeWord model** you
+configure at `voice.wake_word_model_path`; APRIL never downloads or trains a
+wake-word model. Push-to-talk works without any wake-word model, and wake-word
+mode falls back to push-to-talk when no model is configured. `run april voice
+doctor` states this explicitly.
+
+Push-to-talk starts only from explicit CLI invocation. API, Runtime, desktop, and
+normal CLI startup never activate the microphone.
 
 ## Proactive Scheduler
 
@@ -651,6 +750,32 @@ real-model support should fail the command.
 - `open_url` is Level 5, requires `external_actions_enabled`, accepts only
   normalized `http`/`https` URLs without credentials, and requires exact
   approval.
+- There is **no** generic, recursive, or caller-rooted delete tool. The only way
+  to delete files is the scoped two-stage cleanup below.
+
+### Scoped log/cache cleanup
+
+Removing old logs or audio cache uses an immutable two-stage flow modeled on the
+secure patch boundary — not a generic delete:
+
+```bash
+# Stage 1 — plan (Level 1, read-only): enumerates candidates into an immutable
+# manifest and deletes nothing.
+april ask "Delete the old logs from this machine." --project-id PROJECT_ID
+april approvals          # shows the apply_log_cleanup approval with file count + bytes
+april approve APPROVAL_ID
+```
+
+`plan_log_cleanup` accepts only a controlled target (`logs` or `audio_cache`) and
+a bounded `older_than_days`; the root is derived from settings (never from the
+caller). It enumerates only ordinary files (skipping symlinks, the audit log, and
+`.gitkeep`), enforces configurable max-file and max-byte limits, and writes a
+content-addressed manifest. `apply_log_cleanup` is a **Level 4** system action
+requiring exact one-time approval bound to that manifest: before deleting it
+revalidates root containment and each file's size + SHA-256, never follows
+symlinks, never deletes directories, cannot broaden the candidate set, fails
+closed on a tampered manifest, and marks the manifest one-time-use to prevent
+replay. Limits live in `configs/tools.yaml` under `tools.log_cleanup`.
 
 ## Limitations
 

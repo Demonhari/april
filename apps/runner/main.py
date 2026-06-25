@@ -15,8 +15,10 @@ import typer
 from rich.table import Table
 
 from apps.cli.render import console
+from apps.runner.bootstrap import bootstrap as run_bootstrap
 from apps.runner.evals import run_fake_brain_eval, run_real_brain_eval
 from apps.runner.install import is_april_wrapper, path_contains_dir
+from apps.runner.mac_report import ReportThresholds, write_report
 from apps.runner.model_tools import (
     apply_model_profile,
     import_model,
@@ -27,11 +29,11 @@ from apps.runner.model_tools import (
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
 from apps.runner.verify import (
     BenchmarkResult,
+    TargetMacValidator,
     VerifyCheck,
     run_fake_verification,
     run_model_benchmark,
     run_real_model_verification,
-    run_target_mac_validation,
     run_workflow_verification,
 )
 from april_common.config_validation import validate_configuration
@@ -1103,6 +1105,60 @@ def setup_tokens(
     console.print("Full token values were not printed.")
 
 
+@setup_app.command("bootstrap")
+def setup_bootstrap(
+    env_file: Path = typer.Option(Path(".env"), "--env-file", help="Local env file for tokens."),
+    force: bool = typer.Option(False, "--force", help="Regenerate tokens even if they exist."),
+    apply_profile: bool = typer.Option(
+        False, "--apply-profile", help="Apply the recommended model profile (mutates configs)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Safe, non-destructive local first-run setup. Never prints full tokens."""
+    home = _manager().home
+    target_env = env_file if env_file.is_absolute() else home / env_file
+    report = run_bootstrap(home, env_file=target_env, force=force, apply_profile=apply_profile)
+    if json_output:
+        console.print_json(data=report)
+    else:
+        _print_bootstrap(report)
+    if not report["config_valid"]:
+        raise typer.Exit(1)
+
+
+def _print_bootstrap(report: dict[str, Any]) -> None:
+    console.print(f"[bold]APRIL bootstrap[/bold] — home: {report['home']}")
+    created = sum(1 for item in report["directories"] if item["created"])
+    console.print(f"Directories: {len(report['directories'])} ensured ({created} newly created).")
+    tokens = report["tokens"]
+    console.print(f"Tokens ({report['env_file']}): {tokens['action']} (values not printed).")
+    for warning in report["dev_token_warnings"]:
+        console.print(f"[yellow]Warning:[/yellow] {warning}")
+    machine = report["machine"]
+    console.print(
+        f"Machine: {machine['architecture']} · {machine['cpu_count']} CPUs · "
+        f"{machine['available_memory']} RAM"
+    )
+    console.print(
+        f"Recommended profile: {report['recommended_profile']} "
+        f"({report['expected_backend']}); "
+        + (
+            f"applied {report['applied_profile']}."
+            if report["profile_applied"]
+            else "not applied (use --apply-profile)."
+        )
+    )
+    console.print(
+        f"llama-cpp-python: {'available' if report['llama_cpp_available'] else 'not installed'}; "
+        f"models missing files: {len(report['missing_model_paths'])}."
+    )
+    console.print(f"Allowed filesystem roots: {report['allowed_filesystem_roots']}")
+    console.print(f"Config valid: {report['config_valid']}")
+    console.print("Next commands:")
+    for command in report["next_commands"]:
+        console.print(f"  {command}")
+
+
 @april_app.command()
 def verify(
     model_path: Path | None = typer.Argument(None),
@@ -1112,21 +1168,43 @@ def verify(
     target_mac: bool = typer.Option(False, "--target-mac"),
     require_real_model: bool = typer.Option(False, "--require-real-model"),
     json_output: bool = typer.Option(False, "--json"),
+    report: Path | None = typer.Option(
+        None, "--report", help="Write a redacted machine-readable target-Mac report JSON here."
+    ),
+    min_tokens_per_second: float | None = typer.Option(None, "--min-tokens-per-second", min=0.0),
+    max_load_seconds: float | None = typer.Option(None, "--max-load-seconds", min=0.0),
+    max_first_token_latency_seconds: float | None = typer.Option(
+        None, "--max-first-token-latency-seconds", min=0.0
+    ),
     max_output_tokens: int = typer.Option(32, "--max-output-tokens", min=1, max=4096),
     timeout: float = typer.Option(180.0, "--timeout", min=1.0),
 ) -> None:
     if target_mac:
-        checks = run_target_mac_validation(
-            _manager().home,
+        validator = TargetMacValidator(
+            home=_manager().home,
             model_path=model_path,
             require_real_model=require_real_model,
             max_output_tokens=max_output_tokens,
             timeout=timeout,
         )
+        checks = validator.run()
         if json_output:
             console.print_json(data={"checks": [asdict(check) for check in checks]})
         else:
             _print_verification_table("APRIL Target Mac Validation", checks)
+        if report is not None:
+            rendered = validator.build_report(
+                thresholds=ReportThresholds(
+                    min_tokens_per_second=min_tokens_per_second,
+                    max_load_seconds=max_load_seconds,
+                    max_first_token_latency_seconds=max_first_token_latency_seconds,
+                )
+            )
+            written = write_report(rendered, report)
+            console.print(
+                f"[green]Wrote verification report to {written}[/green] "
+                f"(summary: {rendered.summary})"
+            )
         if not all(check.ok for check in checks):
             raise typer.Exit(1)
         raise typer.Exit(0)

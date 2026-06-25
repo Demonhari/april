@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from agents.base import BaseAgent
-from agents.schemas import AgentConfig
+from agents.schemas import AGENT_NAMES, AgentConfig
 from april_common.errors import ValidationError as AprilValidationError
 from services.april_runtime.fake_backend import FakeBackend
 from services.april_runtime.schemas import (
@@ -106,6 +106,34 @@ def test_incorrect_enum_value_rejected() -> None:
     text = VALID_DECISION.replace('"risk_level":"none"', '"risk_level":"made_up"')
     with pytest.raises(AprilValidationError):
         parse_brain_decision(text)
+
+
+def test_invalid_agent_value_rejected() -> None:
+    text = VALID_DECISION.replace('"agent":"general_agent"', '"agent":"nonexistent_agent"')
+    with pytest.raises(AprilValidationError):
+        parse_brain_decision(text)
+
+
+def test_agent_field_exposes_enum_in_schema() -> None:
+    # The structured-output constraint must advertise the exact agent enum so the
+    # runtime can steer the model toward a valid value.
+    schema = BRAIN_DECISION_RESPONSE_FORMAT.json_schema
+    assert schema is not None
+    agent_schema = schema["properties"]["agent"]
+    assert set(agent_schema["enum"]) == set(AGENT_NAMES)
+
+
+async def test_invalid_agent_repairs_then_falls_back() -> None:
+    # The model twice returns a structurally-invalid agent. The router must do a
+    # single repair attempt and then drop to the deterministic fallback rather
+    # than letting an arbitrary agent string reach the orchestrator.
+    invalid = VALID_DECISION.replace('"agent":"general_agent"', '"agent":"nonexistent_agent"')
+    client = ScriptedRuntimeClient([invalid, invalid])
+    decision = await BrainRouter(client).route("plan my day")  # type: ignore[arg-type]
+    assert decision.routing_method == "fallback"
+    assert decision.agent in AGENT_NAMES
+    # Exactly two model calls: the initial route and one repair attempt.
+    assert len(client.response_formats) == 2
 
 
 def test_malformed_json_rejected() -> None:

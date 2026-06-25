@@ -10,10 +10,12 @@ import pytest
 
 from services.voice.audio_player import FakeAudioPlayer
 from services.voice.conversation_loop import (
+    PushToTalkLoop,
     VoiceTimeout,
     WakeWordConversationLoop,
+    interactive_capture_strategy,
 )
-from services.voice.microphone import FakeMicrophone, SoundDeviceMicrophone
+from services.voice.microphone import FakeMicrophone, SoundDeviceMicrophone, write_pcm_wav
 from services.voice.push_to_talk import PushToTalkSession
 from services.voice.speech_to_text import FakeSpeechToText
 from services.voice.text_to_speech import FakeTextToSpeech
@@ -249,3 +251,102 @@ async def test_push_to_talk_cancellation_closes_source(tmp_path: Path) -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert mic.closed is True
+
+
+class ClosableFiniteMicrophone:
+    def __init__(self, frames: list[bytes]) -> None:
+        self._frames = frames
+        self.closed = False
+
+    async def frames(self) -> AsyncIterator[bytes]:
+        try:
+            for frame in self._frames:
+                await asyncio.sleep(0)
+                yield frame
+        finally:
+            self.closed = True
+
+
+async def test_push_to_talk_empty_capture_errors(tmp_path: Path) -> None:
+    mic = FakeMicrophone(tmp_path / "u.wav", frames=[])
+    session = PushToTalkSession(mic, max_seconds=5.0)
+    with pytest.raises(ValueError, match="no audio"):
+        await session.capture(tmp_path / "ptt.wav")
+
+
+async def test_push_to_talk_source_ended_closes_frame_source(tmp_path: Path) -> None:
+    mic = ClosableFiniteMicrophone([_chunk(1)] * 3)
+    session = PushToTalkSession(mic, max_seconds=30.0)
+    out = await session.capture(tmp_path / "ptt.wav")
+    assert session.stop_reason == "source_ended"
+    assert mic.closed is True
+    assert len(_read_wav_frames(out)) == 3 * CHUNK_SAMPLES * 2
+
+
+async def test_interactive_capture_stops_on_second_enter(tmp_path: Path) -> None:
+    mic = InfiniteMicrophone()
+    reads = iter(["", ""])  # first Enter starts, second Enter stops
+    prompts: list[str] = []
+    capture = interactive_capture_strategy(
+        mic,
+        max_seconds=30.0,
+        read_line=lambda: next(reads),
+        announce=prompts.append,
+    )
+    out = await capture(tmp_path / "ptt.wav")
+    assert out.exists()
+    assert mic.closed is True
+    assert any("start" in p.lower() for p in prompts)
+    assert any("stop" in p.lower() for p in prompts)
+
+
+def _ptt_loop(settings_tmp, *, capture=None, microphone=None) -> PushToTalkLoop:
+    return PushToTalkLoop(
+        api_client=_FakeApi(),  # type: ignore[arg-type]
+        microphone=microphone,
+        stt=FakeSpeechToText("April hello"),
+        tts=FakeTextToSpeech(),
+        player=FakeAudioPlayer(),
+        capture=capture,
+    )
+
+
+async def test_ptt_loop_interactive_runs_and_deletes_temp_audio(
+    settings_tmp, tmp_path: Path
+) -> None:
+    mic = InfiniteMicrophone()
+    reads = iter(["", ""])
+    capture = interactive_capture_strategy(
+        mic, max_seconds=5.0, read_line=lambda: next(reads), announce=lambda _m: None
+    )
+    loop = _ptt_loop(settings_tmp, capture=capture, microphone=mic)
+    answer = await loop.run_once()
+    assert answer == "ok"
+    assert mic.closed is True
+    # Temporary capture audio is cleaned up by default.
+    assert list(settings_tmp.audio_cache_path.glob("*.wav")) == []
+
+
+async def test_ptt_loop_retains_debug_audio_when_enabled(settings_tmp, tmp_path: Path) -> None:
+    mic = InfiniteMicrophone()
+    reads = iter(["", ""])
+    capture = interactive_capture_strategy(
+        mic, max_seconds=5.0, read_line=lambda: next(reads), announce=lambda _m: None
+    )
+    loop = _ptt_loop(settings_tmp, capture=capture, microphone=mic)
+    loop.settings = loop.settings.model_copy(
+        update={"voice": loop.settings.voice.model_copy(update={"retain_debug_audio": True})}
+    )
+    await loop.run_once()
+    # The captured WAV is retained for debugging.
+    assert any(settings_tmp.audio_cache_path.glob("*.wav"))
+
+
+async def test_ptt_loop_fixed_duration_seconds_compatibility(settings_tmp, tmp_path: Path) -> None:
+    # --seconds path: the loop uses the microphone's fixed-duration recorder.
+    recorded = tmp_path / "recorded.wav"
+    write_pcm_wav(recorded, [_chunk(1)] * 4)
+    mic = FakeMicrophone(recorded)
+    loop = _ptt_loop(settings_tmp, microphone=mic)
+    answer = await loop.run_once()
+    assert answer == "ok"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -257,6 +258,47 @@ def test_run_april_verify_fake_reports_table(tmp_path: Path, monkeypatch) -> Non
     assert "runtime health" in result.output
 
 
+def test_run_april_verify_target_mac_writes_report(tmp_path: Path, monkeypatch) -> None:
+    from apps.runner.mac_report import MacVerificationReport, RealModelReport
+
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    captured: dict[str, object] = {}
+
+    class _StubValidator:
+        def __init__(self, **kwargs: object) -> None:
+            captured["kwargs"] = kwargs
+
+        def run(self) -> list[VerifyCheck]:
+            return [VerifyCheck(name="machine architecture", ok=True, detail="Darwin/arm64")]
+
+        def build_report(self, *, thresholds: object) -> MacVerificationReport:
+            captured["thresholds"] = thresholds
+            return MacVerificationReport(
+                generated_at="t",
+                os="Darwin 24",
+                cpu_architecture="arm64",
+                python_version="3.11.15",
+                runtime_backend="llama_cpp",
+                real_model=RealModelReport(attempted=False),
+                summary="degraded",
+            )
+
+    monkeypatch.setattr("apps.runner.main.TargetMacValidator", _StubValidator)
+    out = tmp_path / "verification" / "report.json"
+    result = CliRunner().invoke(
+        app,
+        ["april", "verify", "--target-mac", "--report", str(out), "--min-tokens-per-second", "5"],
+    )
+    assert result.exit_code == 0
+    assert out.exists()
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["summary"] == "degraded"
+    assert data["real_model"]["attempted"] is False
+    assert "summary: degraded" in result.output
+    assert captured["thresholds"].min_tokens_per_second == 5  # type: ignore[attr-defined]
+
+
 def test_run_april_verify_fake_fails_on_failed_check(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
@@ -291,13 +333,18 @@ def test_run_april_verify_workflow_json_and_failure(tmp_path: Path, monkeypatch)
 def test_run_april_verify_target_mac_json(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
-    monkeypatch.setattr(
-        "apps.runner.main.run_target_mac_validation",
-        lambda home, **kwargs: [
-            VerifyCheck(name="machine architecture", ok=True, detail=str(kwargs)),
-            VerifyCheck(name="voice smoke", ok=True, detail="manual", status="manual"),
-        ],
-    )
+
+    class _StubValidator:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def run(self) -> list[VerifyCheck]:
+            return [
+                VerifyCheck(name="machine architecture", ok=True, detail="Darwin/arm64"),
+                VerifyCheck(name="voice smoke", ok=True, detail="manual", status="manual"),
+            ]
+
+    monkeypatch.setattr("apps.runner.main.TargetMacValidator", _StubValidator)
     result = CliRunner().invoke(app, ["april", "verify", "--target-mac", "--json"])
     assert result.exit_code == 0
     assert '"status": "manual"' in result.output

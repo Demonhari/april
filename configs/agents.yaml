@@ -48,7 +48,7 @@ agents:
     description: Tightly constrained local system actions.
     model_id: april-brain
     prompt_path: agents/system_action/prompt.md
-    allowed_tools: [list_files, run_command, open_app, open_url]
+    allowed_tools: [list_files, run_command, open_app, open_url, plan_log_cleanup, apply_log_cleanup]
     blocked_tools: [git_push]
     memory_access: none
     maximum_tool_iterations: 2

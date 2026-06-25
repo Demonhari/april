@@ -118,3 +118,34 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         {"content": "stand up", "due_at": "2026-06-21T09:00:00Z"},
     ) in fake.calls
     assert ("DELETE", "/reminders/reminder-1", None) in fake.calls
+
+
+def test_voice_ptt_modes_use_capture_strategy(monkeypatch) -> None:
+    import services.voice.conversation_loop as conversation_loop
+
+    constructed: dict[str, Any] = {}
+
+    class StubLoop:
+        def __init__(self, **kwargs: Any) -> None:
+            constructed.clear()
+            constructed.update(kwargs)
+
+        async def run_once(self) -> str:
+            return "spoken answer"
+
+    monkeypatch.setattr(conversation_loop, "PushToTalkLoop", StubLoop)
+    monkeypatch.setattr("apps.cli.main.client", lambda: object())
+    runner = CliRunner()
+
+    # Fixed-duration (--seconds) mode passes record_seconds and no capture strategy.
+    fixed = runner.invoke(app, ["voice", "ptt", "--seconds", "2"])
+    assert fixed.exit_code == 0, fixed.output
+    assert "spoken answer" in fixed.output
+    assert constructed["record_seconds"] == 2.0
+    assert constructed.get("capture") is None
+
+    # Interactive mode injects a stop-controlled capture strategy and a microphone.
+    interactive = runner.invoke(app, ["voice", "ptt"])
+    assert interactive.exit_code == 0, interactive.output
+    assert constructed.get("capture") is not None
+    assert constructed.get("microphone") is not None

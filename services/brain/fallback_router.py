@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from agents.schemas import AgentName
 from services.brain.schemas import BrainDecision, PlannedToolCall
 from services.permissions.schemas import RiskLevel
 
@@ -61,7 +62,43 @@ class FallbackRouter:
                 confirmation=True,
                 summary="Package installation is outside the MVP.",
             )
-        if self._contains(normalized, "delete", "remove old logs", "wipe"):
+        if self._contains(
+            normalized,
+            "delete old logs",
+            "delete the old logs",
+            "delete logs",
+            "remove old logs",
+            "remove logs",
+            "clear old logs",
+            "clear logs",
+            "clean up logs",
+            "clean up old logs",
+            "clean logs",
+            "old log files",
+            "purge logs",
+            "delete old audio",
+            "clear audio cache",
+            "clean up audio cache",
+        ):
+            # Scoped, two-stage cleanup: planning is read-only and produces an
+            # immutable manifest; applying it is a Level 4 system action that
+            # still requires exact approval. The engine remains authoritative.
+            return self._decision(
+                intent="log_cleanup",
+                agent="system_action_agent",
+                model_id="april-brain",
+                tools=["plan_log_cleanup"],
+                level=4,
+                risk="system_action",
+                confirmation=True,
+                summary=(
+                    "Plan local log cleanup first (read-only); "
+                    "applying deletions requires exact approval."
+                ),
+            )
+        if self._contains(normalized, "delete", "wipe", "rm -rf", "erase everything"):
+            # APRIL has no generic/recursive delete tool by design. Only the
+            # scoped log/audio-cache cleanup flow above can remove files.
             return self._decision(
                 intent="destructive_action",
                 agent="system_action_agent",
@@ -70,7 +107,7 @@ class FallbackRouter:
                 level=4,
                 risk="system_action",
                 confirmation=True,
-                summary="Destructive local action requires explicit approval.",
+                summary="Broad deletion is unsupported; only scoped log cleanup is available.",
             )
         if self._contains(normalized, "push", "deploy", "send email", "payment", "publish"):
             return self._decision(
@@ -122,7 +159,17 @@ class FallbackRouter:
                 confirmation=False,
                 summary="Draft a patch proposal without applying changes.",
             )
-        if self._contains(normalized, "apply the fix", "edit", "modify", "write code", "fix it"):
+        if self._contains(
+            normalized,
+            "apply the fix",
+            "apply the patch",
+            "apply patch",
+            "edit",
+            "modify",
+            "write code",
+            "fix it",
+            "fix this",
+        ):
             return self._decision(
                 intent="code_modification",
                 agent="coding_agent",
@@ -392,7 +439,7 @@ class FallbackRouter:
         self,
         *,
         intent: str,
-        agent: str,
+        agent: AgentName,
         model_id: str,
         tools: list[str],
         planned_tool_calls: list[PlannedToolCall] | None = None,

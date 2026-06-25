@@ -44,6 +44,10 @@ class ToolRegistry:
 def default_registry() -> ToolRegistry:
     from skills.apps.open_app import open_app_definition
     from skills.apps.open_url import open_url_definition
+    from skills.cleanup.log_cleanup import (
+        apply_log_cleanup_definition,
+        plan_log_cleanup_definition,
+    )
     from skills.code.patch_applier import patch_applier_definition
     from skills.code.patch_generator import patch_generator_definition
     from skills.code.repo_indexer import repo_indexer_definition
@@ -91,6 +95,8 @@ def default_registry() -> ToolRegistry:
         list_reminders_definition(),
         open_app_definition(),
         open_url_definition(),
+        plan_log_cleanup_definition(),
+        apply_log_cleanup_definition(),
     ):
         registry.register(definition)
     registry.register(

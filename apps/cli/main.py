@@ -274,16 +274,43 @@ def task_list() -> None:
 
 @voice_app.command("ptt")
 def voice_ptt(seconds: float | None = typer.Option(None, "--seconds", min=0.1, max=300.0)) -> None:
-    from services.voice.conversation_loop import PushToTalkLoop
+    from april_common.errors import RuntimeUnavailableError
+    from services.voice.conversation_loop import PushToTalkLoop, interactive_capture_strategy
     from services.voice.health import voice_health
+    from services.voice.microphone import SoundDeviceMicrophone
 
     settings = get_settings()
     health_report = voice_health(settings)
     if health_report.status == "degraded":
         console.print(health_report.model_dump())
-    console.print("Recording. Speak after this prompt.")
-    loop = PushToTalkLoop(api_client=client(), record_seconds=seconds)
-    run(loop.run_once())
+
+    if seconds is not None:
+        # Deterministic fixed-duration mode for scripts and smoke tests.
+        console.print(f"Recording for {seconds:.1f}s. Speak now.")
+        loop = PushToTalkLoop(api_client=client(), record_seconds=seconds)
+    else:
+        # Interactive, stop-controlled push-to-talk (Enter to start, Enter to stop).
+        microphone = SoundDeviceMicrophone(
+            device=settings.voice.input_device,
+            max_seconds=settings.voice.max_record_seconds,
+        )
+        capture = interactive_capture_strategy(
+            microphone,
+            max_seconds=settings.voice.max_record_seconds,
+            read_line=input,
+            announce=console.print,
+        )
+        loop = PushToTalkLoop(api_client=client(), microphone=microphone, capture=capture)
+
+    try:
+        answer = run(loop.run_once())
+    except KeyboardInterrupt:
+        console.print("Push-to-talk cancelled; microphone released.")
+        raise typer.Exit(130) from None
+    except (ValueError, RuntimeUnavailableError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(answer)
 
 
 @voice_app.command("health")

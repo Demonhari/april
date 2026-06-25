@@ -133,6 +133,27 @@ def _default_url_schemes() -> list[Literal["http", "https"]]:
     return ["http", "https"]
 
 
+def _default_cleanup_targets() -> list[Literal["logs", "audio_cache"]]:
+    return ["logs", "audio_cache"]
+
+
+class LogCleanupPolicy(BaseModel):
+    """Bounds for the scoped log/cache cleanup tools.
+
+    These cap what ``plan_log_cleanup`` may enumerate; the apply step is bound to
+    a manifest produced within these limits and is always Level-4 approval-gated.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed_targets: list[Literal["logs", "audio_cache"]] = Field(
+        default_factory=_default_cleanup_targets
+    )
+    max_candidate_files: int = Field(default=1000, ge=1, le=100000)
+    max_total_bytes: int = Field(default=1_073_741_824, ge=1)
+    min_age_days: int = Field(default=0, ge=0)
+
+
 class ToolPolicyFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -141,6 +162,7 @@ class ToolPolicyFile(BaseModel):
     open_url_allowed_schemes: list[Literal["http", "https"]] = Field(
         default_factory=lambda: _default_url_schemes()
     )
+    log_cleanup: LogCleanupPolicy = Field(default_factory=LogCleanupPolicy)
 
     @field_validator("open_app_allowlist")
     @classmethod

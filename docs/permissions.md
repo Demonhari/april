@@ -51,6 +51,15 @@ Approval execution is one-time and exact-action:
 - Git commit approvals bind the exact staged diff digest, staged tree ID, commit
   message, and repository identity. APRIL recalculates the staged state
   immediately before `git commit` and rejects changed staged content.
+- `apply_log_cleanup` (Level 4) approvals bind an APRIL-owned content-addressed
+  cleanup manifest (SHA-256 id), its target, and root. The manifest is produced
+  by `plan_log_cleanup` (Level 1, read-only) which enumerates only ordinary files
+  under the configured `logs`/audio-cache root within `tools.log_cleanup` limits.
+  Immediately before deletion, APRIL reloads the manifest (failing closed if its
+  bytes no longer match the id), reconfirms the root equals the configured target
+  root, and for each candidate revalidates size + SHA-256, rejects path traversal,
+  refuses symlinks and directories, and never broadens the candidate set. The
+  manifest is marked one-time-use so an approval cannot be replayed.
 - Level 3+ execution writes an audit start record before running; if this fails, the action does not run.
 - Tool calls are recorded in SQLite.
 - Failed executions consume the approval into a terminal state so replay is denied.

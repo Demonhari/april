@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from apps.cli.client import AprilApiClient
@@ -15,14 +17,57 @@ from services.voice.microphone import (
     aclose_frame_source,
     write_pcm_wav,
 )
+from services.voice.push_to_talk import PushToTalkSession
 from services.voice.speech_to_text import SpeechToText, WhisperCppSpeechToText
 from services.voice.text_to_speech import PiperTextToSpeech, TextToSpeech
 from services.voice.vad import VoiceActivityDetector
 from services.voice.wake_word import OpenWakeWordDetector
 
+# A capture strategy turns "the user wants to talk" into a finished WAV file.
+# Injecting it lets the loop use either fixed-duration recording (deterministic,
+# for scripts/--seconds) or an interactive stop-controlled session, without the
+# loop duplicating any recording logic.
+CaptureStrategy = Callable[[Path], Awaitable[Path]]
+
 
 class VoiceTimeout(RuntimeError):
     """Raised when no wake word arrives within the wake-word waiting timeout."""
+
+
+def interactive_capture_strategy(
+    microphone: Microphone,
+    *,
+    max_seconds: float,
+    read_line: Callable[[], str],
+    announce: Callable[[str], None],
+) -> CaptureStrategy:
+    """Build an Enter-to-start / Enter-to-stop push-to-talk capture strategy.
+
+    Capture ends on the first of: the explicit stop, ``max_seconds``, the frame
+    source ending, cancellation, or error. The microphone is always released by
+    ``PushToTalkSession`` on every exit path.
+    """
+
+    async def capture(output_path: Path) -> Path:
+        announce("Press Enter to start recording...")
+        await asyncio.to_thread(read_line)
+        session = PushToTalkSession(microphone, max_seconds=max_seconds)
+        announce("Recording... press Enter to stop.")
+
+        async def _watch_stop() -> None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(read_line)
+            session.request_stop()
+
+        stop_task = asyncio.create_task(_watch_stop())
+        try:
+            return await session.capture(output_path)
+        finally:
+            stop_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stop_task
+
+    return capture
 
 
 def normalize_transcript(text: str, *, wake_word: str | None = None) -> str:
@@ -43,6 +88,7 @@ class PushToTalkLoop:
         player: AudioPlayer | None = None,
         conversation_id: str | None = None,
         record_seconds: float | None = None,
+        capture: CaptureStrategy | None = None,
     ) -> None:
         settings = get_settings()
         self.settings = settings
@@ -52,6 +98,9 @@ class PushToTalkLoop:
             device=settings.voice.input_device,
             max_seconds=max_seconds,
         )
+        # Default capture is fixed-duration recording (resolved lazily in
+        # run_once); the CLI can inject an interactive stop-controlled strategy.
+        self._capture: CaptureStrategy | None = capture
         self.stt = stt or WhisperCppSpeechToText(
             settings.voice.whisper_binary_path,
             settings.voice.whisper_model_path,
@@ -71,23 +120,28 @@ class PushToTalkLoop:
     async def run_once(self) -> str:
         self.settings.audio_cache_path.mkdir(parents=True, exist_ok=True)
         audio_path = self.settings.audio_cache_path / f"{uuid.uuid4()}.wav"
-        spoken_path = await self.microphone.record_push_to_talk(audio_path)
-        text = normalize_transcript(await self.stt.transcribe(spoken_path), wake_word="april")
-        if not text:
-            raise ValueError("Voice transcript was empty.")
-        response = await self.api_client.post(
-            "/voice/input",
-            {"message": text, "conversation_id": self.conversation_id},
-        )
-        answer = response["result"]["final_message"]
         tts_path = self.settings.audio_cache_path / f"{uuid.uuid4()}-reply.wav"
-        output_path = await self.tts.synthesize(answer, tts_path)
-        await self.player.play(output_path)
-        if not self.settings.voice.retain_debug_audio:
-            for path in (audio_path, tts_path):
-                if Path(path).exists():
-                    Path(path).unlink()
-        return answer
+        capture = self._capture or self.microphone.record_push_to_talk
+        try:
+            spoken_path = await capture(audio_path)
+            text = normalize_transcript(await self.stt.transcribe(spoken_path), wake_word="april")
+            if not text:
+                raise ValueError("Voice transcript was empty.")
+            response = await self.api_client.post(
+                "/voice/input",
+                {"message": text, "conversation_id": self.conversation_id},
+            )
+            answer = response["result"]["final_message"]
+            output_path = await self.tts.synthesize(answer, tts_path)
+            await self.player.play(output_path)
+            return answer
+        finally:
+            # Temporary audio is removed on every exit path (success or error)
+            # unless the user opted to retain it for debugging.
+            if not self.settings.voice.retain_debug_audio:
+                for path in (audio_path, tts_path):
+                    if Path(path).exists():
+                        Path(path).unlink()
 
 
 class VoiceConversationLoop(PushToTalkLoop):

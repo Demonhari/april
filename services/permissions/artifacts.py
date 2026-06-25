@@ -105,6 +105,10 @@ async def verify_approval_artifact(record: ApprovalRecord) -> ToolResult | None:
             return await _verify_patch(record)
         if record.tool == "git_commit":
             return await _verify_git_commit(record)
+        if record.tool == "apply_log_cleanup":
+            from services.permissions.cleanup import verify_log_cleanup_approval
+
+            return await verify_log_cleanup_approval(record)
     except PermissionDeniedError as exc:
         return _failed(exc.message, details=exc.details)
     return None

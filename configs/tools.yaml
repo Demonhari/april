@@ -17,3 +17,13 @@ tools:
   open_url_allowed_schemes:
     - http
     - https
+  # Bounds for the scoped log/cache cleanup flow. plan_log_cleanup may only
+  # enumerate ordinary files under these APRIL-owned targets within these limits;
+  # apply_log_cleanup remains Level 4 and exact-approval gated.
+  log_cleanup:
+    allowed_targets:
+      - logs
+      - audio_cache
+    max_candidate_files: 1000
+    max_total_bytes: 1073741824
+    min_age_days: 0

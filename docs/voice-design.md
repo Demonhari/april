@@ -56,3 +56,22 @@ the configured local whisper.cpp adapter, passes `conversation_id` through
 temporary audio unless debug retention is enabled. `voice listen` is optional
 wake-word mode and falls back to explicit push-to-talk behavior when wake-word
 support is unavailable.
+
+`PushToTalkLoop` takes an injectable capture strategy so it never duplicates
+recording logic:
+
+- With no `--seconds`, `voice ptt` injects `interactive_capture_strategy`, which
+  drives `PushToTalkSession`: Enter starts capture, Enter stops it. Capture also
+  ends on the configured maximum duration, the frame source ending, cancellation
+  (Ctrl+C), or error. `PushToTalkSession` closes the microphone frame source on
+  every exit path, raises a clear error on empty audio, and writes bounded
+  16 kHz mono PCM.
+- With `--seconds N`, the loop uses the microphone's deterministic fixed-duration
+  `record_push_to_talk` for scripts and smoke tests.
+
+Temporary capture and reply audio are removed in a `finally` block (success or
+error) unless `retain_debug_audio` is set. Wake-word ("April") listening requires
+a custom local openWakeWord model at `voice.wake_word_model_path`; APRIL never
+downloads or trains one, and `voice doctor` says so explicitly. These paths are
+verified with synthetic PCM, a fake microphone, and mocked input only; a live
+microphone, whisper.cpp, Piper, and openWakeWord are not exercised here.

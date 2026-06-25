@@ -202,7 +202,7 @@ def test_runner_install_main_uninstall_verify_and_shell_paths(tmp_path: Path, mo
 def test_fallback_router_covers_local_intents() -> None:
     router = FallbackRouter()
     cases = {
-        "delete old logs": "destructive_action",
+        "delete old logs": "log_cleanup",
         "please deploy this": "external_action",
         "apply the fix": "code_modification",
         "why is the repository animation broken": "coding_repo_analysis",
@@ -394,6 +394,11 @@ async def test_model_loader_and_runtime_health(settings_tmp) -> None:
     assert health.request_id == "health-1"
     assert health.loaded_model_count == 1
     assert health.active_requests == 0
+    # The configured GGUF path does not exist, but a fake runtime is still ok and
+    # explicitly marked simulated; the missing model stays informational.
+    assert health.status == "ok"
+    assert health.simulated is True
+    assert health.missing_models == ["brain"]
     assert health.process_rss_bytes == 1234
     assert health.process_peak_rss_bytes == 4096
     assert health.process_memory_estimated is False
@@ -401,3 +406,67 @@ async def test_model_loader_and_runtime_health(settings_tmp) -> None:
     assert health.models[0].threads == 1
     assert health.models[0].n_batch == 32
     assert await loader.unload("brain")
+
+
+def _missing_model_registry(home: Path, backend: str) -> ModelRegistry:
+    return ModelRegistry.from_dict(
+        {
+            "models": {
+                "brain": {
+                    "id": "brain",
+                    "name": "Brain",
+                    "path": "models/missing.gguf",
+                    "backend": backend,
+                    "role": "brain",
+                    "chat_format": "generic",
+                    "threads": 1,
+                    "context_size": 512,
+                    "temperature": 0.0,
+                    "max_output_tokens": 16,
+                    "keep_loaded": False,
+                }
+            }
+        },
+        root=home,
+    )
+
+
+def _no_metrics() -> ProcessMemoryMetrics:
+    return ProcessMemoryMetrics(rss_bytes=None, peak_rss_bytes=None, estimated=True)
+
+
+def test_runtime_health_simulated_is_honest_about_missing_models(settings_tmp) -> None:
+    # Fake backend with a missing GGUF path: still ok, explicitly simulated, and
+    # the missing model is reported as informational rather than hidden.
+    fake = runtime_health(
+        ModelLifecycle(_missing_model_registry(settings_tmp.home, "fake"), root_backend="fake"),
+        backend="fake",
+        metric_provider=_no_metrics,
+    )
+    assert fake.status == "ok"
+    assert fake.simulated is True
+    assert fake.missing_models == ["brain"]
+
+    # Real backend with the same missing path: degraded and not simulated, so a
+    # simulated run can never be mistaken for real-model readiness.
+    real = runtime_health(
+        ModelLifecycle(
+            _missing_model_registry(settings_tmp.home, "llama_cpp"), root_backend="llama_cpp"
+        ),
+        backend="llama_cpp",
+        metric_provider=_no_metrics,
+    )
+    assert real.status == "degraded"
+    assert real.simulated is False
+    assert real.missing_models == ["brain"]
+
+
+def test_runtime_health_degrades_on_backend_error_even_when_simulated(settings_tmp) -> None:
+    lifecycle = ModelLifecycle(
+        _missing_model_registry(settings_tmp.home, "fake"), root_backend="fake"
+    )
+    # A genuine backend/model error must degrade health regardless of simulation.
+    lifecycle.get_state("brain").state = "error"
+    health = runtime_health(lifecycle, backend="fake", metric_provider=_no_metrics)
+    assert health.status == "degraded"
+    assert health.simulated is True

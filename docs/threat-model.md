@@ -27,6 +27,16 @@ Controls:
 - approved tools are revalidated against current policy before execution
 - patch and commit approvals bind immutable digests and repository state, then
   recalculate those digests immediately before execution
+- log/cache cleanup uses a two-stage, immutable boundary modeled on the patch
+  flow: `plan_log_cleanup` (Level 1, read-only) enumerates only ordinary files
+  under an APRIL-owned root (`logs` or the audio cache) into a content-addressed
+  manifest and deletes nothing; `apply_log_cleanup` (Level 4) requires
+  exact-action approval bound to that manifest, revalidates root containment and
+  each file's identity (size + SHA-256) before deletion, never follows symlinks,
+  never deletes directories, cannot broaden the candidate set, fails closed on a
+  tampered manifest, and is marked one-time-use to prevent replay
+- there is no generic, recursive, or caller-rooted delete tool; cleanup roots are
+  derived from settings, never from caller-supplied paths
 - risky approved tools audit a start record before running and consume approvals after success or failure
 - repository operations require explicit project selection and allowed-root validation
 - retrieved memory and indexed repository chunks are marked as context, not instructions

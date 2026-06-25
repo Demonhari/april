@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
-from april_common.settings import project_root
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.vector_memory import VectorMemory
@@ -129,7 +129,49 @@ async def test_force_full_reindex(settings_tmp, tmp_path: Path) -> None:
     assert result.data["skipped_files"] == 0
 
 
-def test_git_head_detection() -> None:
-    head = _git_head(project_root())
+def _git(root: Path, *args: str) -> None:
+    """Run a git subcommand inside ``root``, failing loudly on error.
+
+    Tests build a throwaway repository under ``tmp_path`` and configure a
+    repository-local identity, so this never reads or writes the real APRIL
+    source tree's Git metadata (it may legitimately have none, e.g. when run
+    from an extracted source archive).
+    """
+    subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_git_head_detection(tmp_path: Path) -> None:
+    repo = tmp_path / "gitrepo"
+    repo.mkdir()
+    _git(repo, "init")
+    # Repository-local identity only; never touches global/system Git config.
+    _git(repo, "config", "user.email", "april-test@example.invalid")
+    _git(repo, "config", "user.name", "April Test")
+    _git(repo, "config", "commit.gpgsign", "false")
+    (repo / "tracked.py").write_text("print('tracked')\n", encoding="utf-8")
+    _git(repo, "add", "tracked.py")
+    _git(repo, "commit", "-m", "initial commit")
+
+    head = _git_head(repo)
     assert head is not None
     assert len(head) == 40
+    assert set(head) <= set("0123456789abcdef")
+    # The detected HEAD must match what Git itself reports for this repo.
+    rev_parse = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert head == rev_parse.stdout.strip()
+
+
+def test_git_head_none_for_non_git_directory(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert _git_head(plain) is None

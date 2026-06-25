@@ -71,6 +71,14 @@ throughput, context size, threads, batch settings, and idle-unload settings. RSS
 fields are process-level, not per-model physical memory; estimated values are
 flagged as estimates.
 
+Health honestly distinguishes simulation from real-model readiness. A `simulated`
+boolean is `true` only for the fake backend. In that mode a missing GGUF path is
+informational: the model id still appears in `missing_models`, but `status`
+stays `ok` because the fake backend never loads files. With the real `llama_cpp`
+backend, a missing configured path reports `status: degraded`. Genuine
+backend/model errors report `degraded` in both modes, so a simulated run can
+never be presented as real-model verified.
+
 Non-keep-loaded specialist models are eligible for idle unload after their
 configured timeout. When the loaded specialist count exceeds
 `runtime.max_loaded_specialist_models`, APRIL evicts inactive specialists by

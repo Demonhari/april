@@ -33,9 +33,24 @@ def runtime_health(
     missing = [model.id for model in models if model.missing_path]
     loaded = [model for model in models if model.state == "loaded"]
     metrics = (metric_provider or process_memory_metrics)()
+    # The lifecycle's actual root backend is authoritative (the server passes the
+    # configured backend string, but a test may inject a fake lifecycle).
+    effective_backend = lifecycle.root_backend or backend
+    simulated = effective_backend == "fake"
+    has_backend_error = any(model.state == "error" for model in models)
+    # A working fake runtime is "ok" even though its configured GGUF paths do not
+    # exist: it never loads them. Missing real-model paths stay informational in
+    # ``missing_models`` so simulation is never mistaken for real readiness, and
+    # genuine backend/model errors still degrade in both modes. A real backend
+    # with missing files remains degraded as before.
+    if simulated:
+        status = "degraded" if has_backend_error else "ok"
+    else:
+        status = "degraded" if (missing or has_backend_error) else "ok"
     return RuntimeHealth(
-        status="degraded" if missing or any(model.state == "error" for model in models) else "ok",
-        backend=backend,
+        status=status,
+        backend=effective_backend,
+        simulated=simulated,
         models=models,
         missing_models=missing,
         request_id=request_id or str(uuid.uuid4()),

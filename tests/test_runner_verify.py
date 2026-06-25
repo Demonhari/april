@@ -15,6 +15,7 @@ from apps.runner.verify import (
     ModelBenchmark,
     RealModelVerifier,
     RealWorkflowVerifier,
+    TargetMacValidator,
     VerifyCheck,
     WorkflowVerifier,
     run_model_benchmark,
@@ -364,24 +365,46 @@ def test_target_mac_validation_runs_real_model_checks_when_ready(
             ]
         },
     )
-    monkeypatch.setattr(
-        "apps.runner.verify.run_real_model_verification",
-        lambda home, model_path, **kwargs: [
-            VerifyCheck(name="real model load", ok=True, detail=str(model_path))
-        ],
-    )
+
+    class _StubRealVerifier:
+        # TargetMacValidator now instantiates RealModelVerifier directly so it can
+        # read structured metrics for the report; the stub provides both.
+        def __init__(self, **kwargs: object) -> None:
+            self.load_time_seconds = 1.0
+            self.first_token_latency_seconds = 0.2
+            self.generation_time_seconds = 1.0
+            self.output_tokens = 8
+            self.tokens_per_second = 8.0
+            self.runtime_rss_bytes = 1000
+
+        def run(self) -> list[VerifyCheck]:
+            return [VerifyCheck(name="real model load", ok=True, detail="loaded")]
+
+    monkeypatch.setattr("apps.runner.verify.RealModelVerifier", _StubRealVerifier)
     monkeypatch.setattr(
         "apps.runner.verify.run_workflow_verification",
         lambda home, **kwargs: [
             VerifyCheck(name="real workflow specialist-agent request", ok=True, detail="ok")
         ],
     )
-    checks = run_target_mac_validation(Path.cwd(), model_path=gguf)
+    validator = TargetMacValidator(
+        home=Path.cwd(),
+        model_path=gguf,
+        require_real_model=False,
+        max_output_tokens=8,
+        timeout=5.0,
+    )
+    checks = validator.run()
     names = {check.name for check in checks}
     assert "real model load" in names
     assert "real workflow specialist-agent request" in names
     assert any(check.name == "backend acceleration/build information" for check in checks)
     assert all(check.ok for check in checks)
+    # The report captures the real-model metrics from the verifier instance.
+    report = validator.build_report()
+    assert report.real_model.attempted is True
+    assert report.real_model.tokens_per_second == 8.0
+    assert report.real_model.path_basename == "model.gguf"
 
 
 def test_model_benchmark_run_and_single_success(tmp_path: Path, monkeypatch) -> None:
