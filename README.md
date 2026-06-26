@@ -504,6 +504,18 @@ or build step). The Core API serves it at `GET /desktop` over authenticated
 loopback HTTP; the static assets are the only unauthenticated surface besides the
 redacted `GET /health`.
 
+The default screen is a wide **cockpit dashboard** — a dark cyan/terminal layout
+optimised for a landscape MacBook screen (three-column at `>= 1180px`, two columns
+at `800–1179px`, stacked below) with a top system rail, a left systems stack, a
+router/orbit visualisation of the six specialists, runtime telemetry + model
+cards, exact-ID approvals, reminders/tasks, a redacted activity feed, and a wide
+command/chat bar. It is data-driven by polling the existing endpoints and shows
+honest `unknown`/`not available` states (never fabricated values); a simulated
+runtime is always badged and never implies a verified real model. All glow/orbit
+motion is disabled under `prefers-reduced-motion`, and no authenticated request
+runs before the token is acquired. Every prior screen remains reachable as a
+detail screen.
+
 ```bash
 run april desktop          # ensure services, open the browser to the UI
 run april desktop --fake   # same with the deterministic fake runtime

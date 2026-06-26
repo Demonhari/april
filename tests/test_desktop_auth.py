@@ -41,10 +41,21 @@ def test_spa_uses_async_bridge_not_sync_global() -> None:
 def test_spa_defers_requests_until_token_acquired() -> None:
     app = _read("app.js")
     acquire_index = app.index("acquireToken(window)")
-    # The authenticated polling loop must only run after token acquisition.
-    assert app.rindex("refreshConnection()") > acquire_index
-    assert "if (!TOKEN)" in app
-    assert "return;" in app
+    guard_index = app.index("if (!TOKEN)")
+    # The authenticated polling loop and the first navigation must only run
+    # after token acquisition. The dashboard fetches immediately on mount, so a
+    # pre-token navigate() would leak an authenticated request.
+    #
+    # Pin the actual CALL site: "startPolling();" (with the trailing ";")
+    # distinguishes the single guarded call from the "function startPolling()"
+    # definition, so a relocated definition cannot satisfy this check while the
+    # call still runs before the guard.
+    assert app.count("startPolling();") == 1
+    call_index = app.index("startPolling();")
+    assert acquire_index < guard_index < call_index
+    assert app.index("navigate(DEFAULT_SCREEN)") > guard_index
+    # The token guard short-circuits boot (return) before any authenticated work.
+    assert "return;" in app[guard_index:call_index]
 
 
 def test_spa_never_persists_or_logs_token() -> None:
