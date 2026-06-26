@@ -348,9 +348,16 @@
         summary: "degraded",
         real_model_verified: false,
         report_type: "none",
+        verification_level: "none",
+        core_or_all_verified: false,
+        skipped_count: 0,
+        threshold_failure_count: 0,
       };
     }
     const report = latest.report || {};
+    const level = ["none", "partial", "core", "all"].indexOf(report.verification_level) === -1
+      ? "none"
+      : report.verification_level;
     return {
       status: statusWord(latest.status),
       title: statusWord(latest.message || "latest verification report"),
@@ -358,10 +365,16 @@
       report_type: statusWord(report.report_type),
       summary: statusWord(report.summary),
       real_model_verified: report.real_model_verified === true,
-      skipped_count: Array.isArray(report.skipped) ? report.skipped.length : 0,
-      threshold_failure_count: Array.isArray(report.threshold_failures)
-        ? report.threshold_failures.length
-        : 0,
+      verification_level: level,
+      core_or_all_verified: level === "core" || level === "all",
+      real_models_exercised: typeof report.real_models_exercised === "number" ? report.real_models_exercised : 0,
+      real_models_passed: typeof report.real_models_passed === "number" ? report.real_models_passed : 0,
+      skipped_count: typeof report.skipped_count === "number"
+        ? report.skipped_count
+        : Array.isArray(report.skipped) ? report.skipped.length : 0,
+      threshold_failure_count: typeof report.threshold_failure_count === "number"
+        ? report.threshold_failure_count
+        : Array.isArray(report.threshold_failures) ? report.threshold_failures.length : 0,
     };
   }
 

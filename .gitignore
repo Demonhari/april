@@ -5,12 +5,16 @@ data/vector_index/
 data/patches/
 data/artifacts/
 data/audio_cache/
+data/verification/
 data/run/
 logs/*.log
 logs/*.jsonl
 models/*.gguf
 models/*.bin
 audio_cache/
+dist/
+*.app/
+.april_tmp/
 __pycache__/
 *.py[cod]
 .pytest_cache/

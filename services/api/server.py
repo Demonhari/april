@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
@@ -92,6 +92,7 @@ _VERIFICATION_REPORT_TYPES = {
     "voice_live",
     "soak",
 }
+_VERIFICATION_REPORT_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json$")
 
 
 def _read_activity_events(audit_path: Path, limit: int) -> list[dict[str, Any]]:
@@ -256,6 +257,25 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.get("/verification/report/latest")
     async def verification_report_latest(active: ApiContainer = Depends(authorized)) -> object:
         return _latest_verification_report(active.settings)
+
+    @app.get("/verification/reports")
+    async def verification_reports(
+        request: Request,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        if request.query_params:
+            raise HTTPException(status_code=400, detail="query parameters are not supported")
+        return _verification_report_history(active.settings)
+
+    @app.get("/verification/reports/{report_basename}")
+    async def verification_report_by_basename(
+        report_basename: str,
+        request: Request,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        if request.query_params:
+            raise HTTPException(status_code=400, detail="query parameters are not supported")
+        return _verification_report_detail(active.settings, report_basename)
 
     @app.post("/chat")
     async def chat(
@@ -728,6 +748,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
                 "Fake verification is not real model verification.",
                 "Desktop never loads models or starts voice automatically.",
                 "Reports are redacted and show model basenames only.",
+                "Generated verification reports and app stubs are ignored by Git.",
             ],
         },
         "voice": {
@@ -764,7 +785,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "run april verify --all-configured-models --require-real-model "
             "--report data/verification/mac-readiness.json",
             "run april voice verify-live --report data/verification/voice-live.json",
-            "scripts/create_macos_app_stub.sh",
+            "run april setup app-stub",
         ],
     }
 
@@ -819,19 +840,40 @@ def _development_token_warning(settings: AprilSettings) -> str | None:
     return None
 
 
+def _verification_root(settings: AprilSettings) -> Path:
+    return (settings.home / "data" / "verification").resolve()
+
+
+def _verification_report_files(settings: AprilSettings) -> list[Path]:
+    root = _verification_root(settings)
+    if not root.exists() or not root.is_dir():
+        return []
+    candidates: list[Path] = []
+    for path in root.glob("*.json"):
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            continue
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            and _VERIFICATION_REPORT_BASENAME_RE.match(path.name)
+            and _is_relative_to(resolved, root)
+        ):
+            candidates.append(path)
+    return candidates
+
+
+def _read_safe_report(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _latest_verification_report(settings: AprilSettings) -> dict[str, Any]:
-    root = (settings.home / "data" / "verification").resolve()
-    if not root.exists():
-        return {
-            "status": "not_verified",
-            "message": "not verified yet",
-            "report": None,
-        }
-    candidates = [
-        path.resolve()
-        for path in root.glob("*.json")
-        if path.is_file() and _is_relative_to(path.resolve(), root)
-    ]
+    candidates = _verification_report_files(settings)
     if not candidates:
         return {
             "status": "not_verified",
@@ -839,21 +881,77 @@ def _latest_verification_report(settings: AprilSettings) -> dict[str, Any]:
             "report": None,
         }
     latest = max(candidates, key=lambda path: path.stat().st_mtime)
-    try:
-        payload = json.loads(latest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    payload = _read_safe_report(latest)
+    if payload is None:
         return {
             "status": "unreadable",
             "message": "latest verification report could not be read",
             "report": None,
         }
-    if not isinstance(payload, dict):
-        return {"status": "unreadable", "message": "latest report shape is invalid", "report": None}
     return {
         "status": "ok",
         "message": "latest verification report",
         "report": _safe_report_payload(payload, latest),
     }
+
+
+def _verification_report_history(settings: AprilSettings) -> dict[str, Any]:
+    candidates = sorted(
+        _verification_report_files(settings),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    reports: list[dict[str, Any]] = []
+    for path in candidates:
+        payload = _read_safe_report(path)
+        if payload is None:
+            continue
+        reports.append(_safe_report_payload(payload, path))
+    if not reports:
+        return {
+            "status": "not_verified",
+            "message": "not verified yet",
+            "reports": [],
+            "count": 0,
+        }
+    return {
+        "status": "ok",
+        "message": "verification report history",
+        "reports": reports,
+        "count": len(reports),
+    }
+
+
+def _verification_report_detail(settings: AprilSettings, report_basename: str) -> dict[str, Any]:
+    path = _safe_report_path(settings, report_basename)
+    payload = _read_safe_report(path)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="verification report not found")
+    return {
+        "status": "ok",
+        "message": "verification report",
+        "report": _safe_report_payload(payload, path),
+    }
+
+
+def _safe_report_path(settings: AprilSettings, report_basename: str) -> Path:
+    if (
+        report_basename != Path(report_basename).name
+        or "/" in report_basename
+        or "\\" in report_basename
+        or Path(report_basename).is_absolute()
+        or not _VERIFICATION_REPORT_BASENAME_RE.match(report_basename)
+    ):
+        raise HTTPException(status_code=400, detail="unsafe report basename")
+    root = (settings.home / "data" / "verification").resolve()
+    path = root / report_basename
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="verification report not found") from exc
+    if path.is_symlink() or not path.is_file() or not _is_relative_to(resolved, root):
+        raise HTTPException(status_code=400, detail="unsafe report path")
+    return path
 
 
 def _safe_report_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -863,13 +961,26 @@ def _safe_report_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
     summary = str(payload.get("summary", "degraded"))
     safe: dict[str, Any] = {
         "file_basename": path.name,
+        "basename": path.name,
         "generated_at": str(payload.get("generated_at", "")),
         "report_type": report_type,
         "summary": summary,
         "real_model_verified": _report_real_model_verified(payload, report_type),
+        "verification_level": _safe_verification_level(payload),
+        "real_models_exercised": _safe_int(payload.get("real_models_exercised")),
+        "real_models_passed": _safe_int(payload.get("real_models_passed")),
+        "any_real_model_exercised": bool(payload.get("any_real_model_exercised", False)),
+        "any_real_model_passed": bool(payload.get("any_real_model_passed", False)),
+        "core_model_set_verified": bool(payload.get("core_model_set_verified", False)),
+        "all_available_models_verified": bool(payload.get("all_available_models_verified", False)),
+        "all_configured_models_verified": bool(
+            payload.get("all_configured_models_verified", False)
+        ),
         "skipped": _safe_skipped(payload.get("skipped")),
         "threshold_failures": _safe_string_list(payload.get("threshold_failures")),
     }
+    safe["skipped_count"] = len(safe["skipped"])
+    safe["threshold_failure_count"] = len(safe["threshold_failures"])
     if isinstance(payload.get("models"), list):
         safe["models"] = [
             {
@@ -904,6 +1015,15 @@ def _safe_report_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
     if "failures" in payload:
         safe["failures"] = _safe_string_list(payload.get("failures"))
     return safe
+
+
+def _safe_verification_level(payload: dict[str, Any]) -> str:
+    value = str(payload.get("verification_level", "none"))
+    return value if value in {"none", "partial", "core", "all"} else "none"
+
+
+def _safe_int(value: Any) -> int:
+    return value if type(value) is int and value >= 0 else 0
 
 
 def _infer_report_type(payload: dict[str, Any]) -> str:

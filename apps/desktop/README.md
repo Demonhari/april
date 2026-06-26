@@ -47,8 +47,8 @@ reachable from the compact top nav as a detail screen.
 ## Readiness screen
 
 Readiness is an authenticated, local-only setup detail screen backed by
-`GET /readiness` and `GET /verification/report/latest`. It renders only sanitized
-fields:
+`GET /readiness`, `GET /verification/report/latest`, and
+`GET /verification/reports`. It renders only sanitized fields:
 
 - Core readiness: API health, Runtime health, fake/simulated vs real backend,
   database, vector index, and scheduler state.
@@ -57,8 +57,8 @@ fields:
   path basenames only.
 - Verification guidance: exact `run april verify --all-configured-models
   --require-real-model --report data/verification/mac-readiness.json` and
-  single-model target-Mac commands, plus a warning that fake verification is not
-  real model verification.
+  single-model target-Mac commands, plus warnings that fake verification is not
+  real model verification and generated reports/app stubs are ignored.
 - Voice readiness: voice enabled/disabled, macOS microphone guidance,
   sounddevice availability/counts when safely queryable, configured/missing
   whisper.cpp/Piper/wake-word artifacts, and push-to-talk availability without
@@ -66,12 +66,23 @@ fields:
 - Security readiness: allowed-root labels, token configured/missing status only,
   localhost binding state, CORS state, and development-token warnings.
 - Latest report: generated timestamp, report type, pass/degraded/fail summary,
-  `real_model_verified`, skipped checks, threshold failures, and model basenames.
+  verification level (`none` / `partial` / `core` / `all`), real-model counts,
+  skipped checks, threshold failures, and model basenames.
+- Report history: sanitized summaries from `data/verification/*.json`, sorted
+  newest first, with report type, summary, verification level, generated
+  timestamp, skipped count, and threshold failure count.
+- Guided setup examples: `run april setup models`, `run april setup voice`, and
+  `run april setup app-stub`.
+- CI/local gates: the Python quality gates and Node/static Desktop checks run
+  locally and in CI.
 
-If no report exists, it shows `not verified yet`. The report endpoint reads only
-APRIL's own `data/verification/*.json` directory and accepts no arbitrary path.
-The screen displays code blocks and text only; it never starts verification,
-loads a model, records audio, starts wake-word listening, or executes commands.
+If no report exists, it shows `not verified yet`. The report endpoints read only
+APRIL's own `data/verification/*.json` directory. The basename endpoint rejects
+path traversal, slashes, backslashes, absolute paths, symlinks, non-JSON files,
+and arbitrary query paths. Command copy buttons are shown only when
+`navigator.clipboard.writeText` is available; otherwise the command remains
+visible as text. The screen never starts verification, loads a model, records
+audio, starts wake-word listening, or executes commands.
 
 ## Launch
 
@@ -108,11 +119,13 @@ For a local unsigned app bundle wrapper around the same command:
 
 ```bash
 scripts/create_macos_app_stub.sh
+run april setup app-stub
 ```
 
-This creates `dist/APRIL.app` as a development launcher only. It performs no
-signing/notarization, installs nothing, and bundles no models, voice binaries,
-tokens, or secrets. Signed packaging and launch-at-login are future work.
+Both create `dist/APRIL.app` as a development launcher only. They perform no
+signing/notarization, install nothing, and bundle no models, voice binaries,
+tokens, or secrets. The generated bundle is ignored by Git. Signed packaging and
+launch-at-login are future work.
 
 No authenticated request is issued until token acquisition succeeds. If it fails,
 the SPA shows a safe local "locked" screen and starts no polling; the dashboard,
@@ -135,8 +148,9 @@ which fetches on mount, only mounts after the token is in memory.
 - Projects (`GET`/`POST /projects`), Memory (`GET /memory/search`,
   `GET /memory/export`, `POST /memory`, `DELETE /memory/{id}`), Reminders &
   Tasks (`/reminders`, `/tasks`, `/scheduler/briefing/preview`), Status & Models
-  (`/health`, `/diagnostics`, `/runtime/models` + load/unload), and an
-  Activity/Logs feed (`GET /diagnostics/activity`).
+  (`/health`, `/diagnostics`, `/runtime/models` + load/unload), report history
+  (`/verification/report/latest`, `/verification/reports`), and an Activity/Logs
+  feed (`GET /diagnostics/activity`).
 
 Memory is never created automatically from chat; the UI shows exactly what is
 stored. The Activity feed is sourced from the sanitized audit log through a

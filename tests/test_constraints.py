@@ -60,3 +60,19 @@ def test_base_constraints_do_not_include_optional_model_or_voice_artifacts() -> 
     )
     for needle in forbidden:
         assert needle not in entries
+
+
+def test_generated_verification_and_app_stub_outputs_are_ignored() -> None:
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    required = {
+        "data/verification/",
+        "dist/",
+        "*.app/",
+        ".april_tmp/",
+        "__pycache__/",
+        "*.py[cod]",
+        "models/*.gguf",
+        "models/*.bin",
+        "data/audio_cache/",
+    }
+    assert required <= set(gitignore)

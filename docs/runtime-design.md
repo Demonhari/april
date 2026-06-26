@@ -47,9 +47,13 @@ configured local GGUF model that is present and readable. The Brain does not
 count as passing unless load, chat, stream, unload, structured Brain JSON,
 routing eval execution, and `--min-routing-accuracy` (default `0.90`) all pass.
 Specialists do not count as passing unless load, chat, stream, role smoke, and
-unload pass. Missing optional specialists are skipped/degraded, never passed.
-`--require-real-model` fails if no real configured GGUF is exercised, and fake or
-simulated runtime reports can never set `real_model_verified`.
+unload pass. Coding and system-action role smokes validate small JSON schemas;
+all report output remains redacted to booleans and smoke kind only. Missing
+optional specialists are skipped/degraded, never passed. `--require-real-model`
+fails if no real configured GGUF is exercised. The compatibility field
+`real_model_verified` means at least one real model passed; stronger readiness
+is expressed by `verification_level`: `none`, `partial`, `core`, or `all`. Fake
+or simulated runtime reports can never produce `core` or `all`.
 
 `run april verify --soak --fake --minutes 10` is a bounded fake-backend soak
 harness. It repeatedly checks health, chat, and model listing, optionally cycles

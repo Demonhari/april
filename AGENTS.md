@@ -48,5 +48,7 @@ APRIL is a private, local-first AI assistant for a MacBook Pro. The project is C
   `llama-cpp-python`, audio, wake-word, or model artifacts to the base
   constraints file.
 - Do not install Homebrew packages, run `sudo`, download models automatically, push Git branches, or commit secrets.
+- Do not commit generated verification reports under `data/verification/`,
+  generated app stubs under `dist/` or `*.app/`, or `.april_tmp/` contents.
 - Do not implement unrestricted shell execution.
 - External actions such as `git_push`, deployment, email, payment, and publishing are out of scope for the MVP and must not be simulated as successful.

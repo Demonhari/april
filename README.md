@@ -187,11 +187,21 @@ model:
 APRIL_TEST_GGUF_PATH=/absolute/path/to/model.gguf .venv/bin/python -m pytest tests/test_real_model_optional.py
 
 # End-to-end real-model verification (load / chat / stream / unload):
+run april setup models \
+  --brain /absolute/path/granite.gguf \
+  --coding /absolute/path/qwen-coding.gguf \
+  --reading /absolute/path/qwen-reading.gguf \
+  --dry-run
 run april verify --real-model /absolute/path/to/model.gguf
 run april model benchmark /absolute/path/to/model.gguf --runs 1 --max-output-tokens 32
 run april verify --target-mac --require-real-model /absolute/path/to/model.gguf
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
 ```
+
+`run april setup models` is dry-run by default. It validates local `.gguf` paths,
+can copy explicitly supplied files into `models/` with `--copy-into-models`, and
+only writes `configs/models.yaml` with `--apply` after creating a backup. It
+never downloads or installs anything.
 
 #### Machine-readable acceptance report
 
@@ -231,10 +241,28 @@ run april verify --all-configured-models \
 `--mac-readiness` is the same command. The Brain must load/chat/stream/unload,
 produce structured Brain JSON, run routing evals, and meet
 `--min-routing-accuracy` (default `0.90`). Specialists must also pass a role
-smoke check. Missing optional specialists are skipped/degraded, not passed.
-Useful gates include `--max-rss-mb`, `--min-tokens-per-second`,
-`--max-load-seconds`, and `--max-first-token-latency-seconds`. Fake or simulated
-runs can never set `real_model_verified: true`.
+smoke check. Coding and system-action smokes validate tiny JSON schemas; prompts
+and outputs are not stored in reports. Missing optional specialists are
+skipped/degraded, not passed. Useful gates include `--max-rss-mb`,
+`--min-tokens-per-second`, `--max-load-seconds`, and
+`--max-first-token-latency-seconds`. Fake or simulated runs can never set
+`real_model_verified: true`.
+
+The multi-model report keeps `real_model_verified` for compatibility ("at least
+one real model passed") and adds explicit verification levels:
+
+- `none`: no real model was exercised and passed, or the backend is fake.
+- `partial`: at least one real model passed, but the core model set is not
+  verified.
+- `core`: brain passed, coding passed if configured, reading passed if
+  configured, the backend is real, and no required core role failed.
+- `all`: every configured model exists, was exercised, passed acceptance gates,
+  and specialist switching passed when applicable.
+
+Reports under `data/verification/` are generated local artifacts and ignored by
+Git. The Desktop Readiness screen reads sanitized summaries from
+`GET /verification/report/latest` and `GET /verification/reports`; it never
+shows raw report JSON, prompt text, generated text, tokens, or full paths.
 
 Fake soak is local and non-destructive:
 
@@ -553,21 +581,23 @@ through the JS bridge instead of any URL. Screens: Chat (streamed), Projects,
 Approvals (exact-ID, never an implicit "yes"), Memory, Reminders & Tasks with
 today's briefing, Readiness, Status & Models, and a redacted Activity/Logs feed
 from `GET /diagnostics/activity`. Readiness uses authenticated sanitized
-endpoints (`GET /readiness`, `GET /verification/report/latest`) to show core,
-model, voice, and security setup plus the latest redacted verification report.
-It displays copyable commands only; Desktop never starts voice, wake-word,
-microphone, verification, or model loading automatically. See
+endpoints (`GET /readiness`, `GET /verification/report/latest`,
+`GET /verification/reports`) to show core, model, voice, security setup, latest
+redacted verification report, and report history. It displays copyable commands
+only; Desktop never starts voice, wake-word, microphone, verification, or model
+loading automatically. See
 `apps/desktop/README.md` for details.
 
 Unsigned local app launcher scaffolding is available for development only:
 
 ```bash
 scripts/create_macos_app_stub.sh
+run april setup app-stub
 ```
 
-It creates `dist/APRIL.app` around `run april desktop` without sudo, signing,
-notarization, launch-at-login, models, tokens, or secrets. Signed/notarized
-packaging remains future work.
+Both create `dist/APRIL.app` around `run april desktop` without sudo, signing,
+notarization, launch-at-login, models, tokens, or secrets. The generated bundle
+is ignored by Git. Signed/notarized packaging remains future work.
 
 ## Conversations
 
@@ -690,6 +720,13 @@ april voice health
 april voice devices
 april voice ptt
 april voice listen
+run april setup voice \
+  --whisper-binary /path/to/whisper.cpp/main \
+  --whisper-model /path/to/ggml-base.en.bin \
+  --piper-binary /path/to/piper \
+  --piper-model /path/to/voice.onnx \
+  --wake-word-model /path/to/april.onnx \
+  --dry-run
 run april voice verify-live --report data/verification/voice-live.json
 ```
 
@@ -719,6 +756,12 @@ only, asks whether transcription was correct, synthesizes a local Piper phrase,
 plays it, asks whether playback was heard, and writes a redacted report when
 `--report` is supplied. Temporary audio is deleted by default and retained only
 with `--retain-debug-audio` or `retain_debug_audio`.
+
+`run april setup voice` is also dry-run by default. It validates local
+whisper.cpp and Piper paths, treats a missing wake-word model as non-fatal, and
+only writes `configs/april.yaml` with `--apply` after creating a backup. It never
+records, listens, synthesizes, plays audio, downloads assets, or installs
+packages.
 
 ## Proactive Scheduler
 
@@ -771,9 +814,17 @@ run april verify --fake
 run april verify --soak --fake --minutes 10
 run april verify --target-mac
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
+node tests/js/desktop_token_bridge.test.cjs
+node tests/js/desktop_dashboard.test.cjs
+node --check apps/desktop/web/app.js
+node --check apps/desktop/web/token_bridge.js
+node --check apps/desktop/web/dashboard_helpers.js
 ```
 
-Tests use fake model/audio components and do not require GGUF files, network access, microphones, speakers, whisper.cpp, Piper, openWakeWord, or `llama-cpp-python`.
+CI runs these Python gates across Ubuntu Python 3.11/3.12/3.13 and one macOS
+Python job, plus the Node/static Desktop checks in a separate job. Tests use
+fake model/audio components and do not require GGUF files, network access,
+microphones, speakers, whisper.cpp, Piper, openWakeWord, or `llama-cpp-python`.
 
 `run april verify --fake` is a release smoke gate. It checks project-bound
 conversations, immutable patch application, tampered artifact rejection, repo
@@ -792,7 +843,8 @@ real-model support should fail the command.
 multi-model Mac-readiness gate. It never downloads models; absent configured
 models are skipped/degraded, while Brain JSON/routing and specialist smoke
 failures prevent a pass. Reports under `data/verification/` are redacted and are
-the only files the Desktop latest-report viewer reads.
+ignored by Git; the Desktop Readiness screen reads them only through sanitized
+latest-report and report-history endpoints.
 
 ## Security Model
 

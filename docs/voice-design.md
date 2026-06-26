@@ -48,8 +48,21 @@ april voice test-stt /path/to/audio.wav
 april voice test-tts "Hello Hari"
 april voice ptt
 april voice listen
+run april setup voice \
+  --whisper-binary /path/to/whisper.cpp/main \
+  --whisper-model /path/to/ggml-base.en.bin \
+  --piper-binary /path/to/piper \
+  --piper-model /path/to/voice.onnx \
+  --wake-word-model /path/to/april.onnx \
+  --dry-run
 run april voice verify-live --report data/verification/voice-live.json
 ```
+
+`run april setup voice` is a non-recording configuration helper. It validates
+local whisper.cpp and Piper paths, treats a missing wake-word model as non-fatal,
+does not download assets, does not open the microphone, does not start
+wake-word listening, does not synthesize or play audio, and writes
+`configs/april.yaml` only with `--apply` after creating a backup.
 
 `voice ptt` keeps a persistent conversation ID for the loop, transcribes with
 the configured local whisper.cpp adapter, passes `conversation_id` through

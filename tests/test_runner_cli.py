@@ -4,6 +4,7 @@ import json
 import shutil
 from pathlib import Path
 
+import yaml
 from typer.testing import CliRunner
 
 from apps.runner.install import install_wrappers
@@ -542,6 +543,200 @@ def test_run_april_verify_real_model_existing_path_runs_verifier(
 
 def _copy_configs(home: Path) -> None:
     shutil.copytree(Path.cwd() / "configs", home / "configs")
+
+
+def test_setup_models_dry_run_writes_nothing_and_prints_basenames(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    model_dir = tmp_path / "secret-models"
+    model_dir.mkdir()
+    brain = model_dir / "brain.gguf"
+    brain.write_bytes(b"gguf")
+    before = (tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "setup", "models", "--brain", str(brain)])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8") == before
+    assert "dry run" in result.output
+    assert "brain.gguf" in result.output
+    assert "secret-models" not in result.output
+    assert "run april model doctor" in result.output
+
+
+def test_setup_models_apply_writes_config_and_backup(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    brain = tmp_path / "brain.gguf"
+    brain.write_bytes(b"gguf")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app,
+        ["april", "setup", "models", "--brain", str(brain), "--apply"],
+    )
+    assert result.exit_code == 0, result.output
+    data = yaml.safe_load((tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    assert data["models"]["brain"]["id"] == "april-brain"
+    assert data["models"]["brain"]["path"] == str(brain.resolve())
+    assert list((tmp_path / "configs").glob("models.yaml.bak-*"))
+    assert validate_configuration(tmp_path) == []
+
+
+def test_setup_models_rejects_missing_and_non_gguf(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    missing = CliRunner().invoke(
+        app,
+        ["april", "setup", "models", "--brain", str(tmp_path / "missing.gguf")],
+    )
+    assert missing.exit_code == 1
+    assert "missing.gguf" in missing.output
+    text = tmp_path / "model.txt"
+    text.write_text("bad", encoding="utf-8")
+    non_gguf = CliRunner().invoke(app, ["april", "setup", "models", "--brain", str(text)])
+    assert non_gguf.exit_code == 1
+    assert ".gguf" in non_gguf.output
+
+
+def test_setup_models_rejects_symlink_escape(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _copy_configs(home)
+    outside = tmp_path / "outside.gguf"
+    outside.write_bytes(b"gguf")
+    link = home / "linked.gguf"
+    link.symlink_to(outside)
+    manager = FakeManager(home)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "setup", "models", "--brain", str(link)])
+    assert result.exit_code == 1
+    assert "symlink target is outside" in result.output
+
+
+def test_setup_models_copy_into_models_uses_local_home(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _copy_configs(home)
+    source = tmp_path / "source.gguf"
+    source.write_bytes(b"gguf")
+    manager = FakeManager(home)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "setup",
+            "models",
+            "--brain",
+            str(source),
+            "--copy-into-models",
+            "--apply",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (home / "models" / "source.gguf").exists()
+    data = yaml.safe_load((home / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    assert data["models"]["brain"]["path"] == "models/source.gguf"
+
+
+def test_setup_voice_dry_run_apply_and_missing_wake_word(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    whisper_bin = tmp_path / "whisper-main"
+    whisper_model = tmp_path / "ggml-base.en.bin"
+    piper_bin = tmp_path / "piper"
+    piper_model = tmp_path / "voice.onnx"
+    for path in (whisper_bin, whisper_model, piper_bin, piper_model):
+        path.write_bytes(b"asset")
+    before = (tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    runner = CliRunner()
+    base_args = [
+        "april",
+        "setup",
+        "voice",
+        "--whisper-binary",
+        str(whisper_bin),
+        "--whisper-model",
+        str(whisper_model),
+        "--piper-binary",
+        str(piper_bin),
+        "--piper-model",
+        str(piper_model),
+        "--wake-word-model",
+        str(tmp_path / "missing-wake.onnx"),
+    ]
+    dry = runner.invoke(app, base_args)
+    assert dry.exit_code == 0, dry.output
+    assert (tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8") == before
+    assert "missing-wake.onnx" not in dry.output
+    assert "wake-word model missing" in dry.output
+    assert "local-dev-token" not in dry.output
+    applied = runner.invoke(app, [*base_args, "--apply"])
+    assert applied.exit_code == 0, applied.output
+    data = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
+    assert data["voice"]["whisper_binary_path"] == str(whisper_bin.resolve())
+    assert data["voice"]["piper_model_path"] == str(piper_model.resolve())
+    assert data["voice"]["wake_word_model_path"] is None
+    assert list((tmp_path / "configs").glob("april.yaml.bak-*"))
+
+
+def test_setup_voice_missing_required_path_fails(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    whisper_model = tmp_path / "ggml-base.en.bin"
+    piper_bin = tmp_path / "piper"
+    piper_model = tmp_path / "voice.onnx"
+    for path in (whisper_model, piper_bin, piper_model):
+        path.write_bytes(b"asset")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "setup",
+            "voice",
+            "--whisper-binary",
+            str(tmp_path / "missing-whisper"),
+            "--whisper-model",
+            str(whisper_model),
+            "--piper-binary",
+            str(piper_bin),
+            "--piper-model",
+            str(piper_model),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "missing-whisper" in result.output
+
+
+def test_setup_app_stub_command_refuses_overwrite_and_force_replaces(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    output = tmp_path / "dist" / "APRIL.app"
+    runner = CliRunner()
+    created = runner.invoke(app, ["april", "setup", "app-stub", "--output", str(output)])
+    assert created.exit_code == 0, created.output
+    launcher = output / "Contents" / "MacOS" / "APRIL"
+    assert launcher.exists()
+    combined = launcher.read_text(encoding="utf-8") + (
+        output / "Contents" / "Info.plist"
+    ).read_text(encoding="utf-8")
+    for forbidden in ("local-dev-token", ".gguf", "sudo", "codesign", "notarytool"):
+        assert forbidden not in combined
+    again = runner.invoke(app, ["april", "setup", "app-stub", "--output", str(output)])
+    assert again.exit_code == 1
+    assert "--force" in again.output
+    forced = runner.invoke(
+        app,
+        ["april", "setup", "app-stub", "--output", str(output), "--force"],
+    )
+    assert forced.exit_code == 0, forced.output
 
 
 def test_model_import_rejects_missing_path(tmp_path: Path, monkeypatch) -> None:

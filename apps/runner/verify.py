@@ -1828,10 +1828,14 @@ class AllConfiguredModelsVerifier(
             result.process_rss_bytes = _process_rss_bytes(
                 self.runtime.pid if self.runtime else None
             )
-            content, output_tokens = self._chat_model(model.id, self._smoke_prompt(model.role))
+            content, output_tokens, schema_valid, smoke_kind = self._specialist_smoke(
+                model.id, model.role
+            )
             result.chat_success = bool(content)
             if model.role != "brain":
                 result.smoke_success = bool(content)
+                result.smoke_schema_valid = schema_valid
+                result.smoke_kind = smoke_kind
             latency, tps, stream_tokens = self._stream_model(model.id)
             result.streaming_success = stream_tokens > 0
             result.first_token_latency_seconds = latency
@@ -1852,16 +1856,68 @@ class AllConfiguredModelsVerifier(
             return result
         return result
 
-    def _smoke_prompt(self, role: str) -> str:
-        prompts = {
-            "brain": "Reply with the single word ready.",
-            "coding": "Reply with the single word ok.",
-            "reading": "Reply with the single word ok.",
-            "creative": "Reply with the single word ok.",
-            "reasoning": "Reply with the single word ok.",
-            "system_action": "Reply with the single word ok.",
+    def _specialist_smoke(
+        self, model_id: str, role: str
+    ) -> tuple[str, int, bool | None, str | None]:
+        prompt, smoke_kind, schema_validator = self._smoke_spec(role)
+        content, output_tokens = self._chat_model(model_id, prompt)
+        schema_valid = schema_validator(content) if schema_validator else None
+        return content, output_tokens, schema_valid, smoke_kind
+
+    def _smoke_spec(self, role: str) -> tuple[str, str | None, Callable[[str], bool] | None]:
+        prompts: dict[str, tuple[str, str | None, Callable[[str], bool] | None]] = {
+            "brain": ("Reply with the single word ready.", None, None),
+            "coding": (
+                'Return JSON only: {"plan":["edit","test"]}.',
+                "coding_plan",
+                self._valid_coding_plan,
+            ),
+            "reading": (
+                "In one sentence, summarize: APRIL keeps local verification reports redacted.",
+                "reading_summary",
+                None,
+            ),
+            "creative": (
+                "Give one short title for a local verification checklist.",
+                "creative_title",
+                None,
+            ),
+            "reasoning": (
+                "List two concise tradeoffs for keeping assistant models local.",
+                "reasoning_tradeoff",
+                None,
+            ),
+            "system_action": (
+                'Return JSON only: {"execute":false,"permission_level":0}.',
+                "system_decision",
+                self._valid_system_decision,
+            ),
         }
-        return prompts.get(role, "Reply with the single word ok.")
+        return prompts.get(
+            role,
+            ("Reply with one short confirmation.", "specialist_smoke", None),
+        )
+
+    def _valid_coding_plan(self, content: str) -> bool:
+        import json
+
+        try:
+            parsed = json.loads(content)
+        except ValueError:
+            return False
+        plan = parsed.get("plan") if isinstance(parsed, dict) else None
+        return isinstance(plan, list) and all(isinstance(item, str) for item in plan)
+
+    def _valid_system_decision(self, content: str) -> bool:
+        import json
+
+        try:
+            parsed = json.loads(content)
+        except ValueError:
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        return parsed.get("execute") is False and isinstance(parsed.get("permission_level"), int)
 
     def _chat_model(self, model_id: str, prompt: str) -> tuple[str, int]:
         data = self._post_runtime(

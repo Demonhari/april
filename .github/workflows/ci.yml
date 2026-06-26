@@ -6,24 +6,35 @@ on:
 
 jobs:
   python:
-    name: Python 3.11 (${{ matrix.os }})
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.12"
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Install base/dev dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]' -c constraints-dev.txt
+
+      - name: Git whitespace check
+        run: git diff --check
 
       - name: Lint
         run: python -m ruff check .
@@ -34,22 +45,52 @@ jobs:
       - name: Type check
         run: python -m mypy april_common apps services agents skills
 
+      - name: Compile
+        run: python -m compileall -q april_common apps services agents skills
+
+      - name: Tests
+        run: python -m pytest -ra
+
       - name: Tests with coverage
         run: |
           python -m pytest \
             --cov=april_common \
+            --cov=apps \
             --cov=services \
             --cov=agents \
             --cov=skills \
-            --cov=apps \
             --cov-report=term-missing \
             --cov-fail-under=85
 
-      - name: Compile
-        run: python -m compileall -q april_common apps services agents skills tests
+      - name: ResourceWarning-visible tests
+        run: python -W default::ResourceWarning -m pytest -ra
 
       - name: Config validation
         run: run april config validate
 
       - name: Fake verification
+        env:
+          APRIL_RUNTIME_BACKEND: fake
         run: run april verify --fake
+
+  desktop-static:
+    name: Desktop static Node checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Desktop helper tests
+        run: |
+          node tests/js/desktop_token_bridge.test.cjs
+          node tests/js/desktop_dashboard.test.cjs
+
+      - name: Desktop JavaScript syntax checks
+        run: |
+          node --check apps/desktop/web/app.js
+          node --check apps/desktop/web/token_bridge.js
+          node --check apps/desktop/web/dashboard_helpers.js

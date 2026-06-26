@@ -443,6 +443,37 @@ pre {
   color: var(--april-text-dim);
 }
 
+.command-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  margin-bottom: 8px;
+}
+.command-row pre { margin: 0; }
+.command-copy { min-width: 64px; }
+
+.report-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.report-table th,
+.report-table td {
+  border-bottom: 1px solid var(--april-line-soft);
+  padding: 7px 6px;
+  text-align: left;
+  color: var(--april-text-dim);
+  overflow-wrap: anywhere;
+}
+.report-table th {
+  color: var(--april-cyan);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 .list-item { border-bottom: 1px solid var(--april-line-soft); padding: 9px 0; }
 .list-item:last-child { border-bottom: none; }
 

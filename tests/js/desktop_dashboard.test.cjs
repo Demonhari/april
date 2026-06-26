@@ -184,6 +184,7 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
   const notVerified = D.verificationSummary({ status: "not_verified", report: null });
   check("verification not verified title", notVerified.title === "not verified yet");
   check("verification not verified real false", notVerified.real_model_verified === false);
+  check("verification not verified level none", notVerified.verification_level === "none");
   const latest = D.verificationSummary({
     status: "ok",
     message: "latest verification report",
@@ -192,13 +193,26 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
       report_type: "multi_model",
       summary: "degraded",
       real_model_verified: false,
+      verification_level: "partial",
+      real_models_exercised: 1,
+      real_models_passed: 1,
+      skipped_count: 1,
+      threshold_failure_count: 1,
       skipped: [{ name: "april-reading" }],
       threshold_failures: ["routing accuracy low"],
     },
   });
   check("verification latest report type", latest.report_type === "multi_model");
+  check("verification latest level partial", latest.verification_level === "partial");
+  check("verification latest core false", latest.core_or_all_verified === false);
+  check("verification exercised count", latest.real_models_exercised === 1);
+  check("verification passed count", latest.real_models_passed === 1);
   check("verification skipped count", latest.skipped_count === 1);
   check("verification threshold count", latest.threshold_failure_count === 1);
+  const core = D.verificationSummary({ status: "ok", report: { verification_level: "core" } });
+  const all = D.verificationSummary({ status: "ok", report: { verification_level: "all" } });
+  check("verification core true", core.core_or_all_verified === true);
+  check("verification all true", all.core_or_all_verified === true);
 }
 
 if (failures > 0) {

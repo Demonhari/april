@@ -100,6 +100,7 @@ def test_readiness_screen_is_static_and_token_free() -> None:
     segment = app[app.index("screens.readiness") : app.index("screens.status")]
     assert "/readiness" in segment
     assert "/verification/report/latest" in segment
+    assert "/verification/reports" in segment
     assert "local-dev-token" not in segment
     assert "TOKEN" not in segment
     assert "localStorage" not in segment
@@ -107,6 +108,11 @@ def test_readiness_screen_is_static_and_token_free() -> None:
     assert "document.cookie" not in segment
     assert "run april verify --all-configured-models --require-real-model" in segment
     assert "run april voice verify-live" in segment
+    assert "run april setup models" in segment
+    assert "run april setup voice" in segment
+    assert "run april setup app-stub" in segment
+    assert "bindCommandCopies();" in segment
+    assert "navigator.clipboard.writeText" in app
 
 
 def test_authenticated_polling_starts_after_token() -> None:
@@ -234,6 +240,7 @@ def test_dashboard_polled_endpoints_are_authenticated_and_shaped(settings_tmp) -
             "/tasks",
             "/readiness",
             "/verification/report/latest",
+            "/verification/reports",
         ):
             assert client.get(path).status_code in (401, 403), path
             body = client.get(path, headers=headers).json()
@@ -247,6 +254,9 @@ def test_dashboard_polled_endpoints_are_authenticated_and_shaped(settings_tmp) -
         assert str(settings_tmp.home) not in json.dumps(readiness)
         latest = client.get("/verification/report/latest", headers=headers).json()
         assert latest["message"] == "not verified yet"
+        reports = client.get("/verification/reports", headers=headers).json()
+        assert reports["message"] == "not verified yet"
+        assert reports["reports"] == []
         activity = client.get("/diagnostics/activity?limit=80", headers=headers).json()
         assert "events" in activity
         assert "count" in activity

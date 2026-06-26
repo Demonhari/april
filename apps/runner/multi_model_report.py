@@ -59,6 +59,8 @@ class PerModelResult(BaseModel):
     routing: RoutingReport | None = None
     # Specialist-only role-appropriate smoke prompt (None for the brain).
     smoke_success: bool | None = None
+    smoke_schema_valid: bool | None = None
+    smoke_kind: str | None = None
 
     @property
     def structural_ok(self) -> bool:
@@ -101,6 +103,8 @@ class PerModelResult(BaseModel):
                     )
         elif self.smoke_success is not True:
             failures.append(f"{label}: specialist role smoke check failed")
+        elif self.smoke_schema_valid is False:
+            failures.append(f"{label}: specialist role smoke schema check failed")
         return failures
 
     def acceptance_ok(self, thresholds: ReportThresholds) -> bool:
@@ -148,6 +152,14 @@ class MultiModelVerificationReport(BaseModel):
     # A fake/simulated run can never set this true, so simulation is never
     # mistaken for real-model verification.
     real_model_verified: bool = False
+    real_models_exercised: int = 0
+    real_models_passed: int = 0
+    any_real_model_exercised: bool = False
+    any_real_model_passed: bool = False
+    core_model_set_verified: bool = False
+    all_available_models_verified: bool = False
+    all_configured_models_verified: bool = False
+    verification_level: Literal["none", "partial", "core", "all"] = "none"
     models: list[PerModelResult] = Field(default_factory=list)
     specialist_switch: SpecialistSwitchReport | None = None
     thresholds: dict[str, float] = Field(default_factory=dict)
@@ -230,6 +242,58 @@ def _summary(
     return "pass"
 
 
+def _role_passes(results: list[PerModelResult], thresholds: ReportThresholds) -> dict[str, bool]:
+    roles: dict[str, bool] = {}
+    for result in results:
+        roles[result.role] = result.acceptance_ok(thresholds)
+    return roles
+
+
+def _core_model_set_verified(
+    *,
+    results: list[PerModelResult],
+    thresholds: ReportThresholds,
+    simulated: bool,
+) -> bool:
+    if simulated:
+        return False
+    configured_roles = {result.role for result in results}
+    role_passes = _role_passes(results, thresholds)
+    if role_passes.get("brain") is not True:
+        return False
+    for role in ("coding", "reading"):
+        if role in configured_roles and role_passes.get(role) is not True:
+            return False
+    return True
+
+
+def _specialist_switch_ok(
+    *,
+    results: list[PerModelResult],
+    specialist_switch: SpecialistSwitchReport | None,
+) -> bool:
+    specialist_roles = {"coding", "reading"}
+    switch_required = any(result.role in specialist_roles for result in results)
+    if not switch_required:
+        return True
+    return bool(specialist_switch and specialist_switch.success)
+
+
+def _verification_level(
+    *,
+    any_real_model_passed: bool,
+    core_model_set_verified: bool,
+    all_configured_models_verified: bool,
+) -> Literal["none", "partial", "core", "all"]:
+    if all_configured_models_verified:
+        return "all"
+    if core_model_set_verified:
+        return "core"
+    if any_real_model_passed:
+        return "partial"
+    return "none"
+
+
 def build_multi_model_report(
     *,
     environment: EnvironmentSnapshot,
@@ -273,8 +337,35 @@ def build_multi_model_report(
         failures.extend(per_model_threshold_failures(result, active_thresholds))
 
     models_passed = sum(1 for result in attempted if result.acceptance_ok(active_thresholds))
-    real_model_verified = (not simulated) and any(
-        result.acceptance_ok(active_thresholds) for result in attempted
+    real_models_exercised = 0 if simulated else len(attempted)
+    real_models_passed = 0 if simulated else models_passed
+    any_real_model_exercised = real_models_exercised > 0
+    any_real_model_passed = real_models_passed > 0
+    real_model_verified = any_real_model_passed
+    switch_ok = _specialist_switch_ok(results=results, specialist_switch=specialist_switch)
+    core_model_set_verified = _core_model_set_verified(
+        results=results,
+        thresholds=active_thresholds,
+        simulated=simulated,
+    )
+    all_available_models_verified = (
+        not simulated
+        and bool(attempted)
+        and all(result.acceptance_ok(active_thresholds) for result in attempted)
+        and switch_ok
+    )
+    all_configured_models_verified = (
+        not simulated
+        and bool(results)
+        and len(attempted) == len(results)
+        and all(result.available for result in results)
+        and all(result.acceptance_ok(active_thresholds) for result in results)
+        and switch_ok
+    )
+    verification_level = _verification_level(
+        any_real_model_passed=any_real_model_passed,
+        core_model_set_verified=core_model_set_verified,
+        all_configured_models_verified=all_configured_models_verified,
     )
 
     skipped = list(extra_skipped or [])
@@ -293,7 +384,7 @@ def build_multi_model_report(
         require_real_model=require_real_model,
         threshold_failures_present=bool(failures),
         optional_skipped=bool(skipped),
-        switch_ok=specialist_switch is None or specialist_switch.success,
+        switch_ok=switch_ok,
     )
 
     return MultiModelVerificationReport(
@@ -303,6 +394,14 @@ def build_multi_model_report(
         python_version=environment.python_version,
         runtime_backend=runtime_backend,
         real_model_verified=real_model_verified,
+        real_models_exercised=real_models_exercised,
+        real_models_passed=real_models_passed,
+        any_real_model_exercised=any_real_model_exercised,
+        any_real_model_passed=any_real_model_passed,
+        core_model_set_verified=core_model_set_verified,
+        all_available_models_verified=all_available_models_verified,
+        all_configured_models_verified=all_configured_models_verified,
+        verification_level=verification_level,
         models=results,
         specialist_switch=specialist_switch,
         thresholds=active_thresholds.model_dump(exclude_none=True),

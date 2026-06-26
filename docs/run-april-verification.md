@@ -10,6 +10,9 @@ run april verify --soak --fake --minutes 10
 run april verify --workflow
 run april verify --target-mac
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
+run april setup models --brain /absolute/path/granite.gguf --coding /absolute/path/qwen-coding.gguf --reading /absolute/path/qwen-reading.gguf --dry-run
+run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run
+run april setup app-stub
 run april model doctor
 run april model profile list
 run april status
@@ -89,9 +92,22 @@ fake/simulated runtime is never marked `real_model_verified`.
 
 The Brain model must load, chat, stream, unload, return structured Brain JSON,
 run routing evals, and meet `--min-routing-accuracy` (default `0.90`). Specialist
-models must load, chat, stream, pass their role smoke check, and unload. Optional
-performance thresholds include `--max-rss-mb`, `--min-tokens-per-second`,
-`--max-load-seconds`, and `--max-first-token-latency-seconds`.
+models must load, chat, stream, pass their role smoke check, and unload. Coding
+and system-action smoke checks validate tiny JSON schemas. Prompts and generated
+outputs are not stored in the report; only `smoke_kind`, `smoke_success`, and
+`smoke_schema_valid` are recorded. Optional performance thresholds include
+`--max-rss-mb`, `--min-tokens-per-second`, `--max-load-seconds`, and
+`--max-first-token-latency-seconds`.
+
+Multi-model reports keep the compatibility field `real_model_verified` ("at
+least one real model passed") and add clearer levels:
+
+- `none`: no real model was exercised and passed, or the backend is fake.
+- `partial`: at least one real model passed, but the core set is not verified.
+- `core`: brain passed, coding passed if configured, reading passed if
+  configured, and the backend is real.
+- `all`: every configured model exists, was exercised, passed acceptance gates,
+  and specialist switching passed when applicable.
 
 Single-model target-Mac verification remains available:
 
@@ -106,6 +122,13 @@ Reports are redacted: no prompts, generated text, tokens, secrets, raw tool
 arguments, file contents, or full paths. Model paths are basenames only. Real
 verification requires local GGUF files and `llama-cpp-python`; APRIL never
 downloads models or installs packages.
+
+`data/verification/` is generated and ignored by Git. The Core API exposes only
+authenticated sanitized summaries through `GET /verification/report/latest`,
+`GET /verification/reports`, and `GET /verification/reports/{report_basename}`.
+The basename endpoint rejects traversal, slashes, backslashes, symlinks,
+absolute paths, non-JSON files, and arbitrary query paths. Desktop Readiness
+uses those endpoints for latest-report and report-history display.
 
 Fake soak is non-destructive and fake-backend-only:
 

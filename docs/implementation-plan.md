@@ -40,7 +40,15 @@
    - Add one authenticated, strictly allowlisted endpoint, `GET /diagnostics/activity?limit=N` (capped at 200), that projects the sanitized audit JSONL down to event type, timestamp, reference IDs, and risk level — never prompt content, file contents, tool arguments, tokens, or secrets.
    - Add a `run april desktop` launcher that ensures Runtime + Core API (honoring `--fake`), never starts voice/wake-word/microphone, resolves the API token from the same settings/.env source as the CLI, and opens `http://127.0.0.1:<api_port>/desktop#token=<TOKEN>` with the token in the URL fragment only. An optional native window behind the `[desktop]` extra (pywebview) injects the token via the JS bridge so it never appears in a URL; absent pywebview it falls back to the browser path.
    - The SPA holds the token in memory only (never `localStorage`/`sessionStorage`), strips the fragment via `history.replaceState` on load, streams Chat via `fetch()` + `ReadableStream` against `POST /chat/stream`, routes `approval_required` to the exact-ID Approvals screen (a chat "yes" is never approval), and surfaces 401/403/network errors in a non-crashing banner. Screens: Chat, Projects, Approvals, Memory, Reminders & Tasks (+ briefing), Status & Models, and Activity/Logs.
-   - Tests run on the fake backend with no GGUF/network/microphone: the static mount returns `index.html`, `/diagnostics/activity` requires auth and is redacted, and the `desktop` subcommand resolves config and target URL without launching a real browser.
+   - Add Readiness report history through authenticated sanitized endpoints
+     (`/verification/report/latest`, `/verification/reports`, and basename
+     lookup) that read only `data/verification/*.json` and reject traversal,
+     symlinks, non-JSON files, and arbitrary path input.
+   - Add discoverable local setup helpers for model paths, voice paths, and the
+     unsigned app stub (`run april setup models`, `run april setup voice`,
+     `run april setup app-stub`), all dry-run or explicit-apply where they
+     mutate config.
+   - Tests run on the fake backend with no GGUF/network/microphone: the static mount returns `index.html`, `/diagnostics/activity` requires auth and is redacted, report history is sanitized, and the `desktop` subcommand resolves config and target URL without launching a real browser.
 
 ## Architectural Assumptions
 

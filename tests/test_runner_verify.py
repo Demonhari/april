@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from apps.runner.verify import (
+    AllConfiguredModelsVerifier,
     LauncherVerifier,
     ModelBenchmark,
     RealModelVerifier,
@@ -28,6 +29,26 @@ def verifier_with_ports(monkeypatch) -> LauncherVerifier:
     ports = iter([18001, 18002])
     monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
     return LauncherVerifier(home=Path.cwd())
+
+
+def test_all_configured_specialist_smoke_schema_validators() -> None:
+    verifier = object.__new__(AllConfiguredModelsVerifier)
+    coding_prompt, coding_kind, coding_validator = verifier._smoke_spec("coding")
+    _system_prompt, system_kind, system_validator = verifier._smoke_spec("system_action")
+    reading_prompt, reading_kind, reading_validator = verifier._smoke_spec("reading")
+
+    assert "JSON" in coding_prompt
+    assert coding_kind == "coding_plan"
+    assert coding_validator is not None
+    assert coding_validator('{"plan":["edit","test"]}') is True
+    assert coding_validator('{"plan":"edit"}') is False
+    assert system_kind == "system_decision"
+    assert system_validator is not None
+    assert system_validator('{"execute":false,"permission_level":0}') is True
+    assert system_validator('{"execute":true,"permission_level":5}') is False
+    assert reading_kind == "reading_summary"
+    assert reading_validator is None
+    assert "summarize" in reading_prompt.lower()
 
 
 class FakeResponse:

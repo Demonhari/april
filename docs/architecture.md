@@ -73,11 +73,11 @@ commands.
 
 Desktop is a static HTML/CSS/vanilla JS SPA served by the Core API. Its
 Readiness screen calls authenticated sanitized endpoints only:
-`GET /readiness` and `GET /verification/report/latest`. The latest-report
-endpoint reads only APRIL-owned `data/verification/*.json`, accepts no path input,
-and projects known report types into safe fields. Desktop never starts model
-loading, verification, microphone recording, wake-word listening, or command
-execution automatically.
+`GET /readiness`, `GET /verification/report/latest`, and
+`GET /verification/reports`. Report endpoints read only APRIL-owned
+`data/verification/*.json`, reject arbitrary path input, and project known
+report types into safe fields. Desktop never starts model loading, verification,
+microphone recording, wake-word listening, or command execution automatically.
 
 Specialist agents now execute through `StructuredAgentLoop` by default. The
 Brain still selects the agent for natural `/chat`, but Coding, Reading,
@@ -108,7 +108,8 @@ services.
 `run april verify --all-configured-models` (`--mac-readiness`) is the real
 multi-model readiness path. It requires local GGUF files and `llama-cpp-python`
 for real verification, skips missing optional models instead of passing them,
-and writes redacted reports with basenames only. `run april voice verify-live` is
-the explicit live audio path and asks before recording. `scripts/create_macos_app_stub.sh`
-creates an unsigned local development launcher only; it bundles no models,
-tokens, voice assets, signing, or launch-at-login service.
+and writes redacted reports with basenames only plus verification levels
+(`none`, `partial`, `core`, `all`). `run april voice verify-live` is the explicit
+live audio path and asks before recording. `scripts/create_macos_app_stub.sh` and
+`run april setup app-stub` create an unsigned local development launcher only;
+they bundle no models, tokens, voice assets, signing, or launch-at-login service.

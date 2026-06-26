@@ -67,6 +67,30 @@ def _coding_pass() -> PerModelResult:
         output_token_count=8,
         unload_success=True,
         smoke_success=True,
+        smoke_schema_valid=True,
+        smoke_kind="coding_plan",
+    )
+
+
+def _reading_pass() -> PerModelResult:
+    return PerModelResult(
+        model_id="april-reading",
+        role="reading",
+        backend="llama_cpp",
+        path_basename="qwen3-0.6b-q8_0.gguf",
+        quantization="q8_0",
+        available=True,
+        context_size=4096,
+        load_success=True,
+        load_duration_seconds=0.7,
+        chat_success=True,
+        streaming_success=True,
+        first_token_latency_seconds=0.2,
+        tokens_per_second=35.0,
+        output_token_count=8,
+        unload_success=True,
+        smoke_success=True,
+        smoke_kind="reading_summary",
     )
 
 
@@ -89,13 +113,86 @@ def test_all_models_pass_is_pass() -> None:
     report = build_multi_model_report(
         environment=ENV,
         runtime_backend="llama_cpp",
-        results=[_brain_pass(), _coding_pass()],
+        results=[_brain_pass(), _coding_pass(), _reading_pass()],
         specialist_switch=_all_switch_ok(),
     )
     assert report.summary == "pass"
     assert report.real_model_verified is True
-    assert report.models_passed == 2
+    assert report.real_models_exercised == 3
+    assert report.real_models_passed == 3
+    assert report.any_real_model_exercised is True
+    assert report.any_real_model_passed is True
+    assert report.core_model_set_verified is True
+    assert report.all_available_models_verified is True
+    assert report.all_configured_models_verified is True
+    assert report.verification_level == "all"
+    assert report.models_passed == 3
     assert report.skipped == []
+
+
+def test_zero_real_models_is_verification_level_none() -> None:
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[],
+        specialist_switch=None,
+    )
+    assert report.real_models_exercised == 0
+    assert report.real_models_passed == 0
+    assert report.any_real_model_exercised is False
+    assert report.any_real_model_passed is False
+    assert report.verification_level == "none"
+
+
+def test_one_passing_model_only_is_partial_when_core_roles_are_missing() -> None:
+    missing_coding = PerModelResult(
+        model_id="april-coding",
+        role="coding",
+        backend="llama_cpp",
+        path_basename="qwen-coding.gguf",
+        available=False,
+        skipped_reason="Missing model file.",
+    )
+    missing_reading = PerModelResult(
+        model_id="april-reading",
+        role="reading",
+        backend="llama_cpp",
+        path_basename="qwen-reading.gguf",
+        available=False,
+        skipped_reason="Missing model file.",
+    )
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[_brain_pass(), missing_coding, missing_reading],
+        specialist_switch=_all_switch_ok(),
+    )
+    assert report.real_model_verified is True
+    assert report.core_model_set_verified is False
+    assert report.all_configured_models_verified is False
+    assert report.verification_level == "partial"
+    assert report.summary == "degraded"
+
+
+def test_brain_coding_reading_pass_is_core_when_optional_specialist_missing() -> None:
+    missing_reasoning = PerModelResult(
+        model_id="april-reasoning",
+        role="reasoning",
+        backend="llama_cpp",
+        path_basename="reasoning.gguf",
+        available=False,
+        skipped_reason="Missing model file.",
+    )
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[_brain_pass(), _coding_pass(), _reading_pass(), missing_reasoning],
+        specialist_switch=_all_switch_ok(),
+    )
+    assert report.core_model_set_verified is True
+    assert report.all_configured_models_verified is False
+    assert report.verification_level == "core"
+    assert report.summary == "degraded"
 
 
 def test_fake_backend_can_never_be_real_verified() -> None:
@@ -108,6 +205,10 @@ def test_fake_backend_can_never_be_real_verified() -> None:
         specialist_switch=_all_switch_ok(),
     )
     assert report.real_model_verified is False
+    assert report.real_models_exercised == 0
+    assert report.core_model_set_verified is False
+    assert report.all_configured_models_verified is False
+    assert report.verification_level == "none"
     assert report.summary != "pass"
     assert report.summary == "degraded"
 
@@ -131,6 +232,8 @@ def test_missing_model_is_skipped_not_passed() -> None:
     # degrades the otherwise-passing run.
     assert report.models_passed == 1
     assert report.summary == "degraded"
+    assert report.all_configured_models_verified is False
+    assert report.verification_level == "partial"
     assert any(item.name == "april-reading" for item in report.skipped)
 
 
@@ -205,6 +308,19 @@ def test_specialist_smoke_false_fails() -> None:
     assert report.summary == "fail"
     assert report.models_passed == 1
     assert any("specialist role smoke" in failure for failure in report.check_failures)
+
+
+def test_specialist_smoke_schema_false_fails() -> None:
+    coding = _coding_pass()
+    coding.smoke_schema_valid = False
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[_brain_pass(), coding],
+        specialist_switch=_all_switch_ok(),
+    )
+    assert report.summary == "fail"
+    assert any("smoke schema" in failure for failure in report.check_failures)
 
 
 def test_specialist_switch_failure_is_fail() -> None:

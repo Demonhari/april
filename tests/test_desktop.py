@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import anyio
@@ -104,6 +105,11 @@ def test_latest_verification_report_redacts_and_ignores_path_query(settings_tmp)
         "generated_at": "2026-06-26T00:00:00Z",
         "summary": "degraded",
         "real_model_verified": False,
+        "verification_level": "partial",
+        "real_models_exercised": 1,
+        "real_models_passed": 1,
+        "core_model_set_verified": False,
+        "all_configured_models_verified": False,
         "models": [
             {
                 "model_id": "april-brain",
@@ -137,10 +143,162 @@ def test_latest_verification_report_redacts_and_ignores_path_query(settings_tmp)
     blob = json.dumps(data)
     assert data["status"] == "ok"
     assert data["report"]["models"][0]["path_basename"] == "brain.gguf"
+    assert data["report"]["verification_level"] == "partial"
+    assert data["report"]["real_models_exercised"] == 1
+    assert data["report"]["skipped_count"] == 1
+    assert data["report"]["threshold_failure_count"] == 1
     assert str(settings_tmp.home) not in blob
     assert "/etc/passwd" not in blob
     assert settings_tmp.api.token not in blob
     assert "must not leak" not in blob
+
+
+def _write_verification_report(
+    home: Path,
+    basename: str,
+    *,
+    generated_at: str,
+    summary: str = "degraded",
+    verification_level: str = "partial",
+) -> Path:
+    report_dir = home / "data" / "verification"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / basename
+    report = {
+        "report_type": "multi_model",
+        "generated_at": generated_at,
+        "summary": summary,
+        "real_model_verified": verification_level in {"partial", "core", "all"},
+        "verification_level": verification_level,
+        "real_models_exercised": 1,
+        "real_models_passed": 1,
+        "any_real_model_exercised": True,
+        "any_real_model_passed": True,
+        "core_model_set_verified": verification_level in {"core", "all"},
+        "all_configured_models_verified": verification_level == "all",
+        "models": [
+            {
+                "model_id": "april-brain",
+                "role": "brain",
+                "backend": "llama_cpp",
+                "path": str(home / "models" / "brain.gguf"),
+                "available": True,
+            }
+        ],
+        "skipped": [
+            {
+                "name": "april-reading",
+                "reason": f"Missing model file: {home}/models/reading.gguf",
+            }
+        ],
+        "threshold_failures": [f"april-brain: path {home}/models/brain.gguf"],
+        "prompt": "must not leak",
+        "generated_text": "must not leak",
+        "api_token": "secret-token",
+        "raw_tool_args": {"path": "/etc/passwd"},
+    }
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path
+
+
+def test_verification_report_history_requires_auth(settings_tmp) -> None:
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    assert client.get("/verification/reports").status_code == 403
+    assert client.get("/verification/reports/mac-readiness.json").status_code == 403
+
+
+def test_verification_report_history_no_reports(settings_tmp) -> None:
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        response = client.get("/verification/reports", headers=auth(settings_tmp))
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "not_verified",
+        "message": "not verified yet",
+        "reports": [],
+        "count": 0,
+    }
+
+
+def test_verification_report_history_sorted_and_sanitized(settings_tmp) -> None:
+    older = _write_verification_report(
+        settings_tmp.home,
+        "older.json",
+        generated_at="2026-06-25T00:00:00Z",
+        verification_level="partial",
+    )
+    newer = _write_verification_report(
+        settings_tmp.home,
+        "newer.json",
+        generated_at="2026-06-26T00:00:00Z",
+        verification_level="all",
+        summary="pass",
+    )
+    os.utime(older, (1, 1))
+    os.utime(newer, (2, 2))
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        response = client.get("/verification/reports", headers=auth(settings_tmp))
+        detail = client.get("/verification/reports/newer.json", headers=auth(settings_tmp))
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["basename"] for item in data["reports"]] == ["newer.json", "older.json"]
+    latest = data["reports"][0]
+    assert latest["verification_level"] == "all"
+    assert latest["skipped_count"] == 1
+    assert latest["threshold_failure_count"] == 1
+    blob = json.dumps(data)
+    assert str(settings_tmp.home) not in blob
+    assert "must not leak" not in blob
+    assert "secret-token" not in blob
+    assert "/etc/passwd" not in blob
+    assert detail.status_code == 200
+    assert detail.json()["report"]["basename"] == "newer.json"
+
+
+def test_verification_report_history_rejects_traversal_and_query_path(settings_tmp) -> None:
+    _write_verification_report(
+        settings_tmp.home,
+        "mac-readiness.json",
+        generated_at="2026-06-26T00:00:00Z",
+    )
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        query = client.get("/verification/reports?path=/etc/passwd", headers=auth(settings_tmp))
+        traversal = client.get(
+            "/verification/reports/../mac-readiness.json",
+            headers=auth(settings_tmp),
+        )
+        encoded = client.get(
+            "/verification/reports/%2Fetc%2Fpasswd",
+            headers=auth(settings_tmp),
+        )
+        assert (
+            client.get(
+                "/verification/reports/mac-readiness.json?path=/etc/passwd",
+                headers=auth(settings_tmp),
+            ).status_code
+            == 400
+        )
+    assert query.status_code == 400
+    assert traversal.status_code in (400, 404)
+    assert encoded.status_code in (400, 404)
+
+
+def test_verification_report_history_rejects_symlink_escape(settings_tmp, tmp_path: Path) -> None:
+    report_dir = settings_tmp.home / "data" / "verification"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"report_type": "multi_model"}), encoding="utf-8")
+    symlink = report_dir / "escape.json"
+    symlink.symlink_to(outside)
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        listed = client.get("/verification/reports", headers=auth(settings_tmp)).json()
+        detail = client.get("/verification/reports/escape.json", headers=auth(settings_tmp))
+    assert listed["reports"] == []
+    assert detail.status_code == 400
 
 
 def test_activity_feed_is_redacted(settings_tmp) -> None:

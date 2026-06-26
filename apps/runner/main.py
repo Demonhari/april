@@ -21,10 +21,13 @@ from apps.runner.install import is_april_wrapper, path_contains_dir
 from apps.runner.mac_report import ReportThresholds, write_report
 from apps.runner.model_tools import (
     apply_model_profile,
+    create_macos_app_stub,
     import_model,
     load_model_profiles,
     model_doctor,
     recommend_model_profile,
+    setup_model_set,
+    setup_voice_stack,
 )
 from apps.runner.multi_model_report import write_multi_model_report
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
@@ -1146,6 +1149,127 @@ def profile_delete() -> None:
     console.print(f"Deleted local profile: {deleted}")
 
 
+@setup_app.command("models")
+def setup_models(
+    brain: Path | None = typer.Option(None, "--brain", help="Local brain GGUF path."),
+    coding: Path | None = typer.Option(None, "--coding", help="Local coding GGUF path."),
+    reading: Path | None = typer.Option(None, "--reading", help="Local reading GGUF path."),
+    reasoning: Path | None = typer.Option(
+        None, "--reasoning", help="Optional reasoning GGUF path."
+    ),
+    brain_id: str | None = typer.Option(None, "--brain-id"),
+    coding_id: str | None = typer.Option(None, "--coding-id"),
+    reading_id: str | None = typer.Option(None, "--reading-id"),
+    reasoning_id: str | None = typer.Option(None, "--reasoning-id"),
+    copy_into_models: bool = typer.Option(False, "--copy-into-models"),
+    apply_changes: bool = typer.Option(False, "--apply"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """Safely validate and optionally configure APRIL's local GGUF model set."""
+    if apply_changes and dry_run:
+        console.print("[red]Use either --apply or --dry-run, not both.[/red]")
+        raise typer.Exit(1)
+    try:
+        result = setup_model_set(
+            home=_manager().home,
+            role_paths={
+                "brain": brain,
+                "coding": coding,
+                "reading": reading,
+                "reasoning": reasoning,
+            },
+            role_ids={
+                "brain": brain_id,
+                "coding": coding_id,
+                "reading": reading_id,
+                "reasoning": reasoning_id,
+            },
+            copy_into_models=copy_into_models,
+            apply=apply_changes,
+            force=force,
+        )
+    except ConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(
+        "[green]Model setup applied.[/green]"
+        if result["applied"]
+        else "[yellow]Model setup dry run; no files were changed.[/yellow]"
+    )
+    for entry in result["entries"]:
+        console.print(
+            f"{entry['role']}: {entry['source_basename']} -> {entry['model_id']} "
+            f"(copy_into_models={entry['copy_into_models']})"
+        )
+    if result["backup_basename"]:
+        console.print(f"Config backup: {result['backup_basename']}")
+    console.print("Next commands:")
+    for command in result["next_commands"]:
+        console.print(f"  {command}")
+
+
+@setup_app.command("voice")
+def setup_voice(
+    whisper_binary: Path = typer.Option(..., "--whisper-binary"),
+    whisper_model: Path = typer.Option(..., "--whisper-model"),
+    piper_binary: Path = typer.Option(..., "--piper-binary"),
+    piper_model: Path = typer.Option(..., "--piper-model"),
+    wake_word_model: Path | None = typer.Option(None, "--wake-word-model"),
+    apply_changes: bool = typer.Option(False, "--apply"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Validate and optionally configure local voice tools without recording."""
+    if apply_changes and dry_run:
+        console.print("[red]Use either --apply or --dry-run, not both.[/red]")
+        raise typer.Exit(1)
+    try:
+        result = setup_voice_stack(
+            home=_manager().home,
+            whisper_binary=whisper_binary,
+            whisper_model=whisper_model,
+            piper_binary=piper_binary,
+            piper_model=piper_model,
+            wake_word_model=wake_word_model,
+            apply=apply_changes,
+        )
+    except ConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(
+        "[green]Voice setup applied.[/green]"
+        if result["applied"]
+        else "[yellow]Voice setup dry run; no files were changed.[/yellow]"
+    )
+    for artifact in result["artifacts"]:
+        label = artifact["basename"] or "not configured"
+        console.print(f"{artifact['name']}: {label}")
+    for warning in result["warnings"]:
+        console.print(f"[yellow]Warning:[/yellow] {warning}")
+    if result["backup_basename"]:
+        console.print(f"Config backup: {result['backup_basename']}")
+    console.print("Next commands:")
+    for command in result["next_commands"]:
+        console.print(f"  {command}")
+
+
+@setup_app.command("app-stub")
+def setup_app_stub(
+    output: Path = typer.Option(Path("dist/APRIL.app"), "--output"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """Create the unsigned local-development macOS APRIL.app launcher."""
+    try:
+        result = create_macos_app_stub(home=_manager().home, output=output, force=force)
+    except ConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(
+        f"[green]Created unsigned APRIL development launcher: {result.output_path}[/green]"
+    )
+    console.print("Unsigned local development only. No models, tokens, signing, or notarization.")
+
+
 @setup_app.command("tokens")
 def setup_tokens(
     output: Path = typer.Option(Path(".env"), "--output", help="Local env file to update."),
@@ -1301,7 +1425,7 @@ def verify(
             console.print(
                 f"[green]Wrote multi-model verification report to {written}[/green] "
                 f"(summary: {multi_report.summary}, "
-                f"real_model_verified: {multi_report.real_model_verified})"
+                f"verification_level: {multi_report.verification_level})"
             )
         if not all(check.ok for check in checks):
             raise typer.Exit(1)

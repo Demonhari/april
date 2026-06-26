@@ -43,6 +43,13 @@ class ModelImportResult:
     next_command: str
 
 
+@dataclass(frozen=True, slots=True)
+class AppStubResult:
+    output_path: Path
+    launcher_path: Path
+    unsigned: bool = True
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     loaded = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader) or {}
     if not isinstance(loaded, dict):
@@ -56,6 +63,16 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
 
 def _config_path(home: Path) -> Path:
     return home / "configs" / "models.yaml"
+
+
+def _settings_config_path(home: Path) -> Path:
+    return home / "configs" / "april.yaml"
+
+
+def _timestamped_backup(path: Path) -> Path:
+    backup = path.with_suffix(f"{path.suffix}.bak-{time.strftime('%Y%m%d%H%M%S')}")
+    shutil.copy2(path, backup)
+    return backup
 
 
 def _validate_after_write(home: Path) -> None:
@@ -72,6 +89,44 @@ def _role_key(data: dict[str, Any], role: str, model_id: str) -> str:
         if isinstance(value, dict) and (value.get("role") == role or value.get("id") == model_id):
             return str(key)
     return role
+
+
+def _existing_model_for_role(data: dict[str, Any], role: str) -> dict[str, Any]:
+    models = data.get("models")
+    if not isinstance(models, dict):
+        return {}
+    for value in models.values():
+        if isinstance(value, dict) and value.get("role") == role:
+            return value
+    return {}
+
+
+def _validate_model_source(
+    *,
+    home: Path,
+    source_path: Path,
+    copy_into_models: bool,
+) -> Path:
+    root = home.expanduser().resolve()
+    source_raw = source_path.expanduser()
+    if not source_raw.exists():
+        raise ConfigError(f"Model path does not exist: {source_raw.name}")
+    if not source_raw.is_file():
+        raise ConfigError(f"Model path is not a file: {source_raw.name}")
+    if source_raw.suffix.lower() != ".gguf":
+        raise ConfigError("Model setup only accepts existing .gguf files.")
+    source = source_raw.resolve()
+
+    settings = load_settings(root=root)
+    allowed_roots = [root, *settings.allowed_roots]
+    if source_raw.is_symlink() and not is_path_within_roots(source, allowed_roots):
+        raise ConfigError("Model symlink target is outside APRIL allowed roots.")
+    if not copy_into_models and not is_path_within_roots(source, allowed_roots):
+        raise ConfigError(
+            "Model path is outside APRIL allowed roots. Use --copy-into-models to copy it locally.",
+            {"path": str(source)},
+        )
+    return source
 
 
 def import_model(
@@ -154,6 +209,252 @@ def import_model(
         config_path=config_path,
         next_command=f"run april verify --real-model {target}",
     )
+
+
+def setup_model_set(
+    *,
+    home: Path,
+    role_paths: dict[str, Path | None],
+    role_ids: dict[str, str | None] | None = None,
+    copy_into_models: bool = False,
+    apply: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Validate and optionally register APRIL's intended local GGUF model set.
+
+    This wrapper is dry-run by default and reuses ``import_model`` for the
+    actual safe copy/config mutation path when ``apply`` is true.
+    """
+    root = home.expanduser().resolve()
+    supplied = {role: path for role, path in role_paths.items() if path is not None}
+    if not supplied:
+        raise ConfigError("At least one model path must be supplied.")
+    ids = role_ids or {}
+    config_path = _config_path(root)
+    data = _read_yaml(config_path)
+    entries: list[dict[str, Any]] = []
+    for role, source_path in supplied.items():
+        source = _validate_model_source(
+            home=root,
+            source_path=source_path,
+            copy_into_models=copy_into_models,
+        )
+        existing = _existing_model_for_role(data, role)
+        model_id = ids.get(role) or str(existing.get("id") or f"april-{role}")
+        name = str(existing.get("name") or source.stem)
+        entries.append(
+            {
+                "role": role,
+                "model_id": model_id,
+                "name": name,
+                "source_basename": source.name,
+                "copy_into_models": copy_into_models,
+                "would_write": apply,
+            }
+        )
+
+    backup: Path | None = None
+    imported: list[ModelImportResult] = []
+    if apply:
+        backup = _timestamped_backup(config_path)
+        try:
+            for entry in entries:
+                imported.append(
+                    import_model(
+                        home=root,
+                        role=str(entry["role"]),
+                        model_id=str(entry["model_id"]),
+                        name=str(entry["name"]),
+                        source_path=supplied[str(entry["role"])],
+                        copy_into_models=copy_into_models,
+                        force=force,
+                    )
+                )
+        except Exception:
+            shutil.copy2(backup, config_path)
+            raise
+
+    by_role = {result.role: result for result in imported}
+    rendered_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        result = by_role.get(str(entry["role"]))
+        rendered = dict(entry)
+        if result is not None:
+            rendered["copied"] = result.copied
+            rendered["registered_basename"] = result.path.name
+        else:
+            rendered["copied"] = False
+            rendered["registered_basename"] = entry["source_basename"]
+        rendered_entries.append(rendered)
+
+    return {
+        "applied": apply,
+        "backup_basename": backup.name if backup is not None else None,
+        "entries": rendered_entries,
+        "next_commands": [
+            "run april model doctor",
+            "run april verify --all-configured-models --require-real-model "
+            "--report data/verification/mac-readiness.json",
+        ],
+        "mutating": apply,
+    }
+
+
+def setup_voice_stack(
+    *,
+    home: Path,
+    whisper_binary: Path,
+    whisper_model: Path,
+    piper_binary: Path,
+    piper_model: Path,
+    wake_word_model: Path | None = None,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Validate and optionally configure local voice assets without recording."""
+    root = home.expanduser().resolve()
+    required = {
+        "whisper_binary_path": whisper_binary,
+        "whisper_model_path": whisper_model,
+        "piper_binary_path": piper_binary,
+        "piper_model_path": piper_model,
+    }
+    resolved_required: dict[str, Path] = {}
+    for key, path in required.items():
+        resolved = path.expanduser().resolve()
+        if not resolved.exists():
+            raise ConfigError(f"Voice path does not exist: {path.name}")
+        if not resolved.is_file():
+            raise ConfigError(f"Voice path is not a file: {path.name}")
+        resolved_required[key] = resolved
+
+    warnings: list[str] = []
+    resolved_wake: Path | None = None
+    if wake_word_model is not None:
+        candidate = wake_word_model.expanduser().resolve()
+        if candidate.exists() and candidate.is_file():
+            resolved_wake = candidate
+        else:
+            warnings.append("wake-word model missing; wake-word remains unconfigured")
+
+    config_path = _settings_config_path(root)
+    backup: Path | None = None
+    if apply:
+        backup = _timestamped_backup(config_path)
+        data = _read_yaml(config_path)
+        voice = data.setdefault("voice", {})
+        if not isinstance(voice, dict):
+            raise ConfigError("configs/april.yaml voice field must be a mapping.")
+        for key, path in resolved_required.items():
+            voice[key] = str(path)
+        if resolved_wake is not None:
+            voice["wake_word_model_path"] = str(resolved_wake)
+        _write_yaml(config_path, data)
+        try:
+            _validate_after_write(root)
+        except Exception:
+            shutil.copy2(backup, config_path)
+            raise
+
+    artifacts = [
+        {"name": key, "basename": path.name, "configured": True}
+        for key, path in resolved_required.items()
+    ]
+    artifacts.append(
+        {
+            "name": "wake_word_model_path",
+            "basename": resolved_wake.name if resolved_wake is not None else None,
+            "configured": resolved_wake is not None,
+        }
+    )
+    return {
+        "applied": apply,
+        "backup_basename": backup.name if backup is not None else None,
+        "artifacts": artifacts,
+        "warnings": warnings,
+        "next_commands": [
+            "run april voice verify-live --report data/verification/voice-live.json",
+        ],
+        "mutating": apply,
+    }
+
+
+def create_macos_app_stub(
+    *, home: Path, output: Path | None = None, force: bool = False
+) -> AppStubResult:
+    """Create an unsigned local APRIL.app launcher without tokens or models."""
+    root = home.expanduser().resolve()
+    settings = load_settings(root=root)
+    target = output or root / "dist" / "APRIL.app"
+    resolved = (
+        (root / target).resolve() if not target.is_absolute() else target.expanduser().resolve()
+    )
+    if resolved.suffix != ".app":
+        raise ConfigError("App stub output must end with .app.")
+    allowed_roots = [root, *settings.allowed_roots]
+    parent = resolved.parent
+    if not is_path_within_roots(parent.resolve(), allowed_roots):
+        raise ConfigError("App stub output is outside APRIL allowed roots.")
+    parent.mkdir(parents=True, exist_ok=True)
+    if resolved.is_symlink():
+        raise ConfigError("App stub output must not be a symlink.")
+    if resolved.exists():
+        if not force:
+            raise ConfigError(f"App stub already exists: {resolved}. Pass --force to overwrite.")
+        if resolved.is_dir():
+            shutil.rmtree(resolved)
+        else:
+            resolved.unlink()
+
+    contents = resolved / "Contents"
+    macos = contents / "MacOS"
+    resources = contents / "Resources"
+    launcher = macos / "APRIL"
+    macos.mkdir(parents=True, exist_ok=True)
+    resources.mkdir(parents=True, exist_ok=True)
+    (contents / "Info.plist").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>APRIL</string>
+  <key>CFBundleDisplayName</key>
+  <string>APRIL</string>
+  <key>CFBundleIdentifier</key>
+  <string>local.april.dev</string>
+  <key>CFBundleVersion</key>
+  <string>0.1.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleExecutable</key>
+  <string>APRIL</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Unsigned local development launcher. No models, tokens, or secrets are bundled.</string>
+</dict>
+</plist>
+""",
+        encoding="utf-8",
+    )
+    launcher.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+
+cd "{root}"
+if command -v run >/dev/null 2>&1; then
+  exec run april desktop "$@"
+elif [ -x ".venv/bin/python" ]; then
+  exec ".venv/bin/python" -m apps.runner.main april desktop "$@"
+else
+  exec python -m apps.runner.main april desktop "$@"
+fi
+""",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    return AppStubResult(output_path=resolved, launcher_path=launcher)
 
 
 def load_model_profiles(home: Path) -> dict[str, Any]:

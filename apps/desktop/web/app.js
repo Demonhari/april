@@ -35,6 +35,7 @@ const state = {
   models: null,
   readiness: null,
   latestReport: null,
+  reportHistory: null,
   approvals: [],
   reminders: [],
   tasks: [],
@@ -1036,8 +1037,46 @@ function kvRows(rows) {
   ).join("");
 }
 
+let commandRegistry = [];
+
+function canCopyCommands() {
+  return Boolean(navigator.clipboard && navigator.clipboard.writeText);
+}
+
 function commandBlock(command) {
-  return "<pre class='command'>" + esc(command) + "</pre>";
+  const index = commandRegistry.push(command) - 1;
+  const copy = canCopyCommands()
+    ? "<button class='btn command-copy' data-command-index='" + index + "'>Copy</button>"
+    : "";
+  return "<div class='command-row'><pre class='command'>" + esc(command) + "</pre>" +
+    copy + "</div>";
+}
+
+function bindCommandCopies() {
+  if (!canCopyCommands()) return;
+  document.querySelectorAll(".command-copy").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const index = Number(button.getAttribute("data-command-index"));
+      const command = commandRegistry[index];
+      if (!command) return;
+      try {
+        await navigator.clipboard.writeText(command);
+        showBannerInfo("Command copied.");
+      } catch (_) {
+        showBanner("Clipboard is unavailable. The command is shown on screen.");
+      }
+    });
+  });
+}
+
+function levelPill(level) {
+  const normalized = ["none", "partial", "core", "all"].indexOf(level) === -1
+    ? "none"
+    : level;
+  const kind = normalized === "all" || normalized === "core"
+    ? "ok"
+    : normalized === "partial" ? "warn" : "bad";
+  return pill("level " + normalized, kind);
 }
 
 function renderLatestReport(latest) {
@@ -1048,11 +1087,14 @@ function renderLatestReport(latest) {
   }
   const report = latest.report || {};
   let html = "<div class='panel-title'>Latest verification report</div>" +
+    "<div class='row'>" + levelPill(summary.verification_level) + "</div>" +
     kvRows([
       ["generated", summary.generated_at],
       ["type", summary.report_type],
       ["summary", summary.summary],
-      ["real model verified", boolText(summary.real_model_verified)],
+      ["real models exercised", String(summary.real_models_exercised || 0)],
+      ["real models passed", String(summary.real_models_passed || 0)],
+      ["core/all verified", boolText(summary.core_or_all_verified)],
     ]);
   const skipped = Array.isArray(report.skipped) ? report.skipped : [];
   const thresholdFailures = Array.isArray(report.threshold_failures)
@@ -1081,15 +1123,42 @@ function renderLatestReport(latest) {
   return html;
 }
 
+function renderReportHistory(history) {
+  const reports = history && Array.isArray(history.reports) ? history.reports : [];
+  let html = "<div class='panel-title'>Report history</div>";
+  if (!reports.length) {
+    return html + "<span class='muted'>not verified yet</span>";
+  }
+  html += "<table class='report-table'><thead><tr>" +
+    "<th>type</th><th>summary</th><th>level</th><th>generated</th>" +
+    "<th>skipped</th><th>thresholds</th></tr></thead><tbody>";
+  reports.forEach((report) => {
+    const level = D.verificationSummary({ status: "ok", report: report }).verification_level;
+    html += "<tr><td>" + esc(report.report_type || "unknown") + "</td>" +
+      "<td>" + esc(report.summary || "unknown") + "</td>" +
+      "<td>" + esc(level) + "</td>" +
+      "<td>" + esc(report.generated_at || "unknown") + "</td>" +
+      "<td>" + esc(String(report.skipped_count || 0)) + "</td>" +
+      "<td>" + esc(String(report.threshold_failure_count || 0)) + "</td></tr>";
+  });
+  return html + "</tbody></table>";
+}
+
 screens.readiness = async function () {
+  commandRegistry = [];
   screenEl.appendChild(screenHeader("Readiness", "Local setup state, safe verification reports, and explicit next commands."));
   const macReadinessCommand = "run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json";
   const singleModelCommand = "run april verify /absolute/path/to/model.gguf --target-mac --require-real-model --report data/verification/single-model.json";
   const voiceLiveCommand = "run april voice verify-live --report data/verification/voice-live.json";
+  const modelSetupCommand = "run april setup models --brain /absolute/path/granite.gguf --coding /absolute/path/qwen-coding.gguf --reading /absolute/path/qwen-reading.gguf --dry-run";
+  const voiceSetupCommand = "run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --wake-word-model /path/to/april.onnx --dry-run";
+  const appStubCommand = "run april setup app-stub";
   const readiness = await api("GET", "/readiness").catch(() => null);
   if (readiness) state.readiness = readiness;
   const latest = await api("GET", "/verification/report/latest").catch(() => null);
   if (latest) state.latestReport = latest;
+  const history = await api("GET", "/verification/reports").catch(() => null);
+  if (history) state.reportHistory = history;
 
   if (!readiness) {
     screenEl.appendChild(card("<span class='muted'>Readiness is unavailable.</span>"));
@@ -1141,10 +1210,29 @@ screens.readiness = async function () {
   screenEl.appendChild(card(
     "<div class='panel-title'>Verification guidance</div>" +
     commands.map(commandBlock).join("") +
-    "<span class='pill warn'>fake verification is not real model verification</span>"
+    "<span class='pill warn'>fake verification is not real model verification</span>" +
+    "<span class='pill warn'>generated reports and app stubs are ignored</span>"
   ));
 
   screenEl.appendChild(card(renderLatestReport(latest)));
+  screenEl.appendChild(card(renderReportHistory(state.reportHistory)));
+
+  screenEl.appendChild(card(
+    "<div class='panel-title'>Guided setup commands</div>" +
+    commandBlock(modelSetupCommand) +
+    commandBlock(voiceSetupCommand) +
+    commandBlock(appStubCommand)
+  ));
+
+  screenEl.appendChild(card(
+    "<div class='panel-title'>CI/local gates</div>" +
+    kvRows([
+      ["Python", "ruff, format, mypy, compileall, pytest, coverage"],
+      ["Warnings", "ResourceWarning-visible pytest"],
+      ["Runtime", "config validate, fake verification"],
+      ["Desktop", "Node helper tests, static syntax checks"],
+    ])
+  ));
 
   const artifacts = Array.isArray(voice.artifacts) ? voice.artifacts : [];
   let voiceHtml = "<div class='panel-title'>Voice readiness</div>" +
@@ -1195,6 +1283,7 @@ screens.readiness = async function () {
     "<div class='panel-title'>Next actions</div>" +
     nextActions.map(commandBlock).join("")
   ));
+  bindCommandCopies();
 };
 
 screens.status = async function () {
