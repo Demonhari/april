@@ -33,6 +33,8 @@ const state = {
   online: false,
   health: null,
   models: null,
+  readiness: null,
+  latestReport: null,
   approvals: [],
   reminders: [],
   tasks: [],
@@ -1015,6 +1017,184 @@ screens.reminders = async function () {
     taskWrap.appendChild(el("div", "list-item", "<pre>" + esc(JSON.stringify(t, null, 2)) + "</pre>"));
   }
   screenEl.appendChild(taskWrap);
+};
+
+function pill(text, kind) {
+  return "<span class='pill " + esc(kind || "") + "'>" + esc(text) + "</span>";
+}
+
+function boolText(value) {
+  if (value === true) return "yes";
+  if (value === false) return "no";
+  return "unknown";
+}
+
+function kvRows(rows) {
+  return rows.map((row) =>
+    "<div class='sys-row'><span class='sys-name'>" + esc(row[0]) +
+    "</span><span class='sys-val'>" + esc(row[1]) + "</span></div>"
+  ).join("");
+}
+
+function commandBlock(command) {
+  return "<pre class='command'>" + esc(command) + "</pre>";
+}
+
+function renderLatestReport(latest) {
+  const summary = D.verificationSummary(latest);
+  if (summary.status === "not_verified") {
+    return "<div class='panel-title'>Latest verification report</div>" +
+      "<span class='muted'>not verified yet</span>";
+  }
+  const report = latest.report || {};
+  let html = "<div class='panel-title'>Latest verification report</div>" +
+    kvRows([
+      ["generated", summary.generated_at],
+      ["type", summary.report_type],
+      ["summary", summary.summary],
+      ["real model verified", boolText(summary.real_model_verified)],
+    ]);
+  const skipped = Array.isArray(report.skipped) ? report.skipped : [];
+  const thresholdFailures = Array.isArray(report.threshold_failures)
+    ? report.threshold_failures
+    : [];
+  if (skipped.length) {
+    html += "<div class='spacer'></div><strong class='kv'>Skipped checks</strong>";
+    skipped.forEach((item) => {
+      html += "<div class='kv'>" + esc(item.name) + ": " + esc(item.reason) + "</div>";
+    });
+  }
+  if (thresholdFailures.length) {
+    html += "<div class='spacer'></div><strong class='kv'>Threshold failures</strong>";
+    thresholdFailures.forEach((item) => {
+      html += "<div class='kv'>" + esc(item) + "</div>";
+    });
+  }
+  const models = Array.isArray(report.models) ? report.models : [];
+  if (models.length) {
+    html += "<div class='spacer'></div><strong class='kv'>Models</strong>";
+    models.forEach((model) => {
+      html += "<div class='kv'>" + esc(model.model_id) + " · " +
+        esc(model.role) + " · " + esc(D.basenameOnly(model.path_basename)) + "</div>";
+    });
+  }
+  return html;
+}
+
+screens.readiness = async function () {
+  screenEl.appendChild(screenHeader("Readiness", "Local setup state, safe verification reports, and explicit next commands."));
+  const macReadinessCommand = "run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json";
+  const singleModelCommand = "run april verify /absolute/path/to/model.gguf --target-mac --require-real-model --report data/verification/single-model.json";
+  const voiceLiveCommand = "run april voice verify-live --report data/verification/voice-live.json";
+  const readiness = await api("GET", "/readiness").catch(() => null);
+  if (readiness) state.readiness = readiness;
+  const latest = await api("GET", "/verification/report/latest").catch(() => null);
+  if (latest) state.latestReport = latest;
+
+  if (!readiness) {
+    screenEl.appendChild(card("<span class='muted'>Readiness is unavailable.</span>"));
+    return;
+  }
+
+  const core = readiness.core || {};
+  const models = (readiness.models && readiness.models.registered) || [];
+  const voice = readiness.voice || {};
+  const security = readiness.security || {};
+  const guidance = readiness.verification_guidance || {};
+
+  screenEl.appendChild(card(
+    "<div class='panel-title'>Core readiness</div>" +
+    kvRows([
+      ["API health", core.api_health || "unknown"],
+      ["Runtime health", core.runtime_health || "unknown"],
+      ["Runtime backend", core.runtime_backend || "unknown"],
+      ["Runtime simulated", boolText(core.runtime_simulated)],
+      ["Database", (core.database && core.database.status) || "unknown"],
+      ["Vector index", (core.vector_index && (core.vector_index.status || core.vector_index.state)) || "unknown"],
+      ["Scheduler", core.scheduler && core.scheduler.enabled ? (core.scheduler.running ? "running" : "enabled") : "disabled"],
+    ])
+  ));
+
+  let modelHtml = "<div class='panel-title'>Model readiness</div>" +
+    "<div class='row'>" +
+    pill("llama-cpp-python " + ((readiness.models || {}).llama_cpp_python_available ? "available" : "missing"), (readiness.models || {}).llama_cpp_python_available ? "ok" : "warn") +
+    "</div>";
+  if (!models.length) {
+    modelHtml += "<div class='spacer'></div><span class='muted'>No models reported.</span>";
+  }
+  models.forEach((m) => {
+    modelHtml += "<div class='list-item'>" +
+      "<div class='row'><strong>" + esc(m.id) + "</strong>" +
+      pill(m.role || "unknown") +
+      pill(m.backend || "unknown") +
+      pill(m.state || "unknown", m.state === "loaded" ? "ok" : "") +
+      (m.keep_loaded ? pill("keep_loaded", "cyan") : "") +
+      (m.missing_path ? pill("missing path", "warn") : "") +
+      (m.simulated ? pill("simulated", "warn") : "") +
+      "</div><div class='kv'>path basename: <strong>" +
+      esc(D.basenameOnly(m.path_basename) || "not configured") +
+      "</strong></div></div>";
+  });
+  screenEl.appendChild(card(modelHtml));
+
+  const commands = guidance.commands || [macReadinessCommand, singleModelCommand];
+  screenEl.appendChild(card(
+    "<div class='panel-title'>Verification guidance</div>" +
+    commands.map(commandBlock).join("") +
+    "<span class='pill warn'>fake verification is not real model verification</span>"
+  ));
+
+  screenEl.appendChild(card(renderLatestReport(latest)));
+
+  const artifacts = Array.isArray(voice.artifacts) ? voice.artifacts : [];
+  let voiceHtml = "<div class='panel-title'>Voice readiness</div>" +
+    kvRows([
+      ["Voice enabled", boolText(voice.enabled)],
+      ["sounddevice", voice.sounddevice_available ? "available" : "missing"],
+      ["Input devices", D.formatInt(voice.input_device_count)],
+      ["Output devices", D.formatInt(voice.output_device_count)],
+      ["Push-to-talk without wake word", boolText(voice.push_to_talk_available_without_wake_word)],
+    ]) +
+    "<div class='spacer'></div><div class='kv'>" +
+    esc(voice.macos_microphone_permission_guidance || "") + "</div>";
+  artifacts.forEach((item) => {
+    voiceHtml += "<div class='kv'>" + esc(item.name) + ": " +
+      (item.configured ? esc(item.basename || "configured") : "not configured") +
+      (item.missing ? " · missing" : " · present") + "</div>";
+  });
+  screenEl.appendChild(card(voiceHtml));
+
+  const roots = Array.isArray(security.allowed_filesystem_roots)
+    ? security.allowed_filesystem_roots
+    : [];
+  let securityHtml = "<div class='panel-title'>Security readiness</div>" +
+    kvRows([
+      ["API token", (security["api_token"] && security["api_token"].status) || "unknown"],
+      ["Runtime token", (security.runtime_token && security.runtime_token.status) || "unknown"],
+      ["API localhost binding", boolText(security.api_localhost_binding)],
+      ["Runtime localhost binding", boolText(security.runtime_localhost_binding)],
+      ["CORS enabled", boolText(security.cors_enabled)],
+      ["Development token warning", security.development_token_warning || "none"],
+    ]);
+  if (roots.length) {
+    securityHtml += "<div class='spacer'></div><strong class='kv'>Allowed roots</strong>";
+    roots.forEach((root) => {
+      securityHtml += "<div class='kv'>" + esc(root.basename) +
+        " · exists " + esc(boolText(root.exists)) +
+        " · APRIL home " + esc(boolText(root.within_april_home)) + "</div>";
+    });
+  }
+  screenEl.appendChild(card(securityHtml));
+
+  const nextActions = readiness.next_actions || [
+    macReadinessCommand,
+    voiceLiveCommand,
+    "scripts/create_macos_app_stub.sh",
+  ];
+  screenEl.appendChild(card(
+    "<div class='panel-title'>Next actions</div>" +
+    nextActions.map(commandBlock).join("")
+  ));
 };
 
 screens.status = async function () {

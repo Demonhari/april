@@ -70,6 +70,42 @@ class PerModelResult(BaseModel):
             and self.unload_success
         )
 
+    def acceptance_failures(self, thresholds: ReportThresholds) -> list[str]:
+        failures: list[str] = []
+        label = self.model_id
+        if not self.available:
+            failures.append(f"{label}: model was not exercised")
+            return failures
+
+        required = {
+            "load": self.load_success,
+            "chat": self.chat_success,
+            "streaming": self.streaming_success,
+            "unload": self.unload_success,
+        }
+        for name, ok in required.items():
+            if not ok:
+                failures.append(f"{label}: {name} check failed")
+
+        if self.role == "brain":
+            if self.structured_brain_json_success is not True:
+                failures.append(f"{label}: structured Brain JSON check failed")
+            if self.routing is None or self.routing.total <= 0:
+                failures.append(f"{label}: routing evals did not run")
+            else:
+                min_accuracy = thresholds.min_routing_accuracy
+                if min_accuracy is not None and self.routing.accuracy < min_accuracy:
+                    failures.append(
+                        f"{label}: routing accuracy {self.routing.accuracy:.2f} "
+                        f"below minimum {min_accuracy:.2f}"
+                    )
+        elif self.smoke_success is not True:
+            failures.append(f"{label}: specialist role smoke check failed")
+        return failures
+
+    def acceptance_ok(self, thresholds: ReportThresholds) -> bool:
+        return not self.acceptance_failures(thresholds)
+
 
 class SpecialistSwitchReport(BaseModel):
     """Brain-resident → coding load/unload → reading load/unload → brain usable.
@@ -108,7 +144,7 @@ class MultiModelVerificationReport(BaseModel):
     cpu_architecture: str
     python_version: str
     runtime_backend: str
-    # True ONLY for a real backend with at least one structurally-passing model.
+    # True ONLY for a real backend with at least one fully-passing model.
     # A fake/simulated run can never set this true, so simulation is never
     # mistaken for real-model verification.
     real_model_verified: bool = False
@@ -121,12 +157,20 @@ class MultiModelVerificationReport(BaseModel):
     models_available: int = 0
     models_passed: int = 0
     checks_failed: int = 0
+    check_failures: list[str] = Field(default_factory=list)
     summary: ReportSummary = "degraded"
 
 
 def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThresholds) -> list[str]:
     failures: list[str] = []
     label = result.model_id
+    if result.role == "brain" and result.routing is not None and result.routing.total > 0:
+        min_accuracy = thresholds.min_routing_accuracy
+        if min_accuracy is not None and result.routing.accuracy < min_accuracy:
+            failures.append(
+                f"{label}: routing accuracy {result.routing.accuracy:.2f} "
+                f"below minimum {min_accuracy:.2f}"
+            )
     tps = result.tokens_per_second
     min_tps = thresholds.min_tokens_per_second
     if min_tps is not None and tps is not None and tps < min_tps:
@@ -148,6 +192,13 @@ def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThres
             f"{label}: process_rss_mb {rss / (1024 * 1024):.1f} above maximum {max_rss:.1f}"
         )
     return failures
+
+
+def _active_thresholds(thresholds: ReportThresholds | None) -> ReportThresholds:
+    active = thresholds or ReportThresholds()
+    if active.min_routing_accuracy is None:
+        return active.model_copy(update={"min_routing_accuracy": 0.90})
+    return active
 
 
 def _summary(
@@ -196,7 +247,7 @@ def build_multi_model_report(
     models keep ``available=False`` and a ``skipped_reason`` so they are reported
     as skipped, never passed.
     """
-    active_thresholds = thresholds or ReportThresholds()
+    active_thresholds = _active_thresholds(thresholds)
     simulated = runtime_backend == "fake"
 
     # Redact any path-looking skip reason in-place (basename only).
@@ -205,20 +256,26 @@ def build_multi_model_report(
             result.skipped_reason = redact_reason(result.skipped_reason)
 
     attempted = [result for result in results if result.available]
-    structural_failures = sum(1 for result in attempted if not result.structural_ok)
+    check_failures: list[str] = []
+    for result in attempted:
+        check_failures.extend(result.acceptance_failures(active_thresholds))
     switch_failed = (
         specialist_switch is not None
         and specialist_switch.attempted
         and not specialist_switch.success
     )
-    checks_failed = structural_failures + (1 if switch_failed else 0)
+    if switch_failed:
+        check_failures.append("specialist switching failed")
+    checks_failed = len(check_failures)
 
     failures: list[str] = []
     for result in attempted:
         failures.extend(per_model_threshold_failures(result, active_thresholds))
 
-    models_passed = sum(1 for result in attempted if result.structural_ok)
-    real_model_verified = (not simulated) and any(result.structural_ok for result in attempted)
+    models_passed = sum(1 for result in attempted if result.acceptance_ok(active_thresholds))
+    real_model_verified = (not simulated) and any(
+        result.acceptance_ok(active_thresholds) for result in attempted
+    )
 
     skipped = list(extra_skipped or [])
     skipped.extend(
@@ -255,6 +312,7 @@ def build_multi_model_report(
         models_available=len(attempted),
         models_passed=models_passed,
         checks_failed=checks_failed,
+        check_failures=check_failures,
         summary=summary,
     )
 

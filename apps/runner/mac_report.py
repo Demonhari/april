@@ -35,6 +35,7 @@ class ReportThresholds(BaseModel):
     max_load_seconds: float | None = None
     max_first_token_latency_seconds: float | None = None
     max_rss_mb: float | None = None
+    min_routing_accuracy: float | None = None
 
 
 # An absolute (or home-relative) filesystem path with at least two segments, e.g.

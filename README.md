@@ -190,6 +190,7 @@ APRIL_TEST_GGUF_PATH=/absolute/path/to/model.gguf .venv/bin/python -m pytest tes
 run april verify --real-model /absolute/path/to/model.gguf
 run april model benchmark /absolute/path/to/model.gguf --runs 1 --max-output-tokens 32
 run april verify --target-mac --require-real-model /absolute/path/to/model.gguf
+run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
 ```
 
 #### Machine-readable acceptance report
@@ -218,6 +219,28 @@ structurally-passing run to `degraded`; they never hard-fail on speed alone. Whe
 no real model is supplied the real-model section is marked `attempted: false`, the
 checks are listed as skipped with reasons, and the summary can never be `pass` —
 the run is never silently relabeled as real-model verified.
+
+For full Mac readiness, use the multi-model verifier:
+
+```bash
+run april verify --all-configured-models \
+  --require-real-model \
+  --report data/verification/mac-readiness.json
+```
+
+`--mac-readiness` is the same command. The Brain must load/chat/stream/unload,
+produce structured Brain JSON, run routing evals, and meet
+`--min-routing-accuracy` (default `0.90`). Specialists must also pass a role
+smoke check. Missing optional specialists are skipped/degraded, not passed.
+Useful gates include `--max-rss-mb`, `--min-tokens-per-second`,
+`--max-load-seconds`, and `--max-first-token-latency-seconds`. Fake or simulated
+runs can never set `real_model_verified: true`.
+
+Fake soak is local and non-destructive:
+
+```bash
+run april verify --soak --fake --minutes 10 --report data/verification/soak.json
+```
 
 ### Reproducible development environment
 
@@ -528,8 +551,23 @@ SPA reads it into memory and immediately strips it from the address bar, and nev
 persists it to `localStorage`/`sessionStorage`. The native window injects the token
 through the JS bridge instead of any URL. Screens: Chat (streamed), Projects,
 Approvals (exact-ID, never an implicit "yes"), Memory, Reminders & Tasks with
-today's briefing, Status & Models, and a redacted Activity/Logs feed from
-`GET /diagnostics/activity`. See `apps/desktop/README.md` for details.
+today's briefing, Readiness, Status & Models, and a redacted Activity/Logs feed
+from `GET /diagnostics/activity`. Readiness uses authenticated sanitized
+endpoints (`GET /readiness`, `GET /verification/report/latest`) to show core,
+model, voice, and security setup plus the latest redacted verification report.
+It displays copyable commands only; Desktop never starts voice, wake-word,
+microphone, verification, or model loading automatically. See
+`apps/desktop/README.md` for details.
+
+Unsigned local app launcher scaffolding is available for development only:
+
+```bash
+scripts/create_macos_app_stub.sh
+```
+
+It creates `dist/APRIL.app` around `run april desktop` without sudo, signing,
+notarization, launch-at-login, models, tokens, or secrets. Signed/notarized
+packaging remains future work.
 
 ## Conversations
 
@@ -652,6 +690,7 @@ april voice health
 april voice devices
 april voice ptt
 april voice listen
+run april voice verify-live --report data/verification/voice-live.json
 ```
 
 `run april voice ptt` (no `--seconds`) is genuinely interactive: press Enter to
@@ -672,6 +711,14 @@ doctor` states this explicitly.
 
 Push-to-talk starts only from explicit CLI invocation. API, Runtime, desktop, and
 normal CLI startup never activate the microphone.
+
+`run april voice verify-live` is the explicit live hardware check. It runs voice
+doctor, prints macOS microphone permission guidance, asks before recording a
+short push-to-talk sample, runs local whisper.cpp STT, stores transcript length
+only, asks whether transcription was correct, synthesizes a local Piper phrase,
+plays it, asks whether playback was heard, and writes a redacted report when
+`--report` is supplied. Temporary audio is deleted by default and retained only
+with `--retain-debug-audio` or `retain_debug_audio`.
 
 ## Proactive Scheduler
 
@@ -721,7 +768,9 @@ make typecheck
 make check
 run april config validate
 run april verify --fake
+run april verify --soak --fake --minutes 10
 run april verify --target-mac
+run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
 ```
 
 Tests use fake model/audio components and do not require GGUF files, network access, microphones, speakers, whisper.cpp, Piper, openWakeWord, or `llama-cpp-python`.
@@ -738,6 +787,12 @@ when a local model is supplied, voice dependencies, and push-to-talk smoke
 steps. It never downloads models or changes system settings. Use
 `--require-real-model` with a GGUF path or `APRIL_TEST_GGUF_PATH` when missing
 real-model support should fail the command.
+
+`run april verify --all-configured-models` (`--mac-readiness`) is the stricter
+multi-model Mac-readiness gate. It never downloads models; absent configured
+models are skipped/degraded, while Brain JSON/routing and specialist smoke
+failures prevent a pass. Reports under `data/verification/` are redacted and are
+the only files the Desktop latest-report viewer reads.
 
 ## Security Model
 

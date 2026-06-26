@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,7 +23,12 @@ from april_common.errors import (
     error_payload,
 )
 from april_common.path_security import PathPolicy, normalize_existing_path
-from april_common.settings import AprilSettings, get_settings
+from april_common.settings import (
+    KNOWN_DEFAULT_API_TOKENS,
+    KNOWN_DEFAULT_RUNTIME_TOKENS,
+    AprilSettings,
+    get_settings,
+)
 from april_common.time import utc_now
 from services.api.auth import require_bearer_token
 from services.api.dependencies import ApiContainer, build_container
@@ -39,7 +46,7 @@ from services.api.schemas import (
 from services.april_runtime.schemas import LoadModelRequest
 from services.memory.writer import MemoryWriter
 from services.scheduler import compose_briefing, compute_repo_activity
-from services.voice.health import voice_health
+from services.voice.health import query_audio_devices, voice_health
 
 _DESKTOP_WEB_DIR = Path(__file__).resolve().parents[2] / "apps" / "desktop" / "web"
 
@@ -77,6 +84,14 @@ _ACTIVITY_ALLOWED_KEYS = frozenset(
         "date",
     }
 )
+
+_PATH_TEXT_RE = re.compile(r"~?(?:/[\w.\-]+){2,}/?")
+_VERIFICATION_REPORT_TYPES = {
+    "multi_model",
+    "target_mac",
+    "voice_live",
+    "soak",
+}
 
 
 def _read_activity_events(audit_path: Path, limit: int) -> list[dict[str, Any]]:
@@ -233,6 +248,14 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         capped = max(1, min(limit, _ACTIVITY_MAX_LIMIT))
         events = _read_activity_events(active.settings.audit_path, capped)
         return {"events": events, "count": len(events)}
+
+    @app.get("/readiness")
+    async def readiness(active: ApiContainer = Depends(authorized)) -> object:
+        return await _readiness_payload(active)
+
+    @app.get("/verification/report/latest")
+    async def verification_report_latest(active: ApiContainer = Depends(authorized)) -> object:
+        return _latest_verification_report(active.settings)
 
     @app.post("/chat")
     async def chat(
@@ -619,6 +642,341 @@ def _redact_health_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_health_payload(item) for item in value]
     return value
+
+
+async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
+    runtime_status = "unavailable"
+    runtime_backend = "unknown"
+    runtime_simulated: bool | None = None
+    runtime_health: dict[str, Any]
+    try:
+        raw_runtime = await active.runtime_client.health(timeout=1.0)
+        runtime_health = _safe_runtime_health(raw_runtime)
+        runtime_status = str(raw_runtime.get("status", "unknown"))
+        runtime_backend = str(raw_runtime.get("backend", "unknown"))
+        simulated = raw_runtime.get("simulated")
+        runtime_simulated = simulated if isinstance(simulated, bool) else None
+    except AprilError as exc:
+        runtime_health = {"status": "unavailable", "error": exc.message}
+
+    try:
+        raw_models = await active.runtime_client.models()
+        models = [
+            _safe_model_entry(model, runtime_backend) for model in raw_models.get("models", [])
+        ]
+    except AprilError:
+        models = []
+    if not models and isinstance(runtime_health.get("models"), list):
+        models = [
+            _safe_model_entry(model, runtime_backend)
+            for model in runtime_health.get("models", [])
+            if isinstance(model, dict)
+        ]
+
+    vector = _redact_health_payload(active.vector_memory.health())
+    devices = query_audio_devices()
+    voice_artifacts = [
+        _voice_artifact(
+            active.settings, "whisper binary", active.settings.voice.whisper_binary_path
+        ),
+        _voice_artifact(active.settings, "whisper model", active.settings.voice.whisper_model_path),
+        _voice_artifact(active.settings, "piper binary", active.settings.voice.piper_binary_path),
+        _voice_artifact(active.settings, "piper model", active.settings.voice.piper_model_path),
+        _voice_artifact(
+            active.settings, "wake-word model", active.settings.voice.wake_word_model_path
+        ),
+    ]
+    api_localhost = active.settings.api.host in {"127.0.0.1", "localhost"}
+    runtime_localhost = active.settings.runtime.url.startswith(
+        ("http://127.0.0.1", "http://localhost")
+    )
+    degraded = (
+        str(runtime_status) not in {"ok", "degraded"}
+        or not active.database.path.exists()
+        or runtime_simulated is True
+    )
+    return {
+        "status": "degraded" if degraded else "ok",
+        "core": {
+            "api_health": "ok",
+            "runtime_health": runtime_status,
+            "runtime_backend": runtime_backend,
+            "runtime_simulated": runtime_simulated,
+            "database": {
+                "status": "ok" if active.database.path.exists() else "missing",
+                "configured": True,
+            },
+            "vector_index": vector,
+            "scheduler": {
+                "enabled": active.settings.scheduler.enabled,
+                "running": active.scheduler.running if active.scheduler else False,
+                "briefing_enabled": active.settings.scheduler.briefing_enabled,
+            },
+        },
+        "models": {
+            "llama_cpp_python_available": importlib.util.find_spec("llama_cpp") is not None,
+            "registered": models,
+        },
+        "verification_guidance": {
+            "commands": [
+                "run april verify --all-configured-models --require-real-model "
+                "--report data/verification/mac-readiness.json",
+                "run april verify /absolute/path/to/model.gguf --target-mac "
+                "--require-real-model --report data/verification/single-model.json",
+            ],
+            "warnings": [
+                "Fake verification is not real model verification.",
+                "Desktop never loads models or starts voice automatically.",
+                "Reports are redacted and show model basenames only.",
+            ],
+        },
+        "voice": {
+            "enabled": active.settings.voice.enabled,
+            "sounddevice_available": bool(devices.get("sounddevice_installed")),
+            "input_device_count": len(devices.get("input_devices", [])),
+            "output_device_count": len(devices.get("output_devices", [])),
+            "macos_microphone_permission_guidance": (
+                "macOS: System Settings > Privacy & Security > Microphone. "
+                "Allow the terminal app used to run APRIL."
+            ),
+            "artifacts": voice_artifacts,
+            "push_to_talk_available_without_wake_word": True,
+        },
+        "security": {
+            "allowed_filesystem_roots": [
+                {
+                    "basename": root.name or str(root),
+                    "exists": root.exists(),
+                    "within_april_home": _is_relative_to(root, active.settings.home),
+                }
+                for root in active.settings.allowed_roots
+            ],
+            "api_token": {"status": "configured" if active.settings.api.token else "missing"},
+            "runtime_token": {
+                "status": "configured" if active.settings.runtime.token else "missing"
+            },
+            "api_localhost_binding": api_localhost,
+            "runtime_localhost_binding": runtime_localhost,
+            "cors_enabled": active.settings.api.cors_enabled,
+            "development_token_warning": _development_token_warning(active.settings),
+        },
+        "next_actions": [
+            "run april verify --all-configured-models --require-real-model "
+            "--report data/verification/mac-readiness.json",
+            "run april voice verify-live --report data/verification/voice-live.json",
+            "scripts/create_macos_app_stub.sh",
+        ],
+    }
+
+
+def _safe_runtime_health(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = _redact_health_payload(payload)
+    if isinstance(safe, dict) and isinstance(safe.get("models"), list):
+        backend = str(safe.get("backend", "unknown"))
+        safe["models"] = [
+            _safe_model_entry(model, backend) for model in safe["models"] if isinstance(model, dict)
+        ]
+    return safe if isinstance(safe, dict) else {"status": "unknown"}
+
+
+def _safe_model_entry(model: dict[str, Any], runtime_backend: str) -> dict[str, Any]:
+    path = model.get("path")
+    backend = str(model.get("backend") or runtime_backend or "unknown")
+    return {
+        "id": str(model.get("id", "unknown")),
+        "name": str(model.get("name", "unknown")),
+        "role": str(model.get("role", "unknown")),
+        "backend": backend,
+        "state": str(model.get("state", "unknown")),
+        "keep_loaded": bool(model.get("keep_loaded", False)),
+        "missing_path": bool(model.get("missing_path", False)),
+        "simulated": backend == "fake" or runtime_backend == "fake",
+        "path_basename": _basename(path),
+        "context_size": model.get("context_size"),
+        "load_error": (
+            _redact_path_text(str(model.get("load_error"))) if model.get("load_error") else None
+        ),
+    }
+
+
+def _voice_artifact(settings: AprilSettings, name: str, path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {"name": name, "configured": False, "missing": True, "basename": None}
+    resolved = settings.resolve_path(path)
+    return {
+        "name": name,
+        "configured": True,
+        "missing": not resolved.exists(),
+        "basename": resolved.name,
+    }
+
+
+def _development_token_warning(settings: AprilSettings) -> str | None:
+    if settings.api.token in KNOWN_DEFAULT_API_TOKENS:
+        return "API token uses the development default."
+    if settings.runtime.token is None or settings.runtime.token in KNOWN_DEFAULT_RUNTIME_TOKENS:
+        return "Runtime token uses the development default or is missing."
+    return None
+
+
+def _latest_verification_report(settings: AprilSettings) -> dict[str, Any]:
+    root = (settings.home / "data" / "verification").resolve()
+    if not root.exists():
+        return {
+            "status": "not_verified",
+            "message": "not verified yet",
+            "report": None,
+        }
+    candidates = [
+        path.resolve()
+        for path in root.glob("*.json")
+        if path.is_file() and _is_relative_to(path.resolve(), root)
+    ]
+    if not candidates:
+        return {
+            "status": "not_verified",
+            "message": "not verified yet",
+            "report": None,
+        }
+    latest = max(candidates, key=lambda path: path.stat().st_mtime)
+    try:
+        payload = json.loads(latest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "status": "unreadable",
+            "message": "latest verification report could not be read",
+            "report": None,
+        }
+    if not isinstance(payload, dict):
+        return {"status": "unreadable", "message": "latest report shape is invalid", "report": None}
+    return {
+        "status": "ok",
+        "message": "latest verification report",
+        "report": _safe_report_payload(payload, latest),
+    }
+
+
+def _safe_report_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    report_type = str(payload.get("report_type") or _infer_report_type(payload))
+    if report_type not in _VERIFICATION_REPORT_TYPES:
+        report_type = "unknown"
+    summary = str(payload.get("summary", "degraded"))
+    safe: dict[str, Any] = {
+        "file_basename": path.name,
+        "generated_at": str(payload.get("generated_at", "")),
+        "report_type": report_type,
+        "summary": summary,
+        "real_model_verified": _report_real_model_verified(payload, report_type),
+        "skipped": _safe_skipped(payload.get("skipped")),
+        "threshold_failures": _safe_string_list(payload.get("threshold_failures")),
+    }
+    if isinstance(payload.get("models"), list):
+        safe["models"] = [
+            {
+                "model_id": str(model.get("model_id", model.get("id", "unknown"))),
+                "role": str(model.get("role", "unknown")),
+                "backend": str(model.get("backend", "unknown")),
+                "path_basename": _basename(model.get("path_basename") or model.get("path")),
+                "available": bool(model.get("available", False)),
+                "skipped_reason": _redact_path_text(str(model.get("skipped_reason")))
+                if model.get("skipped_reason")
+                else None,
+            }
+            for model in payload["models"]
+            if isinstance(model, dict)
+        ]
+    if isinstance(payload.get("real_model"), dict):
+        real_model = payload["real_model"]
+        safe["models"] = [
+            {
+                "model_id": str(real_model.get("model_id", "unknown")),
+                "role": str(real_model.get("role", "unknown")),
+                "backend": str(payload.get("runtime_backend", "unknown")),
+                "path_basename": _basename(real_model.get("path_basename")),
+                "available": bool(real_model.get("attempted", False)),
+                "skipped_reason": None,
+            }
+        ]
+    if "checks_failed" in payload:
+        safe["checks_failed"] = payload.get("checks_failed")
+    if "check_failures" in payload:
+        safe["check_failures"] = _safe_string_list(payload.get("check_failures"))
+    if "failures" in payload:
+        safe["failures"] = _safe_string_list(payload.get("failures"))
+    return safe
+
+
+def _infer_report_type(payload: dict[str, Any]) -> str:
+    if "real_model" in payload:
+        return "target_mac"
+    if "recording_success" in payload or "playback_user_confirmed" in payload:
+        return "voice_live"
+    if "iterations" in payload and "latency_ms" in payload:
+        return "soak"
+    return "unknown"
+
+
+def _report_real_model_verified(payload: dict[str, Any], report_type: str) -> bool:
+    if isinstance(payload.get("real_model_verified"), bool):
+        return bool(payload["real_model_verified"])
+    if report_type == "target_mac" and isinstance(payload.get("real_model"), dict):
+        real_model = payload["real_model"]
+        return (
+            str(payload.get("runtime_backend")) != "fake"
+            and bool(real_model.get("attempted"))
+            and bool(real_model.get("load_success"))
+            and bool(real_model.get("chat_success"))
+            and bool(real_model.get("streaming_success"))
+            and bool(real_model.get("unload_success"))
+        )
+    return False
+
+
+def _safe_skipped(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    skipped: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        skipped.append(
+            {
+                "name": str(item.get("name", "unknown")),
+                "reason": _redact_path_text(str(item.get("reason", ""))),
+            }
+        )
+    return skipped
+
+
+def _safe_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_redact_path_text(str(item)) for item in value]
+
+
+def _redact_path_text(text: str) -> str:
+    def _basename(match: re.Match[str]) -> str:
+        name = Path(match.group(0)).name
+        return name or match.group(0)
+
+    return _PATH_TEXT_RE.sub(_basename, text)
+
+
+def _basename(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if not text or text == "[REDACTED]":
+        return None
+    return Path(text).name
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 async def _execute_approved_tool(

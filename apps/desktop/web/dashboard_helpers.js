@@ -331,6 +331,40 @@
     return patch;
   }
 
+  function basenameOnly(value) {
+    if (isMissing(value)) return "";
+    const text = String(value);
+    if (text === "[REDACTED]") return "";
+    const normalized = text.replace(/\\/g, "/");
+    const parts = normalized.split("/").filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : normalized;
+  }
+
+  function verificationSummary(latest) {
+    if (!latest || latest.status === "not_verified" || !latest.report) {
+      return {
+        status: "not_verified",
+        title: "not verified yet",
+        summary: "degraded",
+        real_model_verified: false,
+        report_type: "none",
+      };
+    }
+    const report = latest.report || {};
+    return {
+      status: statusWord(latest.status),
+      title: statusWord(latest.message || "latest verification report"),
+      generated_at: statusWord(report.generated_at),
+      report_type: statusWord(report.report_type),
+      summary: statusWord(report.summary),
+      real_model_verified: report.real_model_verified === true,
+      skipped_count: Array.isArray(report.skipped) ? report.skipped.length : 0,
+      threshold_failure_count: Array.isArray(report.threshold_failures)
+        ? report.threshold_failures.length
+        : 0,
+    };
+  }
+
   root.AprilDashboard = {
     UNKNOWN: UNKNOWN,
     UNAVAILABLE: UNAVAILABLE,
@@ -355,6 +389,8 @@
     activityRow: activityRow,
     summarizeStreamEvent: summarizeStreamEvent,
     streamStateUpdate: streamStateUpdate,
+    basenameOnly: basenameOnly,
+    verificationSummary: verificationSummary,
   };
 
   if (typeof module !== "undefined" && module.exports) {

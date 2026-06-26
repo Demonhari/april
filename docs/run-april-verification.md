@@ -6,8 +6,10 @@ APRIL release checks should include these local launcher gates:
 run april config validate
 run april config inspect
 run april verify --fake
+run april verify --soak --fake --minutes 10
 run april verify --workflow
 run april verify --target-mac
+run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
 run april model doctor
 run april model profile list
 run april status
@@ -21,6 +23,7 @@ run april reminder list --fake
 run april task list --fake
 run april voice health --fake
 run april voice doctor --fake
+run april voice verify-live --report data/verification/voice-live.json
 run april memory doctor
 run april eval brain --fake
 ```
@@ -69,6 +72,60 @@ models, installs packages, changes system settings, or starts persistent
 services. Voice push-to-talk remains a manual check because it needs local
 microphone permission, configured whisper.cpp/Piper assets, and user-observable
 audio I/O.
+
+Multi-model Mac readiness verifies every configured local GGUF model that is
+present and readable:
+
+```bash
+run april verify --all-configured-models \
+  --require-real-model \
+  --report data/verification/mac-readiness.json
+```
+
+`--mac-readiness` is an alias for `--all-configured-models`. Missing optional
+specialist models are reported as skipped/degraded, never passed.
+`--require-real-model` fails if no real configured GGUF model is exercised. A
+fake/simulated runtime is never marked `real_model_verified`.
+
+The Brain model must load, chat, stream, unload, return structured Brain JSON,
+run routing evals, and meet `--min-routing-accuracy` (default `0.90`). Specialist
+models must load, chat, stream, pass their role smoke check, and unload. Optional
+performance thresholds include `--max-rss-mb`, `--min-tokens-per-second`,
+`--max-load-seconds`, and `--max-first-token-latency-seconds`.
+
+Single-model target-Mac verification remains available:
+
+```bash
+run april verify /absolute/path/to/model.gguf \
+  --target-mac \
+  --require-real-model \
+  --report data/verification/single-model.json
+```
+
+Reports are redacted: no prompts, generated text, tokens, secrets, raw tool
+arguments, file contents, or full paths. Model paths are basenames only. Real
+verification requires local GGUF files and `llama-cpp-python`; APRIL never
+downloads models or installs packages.
+
+Fake soak is non-destructive and fake-backend-only:
+
+```bash
+run april verify --soak --fake --minutes 10 --report data/verification/soak.json
+```
+
+It repeatedly checks health, chat, and model listing with bounded delay, tracks
+failures/latency/RSS when available, and never requires real models or voice.
+
+Live voice verification is explicit and interactive:
+
+```bash
+run april voice verify-live --report data/verification/voice-live.json
+```
+
+It runs voice doctor, shows macOS microphone guidance, asks before recording,
+uses push-to-talk only, runs local whisper.cpp and Piper if configured, stores
+transcript length rather than transcript text, deletes temporary audio by
+default, and never starts wake-word listening or uploads audio.
 
 The fake brain eval uses the deterministic fallback router and validates schema
 validity plus routing expectations for ordinary chat, planning, coding,

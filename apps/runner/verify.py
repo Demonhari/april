@@ -1779,12 +1779,12 @@ class AllConfiguredModelsVerifier(
                 self.results.append(result)
                 self.checks.append(
                     VerifyCheck(
-                        name=f"model {entry.model.id} load/chat/stream/unload",
-                        ok=result.structural_ok,
+                        name=f"model {entry.model.id} acceptance gates",
+                        ok=result.acceptance_ok(self.thresholds),
                         detail=(
                             f"tps={result.tokens_per_second}"
-                            if result.structural_ok
-                            else "structural failure"
+                            if result.acceptance_ok(self.thresholds)
+                            else "; ".join(result.acceptance_failures(self.thresholds))
                         ),
                     )
                 )

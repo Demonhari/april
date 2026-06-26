@@ -147,6 +147,66 @@ def test_structural_failure_is_fail() -> None:
     assert report.checks_failed == 1
 
 
+def test_brain_structured_json_false_fails() -> None:
+    brain = _brain_pass()
+    brain.structured_brain_json_success = False
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[brain],
+        specialist_switch=_all_switch_ok(),
+    )
+    assert report.summary == "fail"
+    assert report.models_passed == 0
+    assert any("structured Brain JSON" in failure for failure in report.check_failures)
+
+
+def test_routing_below_threshold_fails_and_is_reported() -> None:
+    brain = _brain_pass()
+    brain.routing = RoutingReport(total=10, passed=8, accuracy=0.8)
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[brain],
+        specialist_switch=_all_switch_ok(),
+        thresholds=ReportThresholds(min_routing_accuracy=0.9),
+    )
+    assert report.summary == "fail"
+    assert report.models_passed == 0
+    assert report.real_model_verified is False
+    assert any("routing accuracy 0.80 below minimum 0.90" in item for item in report.check_failures)
+    assert any(
+        "routing accuracy 0.80 below minimum 0.90" in item for item in report.threshold_failures
+    )
+
+
+def test_brain_without_routing_evals_fails() -> None:
+    brain = _brain_pass()
+    brain.routing = RoutingReport(total=0, passed=0, accuracy=0.0)
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[brain],
+        specialist_switch=_all_switch_ok(),
+    )
+    assert report.summary == "fail"
+    assert any("routing evals did not run" in failure for failure in report.check_failures)
+
+
+def test_specialist_smoke_false_fails() -> None:
+    coding = _coding_pass()
+    coding.smoke_success = False
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[_brain_pass(), coding],
+        specialist_switch=_all_switch_ok(),
+    )
+    assert report.summary == "fail"
+    assert report.models_passed == 1
+    assert any("specialist role smoke" in failure for failure in report.check_failures)
+
+
 def test_specialist_switch_failure_is_fail() -> None:
     switch = _all_switch_ok()
     switch.brain_usable_after = False

@@ -40,6 +40,7 @@ Core API responsibilities:
 - reminders and task inspection
 - tool execution
 - runtime proxying and token streaming
+- authenticated readiness and latest redacted verification-report summaries
 
 All tool calls now pass through a trusted `ToolExecutionContext`. The context is
 created by APRIL application code, not by the model, and carries request ID,
@@ -70,6 +71,14 @@ and writes service logs under `logs/`. It does not start desktop UI or
 background microphone capture. Voice starts only through explicit `voice`
 commands.
 
+Desktop is a static HTML/CSS/vanilla JS SPA served by the Core API. Its
+Readiness screen calls authenticated sanitized endpoints only:
+`GET /readiness` and `GET /verification/report/latest`. The latest-report
+endpoint reads only APRIL-owned `data/verification/*.json`, accepts no path input,
+and projects known report types into safe fields. Desktop never starts model
+loading, verification, microphone recording, wake-word listening, or command
+execution automatically.
+
 Specialist agents now execute through `StructuredAgentLoop` by default. The
 Brain still selects the agent for natural `/chat`, but Coding, Reading,
 Reasoning, System Action, and tool-using Creative turns run as strict JSON
@@ -95,3 +104,11 @@ patch approval/application, tampered artifact rejection, approval replay
 rejection, repo override rejection, command cwd forcing, audit/tool-call checks,
 agent run/iteration/suspension rows, and runtime streaming, then stops the
 services.
+
+`run april verify --all-configured-models` (`--mac-readiness`) is the real
+multi-model readiness path. It requires local GGUF files and `llama-cpp-python`
+for real verification, skips missing optional models instead of passing them,
+and writes redacted reports with basenames only. `run april voice verify-live` is
+the explicit live audio path and asks before recording. `scripts/create_macos_app_stub.sh`
+creates an unsigned local development launcher only; it bundles no models,
+tokens, voice assets, signing, or launch-at-login service.

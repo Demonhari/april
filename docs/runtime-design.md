@@ -42,6 +42,20 @@ specialist execution, approval suspension/resume, and SSE streaming against the
 fake backend. It asserts exactly one runtime `usage` event for the stream it
 opens.
 
+`run april verify --all-configured-models` (`--mac-readiness`) exercises every
+configured local GGUF model that is present and readable. The Brain does not
+count as passing unless load, chat, stream, unload, structured Brain JSON,
+routing eval execution, and `--min-routing-accuracy` (default `0.90`) all pass.
+Specialists do not count as passing unless load, chat, stream, role smoke, and
+unload pass. Missing optional specialists are skipped/degraded, never passed.
+`--require-real-model` fails if no real configured GGUF is exercised, and fake or
+simulated runtime reports can never set `real_model_verified`.
+
+`run april verify --soak --fake --minutes 10` is a bounded fake-backend soak
+harness. It repeatedly checks health, chat, and model listing, optionally cycles
+fake load/unload, records failures/latency/RSS when available, and never requires
+real models or voice.
+
 Generation options are backend-neutral for `temperature`, `top_p`,
 `max_output_tokens`, stop sequences, and optional seed. Lifecycle state tracks
 loaded/unloaded/error state, active requests, generation errors, recent

@@ -48,6 +48,7 @@ april voice test-stt /path/to/audio.wav
 april voice test-tts "Hello Hari"
 april voice ptt
 april voice listen
+run april voice verify-live --report data/verification/voice-live.json
 ```
 
 `voice ptt` keeps a persistent conversation ID for the loop, transcribes with
@@ -75,3 +76,24 @@ a custom local openWakeWord model at `voice.wake_word_model_path`; APRIL never
 downloads or trains one, and `voice doctor` says so explicitly. These paths are
 verified with synthetic PCM, a fake microphone, and mocked input only; a live
 microphone, whisper.cpp, Piper, and openWakeWord are not exercised here.
+
+## Live verification
+
+`run april voice verify-live` is the explicit live-hardware path. It does not
+start from Desktop or API startup. It:
+
+- runs voice doctor and prints macOS microphone permission guidance
+- asks for confirmation before any recording
+- records one short push-to-talk sample
+- runs local whisper.cpp STT and reports transcript length only by default
+- asks the user whether transcription was correct
+- synthesizes one local Piper phrase, plays it, and asks whether playback was heard
+- writes a redacted report when `--report` is supplied
+
+The report includes timestamp, platform, sounddevice availability, input/output
+device counts, configured/missing whisper.cpp/Piper/wake-word artifacts,
+recording/STT/TTS/playback booleans, skipped checks, and final
+`pass`/`degraded`/`fail`. It never includes transcript text, audio bytes, tokens,
+or full paths. Temporary audio is deleted by default and retained only with
+`--retain-debug-audio` or `voice.retain_debug_audio`. Tests use fake microphone,
+STT, TTS, and player adapters only.

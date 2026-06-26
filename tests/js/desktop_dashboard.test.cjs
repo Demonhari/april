@@ -176,6 +176,31 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
   check("stream patch route", metaPatch.lastRoute === "fallback");
 }
 
+// --- readiness/report helpers --------------------------------------------
+{
+  check("basename strips unix path", D.basenameOnly("/Users/hari/models/brain.gguf") === "brain.gguf");
+  check("basename strips windows path", D.basenameOnly("C:\\models\\brain.gguf") === "brain.gguf");
+  check("basename redacted empty", D.basenameOnly("[REDACTED]") === "");
+  const notVerified = D.verificationSummary({ status: "not_verified", report: null });
+  check("verification not verified title", notVerified.title === "not verified yet");
+  check("verification not verified real false", notVerified.real_model_verified === false);
+  const latest = D.verificationSummary({
+    status: "ok",
+    message: "latest verification report",
+    report: {
+      generated_at: "2026-06-26T00:00:00Z",
+      report_type: "multi_model",
+      summary: "degraded",
+      real_model_verified: false,
+      skipped: [{ name: "april-reading" }],
+      threshold_failures: ["routing accuracy low"],
+    },
+  });
+  check("verification latest report type", latest.report_type === "multi_model");
+  check("verification skipped count", latest.skipped_count === 1);
+  check("verification threshold count", latest.threshold_failure_count === 1);
+}
+
 if (failures > 0) {
   console.error(failures + " desktop dashboard checks failed");
   process.exit(1);

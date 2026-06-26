@@ -1,10 +1,12 @@
-# Direct dependency constraints for reproducible APRIL dev installs.
+# Direct dependency constraints for reproducible APRIL runtime/dev/editable installs.
 # Regenerate intentionally from a provisioned dev environment with:
 #   .venv/bin/python -m pip freeze --exclude-editable
-# Then copy only base project dependencies and the [dev] extra here.
+# Then copy only base runtime dependencies, the [dev] extra, and build-backend
+# packages required by pyproject.toml for reproducible editable installs.
 #
 # Do not add llama-cpp-python, sounddevice, openwakeword, GGUF files, or
 # platform-specific voice/runtime wheels to this base constraints file.
+hatchling==1.30.1
 aiosqlite==0.22.1
 fastapi==0.137.2
 httpx==0.28.1

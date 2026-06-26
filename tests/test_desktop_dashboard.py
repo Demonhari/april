@@ -37,6 +37,8 @@ def test_dashboard_is_default_screen() -> None:
     assert nav_order, "no nav buttons found"
     assert nav_order[0] == "dashboard"
     assert "chat" in nav_order
+    assert "readiness" in nav_order
+    assert ">Readiness<" in html
 
 
 def test_dashboard_helpers_loaded_before_app() -> None:
@@ -90,6 +92,21 @@ def test_app_never_persists_or_logs_token() -> None:
         for line in text.splitlines():
             if "console" in line:
                 assert "TOKEN" not in line
+
+
+def test_readiness_screen_is_static_and_token_free() -> None:
+    app = _read("app.js")
+    assert "screens.readiness" in app
+    segment = app[app.index("screens.readiness") : app.index("screens.status")]
+    assert "/readiness" in segment
+    assert "/verification/report/latest" in segment
+    assert "local-dev-token" not in segment
+    assert "TOKEN" not in segment
+    assert "localStorage" not in segment
+    assert "sessionStorage" not in segment
+    assert "document.cookie" not in segment
+    assert "run april verify --all-configured-models --require-real-model" in segment
+    assert "run april voice verify-live" in segment
 
 
 def test_authenticated_polling_starts_after_token() -> None:
@@ -210,7 +227,14 @@ def test_dashboard_polled_endpoints_are_authenticated_and_shaped(settings_tmp) -
         health_body = health.json()
         assert health_body["database"]["path"] == "[REDACTED]"
         assert str(settings_tmp.database_path) not in json.dumps(health_body)
-        for path in ("/approvals", "/runtime/models", "/reminders", "/tasks"):
+        for path in (
+            "/approvals",
+            "/runtime/models",
+            "/reminders",
+            "/tasks",
+            "/readiness",
+            "/verification/report/latest",
+        ):
             assert client.get(path).status_code in (401, 403), path
             body = client.get(path, headers=headers).json()
             assert isinstance(body, dict), path
@@ -218,6 +242,11 @@ def test_dashboard_polled_endpoints_are_authenticated_and_shaped(settings_tmp) -
         assert "models" in client.get("/runtime/models", headers=headers).json()
         assert "reminders" in client.get("/reminders", headers=headers).json()
         assert "tasks" in client.get("/tasks", headers=headers).json()
+        readiness = client.get("/readiness", headers=headers).json()
+        assert "models" in readiness
+        assert str(settings_tmp.home) not in json.dumps(readiness)
+        latest = client.get("/verification/report/latest", headers=headers).json()
+        assert latest["message"] == "not verified yet"
         activity = client.get("/diagnostics/activity?limit=80", headers=headers).json()
         assert "events" in activity
         assert "count" in activity

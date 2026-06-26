@@ -40,9 +40,38 @@ polling the existing authenticated endpoints (health ~8s, approvals ~8s, activit
 ~10s, models ~13s, reminders/tasks/briefing ~45s); a failed poll keeps the last
 known data and flips the rail to a degraded/offline state instead of blanking.
 
-The cockpit is primary; every previous screen (Chat, Projects, Approvals, Memory,
-Reminders, Status & Models, Activity) is still reachable from the compact top nav
-as a detail screen.
+The cockpit is primary; every previous screen plus **Readiness** (Chat, Projects,
+Approvals, Memory, Reminders, Readiness, Status & Models, Activity) is still
+reachable from the compact top nav as a detail screen.
+
+## Readiness screen
+
+Readiness is an authenticated, local-only setup detail screen backed by
+`GET /readiness` and `GET /verification/report/latest`. It renders only sanitized
+fields:
+
+- Core readiness: API health, Runtime health, fake/simulated vs real backend,
+  database, vector index, and scheduler state.
+- Model readiness: registered model id/name/role/backend/state/keep_loaded,
+  missing-path and simulated badges, `llama-cpp-python` availability, and model
+  path basenames only.
+- Verification guidance: exact `run april verify --all-configured-models
+  --require-real-model --report data/verification/mac-readiness.json` and
+  single-model target-Mac commands, plus a warning that fake verification is not
+  real model verification.
+- Voice readiness: voice enabled/disabled, macOS microphone guidance,
+  sounddevice availability/counts when safely queryable, configured/missing
+  whisper.cpp/Piper/wake-word artifacts, and push-to-talk availability without
+  wake word.
+- Security readiness: allowed-root labels, token configured/missing status only,
+  localhost binding state, CORS state, and development-token warnings.
+- Latest report: generated timestamp, report type, pass/degraded/fail summary,
+  `real_model_verified`, skipped checks, threshold failures, and model basenames.
+
+If no report exists, it shows `not verified yet`. The report endpoint reads only
+APRIL's own `data/verification/*.json` directory and accepts no arbitrary path.
+The screen displays code blocks and text only; it never starts verification,
+loads a model, records audio, starts wake-word listening, or executes commands.
 
 ## Launch
 
@@ -74,6 +103,16 @@ event), so it never appears in any URL and is never assumed to be a synchronousl
 injected global. If pywebview is not installed, `--native` prints a message and
 falls back to the browser path. The default path needs zero extra runtime
 dependencies.
+
+For a local unsigned app bundle wrapper around the same command:
+
+```bash
+scripts/create_macos_app_stub.sh
+```
+
+This creates `dist/APRIL.app` as a development launcher only. It performs no
+signing/notarization, installs nothing, and bundles no models, voice binaries,
+tokens, or secrets. Signed packaging and launch-at-login are future work.
 
 No authenticated request is issued until token acquisition succeeds. If it fails,
 the SPA shows a safe local "locked" screen and starts no polling; the dashboard,

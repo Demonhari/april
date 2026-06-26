@@ -9,8 +9,11 @@ from typer.testing import CliRunner
 from apps.runner.install import install_wrappers
 from apps.runner.main import app
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
+from apps.runner.soak import SoakReport
 from apps.runner.verify import BenchmarkResult, VerifyCheck
+from apps.runner.voice_live import VoiceLiveReport
 from april_common.config_validation import validate_configuration
+from april_common.settings import load_settings
 
 
 class FakeManager:
@@ -212,6 +215,51 @@ def test_run_april_voice_reminder_and_task_commands_delegate(tmp_path: Path, mon
     ]
 
 
+def test_run_april_voice_verify_live_uses_local_verifier(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    manager.settings = load_settings(root=tmp_path)  # type: ignore[attr-defined]
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.collect_voice_doctor",
+        lambda settings: {"status": "ok", "macos_microphone_permission_guidance": "guidance"},
+    )
+    captured: dict[str, object] = {}
+
+    async def _fake_voice_live(**kwargs: object) -> VoiceLiveReport:
+        captured.update(kwargs)
+        return VoiceLiveReport(
+            timestamp="2026-06-26T00:00:00Z",
+            platform="Darwin 24",
+            sounddevice_available=True,
+            input_device_count=1,
+            output_device_count=1,
+            whisper_binary_available=True,
+            whisper_model_available=True,
+            piper_binary_available=True,
+            piper_model_available=True,
+            wake_word_model_available=False,
+            recording_success=True,
+            stt_success=True,
+            transcript_length=10,
+            transcription_user_confirmed=True,
+            tts_success=True,
+            playback_user_confirmed=True,
+            summary="pass",
+        )
+
+    monkeypatch.setattr("apps.runner.main.run_voice_live_verification", _fake_voice_live)
+    out = tmp_path / "voice-live.json"
+    result = CliRunner().invoke(
+        app,
+        ["april", "voice", "verify-live", "--seconds", "1", "--report", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["settings"] is manager.settings
+    assert captured["seconds"] == 1
+    assert captured["report_path"] == out
+    assert "transcript_length=10" in result.output
+
+
 def test_run_april_config_validate_reports_success(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
@@ -258,6 +306,47 @@ def test_run_april_verify_fake_reports_table(tmp_path: Path, monkeypatch) -> Non
     assert "runtime health" in result.output
 
 
+def test_run_april_verify_fake_soak_short_mode(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    captured: dict[str, object] = {}
+
+    def _fake_soak(home: Path, **kwargs: object) -> SoakReport:
+        captured["home"] = home
+        captured.update(kwargs)
+        return SoakReport(
+            generated_at="2026-06-26T00:00:00Z",
+            duration_seconds=0.6,
+            iterations=2,
+            latency_ms={"median": 1.0},
+            summary="pass",
+        )
+
+    monkeypatch.setattr("apps.runner.main.run_fake_soak", _fake_soak)
+    out = tmp_path / "soak.json"
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "verify",
+            "--soak",
+            "--fake",
+            "--minutes",
+            "0.01",
+            "--report",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["home"] == tmp_path
+    assert captured["minutes"] == 0.01
+    assert out.exists()
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["report_type"] == "soak"
+    assert data["real_model_verified"] is False
+    assert "APRIL Fake Soak Verification" in result.output
+
+
 def test_run_april_verify_target_mac_writes_report(tmp_path: Path, monkeypatch) -> None:
     from apps.runner.mac_report import MacVerificationReport, RealModelReport
 
@@ -297,6 +386,72 @@ def test_run_april_verify_target_mac_writes_report(tmp_path: Path, monkeypatch) 
     assert data["real_model"]["attempted"] is False
     assert "summary: degraded" in result.output
     assert captured["thresholds"].min_tokens_per_second == 5  # type: ignore[attr-defined]
+
+
+def test_run_april_verify_all_configured_cli_flags(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    captured: dict[str, object] = {}
+
+    class _StubAllVerifier:
+        def __init__(self) -> None:
+            self.checks = [
+                VerifyCheck(name="model april-brain acceptance gates", ok=True, detail="ok")
+            ]
+
+        def build_report(self) -> object:
+            raise AssertionError("report should not be built without --report")
+
+    def _fake_all_configured(home: Path, **kwargs: object) -> _StubAllVerifier:
+        captured["home"] = home
+        captured.update(kwargs)
+        return _StubAllVerifier()
+
+    monkeypatch.setattr(
+        "apps.runner.main.run_all_configured_models_verification",
+        _fake_all_configured,
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "verify",
+            "--all-configured-models",
+            "--require-real-model",
+            "--max-rss-mb",
+            "4096",
+            "--min-routing-accuracy",
+            "0.95",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["home"] == tmp_path
+    assert captured["require_real_model"] is True
+    thresholds = captured["thresholds"]
+    assert thresholds.max_rss_mb == 4096  # type: ignore[attr-defined]
+    assert thresholds.min_routing_accuracy == 0.95  # type: ignore[attr-defined]
+    assert "APRIL All-Configured-Model Verification" in result.output
+
+
+def test_run_april_verify_mac_readiness_alias(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    called: list[bool] = []
+
+    class _StubAllVerifier:
+        def __init__(self) -> None:
+            self.checks = [VerifyCheck(name="configured models", ok=True, detail="ok")]
+
+        def build_report(self) -> object:
+            raise AssertionError("report should not be built without --report")
+
+    monkeypatch.setattr(
+        "apps.runner.main.run_all_configured_models_verification",
+        lambda home, **kwargs: called.append(True) or _StubAllVerifier(),
+    )
+    result = CliRunner().invoke(app, ["april", "verify", "--mac-readiness"])
+    assert result.exit_code == 0, result.output
+    assert called == [True]
 
 
 def test_run_april_verify_fake_fails_on_failed_check(tmp_path: Path, monkeypatch) -> None:

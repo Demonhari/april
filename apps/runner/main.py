@@ -28,6 +28,7 @@ from apps.runner.model_tools import (
 )
 from apps.runner.multi_model_report import write_multi_model_report
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
+from apps.runner.soak import run_fake_soak, write_soak_report
 from apps.runner.verify import (
     BenchmarkResult,
     TargetMacValidator,
@@ -38,6 +39,7 @@ from apps.runner.verify import (
     run_real_model_verification,
     run_workflow_verification,
 )
+from apps.runner.voice_live import run_voice_live_verification
 from april_common.config_validation import validate_configuration
 from april_common.effective_config import load_agents_file, load_permissions_file, load_tools_file
 from april_common.errors import ConfigError
@@ -47,6 +49,7 @@ from services.april_runtime.model_registry import ModelRegistry
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.user_profile import UserProfileStore
+from services.voice.health import voice_doctor as collect_voice_doctor
 
 _T = TypeVar("_T")
 
@@ -920,6 +923,52 @@ def voice_doctor(
     )
 
 
+@voice_app.command("verify-live")
+def voice_verify_live(
+    report: Path | None = typer.Option(
+        None, "--report", help="Write a redacted live voice verification report JSON here."
+    ),
+    seconds: float = typer.Option(3.0, "--seconds", min=0.2, max=10.0),
+    retain_debug_audio: bool = typer.Option(
+        False,
+        "--retain-debug-audio",
+        help="Keep the exact temporary audio files created by this explicit verification run.",
+    ),
+) -> None:
+    settings = _manager().settings
+    doctor = collect_voice_doctor(settings)
+    console.print(f"Voice doctor status: {doctor['status']}")
+    guidance = doctor.get("macos_microphone_permission_guidance")
+    if guidance:
+        console.print(str(guidance))
+    console.print("Wake-word listening is not used by this verification.")
+
+    def confirm(message: str) -> bool:
+        return typer.confirm(message, default=False)
+
+    result = asyncio.run(
+        run_voice_live_verification(
+            settings=settings,
+            confirm_recording=confirm,
+            confirm_transcription=confirm,
+            confirm_playback=confirm,
+            seconds=seconds,
+            retain_debug_audio=retain_debug_audio,
+            report_path=report,
+        )
+    )
+    console.print(
+        "Voice live verification: "
+        f"{result.summary} (recording={result.recording_success}, "
+        f"stt={result.stt_success}, transcript_length={result.transcript_length}, "
+        f"tts={result.tts_success}, playback_confirmed={result.playback_user_confirmed})"
+    )
+    if report is not None:
+        console.print(f"[green]Wrote voice verification report to {report.expanduser()}[/green]")
+    if result.summary != "pass":
+        raise typer.Exit(1)
+
+
 @voice_app.command("devices")
 def voice_devices(
     ctx: typer.Context,
@@ -1174,6 +1223,16 @@ def verify(
         "--mac-readiness",
         help="Verify every configured real GGUF model (load/chat/stream/unload + switching).",
     ),
+    soak: bool = typer.Option(False, "--soak", help="Run a bounded fake-backend soak check."),
+    minutes: float = typer.Option(10.0, "--minutes", min=0.01, max=240.0),
+    soak_interval_seconds: float = typer.Option(
+        1.0,
+        "--soak-interval-seconds",
+        min=0.1,
+        max=60.0,
+        help="Delay between fake soak iterations.",
+    ),
+    cycle_fake_models: bool = typer.Option(False, "--cycle-fake-models"),
     require_real_model: bool = typer.Option(False, "--require-real-model"),
     json_output: bool = typer.Option(False, "--json"),
     report: Path | None = typer.Option(
@@ -1185,6 +1244,7 @@ def verify(
         None, "--max-first-token-latency-seconds", min=0.0
     ),
     max_rss_mb: float | None = typer.Option(None, "--max-rss-mb", min=0.0),
+    min_routing_accuracy: float = typer.Option(0.90, "--min-routing-accuracy", min=0.0, max=1.0),
     max_output_tokens: int = typer.Option(32, "--max-output-tokens", min=1, max=4096),
     timeout: float = typer.Option(180.0, "--timeout", min=1.0),
 ) -> None:
@@ -1193,7 +1253,35 @@ def verify(
         max_load_seconds=max_load_seconds,
         max_first_token_latency_seconds=max_first_token_latency_seconds,
         max_rss_mb=max_rss_mb,
+        min_routing_accuracy=min_routing_accuracy,
     )
+    if soak:
+        soak_report = run_fake_soak(
+            _manager().home,
+            minutes=minutes,
+            interval_seconds=soak_interval_seconds,
+            cycle_models=cycle_fake_models,
+        )
+        checks = [
+            VerifyCheck(
+                name="fake soak",
+                ok=soak_report.summary == "pass",
+                detail=f"iterations={soak_report.iterations}, failures={len(soak_report.failures)}",
+            )
+        ]
+        if json_output:
+            console.print_json(data=soak_report.model_dump())
+        else:
+            _print_verification_table("APRIL Fake Soak Verification", checks)
+        if report is not None:
+            written = write_soak_report(soak_report, report)
+            console.print(
+                f"[green]Wrote fake soak report to {written}[/green] "
+                f"(summary: {soak_report.summary}, real_model_verified: false)"
+            )
+        if soak_report.summary != "pass":
+            raise typer.Exit(1)
+        raise typer.Exit(0)
     if all_configured_models:
         verifier = run_all_configured_models_verification(
             _manager().home,

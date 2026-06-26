@@ -11,6 +11,7 @@ from apps.runner.main import app as runner_app
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
 from april_common.settings import load_settings
 from services.api.server import create_app
+from tests.conftest import FakeRuntimeClient
 from tests.test_core_api import auth, make_container
 
 
@@ -27,6 +28,119 @@ def test_activity_requires_auth(settings_tmp) -> None:
     container = anyio.run(make_container, settings_tmp)
     client = TestClient(create_app(container))
     assert client.get("/diagnostics/activity").status_code == 403
+
+
+def test_readiness_requires_auth(settings_tmp) -> None:
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    assert client.get("/readiness").status_code == 403
+
+
+def test_readiness_redacts_tokens_and_paths(settings_tmp) -> None:
+    class RuntimeWithPaths(FakeRuntimeClient):
+        async def health(self, *, timeout: float | None = None) -> dict[str, object]:
+            return {
+                "status": "ok",
+                "backend": "fake",
+                "simulated": True,
+                "models": [
+                    {
+                        "id": "april-brain",
+                        "name": "brain",
+                        "role": "brain",
+                        "backend": "fake",
+                        "path": str(settings_tmp.home / "models" / "brain.gguf"),
+                        "state": "loaded",
+                        "keep_loaded": True,
+                        "missing_path": True,
+                    }
+                ],
+            }
+
+        async def models(self) -> dict[str, object]:
+            return {
+                "models": [
+                    {
+                        "id": "april-brain",
+                        "name": "brain",
+                        "role": "brain",
+                        "backend": "fake",
+                        "path": str(settings_tmp.home / "models" / "brain.gguf"),
+                        "state": "loaded",
+                        "keep_loaded": True,
+                        "missing_path": True,
+                    }
+                ]
+            }
+
+    container = anyio.run(make_container, settings_tmp, RuntimeWithPaths())
+    client = TestClient(create_app(container))
+    response = client.get("/readiness", headers=auth(settings_tmp))
+    assert response.status_code == 200
+    data = response.json()
+    blob = json.dumps(data)
+    assert settings_tmp.api.token not in blob
+    assert str(settings_tmp.home) not in blob
+    assert str(settings_tmp.database_path) not in blob
+    assert data["models"]["registered"][0]["path_basename"] == "brain.gguf"
+    assert "/" not in data["models"]["registered"][0]["path_basename"]
+    assert data["security"]["api_token"]["status"] == "configured"
+
+
+def test_latest_verification_report_not_verified(settings_tmp) -> None:
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.get("/verification/report/latest", headers=auth(settings_tmp))
+    assert response.status_code == 200
+    assert response.json()["status"] == "not_verified"
+    assert response.json()["message"] == "not verified yet"
+
+
+def test_latest_verification_report_redacts_and_ignores_path_query(settings_tmp) -> None:
+    report_dir = settings_tmp.home / "data" / "verification"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "report_type": "multi_model",
+        "generated_at": "2026-06-26T00:00:00Z",
+        "summary": "degraded",
+        "real_model_verified": False,
+        "models": [
+            {
+                "model_id": "april-brain",
+                "role": "brain",
+                "backend": "llama_cpp",
+                "path": str(settings_tmp.home / "models" / "brain.gguf"),
+                "available": False,
+                "skipped_reason": f"Missing model file: {settings_tmp.home}/models/brain.gguf",
+            }
+        ],
+        "skipped": [
+            {
+                "name": "april-brain",
+                "reason": f"Missing model file: {settings_tmp.home}/models/brain.gguf",
+            }
+        ],
+        "threshold_failures": [f"april-brain: routing path {settings_tmp.home}/models/brain.gguf"],
+        "prompt": "must not leak",
+        "generated_text": "must not leak",
+        "api_token": settings_tmp.api.token,
+    }
+    (report_dir / "mac-readiness.json").write_text(json.dumps(report), encoding="utf-8")
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.get(
+        "/verification/report/latest?path=/etc/passwd",
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    data = response.json()
+    blob = json.dumps(data)
+    assert data["status"] == "ok"
+    assert data["report"]["models"][0]["path_basename"] == "brain.gguf"
+    assert str(settings_tmp.home) not in blob
+    assert "/etc/passwd" not in blob
+    assert settings_tmp.api.token not in blob
+    assert "must not leak" not in blob
 
 
 def test_activity_feed_is_redacted(settings_tmp) -> None:
