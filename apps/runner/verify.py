@@ -2001,18 +2001,18 @@ class AllConfiguredModelsVerifier(
         return isinstance(parsed, dict)
 
     def _routing_report(self) -> RoutingReport:
-        from apps.runner.evals import _evaluate_case, load_brain_eval_cases
+        from apps.runner.evals import load_brain_eval_cases, real_routing_report
 
         cases = load_brain_eval_cases(self.repo_home)
-        results: list[Any] = []
+        decisions: list[dict[str, Any]] = []
         with httpx.Client(
             base_url=self.api_url, headers=self.api_headers, timeout=self.timeout
         ) as client:
             for case in cases:
                 response = client.post("/chat", json={"message": case.message})
-                actual = self._latest_decision() if response.status_code < 400 else {}
-                results.append(_evaluate_case(case, actual, schema_valid=bool(actual)))
-        return routing_report_from_results(results)
+                decisions.append(self._latest_decision() if response.status_code < 400 else {})
+        # Real-mode routing report: a schema-valid fallback decision is a failure.
+        return real_routing_report(cases, decisions)
 
     def _latest_decision(self) -> dict[str, Any]:
         import json

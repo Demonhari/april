@@ -153,6 +153,131 @@ def test_latest_verification_report_redacts_and_ignores_path_query(settings_tmp)
     assert "must not leak" not in blob
 
 
+def _write_voice_live_report(home: Path, basename: str, *, generated_at: str, passed: bool) -> Path:
+    report_dir = home / "data" / "verification"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / basename
+    report = {
+        "report_type": "voice_live",
+        "generated_at": generated_at,
+        "timestamp": generated_at,
+        "platform": "Darwin 25.5.0",
+        "summary": "pass" if passed else "degraded",
+        "voice_live_verified": passed,
+        "recording_success": passed,
+        "stt_success": passed,
+        "transcript_length": 11,
+        "transcription_user_confirmed": passed,
+        "tts_success": passed,
+        "playback_user_confirmed": passed,
+        # Hostile-looking fields that must never reach the sanitized payload.
+        "transcript": "SECRET SPOKEN WORDS",
+        "input_path": str(home / "data" / "audio_cache" / "voice-live-input.wav"),
+        "input_device_name": "MacBook Pro Microphone",
+        "output_device_name": "MacBook Pro Speakers",
+        "api_token": "secret-token",
+    }
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path
+
+
+def test_latest_voice_live_report_is_sanitized(settings_tmp) -> None:
+    _write_voice_live_report(
+        settings_tmp.home, "voice-live.json", generated_at="2026-06-26T00:00:00Z", passed=True
+    )
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        response = client.get(
+            "/verification/report/latest?type=voice_live", headers=auth(settings_tmp)
+        )
+    assert response.status_code == 200
+    data = response.json()
+    report = data["report"]
+    assert report["report_type"] == "voice_live"
+    assert report["generated_at"] == "2026-06-26T00:00:00Z"
+    assert report["summary"] == "pass"
+    # The safe voice fields are exposed.
+    assert report["voice_live_verified"] is True
+    assert report["recording_success"] is True
+    assert report["stt_success"] is True
+    assert report["tts_success"] is True
+    assert report["playback_user_confirmed"] is True
+    assert "skipped_count" in report
+    # Nothing sensitive leaks: no transcript, audio path, device name, or token.
+    blob = json.dumps(data)
+    for secret in (
+        "SECRET SPOKEN WORDS",
+        "voice-live-input.wav",
+        "MacBook Pro Microphone",
+        "MacBook Pro Speakers",
+        "secret-token",
+    ):
+        assert secret not in blob
+
+
+def test_failed_voice_live_report_serializes_verified_false(settings_tmp) -> None:
+    _write_voice_live_report(
+        settings_tmp.home, "voice-live.json", generated_at="2026-06-26T00:00:00Z", passed=False
+    )
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        response = client.get(
+            "/verification/report/latest?type=voice_live", headers=auth(settings_tmp)
+        )
+    report = response.json()["report"]
+    assert report["voice_live_verified"] is False
+    assert report["summary"] == "degraded"
+
+
+def test_latest_real_model_report_is_stable_against_newer_voice_report(settings_tmp) -> None:
+    # A real-model (multi_model) report, then a NEWER voice-live report.
+    real_model = _write_verification_report(
+        settings_tmp.home,
+        "mac-readiness.json",
+        generated_at="2026-06-25T00:00:00Z",
+        verification_level="core",
+        summary="pass",
+    )
+    voice = _write_voice_live_report(
+        settings_tmp.home, "voice-live.json", generated_at="2026-06-26T00:00:00Z", passed=True
+    )
+    os.utime(real_model, (1, 1))
+    os.utime(voice, (2, 2))  # voice is strictly newer
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        headers = auth(settings_tmp)
+        any_latest = client.get("/verification/report/latest", headers=headers).json()
+        real_latest = client.get(
+            "/verification/report/latest?type=real_model", headers=headers
+        ).json()
+        voice_latest = client.get(
+            "/verification/report/latest?type=voice_live", headers=headers
+        ).json()
+    # The newest of any kind is the voice report.
+    assert any_latest["report"]["report_type"] == "voice_live"
+    # But the real-model latest is still the multi_model report, not the voice one.
+    assert real_latest["report"]["report_type"] == "multi_model"
+    assert real_latest["report"]["verification_level"] == "core"
+    assert real_latest["report"]["real_model_verified"] is True
+    # And the voice-live latest is the voice report.
+    assert voice_latest["report"]["report_type"] == "voice_live"
+    assert voice_latest["report"]["voice_live_verified"] is True
+
+
+def test_latest_voice_live_report_absent_is_not_verified(settings_tmp) -> None:
+    # A real-model report exists but no voice report: voice latest is not_verified.
+    _write_verification_report(
+        settings_tmp.home, "mac-readiness.json", generated_at="2026-06-25T00:00:00Z"
+    )
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        voice_latest = client.get(
+            "/verification/report/latest?type=voice_live", headers=auth(settings_tmp)
+        ).json()
+    assert voice_latest["status"] == "not_verified"
+    assert voice_latest["report"] is None
+
+
 def _write_verification_report(
     home: Path,
     basename: str,

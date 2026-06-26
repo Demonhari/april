@@ -47,6 +47,10 @@ async def test_voice_live_success_path_uses_fakes(settings_tmp) -> None:
     assert report.transcript_length == len("hello april")
     assert report.tts_success is True
     assert report.playback_user_confirmed is True
+    # A fully-confirmed pass is the only state that sets voice_live_verified true.
+    assert report.voice_live_verified is True
+    assert report.generated_at == report.timestamp
+    assert report.generated_at
 
 
 @pytest.mark.anyio
@@ -65,6 +69,8 @@ async def test_voice_live_confirmation_required(settings_tmp) -> None:
     assert microphone.called is False
     assert report.summary == "degraded"
     assert report.skipped[0].reason == "user denied recording"
+    # A degraded run is never live-verified.
+    assert report.voice_live_verified is False
 
 
 @pytest.mark.anyio
@@ -103,7 +109,7 @@ async def test_voice_live_retains_audio_only_with_explicit_flag(settings_tmp) ->
 @pytest.mark.anyio
 async def test_voice_live_report_redacts_transcript(settings_tmp, tmp_path: Path) -> None:
     report_path = tmp_path / "voice-live.json"
-    await run_voice_live_verification(
+    report = await run_voice_live_verification(
         settings=settings_tmp,
         confirm_recording=lambda _message: True,
         confirm_transcription=lambda _message: False,
@@ -118,6 +124,9 @@ async def test_voice_live_report_redacts_transcript(settings_tmp, tmp_path: Path
     assert "secret transcript words" not in text
     assert "transcript_length" in text
     assert settings_tmp.api.token not in text
+    # Transcription was not confirmed → not a full pass → never live-verified.
+    assert report.voice_live_verified is False
+    assert '"voice_live_verified": false' in text
 
 
 @pytest.mark.anyio

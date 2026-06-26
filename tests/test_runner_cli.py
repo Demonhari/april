@@ -733,6 +733,81 @@ def test_setup_voice_missing_required_path_fails(tmp_path: Path, monkeypatch) ->
     assert "missing-whisper" in result.output
 
 
+def _voice_setup_args(tmp_path: Path, *, wake_word: Path | None = None) -> list[str]:
+    whisper_bin = tmp_path / "whisper-main"
+    whisper_model = tmp_path / "ggml-base.en.bin"
+    piper_bin = tmp_path / "piper"
+    piper_model = tmp_path / "voice.onnx"
+    for path in (whisper_bin, whisper_model, piper_bin, piper_model):
+        if not path.exists():
+            path.write_bytes(b"asset")
+    args = [
+        "april",
+        "setup",
+        "voice",
+        "--whisper-binary",
+        str(whisper_bin),
+        "--whisper-model",
+        str(whisper_model),
+        "--piper-binary",
+        str(piper_bin),
+        "--piper-model",
+        str(piper_model),
+    ]
+    if wake_word is not None:
+        args.extend(["--wake-word-model", str(wake_word)])
+    return args
+
+
+def test_setup_voice_apply_without_enable_keeps_voice_disabled(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, [*_voice_setup_args(tmp_path), "--apply"])
+    assert result.exit_code == 0, result.output
+    data = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
+    # Paths are written, but voice stays OFF: no surprise enablement.
+    assert data["voice"]["whisper_binary_path"] == str((tmp_path / "whisper-main").resolve())
+    assert data["voice"]["enabled"] is False
+    assert "remains DISABLED" in result.output
+
+
+def test_setup_voice_enable_turns_voice_on_after_validation(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    wake = tmp_path / "april.onnx"
+    wake.write_bytes(b"wake")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app, [*_voice_setup_args(tmp_path, wake_word=wake), "--apply", "--enable"]
+    )
+    assert result.exit_code == 0, result.output
+    data = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
+    assert data["voice"]["enabled"] is True
+    assert data["voice"]["wake_word_model_path"] == str(wake.resolve())
+    assert "ENABLED" in result.output
+    # Even with a wake-word model present, wake-word listening stays unverified.
+    assert "UNVERIFIED" in result.output
+
+
+def test_setup_voice_enable_without_wake_word_keeps_ptt_and_marks_wake_unavailable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    args = _voice_setup_args(tmp_path, wake_word=tmp_path / "missing-wake.onnx")
+    result = CliRunner().invoke(app, [*args, "--apply", "--enable"])
+    assert result.exit_code == 0, result.output
+    data = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
+    assert data["voice"]["enabled"] is True
+    assert data["voice"]["wake_word_model_path"] is None
+    # Push-to-talk is available; wake-word listening is unavailable, not a blocker.
+    assert "Push-to-talk is available" in result.output
+    assert "UNAVAILABLE" in result.output
+    assert "wake-word model missing" in result.output
+
+
 def test_setup_app_stub_command_refuses_overwrite_and_force_replaces(
     tmp_path: Path, monkeypatch
 ) -> None:

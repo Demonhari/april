@@ -13,6 +13,13 @@ from april_common.errors import ConfigError
 
 KNOWN_DEFAULT_API_TOKENS = {"local-dev-token"}
 KNOWN_DEFAULT_RUNTIME_TOKENS = {"local-dev-runtime-token"}
+# Placeholder values shipped in .env.example. They are never secret and must be
+# treated exactly like the known development defaults: warn in dev/test, reject
+# in production. Keeping them distinct lets readiness say *why* a token is unsafe.
+PLACEHOLDER_API_TOKENS = {"change-me-local-token"}
+PLACEHOLDER_RUNTIME_TOKENS = {"change-me-runtime-token"}
+INSECURE_API_TOKENS = KNOWN_DEFAULT_API_TOKENS | PLACEHOLDER_API_TOKENS
+INSECURE_RUNTIME_TOKENS = KNOWN_DEFAULT_RUNTIME_TOKENS | PLACEHOLDER_RUNTIME_TOKENS
 SAFE_TOKEN_ENVIRONMENTS = {"development", "test"}
 
 # A POSIX-style environment variable name.
@@ -237,6 +244,26 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
 # lives inside APRIL_HOME, so it must not be able to relocate its own directory.
 _DOTENV_SUPPORTED_KEYS = frozenset(ENV_OVERRIDES) - {"APRIL_HOME"}
 
+# Env vars that map to an Optional[...] setting. A blank value from the process
+# env or ${APRIL_HOME}/.env is an explicit *unset* and must become None — never
+# Path(".") (the repo root) or an empty string. Non-empty values are untouched,
+# so a legitimate relative path still resolves normally. The API token is
+# deliberately excluded: its field is a non-optional str, so a blank stays "" and
+# is reported as missing/insecure rather than silently becoming the default.
+_OPTIONAL_BLANK_IS_NONE: frozenset[str] = frozenset(
+    {
+        "APRIL_RUNTIME_TOKEN",
+        "APRIL_MEMORY_EMBEDDING_MODEL_ID",
+        "APRIL_VOICE_INPUT_DEVICE",
+        "APRIL_VOICE_OUTPUT_DEVICE",
+        "APRIL_WHISPER_BINARY_PATH",
+        "APRIL_WHISPER_MODEL_PATH",
+        "APRIL_PIPER_BINARY_PATH",
+        "APRIL_PIPER_MODEL_PATH",
+        "APRIL_WAKE_WORD_MODEL_PATH",
+    }
+)
+
 
 def _strip_inline_comment(value: str) -> str:
     # Drop a trailing `# comment` only when it follows whitespace, matching common
@@ -339,8 +366,11 @@ def load_settings(config_path: Path | None = None, *, root: Path | None = None) 
         raw = os.environ[env_name] if env_name in os.environ else dotenv.get(env_name)
         if raw is None:
             continue
-        if env_name == "APRIL_ALLOWED_FILESYSTEM_ROOTS":
-            value: Any = [part.strip() for part in raw.split(",") if part.strip()]
+        if not raw.strip() and env_name in _OPTIONAL_BLANK_IS_NONE:
+            # Explicit blank for an optional setting means "unset", not Path(".").
+            value: Any = None
+        elif env_name == "APRIL_ALLOWED_FILESYSTEM_ROOTS":
+            value = [part.strip() for part in raw.split(",") if part.strip()]
         else:
             value = _parse_env_value(raw)
         _set_nested(data, field_path, value)
@@ -361,13 +391,17 @@ def reset_settings_cache() -> None:
 def _validate_default_tokens(settings: AprilSettings) -> None:
     if settings.environment in SAFE_TOKEN_ENVIRONMENTS:
         return
+    # Outside development/test, a token that is empty, a known development default,
+    # or a .env.example placeholder is rejected at startup; a missing runtime token
+    # is rejected too. Real strong tokens come from `run april setup tokens`.
     insecure: list[str] = []
-    if settings.api.token in KNOWN_DEFAULT_API_TOKENS:
+    if not settings.api.token or settings.api.token in INSECURE_API_TOKENS:
         insecure.append("APRIL_API_TOKEN")
-    if settings.runtime.token is None or settings.runtime.token in KNOWN_DEFAULT_RUNTIME_TOKENS:
+    if not settings.runtime.token or settings.runtime.token in INSECURE_RUNTIME_TOKENS:
         insecure.append("APRIL_RUNTIME_TOKEN")
     if insecure:
         raise ConfigError(
-            "Known development tokens are not allowed outside development/test mode.",
+            "Known development tokens, placeholder tokens, or empty/missing tokens "
+            "are not allowed outside development/test mode.",
             {"environment": settings.environment, "settings": insecure},
         )

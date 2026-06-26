@@ -1082,19 +1082,25 @@ function levelPill(level) {
   return pill("level " + normalized, kind);
 }
 
-function renderLatestReport(latest) {
+function renderLatestReport(latest, latestRealModel, latestVoice) {
+  // The "real model verified" status is derived from the latest REAL-MODEL report
+  // and the voice warning from the latest VOICE-LIVE report, so a newer report of
+  // one kind can never overwrite the apparent status of the other.
+  const realModel = latestRealModel || latest;
+  const voice = latestVoice || latest;
   const summary = D.verificationSummary(latest);
-  if (summary.status === "not_verified") {
+  const realSummary = D.verificationSummary(realModel);
+  const voiceWarning = D.voiceLiveWarning(voice);
+  if (summary.status === "not_verified" && realSummary.status === "not_verified") {
     return "<div class='panel-title'>Latest verification report</div>" +
-      "<div class='kv'><strong>" + esc(D.realModelVerifiedLabel(latest)) + "</strong></div>" +
-      "<div class='kv warn'>" + esc(D.voiceLiveWarning(latest)) + "</div>" +
+      "<div class='kv'><strong>" + esc(D.realModelVerifiedLabel(realModel)) + "</strong></div>" +
+      "<div class='kv warn'>" + esc(voiceWarning) + "</div>" +
       "<span class='muted'>not verified yet</span>";
   }
   const report = latest.report || {};
-  const voiceWarning = D.voiceLiveWarning(latest);
   let html = "<div class='panel-title'>Latest verification report</div>" +
-    "<div class='row'>" + levelPill(summary.verification_level) + "</div>" +
-    "<div class='kv'><strong>" + esc(D.realModelVerifiedLabel(latest)) + "</strong></div>" +
+    "<div class='row'>" + levelPill(realSummary.verification_level) + "</div>" +
+    "<div class='kv'><strong>" + esc(D.realModelVerifiedLabel(realModel)) + "</strong></div>" +
     (voiceWarning ? "<div class='kv warn'>" + esc(voiceWarning) + "</div>" : "") +
     kvRows([
       ["generated", summary.generated_at],
@@ -1165,6 +1171,12 @@ screens.readiness = async function () {
   if (readiness) state.readiness = readiness;
   const latest = await api("GET", "/verification/report/latest").catch(() => null);
   if (latest) state.latestReport = latest;
+  // Real-model status and voice status are read from their own latest reports so a
+  // newer report of one kind never overwrites the other's apparent status.
+  const latestRealModel = await api("GET", "/verification/report/latest?type=real_model").catch(() => null);
+  if (latestRealModel) state.latestRealModelReport = latestRealModel;
+  const latestVoice = await api("GET", "/verification/report/latest?type=voice_live").catch(() => null);
+  if (latestVoice) state.latestVoiceReport = latestVoice;
   const history = await api("GET", "/verification/reports").catch(() => null);
   if (history) state.reportHistory = history;
 
@@ -1222,7 +1234,7 @@ screens.readiness = async function () {
     "<span class='pill warn'>generated reports and app stubs are ignored</span>"
   ));
 
-  screenEl.appendChild(card(renderLatestReport(latest)));
+  screenEl.appendChild(card(renderLatestReport(latest, latestRealModel, latestVoice)));
   screenEl.appendChild(card(renderReportHistory(state.reportHistory)));
 
   screenEl.appendChild(card(

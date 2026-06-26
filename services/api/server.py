@@ -24,8 +24,8 @@ from april_common.errors import (
 )
 from april_common.path_security import PathPolicy, normalize_existing_path
 from april_common.settings import (
-    KNOWN_DEFAULT_API_TOKENS,
-    KNOWN_DEFAULT_RUNTIME_TOKENS,
+    INSECURE_API_TOKENS,
+    INSECURE_RUNTIME_TOKENS,
     AprilSettings,
     get_settings,
 )
@@ -255,8 +255,14 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         return await _readiness_payload(active)
 
     @app.get("/verification/report/latest")
-    async def verification_report_latest(active: ApiContainer = Depends(authorized)) -> object:
-        return _latest_verification_report(active.settings)
+    async def verification_report_latest(
+        type: str = "any",
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        # ?type=any (default) | real_model (multi_model+target_mac) | voice_live.
+        # An unknown/extra query value falls back to "any", so existing callers
+        # (and the ignored-?path= probe) keep their behaviour.
+        return _latest_verification_report(active.settings, report_type=type)
 
     @app.get("/verification/reports")
     async def verification_reports(
@@ -834,10 +840,10 @@ def _voice_artifact(settings: AprilSettings, name: str, path: Path | None) -> di
 
 
 def _development_token_warning(settings: AprilSettings) -> str | None:
-    if settings.api.token in KNOWN_DEFAULT_API_TOKENS:
-        return "API token uses the development default."
-    if settings.runtime.token is None or settings.runtime.token in KNOWN_DEFAULT_RUNTIME_TOKENS:
-        return "Runtime token uses the development default or is missing."
+    if not settings.api.token or settings.api.token in INSECURE_API_TOKENS:
+        return "API token uses an insecure development/placeholder default or is empty."
+    if not settings.runtime.token or settings.runtime.token in INSECURE_RUNTIME_TOKENS:
+        return "Runtime token uses an insecure development/placeholder default or is missing."
     return None
 
 
@@ -873,26 +879,58 @@ def _read_safe_report(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _latest_verification_report(settings: AprilSettings) -> dict[str, Any]:
+# A "real model" verification is either the single-model target-Mac report or the
+# multi-model report; both genuinely exercise real GGUF models. The voice-live
+# report is a separate axis and must never be selected as the real-model latest.
+_REAL_MODEL_REPORT_TYPES = {"multi_model", "target_mac"}
+
+
+def _classified_report_type(payload: dict[str, Any]) -> str:
+    report_type = str(payload.get("report_type") or _infer_report_type(payload))
+    return report_type if report_type in _VERIFICATION_REPORT_TYPES else "unknown"
+
+
+def _report_matches_filter(report_type: str, filter_type: str) -> bool:
+    if filter_type == "any":
+        return True
+    if filter_type == "real_model":
+        return report_type in _REAL_MODEL_REPORT_TYPES
+    return report_type == filter_type
+
+
+def _latest_verification_report(
+    settings: AprilSettings, *, report_type: str = "any"
+) -> dict[str, Any]:
+    # The latest report is selected *within the requested class* by modification
+    # time, so a newer voice-live report can never overwrite the latest real-model
+    # report (or vice versa).
+    filter_type = report_type if report_type in {"any", "real_model", "voice_live"} else "any"
     candidates = _verification_report_files(settings)
-    if not candidates:
+    matching: list[tuple[Path, dict[str, Any]]] = []
+    for path in candidates:
+        payload = _read_safe_report(path)
+        if payload is None:
+            continue
+        if _report_matches_filter(_classified_report_type(payload), filter_type):
+            matching.append((path, payload))
+    if not matching:
+        if filter_type == "any" and candidates:
+            # Files exist but none could be read as JSON objects.
+            return {
+                "status": "unreadable",
+                "message": "latest verification report could not be read",
+                "report": None,
+            }
         return {
             "status": "not_verified",
             "message": "not verified yet",
             "report": None,
         }
-    latest = max(candidates, key=lambda path: path.stat().st_mtime)
-    payload = _read_safe_report(latest)
-    if payload is None:
-        return {
-            "status": "unreadable",
-            "message": "latest verification report could not be read",
-            "report": None,
-        }
+    latest_path, latest_payload = max(matching, key=lambda item: item[0].stat().st_mtime)
     return {
         "status": "ok",
         "message": "latest verification report",
-        "report": _safe_report_payload(payload, latest),
+        "report": _safe_report_payload(latest_payload, latest_path),
     }
 
 
@@ -1009,6 +1047,16 @@ def _safe_report_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
                 "skipped_reason": None,
             }
         ]
+    if report_type == "voice_live":
+        # Voice-live reports expose only safe booleans/counts: a live-verified flag
+        # and per-stage successes. Never a transcript, an audio file path, or a
+        # device name — VoiceLiveReport does not store those, and this allowlist
+        # projection keeps it that way even if new raw fields are added later.
+        safe["voice_live_verified"] = bool(payload.get("voice_live_verified", False))
+        safe["recording_success"] = bool(payload.get("recording_success", False))
+        safe["stt_success"] = bool(payload.get("stt_success", False))
+        safe["tts_success"] = bool(payload.get("tts_success", False))
+        safe["playback_user_confirmed"] = bool(payload.get("playback_user_confirmed", False))
     if "checks_failed" in payload:
         safe["checks_failed"] = payload.get("checks_failed")
     if "check_failures" in payload:

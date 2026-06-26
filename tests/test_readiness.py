@@ -148,6 +148,51 @@ def test_default_development_tokens_warn_not_block(tmp_path: Path) -> None:
     assert "run april setup tokens" in report.next_actions
 
 
+def test_blank_voice_paths_report_as_not_configured(tmp_path: Path) -> None:
+    # Blank optional voice paths from .env must resolve to None, so readiness shows
+    # them as "not configured" rather than as the repo root (the Path(".") bug).
+    home = _write_home(tmp_path, backend="fake")
+    (home / ".env").write_text(
+        "\n".join(
+            [
+                "APRIL_WHISPER_BINARY_PATH=",
+                "APRIL_WHISPER_MODEL_PATH=",
+                "APRIL_PIPER_BINARY_PATH=",
+                "APRIL_PIPER_MODEL_PATH=",
+                "APRIL_WAKE_WORD_MODEL_PATH=",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    report = build_readiness_report(home)
+    assert report.voice_artifacts
+    assert all(not artifact.configured for artifact in report.voice_artifacts)
+    assert all(not artifact.exists for artifact in report.voice_artifacts)
+    # The repo-root basename must never appear as a "configured" voice artifact.
+    assert all(artifact.basename is None for artifact in report.voice_artifacts)
+
+
+def test_placeholder_tokens_warn_and_are_never_printed(tmp_path: Path) -> None:
+    home = _write_home(tmp_path, backend="fake")
+    (home / ".env").write_text(
+        "APRIL_API_TOKEN=change-me-local-token\nAPRIL_RUNTIME_TOKEN=change-me-runtime-token\n",
+        encoding="utf-8",
+    )
+    report = build_readiness_report(home)
+    token_check = next(c for c in report.checks if c.name == "api/runtime tokens")
+    assert token_check.status == "warning"
+    assert "api/runtime tokens" in report.warnings
+    assert "api/runtime tokens" not in report.blockers
+    assert report.api_token_status == "placeholder-insecure"
+    assert report.runtime_token_status == "placeholder-insecure"
+    assert "run april setup tokens" in report.next_actions
+    # The placeholder values must never be printed anywhere in the report.
+    blob = json.dumps(report.model_dump())
+    assert "change-me-local-token" not in blob
+    assert "change-me-runtime-token" not in blob
+
+
 def test_report_is_json_serialisable_and_redacted(tmp_path: Path) -> None:
     (tmp_path / "models").mkdir()
     (tmp_path / "models" / "brain.gguf").write_bytes(b"GGUF")

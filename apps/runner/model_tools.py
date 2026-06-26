@@ -309,8 +309,15 @@ def setup_voice_stack(
     piper_model: Path,
     wake_word_model: Path | None = None,
     apply: bool = False,
+    enable: bool = False,
 ) -> dict[str, Any]:
-    """Validate and optionally configure local voice assets without recording."""
+    """Validate and optionally configure local voice assets without recording.
+
+    Voice stays OFF by default. ``enable`` flips ``voice.enabled`` true, but only
+    when ``apply`` actually writes the config and only after every required path
+    has validated above. A missing wake-word model never blocks enabling: push-to-
+    talk stays available, while wake-word listening remains explicitly unverified.
+    """
     root = home.expanduser().resolve()
     required = {
         "whisper_binary_path": whisper_binary,
@@ -348,6 +355,9 @@ def setup_voice_stack(
             voice[key] = str(path)
         if resolved_wake is not None:
             voice["wake_word_model_path"] = str(resolved_wake)
+        if enable:
+            # Reached only after every required path validated above.
+            voice["enabled"] = True
         _write_yaml(config_path, data)
         try:
             _validate_after_write(root)
@@ -366,8 +376,18 @@ def setup_voice_stack(
             "configured": resolved_wake is not None,
         }
     )
+    voice_enabled = bool(apply and enable)
+    wake_word_available = resolved_wake is not None
     return {
         "applied": apply,
+        # Whether voice.enabled was actually set true (only on apply + enable).
+        "voice_enabled": voice_enabled,
+        # The caller asked to enable; useful to message a dry run truthfully.
+        "enable_requested": enable,
+        "wake_word_available": wake_word_available,
+        # Push-to-talk needs no wake-word model; wake-word listening does.
+        "push_to_talk_available": True,
+        "wake_word_verified": False,
         "backup_basename": backup.name if backup is not None else None,
         "artifacts": artifacts,
         "warnings": warnings,

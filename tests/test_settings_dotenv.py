@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from apps.runner.service_manager import AprilServiceManager
+from april_common.errors import ConfigError
 from april_common.settings import load_settings, reset_settings_cache
 from april_common.token_setup import GeneratedTokens, write_token_env_file
 
@@ -102,6 +103,124 @@ def test_malformed_dotenv_lines_are_handled_safely(
 
     assert settings.api.token == "good-token"
     assert settings.runtime.port == 9001
+
+
+def test_blank_optional_paths_from_dotenv_become_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    _write(
+        tmp_path / ".env",
+        "\n".join(
+            [
+                "APRIL_WHISPER_BINARY_PATH=",
+                "APRIL_WHISPER_MODEL_PATH=",
+                "APRIL_PIPER_BINARY_PATH=",
+                "APRIL_PIPER_MODEL_PATH=",
+                "APRIL_WAKE_WORD_MODEL_PATH=",
+            ]
+        )
+        + "\n",
+    )
+
+    settings = load_settings(root=tmp_path)
+
+    # A blank optional path is an explicit unset → None, never Path(".") (repo root).
+    assert settings.voice.whisper_binary_path is None
+    assert settings.voice.whisper_model_path is None
+    assert settings.voice.piper_binary_path is None
+    assert settings.voice.piper_model_path is None
+    assert settings.voice.wake_word_model_path is None
+
+
+def test_blank_optional_devices_and_runtime_token_become_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    _write(
+        tmp_path / ".env",
+        "APRIL_VOICE_INPUT_DEVICE=\nAPRIL_VOICE_OUTPUT_DEVICE=\nAPRIL_RUNTIME_TOKEN=\n",
+    )
+
+    settings = load_settings(root=tmp_path)
+
+    assert settings.voice.input_device is None
+    assert settings.voice.output_device is None
+    assert settings.runtime.token is None
+
+
+def test_blank_optional_path_from_process_env_becomes_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    # Even a YAML-configured path is explicitly unset by a blank process-env value,
+    # which always wins (highest precedence) and means None, not Path(".").
+    _write(
+        tmp_path / "configs" / "april.yaml",
+        "voice:\n  whisper_binary_path: voice/whisper\n",
+    )
+    monkeypatch.setenv("APRIL_WHISPER_BINARY_PATH", "")
+
+    settings = load_settings(root=tmp_path)
+
+    assert settings.voice.whisper_binary_path is None
+
+
+def test_nonempty_relative_optional_path_still_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    _write(tmp_path / ".env", "APRIL_WHISPER_BINARY_PATH=voice/whisper-main\n")
+
+    settings = load_settings(root=tmp_path)
+
+    # A legitimate non-empty relative path is preserved, not collapsed to None.
+    assert settings.voice.whisper_binary_path == Path("voice/whisper-main")
+    assert (
+        settings.resolve_path(settings.voice.whisper_binary_path)
+        == (tmp_path / "voice" / "whisper-main").resolve()
+    )
+
+
+def test_production_rejects_change_me_placeholder_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APRIL_ENV", "production")
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    for key in ("APRIL_API_TOKEN", "APRIL_RUNTIME_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    reset_settings_cache()
+    _write(
+        tmp_path / ".env",
+        "APRIL_API_TOKEN=change-me-local-token\nAPRIL_RUNTIME_TOKEN=change-me-runtime-token\n",
+    )
+    with pytest.raises(ConfigError):
+        load_settings(root=tmp_path)
+    reset_settings_cache()
+
+
+def test_production_rejects_blank_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APRIL_ENV", "production")
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    # Strong API token but a blank runtime token: the blank must still be rejected.
+    monkeypatch.setenv("APRIL_API_TOKEN", "a-strong-real-api-token-value-123456")
+    monkeypatch.setenv("APRIL_RUNTIME_TOKEN", "")
+    reset_settings_cache()
+    with pytest.raises(ConfigError):
+        load_settings(root=tmp_path)
+    reset_settings_cache()
+
+
+def test_production_accepts_strong_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APRIL_ENV", "production")
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    monkeypatch.setenv("APRIL_API_TOKEN", "a-strong-real-api-token-value-123456")
+    monkeypatch.setenv("APRIL_RUNTIME_TOKEN", "a-strong-real-runtime-token-value-654321")
+    reset_settings_cache()
+    settings = load_settings(root=tmp_path)
+    assert settings.api.token == "a-strong-real-api-token-value-123456"
+    assert settings.runtime.token == "a-strong-real-runtime-token-value-654321"
+    reset_settings_cache()
 
 
 def test_dotenv_cannot_relocate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

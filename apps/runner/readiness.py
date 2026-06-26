@@ -35,6 +35,8 @@ from april_common.errors import ConfigError
 from april_common.settings import (
     KNOWN_DEFAULT_API_TOKENS,
     KNOWN_DEFAULT_RUNTIME_TOKENS,
+    PLACEHOLDER_API_TOKENS,
+    PLACEHOLDER_RUNTIME_TOKENS,
     AprilSettings,
     load_settings,
 )
@@ -100,9 +102,11 @@ class ReadinessReport(BaseModel):
     next_actions: list[str] = Field(default_factory=list)
 
 
-def _token_status(value: str | None, defaults: set[str]) -> str:
+def _token_status(value: str | None, defaults: set[str], placeholders: set[str]) -> str:
     if not value:
         return "missing"
+    if value in placeholders:
+        return "placeholder-insecure"
     if value in defaults:
         return "default-development"
     return "configured"
@@ -258,10 +262,23 @@ def build_readiness_report(home: Path) -> ReadinessReport:
             )
 
     # --- development tokens --------------------------------------------------
-    api_status = _token_status(settings.api.token, KNOWN_DEFAULT_API_TOKENS)
-    runtime_status = _token_status(settings.runtime.token, KNOWN_DEFAULT_RUNTIME_TOKENS)
-    dev_tokens_active = "default-development" in {api_status, runtime_status}
-    if dev_tokens_active:
+    api_status = _token_status(settings.api.token, KNOWN_DEFAULT_API_TOKENS, PLACEHOLDER_API_TOKENS)
+    runtime_status = _token_status(
+        settings.runtime.token, KNOWN_DEFAULT_RUNTIME_TOKENS, PLACEHOLDER_RUNTIME_TOKENS
+    )
+    token_statuses = {api_status, runtime_status}
+    if "placeholder-insecure" in token_statuses:
+        # The .env.example placeholders are not secret. They are fine to discover
+        # locally but must be replaced before any non-local exposure; never "ok".
+        checks.append(
+            ReadinessCheck(
+                name="api/runtime tokens",
+                status="warning",
+                detail="Insecure placeholder tokens from .env.example are still active.",
+                action=_SETUP_TOKENS,
+            )
+        )
+    elif "default-development" in token_statuses:
         # Default tokens are fine for local development; they must be rotated
         # before any non-local exposure. A warning, not a hard model blocker.
         checks.append(
@@ -272,7 +289,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 action=_SETUP_TOKENS,
             )
         )
-    elif "missing" in {api_status, runtime_status}:
+    elif "missing" in token_statuses:
         checks.append(
             ReadinessCheck(
                 name="api/runtime tokens",

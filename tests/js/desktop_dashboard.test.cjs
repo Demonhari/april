@@ -252,6 +252,36 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
   );
 }
 
+// --- real-model status and voice status are derived independently -----------
+{
+  // A real-model report that verified at "core" and a SEPARATE voice report that
+  // passed live verification. Each helper reads only its own report, so a newer
+  // report of one kind never changes the other's status.
+  const realModelReport = {
+    status: "ok",
+    report: { report_type: "multi_model", verification_level: "core", real_model_verified: true },
+  };
+  const voiceReport = {
+    status: "ok",
+    report: { report_type: "voice_live", voice_live_verified: true },
+  };
+  check(
+    "real model label from real-model report",
+    D.realModelVerifiedLabel(realModelReport) === "real model verified: core",
+  );
+  check("voice warning cleared from voice report", D.voiceLiveWarning(voiceReport) === "");
+  // A passing voice report must NOT be read as a real-model verification.
+  check(
+    "voice report does not imply real model verified",
+    D.realModelVerifiedLabel(voiceReport) === "real model verified: none",
+  );
+  // A real-model report must NOT clear the voice-not-verified warning.
+  check(
+    "real-model report does not clear voice warning",
+    D.voiceLiveWarning(realModelReport).indexOf("not live-verified") !== -1,
+  );
+}
+
 if (failures > 0) {
   console.error(failures + " desktop dashboard checks failed");
   process.exit(1);

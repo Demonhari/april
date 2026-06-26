@@ -1270,6 +1270,11 @@ def setup_voice(
     piper_model: Path = typer.Option(..., "--piper-model"),
     wake_word_model: Path | None = typer.Option(None, "--wake-word-model"),
     apply_changes: bool = typer.Option(False, "--apply"),
+    enable: bool = typer.Option(
+        False,
+        "--enable",
+        help="Turn voice ON after required paths validate. Voice stays OFF without this flag.",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Validate and optionally configure local voice tools without recording."""
@@ -1285,6 +1290,7 @@ def setup_voice(
             piper_model=piper_model,
             wake_word_model=wake_word_model,
             apply=apply_changes,
+            enable=enable,
         )
     except ConfigError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -1299,6 +1305,27 @@ def setup_voice(
         console.print(f"{artifact['name']}: {label}")
     for warning in result["warnings"]:
         console.print(f"[yellow]Warning:[/yellow] {warning}")
+    # Voice is never enabled by surprise: state the enabled/disabled outcome plainly.
+    if result["voice_enabled"]:
+        console.print("[green]Voice is now ENABLED.[/green]")
+        if result["wake_word_available"]:
+            console.print(
+                "Push-to-talk is available. Wake-word listening stays UNVERIFIED until "
+                "`run april voice verify-live` passes on this Mac."
+            )
+        else:
+            console.print(
+                "Push-to-talk is available. No wake-word model is configured, so wake-word "
+                "listening is UNAVAILABLE; push-to-talk works without one."
+            )
+    elif apply_changes and enable:
+        # enable was requested but apply did not run (should not happen, but be honest).
+        console.print("[yellow]Voice remains DISABLED.[/yellow]")
+    else:
+        console.print(
+            "[yellow]Voice remains DISABLED.[/yellow] Paths are validated only; voice stays OFF "
+            "unless you re-run with --apply --enable."
+        )
     if result["backup_basename"]:
         console.print(f"Config backup: {result['backup_basename']}")
     console.print("Next commands:")

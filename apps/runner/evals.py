@@ -10,6 +10,7 @@ import httpx
 import yaml
 from pydantic import BaseModel, Field
 
+from apps.runner.mac_report import RoutingReport, routing_report_from_results
 from services.brain.fallback_router import FallbackRouter
 
 from .verify import RealModelVerifier
@@ -63,6 +64,7 @@ def _evaluate_case(
     actual: dict[str, Any],
     *,
     schema_valid: bool,
+    allow_fallback: bool = True,
 ) -> BrainEvalResult:
     mismatches: list[str] = []
     _expect(mismatches, "intent", case.expected_intent, actual.get("intent"))
@@ -85,12 +87,19 @@ def _evaluate_case(
         case.expected_needs_confirmation,
         actual.get("needs_confirmation"),
     )
-    _expect_optional(
-        mismatches,
-        "routing_method",
-        case.expected_routing_method,
-        actual.get("routing_method"),
-    )
+    actual_method = actual.get("routing_method")
+    if allow_fallback:
+        # Fake/fallback eval: the fixture's expected routing_method (e.g. fallback)
+        # is authoritative.
+        _expect_optional(mismatches, "routing_method", case.expected_routing_method, actual_method)
+    else:
+        # Real-model eval: a fallback route means the model JSON was unusable (or the
+        # runtime failed) and the deterministic fallback router answered instead — a
+        # failure. Only a real model/model-repair route is acceptable.
+        if actual_method == "fallback":
+            mismatches.append("routing_method was fallback (model JSON unusable or runtime failed)")
+        elif actual_method not in {"model", "model_repair"}:
+            mismatches.append(f"routing_method expected model/model_repair, got {actual_method!r}")
     routing_ok = not mismatches
     return BrainEvalResult(
         id=case.id,
@@ -102,6 +111,22 @@ def _evaluate_case(
         actual=actual,
         detail="" if schema_valid and routing_ok else "; ".join(mismatches),
     )
+
+
+def real_routing_report(
+    cases: list[BrainEvalCase], decisions: list[dict[str, Any]]
+) -> RoutingReport:
+    """Build a real-mode RoutingReport, disallowing fallback for every case.
+
+    ``decisions[i]`` is the Brain decision recorded for ``cases[i]`` (or an empty
+    dict when the request errored). Used by the all-configured-models verifier so
+    its routing report counts a schema-valid fallback decision as a failure.
+    """
+    results = [
+        _evaluate_case(case, actual, schema_valid=bool(actual), allow_fallback=False)
+        for case, actual in zip(cases, decisions, strict=False)
+    ]
+    return routing_report_from_results(results)
 
 
 def _expect(mismatches: list[str], key: str, expected: object, actual: object) -> None:
@@ -165,7 +190,8 @@ class RealBrainEvalRunner(
             schema_valid = True
         except ValueError:
             schema_valid = False
-        return _evaluate_case(case, actual, schema_valid=schema_valid)
+        # Real-model eval: fallback routing is a failure, not an accepted route.
+        return _evaluate_case(case, actual, schema_valid=schema_valid, allow_fallback=False)
 
     def _latest_decision(self) -> dict[str, Any]:
         database = self.temp / "data" / "april.db"

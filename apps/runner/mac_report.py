@@ -92,6 +92,11 @@ class RoutingReport(BaseModel):
     total: int = 0
     passed: int = 0
     accuracy: float = 0.0
+    # Counts of the routing method the model actually used. fallback_count > 0 in a
+    # real-model run means the model JSON was unusable for that many cases. Default
+    # 0 keeps the report shape backward compatible.
+    fallback_count: int = 0
+    model_repair_count: int = 0
 
 
 class SkippedCheck(BaseModel):
@@ -136,11 +141,29 @@ def quantization_from_basename(basename: str | None) -> str | None:
     return match.group(1).lower() if match else None
 
 
+def _routing_method_of(result: object) -> str | None:
+    actual = getattr(result, "actual", None)
+    if isinstance(actual, dict):
+        method = actual.get("routing_method")
+        return method if isinstance(method, str) else None
+    return None
+
+
 def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
     total = len(results)
     passed = sum(1 for result in results if getattr(result, "ok", False))
     accuracy = round(passed / total, 4) if total else 0.0
-    return RoutingReport(total=total, passed=passed, accuracy=accuracy)
+    fallback_count = sum(1 for result in results if _routing_method_of(result) == "fallback")
+    model_repair_count = sum(
+        1 for result in results if _routing_method_of(result) == "model_repair"
+    )
+    return RoutingReport(
+        total=total,
+        passed=passed,
+        accuracy=accuracy,
+        fallback_count=fallback_count,
+        model_repair_count=model_repair_count,
+    )
 
 
 def threshold_failures(real_model: RealModelReport, thresholds: ReportThresholds) -> list[str]:

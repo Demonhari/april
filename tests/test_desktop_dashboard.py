@@ -163,8 +163,13 @@ def test_status_wording_helpers_and_render_present() -> None:
     assert "run april approve" in helpers
     # The verification card renders the explicit "real model verified" field and a
     # voice-not-live-verified warning; the approvals screen shows the disclaimer.
-    assert "D.realModelVerifiedLabel(latest)" in app
-    assert "D.voiceLiveWarning(latest)" in app
+    # Real-model status comes from the real-model report and voice status from the
+    # voice report, so a newer report of one kind cannot overwrite the other.
+    assert "D.realModelVerifiedLabel(realModel)" in app
+    assert "D.voiceLiveWarning(voice)" in app
+    assert "/verification/report/latest?type=real_model" in app
+    assert "/verification/report/latest?type=voice_live" in app
+    assert "renderLatestReport(latest, latestRealModel, latestVoice)" in app
     assert "D.APPROVAL_DISCLAIMER" in app
 
 

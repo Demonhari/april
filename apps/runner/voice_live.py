@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from april_common.errors import RuntimeUnavailableError
 from april_common.settings import AprilSettings
@@ -26,6 +26,11 @@ class VoiceLiveSkippedCheck(BaseModel):
 class VoiceLiveReport(BaseModel):
     schema_version: int = 1
     report_type: str = "voice_live"
+    # ``generated_at`` is the canonical timestamp the Desktop/report viewer reads,
+    # matching the other verification reports; ``timestamp`` is retained for
+    # backward compatibility with any already-written voice-live reports. When only
+    # ``timestamp`` is supplied, ``generated_at`` mirrors it (see validator below).
+    generated_at: str = ""
     timestamp: str
     platform: str
     sounddevice_available: bool
@@ -45,6 +50,20 @@ class VoiceLiveReport(BaseModel):
     temp_audio_retained: bool = False
     skipped: list[VoiceLiveSkippedCheck] = Field(default_factory=list)
     summary: str = "degraded"
+    # True only when the full live loop genuinely passed (all five checks confirmed
+    # AND summary == "pass"). A degraded/failed/skipped run can never set this true,
+    # so a voice report can never be mistaken for a verified live voice pass.
+    voice_live_verified: bool = False
+
+    @model_validator(mode="after")
+    def _mirror_timestamp(self) -> VoiceLiveReport:
+        # Keep the two timestamps consistent: fill whichever was omitted from the
+        # other so older callers (timestamp only) and the report viewer agree.
+        if not self.generated_at and self.timestamp:
+            self.generated_at = self.timestamp
+        elif not self.timestamp and self.generated_at:
+            self.timestamp = self.generated_at
+        return self
 
 
 Confirm = Callable[[str], bool]
@@ -61,8 +80,10 @@ def _available(settings: AprilSettings, path: Path | None) -> bool:
 
 def _initial_report(settings: AprilSettings) -> VoiceLiveReport:
     devices = query_audio_devices()
+    now = utc_now_iso()
     return VoiceLiveReport(
-        timestamp=utc_now_iso(),
+        generated_at=now,
+        timestamp=now,
         platform=f"{platform.system()} {platform.release()}".strip(),
         sounddevice_available=bool(devices.get("sounddevice_installed")),
         input_device_count=len(devices.get("input_devices", [])),
@@ -76,18 +97,22 @@ def _initial_report(settings: AprilSettings) -> VoiceLiveReport:
 
 
 def _finalize_summary(report: VoiceLiveReport) -> None:
-    if (
+    full_pass = (
         report.recording_success
         and report.stt_success
         and report.transcription_user_confirmed
         and report.tts_success
         and report.playback_user_confirmed
-    ):
+    )
+    if full_pass:
         report.summary = "pass"
     elif report.recording_success or report.stt_success or report.tts_success:
         report.summary = "degraded"
     else:
         report.summary = "fail" if not report.skipped else "degraded"
+    # Live-verified requires the full pass AND a "pass" summary; never set on a
+    # degraded, failed, or skipped run.
+    report.voice_live_verified = full_pass and report.summary == "pass"
 
 
 def write_voice_live_report(report: VoiceLiveReport, path: Path) -> Path:
