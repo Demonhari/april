@@ -34,6 +34,30 @@ class ReportThresholds(BaseModel):
     min_tokens_per_second: float | None = None
     max_load_seconds: float | None = None
     max_first_token_latency_seconds: float | None = None
+    max_rss_mb: float | None = None
+
+
+# An absolute (or home-relative) filesystem path with at least two segments, e.g.
+# ``/Users/hari/april/models/granite-3.3-2b-q4_k_m.gguf``. A single ``/foo`` and
+# incidental text like ``read/write`` never match (two+ segments required).
+_ABSOLUTE_PATH_RE = re.compile(r"~?(?:/[\w.\-]+){2,}/?")
+
+
+def redact_reason(text: str | None) -> str:
+    """Collapse any absolute-path-looking substring to its basename.
+
+    Skip/fail reasons are useful with the full path in the terminal, but the
+    machine-readable report must never carry directory structure. This keeps the
+    report's "basenames only" invariant even when a reason embeds a path.
+    """
+    if not text:
+        return text or ""
+
+    def _basename(match: re.Match[str]) -> str:
+        name = Path(match.group(0)).name
+        return name or match.group(0)
+
+    return _ABSOLUTE_PATH_RE.sub(_basename, text)
 
 
 class EnvironmentSnapshot(BaseModel):
@@ -134,6 +158,10 @@ def threshold_failures(real_model: RealModelReport, thresholds: ReportThresholds
         failures.append(
             f"first_token_latency_seconds {latency:.2f} above maximum {max_latency:.2f}"
         )
+    rss = real_model.process_rss_bytes
+    max_rss = thresholds.max_rss_mb
+    if max_rss is not None and rss is not None and rss / (1024 * 1024) > max_rss:
+        failures.append(f"process_rss_mb {rss / (1024 * 1024):.1f} above maximum {max_rss:.1f}")
     return failures
 
 
@@ -179,6 +207,9 @@ def build_mac_report(
 ) -> MacVerificationReport:
     active_thresholds = thresholds or ReportThresholds()
     failures = threshold_failures(real_model, active_thresholds)
+    # Basename-redact skip reasons so an embedded absolute path never reaches the
+    # on-disk report (the terminal table still shows the full path).
+    skipped = [SkippedCheck(name=item.name, reason=redact_reason(item.reason)) for item in skipped]
     summary = _summary(
         real_model,
         checks_failed=checks_failed,

@@ -29,9 +29,15 @@ from apps.runner.mac_report import (
     quantization_from_basename,
     routing_report_from_results,
 )
+from apps.runner.multi_model_report import (
+    MultiModelVerificationReport,
+    PerModelResult,
+    SpecialistSwitchReport,
+    build_multi_model_report,
+)
 from april_common.errors import ConfigError
 from april_common.settings import load_settings
-from services.april_runtime.model_registry import ModelRegistry
+from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
 from services.brain.schemas import BrainDecision
 from services.voice.health import query_audio_devices, voice_doctor
 
@@ -116,6 +122,110 @@ def run_target_mac_validation(
         timeout=timeout,
     )
     return validator.run()
+
+
+@dataclass(slots=True)
+class ModelPlanEntry:
+    """One configured model and whether the multi-model verifier can exercise it.
+
+    Pure data so the discovery/skip decision is unit-testable without a real
+    runtime: a missing file, an unreadable file, a non-chat (embedding) role, or
+    an absent llama-cpp-python all yield ``available=False`` with an explicit
+    ``reason`` — never a silent pass.
+    """
+
+    model: ModelDefinition
+    path: Path
+    available: bool
+    reason: str | None = None
+
+    @property
+    def path_basename(self) -> str:
+        return self.path.name
+
+
+def plan_multi_model_verification(
+    home: Path, *, llama_available: bool | None = None
+) -> list[ModelPlanEntry]:
+    """Inspect ``configs/models.yaml`` and decide which real models can be run.
+
+    Never downloads anything; only reads local configuration and checks local
+    file existence/readability. Embedding-role models are reported as skipped
+    because they are verified through ``run april memory reindex``, not chat.
+    """
+    available = _llama_cpp_installed() if llama_available is None else llama_available
+    registry = ModelRegistry.from_file(home / "configs" / "models.yaml", root=home)
+    entries: list[ModelPlanEntry] = []
+    for model in registry.list():
+        path = model.resolved_path(registry.root)
+        if model.backend != "llama_cpp":
+            reason = f"Backend {model.backend} is not a real GGUF backend."
+            entries.append(ModelPlanEntry(model=model, path=path, available=False, reason=reason))
+        elif model.role == "embedding":
+            entries.append(
+                ModelPlanEntry(
+                    model=model,
+                    path=path,
+                    available=False,
+                    reason="Embedding model is verified via `run april memory reindex`, not chat.",
+                )
+            )
+        elif not available:
+            entries.append(
+                ModelPlanEntry(
+                    model=model,
+                    path=path,
+                    available=False,
+                    reason="llama-cpp-python is not installed (pip install -e '.[runtime]').",
+                )
+            )
+        elif not path.exists():
+            entries.append(
+                ModelPlanEntry(
+                    model=model, path=path, available=False, reason=f"Missing model file: {path}"
+                )
+            )
+        elif not os.access(path, os.R_OK):
+            entries.append(
+                ModelPlanEntry(
+                    model=model, path=path, available=False, reason=f"Not readable: {path}"
+                )
+            )
+        else:
+            entries.append(ModelPlanEntry(model=model, path=path, available=True, reason=None))
+    return entries
+
+
+def skipped_result_for(entry: ModelPlanEntry) -> PerModelResult:
+    """A redacted per-model result for a model that was not exercised."""
+    return PerModelResult(
+        model_id=entry.model.id,
+        role=entry.model.role,
+        backend=entry.model.backend,
+        path_basename=entry.path_basename,
+        quantization=quantization_from_basename(entry.path_basename),
+        available=False,
+        skipped_reason=entry.reason,
+    )
+
+
+def run_all_configured_models_verification(
+    home: Path,
+    *,
+    require_real_model: bool = False,
+    max_output_tokens: int = 32,
+    timeout: float = 180.0,
+    thresholds: ReportThresholds | None = None,
+) -> AllConfiguredModelsVerifier:
+    verifier = AllConfiguredModelsVerifier(
+        home=home,
+        require_real_model=require_real_model,
+        max_output_tokens=max_output_tokens,
+        timeout=timeout,
+        thresholds=thresholds,
+    )
+    verifier.run()
+    return verifier
 
 
 class BenchmarkResult(BaseModel):
@@ -1594,6 +1704,341 @@ class RealWorkflowVerifier(
         except ValueError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+
+class AllConfiguredModelsVerifier(
+    RealModelVerifier
+):  # pragma: no cover - requires optional real GGUF runtime
+    """Load/chat/stream/unload every configured real GGUF model in one runtime.
+
+    Unlike :class:`RealModelVerifier` (single model, rewritten config), this keeps
+    the real ``configs/models.yaml`` so each model is exercised at its own
+    configured path, then verifies specialist switching keeps the brain usable.
+    The report-building is delegated to the unit-tested
+    :func:`build_multi_model_report`, so simulation can never be labelled real.
+    """
+
+    def __init__(
+        self,
+        *,
+        home: Path,
+        require_real_model: bool,
+        max_output_tokens: int = 32,
+        timeout: float = 180.0,
+        thresholds: ReportThresholds | None = None,
+    ) -> None:
+        self.plan = plan_multi_model_verification(home)
+        available = [entry for entry in self.plan if entry.available]
+        nominal = available[0].path if available else (home / "models" / "none.gguf")
+        super().__init__(
+            home=home, model_path=nominal, max_output_tokens=max_output_tokens, timeout=timeout
+        )
+        self.require_real_model = require_real_model
+        self.thresholds = thresholds or ReportThresholds()
+        self.results: list[PerModelResult] = []
+        self.specialist_switch: SpecialistSwitchReport | None = None
+        self.runtime_error = False
+
+    @property
+    def api_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_token}"}
+
+    def _prepare(self) -> None:
+        # Keep the REAL configs so each role uses its own configured GGUF path.
+        self.verify_home.mkdir(parents=True)
+        shutil.copytree(self.repo_home / "configs", self.verify_home / "configs")
+
+    def run(self) -> list[VerifyCheck]:
+        for entry in self.plan:
+            if not entry.available:
+                self.results.append(skipped_result_for(entry))
+        available = [entry for entry in self.plan if entry.available]
+        if not available:
+            status: VerifyStatus = "fail" if self.require_real_model else "skip"
+            self.checks.append(
+                VerifyCheck(
+                    name="configured real GGUF models",
+                    ok=not self.require_real_model,
+                    detail="No available configured GGUF models to verify.",
+                    status=status,
+                )
+            )
+            return self.checks
+        try:
+            self._prepare()
+            env = self._env()
+            self.runtime = self._start("services.april_runtime.server", env, self.runtime_log)
+            self.api = self._start("services.api.server", env, self.api_log)
+            self._check(
+                "runtime health",
+                lambda: self._wait_json(self.runtime_url + "/runtime/health", auth_runtime=True),
+            )
+            self._check("core health", lambda: self._wait_json(self.api_url + "/health"))
+            for entry in available:
+                result = self._verify_one(entry)
+                self.results.append(result)
+                self.checks.append(
+                    VerifyCheck(
+                        name=f"model {entry.model.id} load/chat/stream/unload",
+                        ok=result.structural_ok,
+                        detail=(
+                            f"tps={result.tokens_per_second}"
+                            if result.structural_ok
+                            else "structural failure"
+                        ),
+                    )
+                )
+            self.specialist_switch = self._verify_switching(available)
+            self.checks.append(
+                VerifyCheck(
+                    name="specialist switching (brain resident)",
+                    ok=self.specialist_switch.success,
+                    detail="brain stays usable across specialist load/unload",
+                )
+            )
+        except Exception as exc:
+            self.runtime_error = True
+            self.checks.append(VerifyCheck(name="multi-model runtime", ok=False, detail=str(exc)))
+        finally:
+            self._stop()
+            self._check("services stopped", self._services_stopped)
+            shutil.rmtree(self.temp, ignore_errors=True)
+        return self.checks
+
+    def _verify_one(self, entry: ModelPlanEntry) -> PerModelResult:
+        model = entry.model
+        result = PerModelResult(
+            model_id=model.id,
+            role=model.role,
+            backend=model.backend,
+            path_basename=entry.path_basename,
+            quantization=quantization_from_basename(entry.path_basename),
+            available=True,
+            context_size=model.context_size,
+        )
+        try:
+            load_start = time.monotonic()
+            loaded = self._post_runtime(
+                "/runtime/models/load",
+                {"model_id": model.id, "request_id": f"multi-{model.id}-load"},
+                timeout=self.timeout,
+            )
+            result.load_duration_seconds = time.monotonic() - load_start
+            result.load_success = loaded.get("state") == "loaded"
+            result.process_rss_bytes = _process_rss_bytes(
+                self.runtime.pid if self.runtime else None
+            )
+            content, output_tokens = self._chat_model(model.id, self._smoke_prompt(model.role))
+            result.chat_success = bool(content)
+            if model.role != "brain":
+                result.smoke_success = bool(content)
+            latency, tps, stream_tokens = self._stream_model(model.id)
+            result.streaming_success = stream_tokens > 0
+            result.first_token_latency_seconds = latency
+            result.tokens_per_second = tps
+            result.output_token_count = output_tokens or stream_tokens
+            if model.role == "brain":
+                result.structured_brain_json_success = self._brain_structured_json(model.id)
+                result.routing = self._routing_report()
+            unloaded = self._post_runtime(
+                "/runtime/models/unload",
+                {"model_id": model.id, "request_id": f"multi-{model.id}-unload"},
+                timeout=self.timeout,
+            )
+            result.unload_success = unloaded.get("state") in {"unloaded", "unavailable"}
+        except Exception:
+            # Leave the unset booleans False; structural_ok stays False so the
+            # model is reported as failed, never silently passed.
+            return result
+        return result
+
+    def _smoke_prompt(self, role: str) -> str:
+        prompts = {
+            "brain": "Reply with the single word ready.",
+            "coding": "Reply with the single word ok.",
+            "reading": "Reply with the single word ok.",
+            "creative": "Reply with the single word ok.",
+            "reasoning": "Reply with the single word ok.",
+            "system_action": "Reply with the single word ok.",
+        }
+        return prompts.get(role, "Reply with the single word ok.")
+
+    def _chat_model(self, model_id: str, prompt: str) -> tuple[str, int]:
+        data = self._post_runtime(
+            "/runtime/chat",
+            {
+                "model_id": model_id,
+                "messages": [{"role": "user", "content": prompt}],
+                "options": {"temperature": 0.0, "max_output_tokens": self.max_output_tokens},
+                "request_id": f"multi-{model_id}-chat",
+            },
+            timeout=self.timeout,
+        )
+        usage = data.get("usage") or {}
+        return str(data.get("content", "")).strip(), int(usage.get("output_tokens", 0))
+
+    def _stream_model(self, model_id: str) -> tuple[float | None, float | None, int]:
+        request = {
+            "model_id": model_id,
+            "messages": [{"role": "user", "content": "Say ok."}],
+            "options": {"temperature": 0.0, "max_output_tokens": self.max_output_tokens},
+            "request_id": f"multi-{model_id}-stream",
+        }
+        token_count = 0
+        output_tokens = 0
+        started = time.monotonic()
+        first_token_at: float | None = None
+        with httpx.stream(
+            "POST",
+            self.runtime_url + "/runtime/stream",
+            json=request,
+            headers=self.runtime_headers,
+            timeout=self.timeout,
+        ) as response:
+            if response.status_code >= 400:
+                raise RuntimeError(self._response_error(response))
+            for line in response.iter_lines():
+                if line.startswith("event: token"):
+                    token_count += 1
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
+                elif line.startswith("data: "):
+                    payload = self._stream_payload(line[6:])
+                    if "output_tokens" in payload:
+                        output_tokens = int(payload["output_tokens"])
+        elapsed = max(time.monotonic() - started, 0.000_001)
+        tokens = output_tokens or token_count
+        latency = first_token_at - started if first_token_at is not None else None
+        tps = tokens / elapsed if tokens else None
+        return latency, tps, token_count
+
+    def _stream_payload(self, raw: str) -> dict[str, Any]:
+        try:
+            import json
+
+            data = json.loads(raw)
+        except ValueError:
+            return {}
+        payload = data.get("payload") if isinstance(data, dict) else None
+        return payload if isinstance(payload, dict) else {}
+
+    def _brain_structured_json(self, model_id: str) -> bool:
+        import json
+
+        data = self._post_runtime(
+            "/runtime/chat",
+            {
+                "model_id": model_id,
+                "messages": [
+                    {"role": "user", "content": "Return one JSON object with a key named status."}
+                ],
+                "options": {"temperature": 0.0, "max_output_tokens": self.max_output_tokens},
+                "response_format": {"type": "json_object"},
+                "request_id": f"multi-{model_id}-json",
+            },
+            timeout=self.timeout,
+        )
+        try:
+            parsed = json.loads(str(data.get("content", "")))
+        except ValueError:
+            return False
+        return isinstance(parsed, dict)
+
+    def _routing_report(self) -> RoutingReport:
+        from apps.runner.evals import _evaluate_case, load_brain_eval_cases
+
+        cases = load_brain_eval_cases(self.repo_home)
+        results: list[Any] = []
+        with httpx.Client(
+            base_url=self.api_url, headers=self.api_headers, timeout=self.timeout
+        ) as client:
+            for case in cases:
+                response = client.post("/chat", json={"message": case.message})
+                actual = self._latest_decision() if response.status_code < 400 else {}
+                results.append(_evaluate_case(case, actual, schema_valid=bool(actual)))
+        return routing_report_from_results(results)
+
+    def _latest_decision(self) -> dict[str, Any]:
+        import json
+
+        database = self.temp / "data" / "april.db"
+        with sqlite3.connect(database) as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM conversation_events
+                WHERE event_type = 'brain_decision'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return {}
+        try:
+            payload = json.loads(str(row[0]))
+        except ValueError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _verify_switching(self, available: list[ModelPlanEntry]) -> SpecialistSwitchReport:
+        by_role = {entry.model.role: entry.model.id for entry in available}
+        report = SpecialistSwitchReport(attempted=True)
+        brain = by_role.get("brain")
+        if brain is None:
+            report.attempted = False
+            return report
+        report.brain_loaded = self._load_state(brain) == "loaded"
+        coding = by_role.get("coding")
+        if coding is not None:
+            report.coding_loaded = self._load_state(coding) == "loaded"
+            report.coding_unloaded = self._unload_state(coding) in {"unloaded", "unavailable"}
+        else:
+            report.coding_loaded = report.coding_unloaded = True
+        reading = by_role.get("reading")
+        if reading is not None:
+            report.reading_loaded = self._load_state(reading) == "loaded"
+            report.reading_unloaded = self._unload_state(reading) in {"unloaded", "unavailable"}
+        else:
+            report.reading_loaded = report.reading_unloaded = True
+        content, _ = self._chat_model(brain, "Reply with the single word ready.")
+        report.brain_usable_after = bool(content)
+        self._unload_state(brain)
+        return report
+
+    def _load_state(self, model_id: str) -> str:
+        data = self._post_runtime(
+            "/runtime/models/load",
+            {"model_id": model_id, "request_id": f"switch-load-{model_id}"},
+            timeout=self.timeout,
+        )
+        return str(data.get("state"))
+
+    def _unload_state(self, model_id: str) -> str:
+        data = self._post_runtime(
+            "/runtime/models/unload",
+            {"model_id": model_id, "request_id": f"switch-unload-{model_id}"},
+            timeout=self.timeout,
+        )
+        return str(data.get("state"))
+
+    def _report_backend(self) -> str:
+        if any(entry.available for entry in self.plan):
+            return "llama_cpp"
+        try:
+            return load_settings(root=self.repo_home).runtime.backend
+        except ConfigError:
+            return "unknown"
+
+    def build_report(self) -> MultiModelVerificationReport:
+        return build_multi_model_report(
+            environment=environment_snapshot(),
+            runtime_backend=self._report_backend(),
+            results=self.results,
+            specialist_switch=self.specialist_switch,
+            thresholds=self.thresholds,
+            require_real_model=self.require_real_model,
+            runtime_error=self.runtime_error,
+        )
 
 
 def _llama_cpp_installed() -> bool:

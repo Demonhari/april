@@ -26,11 +26,13 @@ from apps.runner.model_tools import (
     model_doctor,
     recommend_model_profile,
 )
+from apps.runner.multi_model_report import write_multi_model_report
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
 from apps.runner.verify import (
     BenchmarkResult,
     TargetMacValidator,
     VerifyCheck,
+    run_all_configured_models_verification,
     run_fake_verification,
     run_model_benchmark,
     run_real_model_verification,
@@ -1166,19 +1168,56 @@ def verify(
     real_model: bool = typer.Option(False, "--real-model"),
     workflow: bool = typer.Option(False, "--workflow"),
     target_mac: bool = typer.Option(False, "--target-mac"),
+    all_configured_models: bool = typer.Option(
+        False,
+        "--all-configured-models",
+        "--mac-readiness",
+        help="Verify every configured real GGUF model (load/chat/stream/unload + switching).",
+    ),
     require_real_model: bool = typer.Option(False, "--require-real-model"),
     json_output: bool = typer.Option(False, "--json"),
     report: Path | None = typer.Option(
-        None, "--report", help="Write a redacted machine-readable target-Mac report JSON here."
+        None, "--report", help="Write a redacted machine-readable verification report JSON here."
     ),
     min_tokens_per_second: float | None = typer.Option(None, "--min-tokens-per-second", min=0.0),
     max_load_seconds: float | None = typer.Option(None, "--max-load-seconds", min=0.0),
     max_first_token_latency_seconds: float | None = typer.Option(
         None, "--max-first-token-latency-seconds", min=0.0
     ),
+    max_rss_mb: float | None = typer.Option(None, "--max-rss-mb", min=0.0),
     max_output_tokens: int = typer.Option(32, "--max-output-tokens", min=1, max=4096),
     timeout: float = typer.Option(180.0, "--timeout", min=1.0),
 ) -> None:
+    thresholds = ReportThresholds(
+        min_tokens_per_second=min_tokens_per_second,
+        max_load_seconds=max_load_seconds,
+        max_first_token_latency_seconds=max_first_token_latency_seconds,
+        max_rss_mb=max_rss_mb,
+    )
+    if all_configured_models:
+        verifier = run_all_configured_models_verification(
+            _manager().home,
+            require_real_model=require_real_model,
+            max_output_tokens=max_output_tokens,
+            timeout=timeout,
+            thresholds=thresholds,
+        )
+        checks = verifier.checks
+        if json_output:
+            console.print_json(data={"checks": [asdict(check) for check in checks]})
+        else:
+            _print_verification_table("APRIL All-Configured-Model Verification", checks)
+        if report is not None:
+            multi_report = verifier.build_report()
+            written = write_multi_model_report(multi_report, report)
+            console.print(
+                f"[green]Wrote multi-model verification report to {written}[/green] "
+                f"(summary: {multi_report.summary}, "
+                f"real_model_verified: {multi_report.real_model_verified})"
+            )
+        if not all(check.ok for check in checks):
+            raise typer.Exit(1)
+        raise typer.Exit(0)
     if target_mac:
         validator = TargetMacValidator(
             home=_manager().home,
@@ -1193,13 +1232,7 @@ def verify(
         else:
             _print_verification_table("APRIL Target Mac Validation", checks)
         if report is not None:
-            rendered = validator.build_report(
-                thresholds=ReportThresholds(
-                    min_tokens_per_second=min_tokens_per_second,
-                    max_load_seconds=max_load_seconds,
-                    max_first_token_latency_seconds=max_first_token_latency_seconds,
-                )
-            )
+            rendered = validator.build_report(thresholds=thresholds)
             written = write_report(rendered, report)
             console.print(
                 f"[green]Wrote verification report to {written}[/green] "
