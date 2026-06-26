@@ -115,17 +115,30 @@ injected global. If pywebview is not installed, `--native` prints a message and
 falls back to the browser path. The default path needs zero extra runtime
 dependencies.
 
-For a local unsigned app bundle wrapper around the same command:
+### Unsigned app stub vs. a real signed/notarized app
+
+For a local app bundle wrapper around the same command:
 
 ```bash
 scripts/create_macos_app_stub.sh
 run april setup app-stub
 ```
 
-Both create `dist/APRIL.app` as a development launcher only. They perform no
-signing/notarization, install nothing, and bundle no models, voice binaries,
-tokens, or secrets. The generated bundle is ignored by Git. Signed packaging and
-launch-at-login are future work.
+| | Unsigned app stub (today) | Signed/notarized app (future work) |
+|---|---|---|
+| What it is | `dist/APRIL.app`, a thin launcher that runs `run april desktop` | A distributable, Gatekeeper-trusted `.app` |
+| Code signing | None | Developer ID signature required |
+| Notarization | None | Apple notarization + stapling required |
+| Gatekeeper | First launch needs right-click → Open (or a quarantine prompt) | Launches with no warning |
+| Bundles models/voice/tokens | No — none of these are ever bundled | No — still local-only |
+| Launch-at-login | No | Possible future option |
+| Git | Ignored (`dist/` is not committed) | n/a |
+
+Both commands create `dist/APRIL.app` as a **development launcher only**. They
+perform no signing/notarization, install nothing, and bundle no models, voice
+binaries, tokens, or secrets. The generated bundle is ignored by Git. Signed
+packaging, notarization, and launch-at-login are future work; until then the
+Desktop is a local SPA reached through `run april desktop` or this unsigned stub.
 
 No authenticated request is issued until token acquisition succeeds. If it fails,
 the SPA shows a safe local "locked" screen and starts no polling; the dashboard,

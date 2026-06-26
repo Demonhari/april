@@ -215,6 +215,43 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
   check("verification all true", all.core_or_all_verified === true);
 }
 
+// --- explicit status-screen wording (real model verified / voice / approval) ---
+{
+  check(
+    "real model verified label none",
+    D.realModelVerifiedLabel({ status: "not_verified", report: null }) ===
+      "real model verified: none",
+  );
+  check(
+    "real model verified label partial",
+    D.realModelVerifiedLabel({ status: "ok", report: { verification_level: "partial" } }) ===
+      "real model verified: partial",
+  );
+  check(
+    "real model verified label all",
+    D.realModelVerifiedLabel({ status: "ok", report: { verification_level: "all" } }) ===
+      "real model verified: all",
+  );
+  // Voice is not live-verified until a report records it explicitly.
+  check(
+    "voice not live-verified by default",
+    D.voiceLiveVerified({ status: "ok", report: { verification_level: "all" } }) === false,
+  );
+  check(
+    "voice live warning shown when not verified",
+    D.voiceLiveWarning({ status: "not_verified", report: null }).indexOf("not live-verified") !== -1,
+  );
+  check(
+    "voice live verified clears warning",
+    D.voiceLiveWarning({ status: "ok", report: { voice_live_verified: true } }) === "",
+  );
+  check(
+    "approval disclaimer says chat yes is not approval",
+    D.APPROVAL_DISCLAIMER.indexOf("not approval") !== -1 &&
+      D.APPROVAL_DISCLAIMER.indexOf("run april approve") !== -1,
+  );
+}
+
 if (failures > 0) {
   console.error(failures + " desktop dashboard checks failed");
   process.exit(1);

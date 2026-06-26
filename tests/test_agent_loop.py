@@ -216,6 +216,33 @@ async def test_agent_without_model_unavailable(settings_tmp) -> None:
 
 
 @pytest.mark.asyncio
+async def test_structured_agent_loop_rejects_invalid_tool_request(settings_tmp) -> None:
+    # A tool_request carrying an extra forbidden field is schema-invalid: it must
+    # be repaired (never executed as-is). Here the repair resolves to a plain
+    # answer, so NO tool call is recorded for the malformed request.
+    loop, context, _memory, database, runtime = await make_loop(
+        settings_tmp,
+        [
+            '{"type":"tool_request","tool":"read_file","args":{"path":"README.md"},'
+            '"bogus_field":true}',
+            '{"type":"final_answer","message":"Nothing to run.","summary":"ok","citations":[]}',
+        ],
+    )
+    result = await loop.run(
+        agent=coding_agent(),
+        message="inspect",
+        context=context,
+        request_id="request",
+    )
+    assert result.status == "ok"
+    assert result.final_message == "Nothing to run."
+    assert len(runtime.calls) == 2  # original + repair
+    rows = await database.fetchall("SELECT * FROM tool_calls")
+    assert rows == []  # the invalid tool_request was never executed
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_structured_agent_loop_rejects_blocked_tool(settings_tmp) -> None:
     loop, context, _memory, database, _runtime = await make_loop(
         settings_tmp,

@@ -886,6 +886,9 @@ screens.projects = async function () {
 
 screens.approvals = async function () {
   screenEl.appendChild(screenHeader("Approvals", "Exact-ID, one-time approvals. A chat 'yes' is never approval."));
+  const note = card("<div class='panel-title'>How approval works</div>");
+  note.innerHTML += "<div class='kv warn'>" + esc(D.APPROVAL_DISCLAIMER) + "</div>";
+  screenEl.appendChild(note);
   const data = await api("GET", "/approvals");
   state.approvals = (data && data.approvals) || [];
   const wrap = card("<div class='panel-title'>Pending approvals</div>");
@@ -1083,11 +1086,16 @@ function renderLatestReport(latest) {
   const summary = D.verificationSummary(latest);
   if (summary.status === "not_verified") {
     return "<div class='panel-title'>Latest verification report</div>" +
+      "<div class='kv'><strong>" + esc(D.realModelVerifiedLabel(latest)) + "</strong></div>" +
+      "<div class='kv warn'>" + esc(D.voiceLiveWarning(latest)) + "</div>" +
       "<span class='muted'>not verified yet</span>";
   }
   const report = latest.report || {};
+  const voiceWarning = D.voiceLiveWarning(latest);
   let html = "<div class='panel-title'>Latest verification report</div>" +
     "<div class='row'>" + levelPill(summary.verification_level) + "</div>" +
+    "<div class='kv'><strong>" + esc(D.realModelVerifiedLabel(latest)) + "</strong></div>" +
+    (voiceWarning ? "<div class='kv warn'>" + esc(voiceWarning) + "</div>" : "") +
     kvRows([
       ["generated", summary.generated_at],
       ["type", summary.report_type],

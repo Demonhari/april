@@ -30,6 +30,7 @@ from apps.runner.model_tools import (
     setup_voice_stack,
 )
 from apps.runner.multi_model_report import write_multi_model_report
+from apps.runner.readiness import ReadinessReport, build_readiness_report
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
 from apps.runner.soak import run_fake_soak, write_soak_report
 from apps.runner.verify import (
@@ -472,6 +473,58 @@ def doctor() -> None:
 @april_app.command("doctor")
 def april_doctor() -> None:
     _doctor()
+
+
+@april_app.command("readiness")
+def readiness(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Explain offline exactly what is missing for real local-model readiness.
+
+    Reads only configs/env; never starts a service, loads a model, opens the
+    microphone, downloads anything, or installs anything. Prints actionable
+    commands only. Paths and tokens are redacted.
+    """
+    report = build_readiness_report(_manager().home)
+    if json_output:
+        console.print_json(data=report.model_dump())
+        return
+    _print_readiness(report)
+
+
+_READINESS_STATUS_STYLE = {
+    "ok": "[green]ok[/green]",
+    "warning": "[yellow]warning[/yellow]",
+    "blocker": "[red]blocker[/red]",
+    "skipped": "[dim]skipped[/dim]",
+}
+
+
+def _print_readiness(report: ReadinessReport) -> None:
+    headline = (
+        "[green]real model ready[/green]"
+        if report.real_model_ready
+        else "[red]NOT real-model ready[/red]"
+    )
+    console.print(
+        f"APRIL readiness — {headline} (backend={report.runtime_backend}, env={report.environment})"
+    )
+    table = Table(title="Readiness checks")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for check in report.checks:
+        table.add_row(
+            check.name,
+            _READINESS_STATUS_STYLE.get(check.status, check.status),
+            check.detail,
+        )
+    console.print(table)
+    if report.next_actions:
+        console.print("[bold]Next actions (run these yourself; nothing is run for you):[/bold]")
+        for action in report.next_actions:
+            # markup=False so tokens like '.[runtime]' are not parsed as Rich tags.
+            console.print(f"  {action}", markup=False)
+    if not report.blockers:
+        console.print("[green]No blockers: run the real verification command to confirm.[/green]")
 
 
 @april_app.command()

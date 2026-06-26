@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from april_common.audit import AuditLogger
 from april_common.settings import get_settings
-from services.memory.vector_memory import VectorMemory
+from services.memory.factory import vector_memory_from_settings
 from skills.base import timed_tool
 from skills.schemas import ToolDefinition, ToolResult
 
@@ -11,7 +12,7 @@ from skills.schemas import ToolDefinition, ToolResult
 async def document_search(args: dict[str, Any]) -> ToolResult:
     async def run() -> ToolResult:
         settings = get_settings()
-        vector = VectorMemory(settings.vector_index_path)
+        vector = vector_memory_from_settings(settings, audit=AuditLogger(settings.audit_path))
         query = str(args.get("query", ""))
         limit = int(args.get("limit", 5))
         results = vector.search(query, limit=limit, source_type="document")

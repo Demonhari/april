@@ -3,8 +3,11 @@ agents:
     description: Chat, planning, and small answers.
     model_id: april-brain
     prompt_path: agents/general/prompt.md
-    allowed_tools: [remember_memory]
-    blocked_tools: []
+    # The Brain routes reminder requests through general_agent, so the effective
+    # tool registry (derived from this list) must grant the local reminder tools.
+    # These stay Level 1/2 local writes and never require Level 3 approval.
+    allowed_tools: [remember_memory, create_reminder, list_reminders]
+    blocked_tools: [write_file, run_command, git_commit, patch_applier, open_url, open_app]
     memory_access: conversation_and_safe_memory
     maximum_tool_iterations: 5
     output_schema: AgentResult
@@ -21,8 +24,11 @@ agents:
     description: Document and chunk summarization.
     model_id: april-reading
     prompt_path: agents/reading/prompt.md
-    allowed_tools: [read_file, search_files, document_search]
-    blocked_tools: [write_file, run_command, git_commit]
+    # The Core API /documents endpoint executes document_indexer as reading_agent,
+    # so the effective registry must allow it (Level 2 local safe_write, no
+    # approval). Document Q&A also reads and searches local files.
+    allowed_tools: [read_file, search_files, document_search, document_indexer]
+    blocked_tools: [write_file, run_command, git_commit, patch_applier, open_url, open_app]
     memory_access: conversation_and_safe_memory
     maximum_tool_iterations: 3
     output_schema: AgentResult

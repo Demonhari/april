@@ -71,6 +71,21 @@ def voice_health(settings: AprilSettings) -> VoiceHealth:
 
 
 def query_audio_devices() -> dict[str, Any]:
+    """Enumerate audio devices, distinguishing a *missing dependency* from a
+    *device/permission* failure.
+
+    ``import_ok`` records whether ``sounddevice``/PortAudio could be imported at
+    all; ``failure_kind`` then says *why* enumeration failed:
+
+    * ``"missing_dependency"`` — the package or its PortAudio native library is
+      not installed/loadable. The fix is to install it.
+    * ``"device_error"`` — the package imported fine but querying devices failed
+      (commonly a denied macOS microphone permission or no device present). The
+      fix is a permission/hardware check, *not* an install.
+
+    ``sounddevice_installed`` stays ``True`` only on a fully successful query, so
+    existing callers keep their meaning; the new fields refine the diagnosis.
+    """
     try:
         import sounddevice as sd
     except (ImportError, OSError) as exc:
@@ -78,6 +93,8 @@ def query_audio_devices() -> dict[str, Any]:
         # present but the PortAudio native library is missing/unloadable.
         return {
             "sounddevice_installed": False,
+            "import_ok": False,
+            "failure_kind": "missing_dependency",
             "input_devices": [],
             "output_devices": [],
             "error": f"sounddevice/PortAudio unavailable: {exc}",
@@ -97,23 +114,69 @@ def query_audio_devices() -> dict[str, Any]:
             if int(device.get("max_output_channels", 0) or 0) > 0:
                 output_devices.append(record)
     except Exception as exc:
-        # PortAudioError (and any backend error) at query time: degrade to the same
-        # shape rather than crashing the voice doctor/health report.
+        # PortAudioError (and any backend error) at query time: the dependency is
+        # present but the device/permission is not. Report it as such instead of
+        # conflating it with a missing install.
         return {
             "sounddevice_installed": False,
+            "import_ok": True,
+            "failure_kind": "device_error",
             "input_devices": [],
             "output_devices": [],
-            "error": f"sounddevice/PortAudio unavailable: {exc}",
+            "error": f"sounddevice/PortAudio device error: {exc}",
         }
     return {
         "sounddevice_installed": True,
+        "import_ok": True,
+        "failure_kind": None,
         "input_devices": input_devices,
         "output_devices": output_devices,
     }
 
 
+def microphone_access(devices: dict[str, Any]) -> dict[str, str]:
+    """Classify microphone availability into a permission-vs-dependency verdict.
+
+    Returns ``{"status": <verdict>, "message": <guidance>}`` where ``status`` is
+    one of ``ok``, ``missing_dependency``, ``permission_or_device``, or
+    ``no_input_device``. This is the field the doctor and Desktop use to tell a
+    user *which* fix applies.
+    """
+    if not devices.get("import_ok", False):
+        return {
+            "status": "missing_dependency",
+            "message": (
+                "sounddevice/PortAudio is not installed. Install the optional voice "
+                "extra (`pip install -e '.[voice]'`) and the PortAudio native library."
+            ),
+        }
+    if devices.get("failure_kind") == "device_error":
+        return {
+            "status": "permission_or_device",
+            "message": (
+                "sounddevice is installed but querying audio devices failed. This is "
+                "usually a denied microphone permission, not a missing dependency."
+            ),
+        }
+    if not devices.get("input_devices"):
+        return {
+            "status": "no_input_device",
+            "message": (
+                "No input devices were reported. Check that a microphone is connected "
+                "and that microphone permission is granted to the terminal app."
+            ),
+        }
+    return {"status": "ok", "message": f"{len(devices['input_devices'])} input device(s)"}
+
+
 def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
     devices = query_audio_devices()
+    mic = microphone_access(devices)
+    # Push-to-talk is the always-available fallback: it needs a usable microphone
+    # but no wake-word model. Wake-word listening is the only thing that requires
+    # the openWakeWord model.
+    push_to_talk_available = bool(devices["sounddevice_installed"] and devices["input_devices"])
+    wake_word_configured = settings.voice.wake_word_model_path is not None
     components = [
         VoiceComponentHealth(
             name="voice enabled",
@@ -122,8 +185,14 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         ),
         VoiceComponentHealth(
             name="sounddevice import",
-            status="ok" if devices["sounddevice_installed"] else "degraded",
-            message="installed" if devices["sounddevice_installed"] else "missing",
+            status="ok" if devices.get("import_ok") else "degraded",
+            message="installed" if devices.get("import_ok") else "missing",
+        ),
+        VoiceComponentHealth(
+            name="microphone access",
+            status="ok" if mic["status"] == "ok" else "degraded",
+            # Distinguishes permission failure from a missing dependency.
+            message=f"{mic['status']}: {mic['message']}",
         ),
         VoiceComponentHealth(
             name="input devices",
@@ -140,6 +209,15 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         _configured_path_health("piper binary", settings, settings.voice.piper_binary_path),
         _configured_path_health("piper model", settings, settings.voice.piper_model_path),
         _configured_path_health("wake-word model", settings, settings.voice.wake_word_model_path),
+        VoiceComponentHealth(
+            name="push-to-talk fallback",
+            status="ok" if push_to_talk_available else "degraded",
+            message=(
+                "available (no wake-word model required)"
+                if push_to_talk_available
+                else "unavailable: needs a usable microphone"
+            ),
+        ),
         _audio_cache_health(settings),
     ]
     degraded = [component for component in components if component.status == "degraded"]
@@ -147,6 +225,11 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         "status": "degraded" if degraded else "ok",
         "voice_enabled": settings.voice.enabled,
         "sounddevice_installed": devices["sounddevice_installed"],
+        "sounddevice_import_ok": bool(devices.get("import_ok")),
+        "microphone_access": mic["status"],
+        "microphone_access_message": mic["message"],
+        "push_to_talk_available": push_to_talk_available,
+        "wake_word_model_configured": wake_word_configured,
         "input_devices": devices["input_devices"],
         "output_devices": devices["output_devices"],
         "components": [component.model_dump() for component in components],

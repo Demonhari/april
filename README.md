@@ -138,6 +138,8 @@ real models, live audio, or native Mac packaging.
 | Capability | Status |
 |---|---|
 | Runtime, Brain routing, agents, permissions, memory, scheduler, documents, desktop SPA | Implemented, fake-backend tested |
+| Offline real-readiness report (`run april readiness [--json]`) | Implemented, tested with temp configs |
+| Memory vector search (defaults to hashed-token embeddings) | Implemented, fake-backend tested |
 | Brain agent-name schema constraint + repair/fallback | Implemented, fake-backend tested |
 | Simulated vs. real runtime health (`simulated` flag) | Implemented, fake-backend tested |
 | Scoped log/cache cleanup (plan + Level 4 approved apply) | Implemented, security-tested |
@@ -150,6 +152,38 @@ real models, live audio, or native Mac packaging.
 
 Nothing in this repository has been run against a real GGUF model, a live
 microphone, or native Mac packaging in the environment that produced it.
+
+### Offline readiness check
+
+Before starting anything, ask APRIL what is still missing for real local-model
+readiness. This is offline and inert: it reads only configs/env, starts no
+service, loads no model, opens no microphone, downloads nothing, and installs
+nothing. It prints actionable commands only; paths and tokens are redacted.
+
+```bash
+run april readiness          # human-readable table + next commands
+run april readiness --json   # machine-readable, redacted report
+```
+
+It reports, with a blocker/warning/skipped verdict each: the runtime backend
+(fake vs `llama_cpp`), whether the `llama-cpp-python` extra is installed, which
+configured GGUF model files are missing, the whisper.cpp / Piper / wake-word
+artifacts (only blocking when voice is enabled), whether default development
+tokens are still active, and the exact next command for each gap. `run april
+readiness` only diagnoses; it never fixes anything for you.
+
+### Memory embeddings (honest default)
+
+Local memory and repo/document vector search default to **deterministic
+hashed-token embeddings**. Semantic `runtime-local` embeddings are used only when
+you both register a local embedding-role GGUF and set
+`memory.embedding_provider=runtime-local` (`APRIL_MEMORY_EMBEDDING_PROVIDER`).
+Every reader and writer of the local vector index — the API container and the
+`repo_indexer`, `document_indexer`, and `document_search` tools — resolves the
+same configured provider, so vector spaces are never silently mixed; if the
+local embedding model is unavailable the system falls back to hashed-token with
+an audited warning rather than switching spaces. Switching providers requires a
+`run april memory reindex`.
 
 ## Backends, Verification, and Honest Status
 

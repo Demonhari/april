@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from april_common.audit import AuditLogger
 from april_common.path_security import MODEL_SUFFIXES, normalize_existing_path
 from april_common.settings import get_settings
 from april_common.time import utc_now_iso
-from services.memory.vector_memory import VectorMemory
+from services.memory.factory import vector_memory_from_settings
 from skills.base import timed_tool
 from skills.code.repo_indexer import chunk_text
 from skills.documents.extractors import ExtractedDocument, UnsupportedDocument, extract_document
@@ -20,7 +21,7 @@ async def document_indexer(args: dict[str, Any]) -> ToolResult:
         policy = current_path_policy()
         root = normalize_existing_path(args["folder_path"], policy)
         patterns = read_gitignore_patterns(root)
-        vector = VectorMemory(settings.vector_index_path)
+        vector = vector_memory_from_settings(settings, audit=AuditLogger(settings.audit_path))
         indexed = 0
         chunks: list[tuple[str, str, int | None, int | None]] = []
         documents: list[dict[str, object]] = []

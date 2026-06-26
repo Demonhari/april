@@ -50,6 +50,47 @@
      mutate config.
    - Tests run on the fake backend with no GGUF/network/microphone: the static mount returns `index.html`, `/diagnostics/activity` requires auth and is redacted, report history is sanitized, and the `desktop` subcommand resolves config and target URL without launching a real browser.
 
+## Current Status (honest)
+
+This is the candid state of the MVP. A large, green automated suite verifies
+orchestration, permissions, memory, and API/desktop contracts against the
+deterministic fake backend — it does **not** verify real models, live audio, or
+native packaging.
+
+- **Core fake-backend MVP: implemented and tested.** Runtime, Brain routing,
+  specialist agents, the permission engine with exact-action approvals, SQLite
+  memory, the scheduler, documents, and the desktop SPA all pass against
+  `APRIL_RUNTIME_BACKEND=fake`.
+- **Real GGUF: not verified until you run the real-model checks.** The default
+  backend is `llama_cpp`, but no GGUF is downloaded or committed. Run
+  `run april readiness` to see exactly what is missing, then
+  `run april verify --all-configured-models --require-real-model` to actually
+  load/chat/stream/unload your local models. Until then, real-model readiness is
+  `none`.
+- **Voice: code exists, live voice is unverified here.** Voice is off by default
+  and requires the `.[voice]` extra plus whisper.cpp / Piper / wake-word
+  binaries and models you install yourself, and macOS microphone permission.
+  `run april voice doctor` distinguishes a *missing dependency* from a
+  *permission/device failure* and reports push-to-talk fallback availability
+  (push-to-talk needs no wake-word model). Live audio is verified only by
+  `run april voice verify-live` on your Mac.
+- **Desktop: local SPA / optional native wrapper, not signed/notarized.** The UI
+  is plain static HTML/CSS/JS served over authenticated loopback. The optional
+  `dist/APRIL.app` stub is a development launcher only — no signing, no
+  notarization, no bundled models/voice/tokens, ignored by Git. Signed/notarized
+  packaging and launch-at-login remain future work.
+- **Memory vector search defaults to hashed-token embeddings.** Semantic
+  `runtime-local` embeddings are used only when a local embedding-role GGUF is
+  registered and `memory.embedding_provider=runtime-local` is set and verified.
+  All index readers/writers resolve the same configured provider (shared
+  `vector_memory_from_settings` factory) so vector spaces are never silently
+  mixed; an unavailable embedding model falls back to hashed-token with an
+  audited warning.
+- **External actions remain out of scope and disabled.** No git push, deploy,
+  email, payments, automatic model downloads, telemetry, cloud APIs, or broad
+  delete. The only file-removing flow is the scoped, Level-4 approval-gated
+  log/cache cleanup.
+
 ## Architectural Assumptions
 
 - The repository root is the default APRIL home unless `APRIL_HOME` points elsewhere.

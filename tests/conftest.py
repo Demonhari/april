@@ -136,6 +136,28 @@ class FakeRuntimeClient:
                     '"needs_confirmation":false,"task_steps":["Analyze trade-offs"],'
                     '"decision_summary":"Deep reasoning and architecture analysis"}'
                 )
+            elif "remind me to stand up" in lower or "remind me" in lower:
+                content = json.dumps(
+                    {
+                        "intent": "reminders",
+                        "agent": "general_agent",
+                        "model_id": "april-brain",
+                        "tools_needed": ["create_reminder"],
+                        "planned_tool_calls": [
+                            {
+                                "tool": "create_reminder",
+                                "args": {"content": "stand up"},
+                                "reason": "Create local reminder from explicit request.",
+                            }
+                        ],
+                        "memory_queries": [],
+                        "permission_level": 2,
+                        "risk_level": "safe_write",
+                        "needs_confirmation": False,
+                        "task_steps": ["Create the local reminder"],
+                        "decision_summary": "Local reminder request.",
+                    }
+                )
             elif "remember i prefer concise answers" in lower:
                 content = json.dumps(
                     {

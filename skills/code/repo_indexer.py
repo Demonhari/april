@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from april_common.audit import AuditLogger
 from april_common.path_security import (
     ensure_text_file,
     is_path_within_roots,
@@ -13,6 +14,7 @@ from april_common.path_security import (
 from april_common.settings import get_settings
 from april_common.time import utc_now_iso
 from services.memory.database import Database
+from services.memory.factory import vector_memory_from_settings
 from services.memory.repo_index_store import RepoIndexStore
 from services.memory.schemas import VectorMetadata
 from services.memory.vector_memory import VectorMemory
@@ -100,7 +102,7 @@ async def repo_indexer(args: dict[str, Any]) -> ToolResult:
         patterns = read_gitignore_patterns(root)
         source_id = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
         git_commit = _git_head(root)
-        vector = VectorMemory(settings.vector_index_path)
+        vector = vector_memory_from_settings(settings, audit=AuditLogger(settings.audit_path))
         max_bytes = min(policy.max_read_bytes, 500_000)
 
         reindexed_files = 0

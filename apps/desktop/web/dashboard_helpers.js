@@ -378,10 +378,39 @@
     };
   }
 
+  // --- explicit status-screen wording ---------------------------------------
+  // A chat "yes" is conversational text and never authorizes anything. Only the
+  // exact-ID Approve control here, or `run april approve <id>` in the CLI, can
+  // release a Level 3+ action. This string is the single source of that wording.
+  const APPROVAL_DISCLAIMER =
+    'A chat "yes" is not approval. Only the exact Approve button here, or ' +
+    "`run april approve <id>` in the CLI, authorizes a Level 3+ action.";
+
+  // Explicit Status-screen field: "real model verified: none/partial/core/all".
+  // Derived from the latest verification report; honest "none" until a real run.
+  function realModelVerifiedLabel(latest) {
+    return "real model verified: " + verificationSummary(latest).verification_level;
+  }
+
+  // Whether voice has been *live*-verified. Voice live verification is a separate,
+  // opt-in step (`run april voice verify-live`) that writes its own report; until
+  // a report explicitly records a live voice pass, voice is NOT live-verified.
+  function voiceLiveVerified(latest) {
+    const report = (latest && latest.report) || null;
+    return !!(report && report.voice_live_verified === true);
+  }
+
+  // Visible warning string when voice is not live-verified; "" when it is.
+  function voiceLiveWarning(latest) {
+    if (voiceLiveVerified(latest)) return "";
+    return "Voice is not live-verified. Run `run april voice verify-live` on this Mac.";
+  }
+
   root.AprilDashboard = {
     UNKNOWN: UNKNOWN,
     UNAVAILABLE: UNAVAILABLE,
     NOT_VERIFIED: NOT_VERIFIED,
+    APPROVAL_DISCLAIMER: APPROVAL_DISCLAIMER,
     AGENTS: AGENTS,
     PERMISSION_LEVELS: PERMISSION_LEVELS,
     ACTIVITY_ALLOWED_KEYS: ACTIVITY_ALLOWED_KEYS,
@@ -404,6 +433,9 @@
     streamStateUpdate: streamStateUpdate,
     basenameOnly: basenameOnly,
     verificationSummary: verificationSummary,
+    realModelVerifiedLabel: realModelVerifiedLabel,
+    voiceLiveVerified: voiceLiveVerified,
+    voiceLiveWarning: voiceLiveWarning,
   };
 
   if (typeof module !== "undefined" && module.exports) {

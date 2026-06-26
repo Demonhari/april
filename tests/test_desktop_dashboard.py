@@ -149,6 +149,25 @@ def test_approvals_use_exact_id_endpoints() -> None:
     assert "/tools/approve" not in chat_segment
 
 
+# --- explicit status wording (real model verified / voice / approval) ------
+def test_status_wording_helpers_and_render_present() -> None:
+    helpers = _read("dashboard_helpers.js")
+    app = _read("app.js")
+    # The pure helpers expose the explicit Status-screen wording.
+    assert "realModelVerifiedLabel" in helpers
+    assert "real model verified: " in helpers
+    assert "voiceLiveWarning" in helpers
+    assert "not live-verified" in helpers
+    assert "APPROVAL_DISCLAIMER" in helpers
+    assert "not approval" in helpers
+    assert "run april approve" in helpers
+    # The verification card renders the explicit "real model verified" field and a
+    # voice-not-live-verified warning; the approvals screen shows the disclaimer.
+    assert "D.realModelVerifiedLabel(latest)" in app
+    assert "D.voiceLiveWarning(latest)" in app
+    assert "D.APPROVAL_DISCLAIMER" in app
+
+
 # --- activity feed redaction ----------------------------------------------
 def test_activity_rendering_uses_redacted_projection() -> None:
     app = _read("app.js")

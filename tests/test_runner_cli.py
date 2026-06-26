@@ -545,6 +545,27 @@ def _copy_configs(home: Path) -> None:
     shutil.copytree(Path.cwd() / "configs", home / "configs")
 
 
+def test_readiness_cli_human_and_json_are_offline_and_redacted(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    runner = CliRunner()
+    human = runner.invoke(app, ["april", "readiness"])
+    assert human.exit_code == 0, human.output
+    assert "readiness" in human.output.lower()
+    assert "run april verify" in human.output
+
+    structured = runner.invoke(app, ["april", "readiness", "--json"])
+    assert structured.exit_code == 0, structured.output
+    payload = json.loads(structured.output)
+    assert "real_model_ready" in payload
+    assert "blockers" in payload
+    assert "next_actions" in payload
+    # Offline + redacted: no absolute home path, no token value in JSON output.
+    assert str(tmp_path) not in structured.output
+    assert "local-dev-token" not in structured.output
+
+
 def test_setup_models_dry_run_writes_nothing_and_prints_basenames(
     tmp_path: Path, monkeypatch
 ) -> None:

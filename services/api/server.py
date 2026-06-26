@@ -46,7 +46,7 @@ from services.api.schemas import (
 from services.april_runtime.schemas import LoadModelRequest
 from services.memory.writer import MemoryWriter
 from services.scheduler import compose_briefing, compute_repo_activity
-from services.voice.health import query_audio_devices, voice_health
+from services.voice.health import microphone_access, query_audio_devices, voice_health
 
 _DESKTOP_WEB_DIR = Path(__file__).resolve().parents[2] / "apps" / "desktop" / "web"
 
@@ -754,6 +754,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         "voice": {
             "enabled": active.settings.voice.enabled,
             "sounddevice_available": bool(devices.get("sounddevice_installed")),
+            "microphone_access": microphone_access(devices)["status"],
             "input_device_count": len(devices.get("input_devices", [])),
             "output_device_count": len(devices.get("output_devices", [])),
             "macos_microphone_permission_guidance": (

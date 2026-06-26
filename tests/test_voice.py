@@ -13,7 +13,12 @@ import pytest
 from april_common.errors import RuntimeUnavailableError
 from services.voice.audio_player import FakeAudioPlayer, SoundDeviceAudioPlayer
 from services.voice.conversation_loop import PushToTalkLoop, normalize_transcript
-from services.voice.health import query_audio_devices, voice_doctor, voice_health
+from services.voice.health import (
+    microphone_access,
+    query_audio_devices,
+    voice_doctor,
+    voice_health,
+)
 from services.voice.microphone import FakeMicrophone, SoundDeviceMicrophone
 from services.voice.speech_to_text import FakeSpeechToText
 from services.voice.text_to_speech import FakeTextToSpeech
@@ -112,6 +117,87 @@ def test_query_audio_devices_degrades_when_query_raises(settings_tmp, monkeypatc
     assert report["sounddevice_installed"] is False
     assert report["input_devices"] == []
     assert report["output_devices"] == []
+
+
+def test_microphone_access_classifies_missing_dependency() -> None:
+    verdict = microphone_access(
+        {"import_ok": False, "failure_kind": "missing_dependency", "input_devices": []}
+    )
+    assert verdict["status"] == "missing_dependency"
+    assert "install" in verdict["message"].lower()
+
+
+def test_microphone_access_classifies_permission_or_device() -> None:
+    verdict = microphone_access(
+        {"import_ok": True, "failure_kind": "device_error", "input_devices": []}
+    )
+    assert verdict["status"] == "permission_or_device"
+    assert "permission" in verdict["message"].lower()
+
+
+def test_microphone_access_distinguishes_no_input_device() -> None:
+    verdict = microphone_access({"import_ok": True, "failure_kind": None, "input_devices": []})
+    assert verdict["status"] == "no_input_device"
+
+
+def test_query_audio_devices_marks_import_ok_on_device_error(settings_tmp, monkeypatch) -> None:
+    # sounddevice imports fine but querying raises: that is a device/permission
+    # failure, not a missing dependency.
+    def raise_query_devices():
+        raise RuntimeError("Error querying device -1")
+
+    fake_sounddevice = types.SimpleNamespace(query_devices=raise_query_devices)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+    devices = query_audio_devices()
+    assert devices["import_ok"] is True
+    assert devices["failure_kind"] == "device_error"
+    report = voice_doctor(settings_tmp)
+    assert report["microphone_access"] == "permission_or_device"
+
+
+def test_voice_doctor_reports_push_to_talk_fallback_available(settings_tmp, monkeypatch) -> None:
+    fake_sounddevice = types.SimpleNamespace(
+        query_devices=lambda: [
+            {"name": "Mic", "max_input_channels": 1, "max_output_channels": 0},
+            {"name": "Speaker", "max_input_channels": 0, "max_output_channels": 2},
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+    report = voice_doctor(settings_tmp)
+    assert report["push_to_talk_available"] is True
+    assert report["microphone_access"] == "ok"
+    ptt = next(c for c in report["components"] if c["name"] == "push-to-talk fallback")
+    assert ptt["status"] == "ok"
+
+
+def test_voice_doctor_push_to_talk_unavailable_without_microphone(
+    settings_tmp, monkeypatch
+) -> None:
+    fake_sounddevice = types.SimpleNamespace(
+        query_devices=lambda: [
+            {"name": "Speaker", "max_input_channels": 0, "max_output_channels": 2},
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+    report = voice_doctor(settings_tmp)
+    assert report["push_to_talk_available"] is False
+    assert report["microphone_access"] == "no_input_device"
+
+
+def test_voice_doctor_reports_missing_dependency_distinctly(settings_tmp, monkeypatch) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args, **kwargs):
+        if name == "sounddevice":
+            raise ImportError("No module named 'sounddevice'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    report = voice_doctor(settings_tmp)
+    assert report["microphone_access"] == "missing_dependency"
+    assert report["push_to_talk_available"] is False
+    assert report["sounddevice_import_ok"] is False
 
 
 @pytest.mark.asyncio
