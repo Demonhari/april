@@ -115,6 +115,96 @@ def test_bootstrap_warns_about_dev_tokens_when_env_not_loaded(home_with_configs:
     assert report["dev_token_warnings"]  # effective config still on dev tokens
 
 
+def test_bootstrap_warns_for_placeholder_tokens_without_printing_values(
+    home_with_configs: Path,
+) -> None:
+    config = home_with_configs / "configs" / "april.yaml"
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("local-dev-token", "change-me-local-token")
+    text = text.replace("local-dev-runtime-token", "change-me-runtime-token")
+    config.write_text(text, encoding="utf-8")
+
+    report = bootstrap(home_with_configs, env_file=home_with_configs / "side.env")
+
+    warnings = " ".join(report["dev_token_warnings"])
+    assert "placeholder" in warnings
+    blob = json.dumps(report)
+    assert "change-me-local-token" not in blob
+    assert "change-me-runtime-token" not in blob
+
+
+def test_bootstrap_warns_for_blank_or_missing_tokens(
+    home_with_configs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APRIL_API_TOKEN", "")
+    monkeypatch.setenv("APRIL_RUNTIME_TOKEN", "")
+
+    report = bootstrap(home_with_configs, env_file=home_with_configs / "side.env")
+
+    warnings = " ".join(report["dev_token_warnings"])
+    assert "APRIL_API_TOKEN is blank" in warnings
+    assert "APRIL_RUNTIME_TOKEN is blank or missing" in warnings
+
+
+def test_bootstrap_output_does_not_contain_existing_token_values(home_with_configs: Path) -> None:
+    env_file = home_with_configs / ".env"
+    env_file.write_text(
+        "APRIL_API_TOKEN=existing-api-secret\nAPRIL_RUNTIME_TOKEN=existing-runtime-secret\n",
+        encoding="utf-8",
+    )
+
+    report = bootstrap(home_with_configs)
+
+    blob = json.dumps(report)
+    assert "existing-api-secret" not in blob
+    assert "existing-runtime-secret" not in blob
+
+
+def test_bootstrap_voice_relative_path_resolves_under_april_home(
+    home_with_configs: Path,
+) -> None:
+    voice_binary = home_with_configs / "voice" / "whisper-main"
+    voice_binary.parent.mkdir()
+    voice_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    config = home_with_configs / "configs" / "april.yaml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "  whisper_binary_path: null", "  whisper_binary_path: voice/whisper-main"
+        ),
+        encoding="utf-8",
+    )
+
+    report = bootstrap(home_with_configs)
+
+    whisper = next(item for item in report["voice"]["paths"] if item["name"] == "whisper_binary")
+    assert whisper["configured"] is True
+    assert whisper["exists"] is True
+    assert whisper["path"] == "whisper-main"
+
+
+def test_bootstrap_voice_relative_path_does_not_use_current_working_directory(
+    home_with_configs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside"
+    cwd_voice = outside / "voice" / "whisper-main"
+    cwd_voice.parent.mkdir(parents=True)
+    cwd_voice.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.chdir(outside)
+    config = home_with_configs / "configs" / "april.yaml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "  whisper_binary_path: null", "  whisper_binary_path: voice/whisper-main"
+        ),
+        encoding="utf-8",
+    )
+
+    report = bootstrap(home_with_configs)
+
+    whisper = next(item for item in report["voice"]["paths"] if item["name"] == "whisper_binary")
+    assert whisper["configured"] is True
+    assert whisper["exists"] is False
+
+
 def test_setup_bootstrap_cli(home_with_configs: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "apps.runner.main._manager", lambda: SimpleNamespace(home=home_with_configs)
@@ -124,3 +214,17 @@ def test_setup_bootstrap_cli(home_with_configs: Path, monkeypatch) -> None:
     payload = json.loads(result.output)
     assert payload["config_valid"] is True
     assert (home_with_configs / ".env").exists()
+    assert str(home_with_configs) not in result.output
+
+
+def test_setup_bootstrap_cli_show_paths_opt_in(
+    home_with_configs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "apps.runner.main._manager", lambda: SimpleNamespace(home=home_with_configs)
+    )
+
+    result = CliRunner().invoke(app, ["april", "setup", "bootstrap", "--json", "--show-paths"])
+
+    assert result.exit_code == 0, result.output
+    assert str(home_with_configs) in result.output

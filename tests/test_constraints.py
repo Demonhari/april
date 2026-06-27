@@ -62,6 +62,25 @@ def test_base_constraints_do_not_include_optional_model_or_voice_artifacts() -> 
         assert needle not in entries
 
 
+def test_setup_mac_uses_constraints_for_editable_installs() -> None:
+    script = (ROOT / "scripts" / "setup_mac.sh").read_text(encoding="utf-8")
+    assert '.venv/bin/pip install -e ".[${INSTALL_EXTRAS}]" -c constraints-dev.txt' in script
+    assert ".venv/bin/pip install -e . -c constraints-dev.txt" in script
+
+
+def test_install_run_april_uses_constraints_for_dev_editable_install() -> None:
+    script = (ROOT / "scripts" / "install_run_april.sh").read_text(encoding="utf-8")
+    assert '.venv/bin/pip install -e ".[dev]" -c constraints-dev.txt' in script
+
+
+def test_setup_mac_help_documents_install_modes() -> None:
+    script = (ROOT / "scripts" / "setup_mac.sh").read_text(encoding="utf-8")
+    help_block = script.split("HELP", 2)[1]
+    assert "--runtime" in help_block
+    assert "--voice" in help_block
+    assert "--base" in help_block
+
+
 def test_generated_verification_and_app_stub_outputs_are_ignored() -> None:
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     required = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -22,10 +23,13 @@ from apps.runner.verify import (
     VerifyCheck,
     WorkflowVerifier,
     brain_decision_after_marker,
+    build_workflow_report,
     latest_brain_decision_marker,
     run_model_benchmark,
     run_real_model_verification,
     run_target_mac_validation,
+    run_workflow_verification,
+    write_workflow_report,
 )
 
 
@@ -514,6 +518,89 @@ def test_workflow_verifier_run_uses_release_checklist(monkeypatch) -> None:
     assert calls == ["prepare"]
     assert all(check.ok for check in checks)
     assert any(check.name == "voice health" for check in checks)
+
+
+def test_run_workflow_verification_passes_real_model_settings(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubRealWorkflowVerifier:
+        def __init__(
+            self,
+            *,
+            home: Path,
+            model_path: Path,
+            max_output_tokens: int,
+            timeout: float,
+        ) -> None:
+            captured.update(
+                {
+                    "home": home,
+                    "model_path": model_path,
+                    "max_output_tokens": max_output_tokens,
+                    "timeout": timeout,
+                }
+            )
+
+        def run(self) -> list[VerifyCheck]:
+            return [VerifyCheck(name="real workflow planning route", ok=True, detail="ok")]
+
+    monkeypatch.setattr("apps.runner.verify.RealWorkflowVerifier", _StubRealWorkflowVerifier)
+    checks = run_workflow_verification(
+        tmp_path,
+        real_model=True,
+        model_path=tmp_path / "model.gguf",
+        max_output_tokens=13,
+        timeout=7.5,
+    )
+    assert checks[0].ok is True
+    assert captured["max_output_tokens"] == 13
+    assert captured["timeout"] == 7.5
+
+
+def test_workflow_report_redacts_sensitive_details(tmp_path: Path) -> None:
+    report = build_workflow_report(
+        [
+            VerifyCheck(
+                name="real workflow planning route",
+                ok=True,
+                detail=(
+                    "prompt private /Users/hari/secret/project token abc "
+                    "transcript words decision_summary raw_tool_args"
+                ),
+            )
+        ],
+        real_model_requested=True,
+        timeout_seconds=7.5,
+        max_output_tokens=13,
+    )
+    out = tmp_path / "workflow.json"
+    write_workflow_report(report, out)
+    payload = out.read_text(encoding="utf-8")
+    assert "timeout_seconds" in payload
+    assert "max_output_tokens" in payload
+    for secret in (
+        "prompt private",
+        "/Users/hari/secret/project",
+        "token abc",
+        "transcript words",
+        "decision_summary raw_tool_args",
+    ):
+        assert secret not in payload
+
+
+def test_fake_workflow_report_omits_real_verifier_settings(tmp_path: Path) -> None:
+    report = build_workflow_report(
+        [VerifyCheck(name="workflow voice health", ok=True, detail="disabled")],
+        real_model_requested=False,
+        timeout_seconds=7.5,
+        max_output_tokens=13,
+    )
+    out = tmp_path / "workflow-fake.json"
+    write_workflow_report(report, out)
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["real_model_verified"] is False
+    assert "timeout_seconds" not in payload
+    assert "max_output_tokens" not in payload
 
 
 def test_real_workflow_latest_routing_method(tmp_path: Path, monkeypatch) -> None:

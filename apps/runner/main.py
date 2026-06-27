@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -51,8 +52,10 @@ from april_common.effective_config import load_agents_file, load_permissions_fil
 from april_common.errors import ConfigError
 from april_common.settings import load_settings
 from april_common.token_setup import generate_tokens, write_token_env_file
+from services.april_runtime.client import RuntimeClient
 from services.april_runtime.model_registry import ModelRegistry
 from services.memory.database import Database
+from services.memory.embeddings import HashedTokenEmbedding
 from services.memory.migrations import run_migrations
 from services.memory.user_profile import UserProfileStore
 from services.voice.health import voice_doctor as collect_voice_doctor
@@ -854,24 +857,197 @@ def memory_reindex(
 
 
 @memory_app.command("doctor")
-def memory_doctor() -> None:
+def memory_doctor(
+    json_output: bool = typer.Option(False, "--json"),
+    verify_runtime_embedding: bool = typer.Option(
+        False,
+        "--verify-runtime-embedding",
+        help="Explicitly call April Runtime /runtime/embed to verify local semantic embeddings.",
+    ),
+) -> None:
     settings = load_settings(root=_manager().home)
-    provider = settings.memory.embedding_provider
-    semantic = provider == "runtime-local"
-    if provider == "hashed-token":
-        status = "ok: deterministic hashed-token embeddings (default)"
+    data = _memory_doctor_report(settings, verify_runtime_embedding=verify_runtime_embedding)
+    if json_output:
+        console.print_json(data=data)
+        return
+    _print_memory_doctor(data)
+
+
+def _memory_doctor_report(
+    settings: Any, *, verify_runtime_embedding: bool = False
+) -> dict[str, Any]:
+    configured_provider = settings.memory.embedding_provider
+    runtime_local_requested = configured_provider == "runtime-local"
+    model_info = _embedding_model_info(settings)
+    index = _vector_index_report(settings)
+    verification: dict[str, Any] | None = None
+    verified_dimensions: int | None = None
+    verified_ok = False
+    if verify_runtime_embedding and runtime_local_requested:
+        verification = _verify_runtime_embedding(settings, model_info.get("model_id"))
+        verified_ok = verification.get("status") == "ok"
+        raw_dimensions = verification.get("dimensions")
+        verified_dimensions = raw_dimensions if type(raw_dimensions) is int else None
+
+    model_ready = bool(
+        model_info["embedding_model_registered"] and model_info["embedding_model_path_exists"]
+    )
+    fallback_to_hashed = runtime_local_requested and (
+        not model_ready or (verification is not None and not verified_ok)
+    )
+    active_provider = "hashed-token" if fallback_to_hashed else configured_provider
+    if active_provider == "hashed-token":
+        active_dimensions: int | None = HashedTokenEmbedding().dimensions
     else:
-        status = (
-            "ok: runtime-local semantic embeddings active when a role=embedding model is "
-            "registered, otherwise it falls back to hashed-token"
-        )
-    data = {
-        "embedding_provider": provider,
-        "embedding_model_id": settings.memory.embedding_model_id,
-        "semantic_embeddings_enabled": semantic,
+        active_dimensions = verified_dimensions or index.get("persisted_dimensions")
+
+    persisted_provider = index.get("persisted_provider")
+    persisted_dimensions = index.get("persisted_dimensions")
+    reindex_required = False
+    if (persisted_provider is not None and persisted_provider != active_provider) or (
+        persisted_dimensions is not None
+        and active_dimensions is not None
+        and persisted_dimensions != active_dimensions
+    ):
+        reindex_required = True
+
+    if reindex_required:
+        status = "reindex_required"
+    elif (runtime_local_requested and not model_ready) or (
+        verification is not None and not verified_ok
+    ):
+        status = "not_ready"
+    elif runtime_local_requested and verify_runtime_embedding and verified_ok:
+        status = "ok"
+    elif runtime_local_requested:
+        status = "configured_unverified"
+    else:
+        status = "ok"
+
+    report: dict[str, Any] = {
         "status": status,
+        "configured_embedding_provider": configured_provider,
+        "active_vector_index_provider": active_provider,
+        "dimensions": active_dimensions,
+        "runtime_local_requested": runtime_local_requested,
+        "fell_back_to_hashed_token": fallback_to_hashed,
+        "fallback_risk": runtime_local_requested and not verified_ok,
+        "reindex_required": reindex_required,
+        "embedding_model_id": model_info.get("model_id"),
+        "embedding_role_model_registered": model_info["embedding_model_registered"],
+        "embedding_model_path_exists": model_info["embedding_model_path_exists"],
+        "embedding_model_path_basename": model_info.get("path_basename"),
+        "vector_index": index,
     }
-    console.print_json(data=data)
+    if verification is not None:
+        report["runtime_embedding_verification"] = verification
+    return report
+
+
+def _embedding_model_info(settings: Any) -> dict[str, Any]:
+    try:
+        registry = ModelRegistry.from_file(
+            settings.home / "configs" / "models.yaml", root=settings.home
+        )
+    except ConfigError as exc:
+        return {
+            "embedding_model_registered": False,
+            "embedding_model_path_exists": False,
+            "model_id": settings.memory.embedding_model_id,
+            "path_basename": None,
+            "registry_error": str(exc),
+        }
+    candidates = [model for model in registry.list() if model.role == "embedding"]
+    selected = None
+    if settings.memory.embedding_model_id:
+        for model in candidates:
+            if model.id == settings.memory.embedding_model_id:
+                selected = model
+                break
+    elif candidates:
+        selected = candidates[0]
+    if selected is None:
+        return {
+            "embedding_model_registered": False,
+            "embedding_model_path_exists": False,
+            "model_id": settings.memory.embedding_model_id,
+            "path_basename": None,
+        }
+    resolved = selected.resolved_path(settings.home)
+    return {
+        "embedding_model_registered": True,
+        "embedding_model_path_exists": resolved.exists(),
+        "model_id": selected.id,
+        "path_basename": resolved.name,
+    }
+
+
+def _vector_index_report(settings: Any) -> dict[str, Any]:
+    metadata_path = settings.vector_index_path / "metadata.json"
+    persisted_provider: str | None = None
+    persisted_dimensions: int | None = None
+    record_count = 0
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+        if isinstance(metadata, dict):
+            raw_provider = metadata.get("provider")
+            raw_dimensions = metadata.get("dimensions")
+            raw_records = metadata.get("record_count")
+            persisted_provider = raw_provider if isinstance(raw_provider, str) else None
+            persisted_dimensions = raw_dimensions if type(raw_dimensions) is int else None
+            record_count = raw_records if type(raw_records) is int and raw_records >= 0 else 0
+    return {
+        "path_basename": settings.vector_index_path.name,
+        "persisted_provider": persisted_provider,
+        "persisted_dimensions": persisted_dimensions,
+        "record_count": record_count,
+    }
+
+
+def _verify_runtime_embedding(settings: Any, model_id: str | None) -> dict[str, Any]:
+    client = RuntimeClient(
+        settings.runtime.url,
+        timeout=settings.runtime.request_timeout_seconds,
+        token=settings.runtime.token,
+    )
+
+    async def _probe() -> list[float]:
+        return await client.embed("april memory doctor", model_id=model_id)
+
+    try:
+        vector = asyncio.run(_probe())
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)[:240]}
+    return {
+        "status": "ok",
+        "model_id": model_id,
+        "dimensions": len(vector),
+    }
+
+
+def _print_memory_doctor(data: dict[str, Any]) -> None:
+    table = Table(title="APRIL Memory Doctor")
+    table.add_column("Field")
+    table.add_column("Value")
+    for key in (
+        "status",
+        "configured_embedding_provider",
+        "active_vector_index_provider",
+        "dimensions",
+        "runtime_local_requested",
+        "fell_back_to_hashed_token",
+        "fallback_risk",
+        "reindex_required",
+        "embedding_model_id",
+        "embedding_role_model_registered",
+        "embedding_model_path_exists",
+        "embedding_model_path_basename",
+    ):
+        table.add_row(key, str(data.get(key)))
+    console.print(table)
 
 
 @conversation_app.command("delete")
@@ -1369,12 +1545,21 @@ def setup_bootstrap(
     apply_profile: bool = typer.Option(
         False, "--apply-profile", help="Apply the recommended model profile (mutates configs)."
     ),
+    show_paths: bool = typer.Option(
+        False, "--show-paths", help="Include absolute local paths in bootstrap output."
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Safe, non-destructive local first-run setup. Never prints full tokens."""
     home = _manager().home
     target_env = env_file if env_file.is_absolute() else home / env_file
-    report = run_bootstrap(home, env_file=target_env, force=force, apply_profile=apply_profile)
+    report = run_bootstrap(
+        home,
+        env_file=target_env,
+        force=force,
+        apply_profile=apply_profile,
+        show_paths=show_paths,
+    )
     if json_output:
         console.print_json(data=report)
     else:
@@ -1540,13 +1725,20 @@ def verify(
             _manager().home,
             real_model=real_model,
             model_path=model_path,
+            max_output_tokens=max_output_tokens,
+            timeout=timeout,
         )
         if json_output:
             console.print_json(data={"checks": [asdict(check) for check in checks]})
         else:
             _print_verification_table("APRIL Workflow Verification", checks)
         if report is not None:
-            workflow_report = build_workflow_report(checks, real_model_requested=real_model)
+            workflow_report = build_workflow_report(
+                checks,
+                real_model_requested=real_model,
+                timeout_seconds=timeout,
+                max_output_tokens=max_output_tokens,
+            )
             written = write_workflow_report(workflow_report, report)
             console.print(
                 f"[green]Wrote workflow verification report to {written}[/green] "

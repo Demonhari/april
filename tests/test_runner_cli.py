@@ -470,13 +470,36 @@ def test_run_april_verify_fake_fails_on_failed_check(tmp_path: Path, monkeypatch
 def test_run_april_verify_workflow_json_and_failure(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    captured: dict[str, object] = {}
+
+    def _fake_workflow(home: Path, **kwargs: object) -> list[VerifyCheck]:
+        captured.update(kwargs)
+        return [VerifyCheck(name="workflow", ok=True, detail=str(kwargs))]
+
     monkeypatch.setattr(
         "apps.runner.main.run_workflow_verification",
-        lambda home, **kwargs: [VerifyCheck(name="workflow", ok=True, detail=str(kwargs))],
+        _fake_workflow,
     )
-    result = CliRunner().invoke(app, ["april", "verify", "--workflow", "--json"])
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "verify",
+            "--workflow",
+            "--real-model",
+            str(tmp_path / "model.gguf"),
+            "--max-output-tokens",
+            "77",
+            "--timeout",
+            "9.5",
+            "--json",
+        ],
+    )
     assert result.exit_code == 0
     assert "workflow" in result.output
+    assert captured["real_model"] is True
+    assert captured["max_output_tokens"] == 77
+    assert captured["timeout"] == 9.5
     monkeypatch.setattr(
         "apps.runner.main.run_workflow_verification",
         lambda home, **kwargs: [VerifyCheck(name="workflow", ok=False, detail="bad")],
@@ -1122,6 +1145,147 @@ def test_memory_doctor(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(app, ["april", "memory", "doctor"])
     assert result.exit_code == 0
     assert "hashed-token" in result.output
+    structured = CliRunner().invoke(app, ["april", "memory", "doctor", "--json"])
+    assert structured.exit_code == 0
+    payload = json.loads(structured.output)
+    assert payload["status"] == "ok"
+    assert payload["configured_embedding_provider"] == "hashed-token"
+    assert payload["active_vector_index_provider"] == "hashed-token"
+    assert payload["dimensions"] == 256
+
+
+def test_memory_doctor_runtime_local_without_embedding_model_not_ready(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["memory"]["embedding_provider"] = "runtime-local"
+    data["memory"]["embedding_model_id"] = "april-embedding"
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    result = CliRunner().invoke(app, ["april", "memory", "doctor", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "not_ready"
+    assert payload["runtime_local_requested"] is True
+    assert payload["fell_back_to_hashed_token"] is True
+    assert payload["fallback_risk"] is True
+    assert payload["embedding_role_model_registered"] is False
+
+
+def test_memory_doctor_mismatched_vector_provider_requires_reindex(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["memory"]["embedding_provider"] = "hashed-token"
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    index = tmp_path / "data" / "vector_index"
+    index.mkdir(parents=True)
+    (index / "metadata.json").write_text(
+        json.dumps({"provider": "runtime-local", "dimensions": 8, "record_count": 1}),
+        encoding="utf-8",
+    )
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    result = CliRunner().invoke(app, ["april", "memory", "doctor", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["reindex_required"] is True
+    assert payload["status"] == "reindex_required"
+    assert payload["vector_index"]["persisted_provider"] == "runtime-local"
+
+
+def test_memory_doctor_json_redacts_paths(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    model_path = tmp_path / "models" / "embed.gguf"
+    model_path.parent.mkdir()
+    model_path.write_bytes(b"GGUF")
+    models = yaml.safe_load((tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    models["models"]["embedding"] = {
+        "id": "april-embedding",
+        "name": "embed",
+        "path": "models/embed.gguf",
+        "backend": "llama_cpp",
+        "role": "embedding",
+        "threads": 1,
+        "context_size": 512,
+        "temperature": 0.0,
+        "max_output_tokens": 1,
+        "keep_loaded": True,
+    }
+    (tmp_path / "configs" / "models.yaml").write_text(yaml.safe_dump(models), encoding="utf-8")
+    config = tmp_path / "configs" / "april.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["memory"]["embedding_provider"] = "runtime-local"
+    data["memory"]["embedding_model_id"] = "april-embedding"
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    result = CliRunner().invoke(app, ["april", "memory", "doctor", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    blob = json.dumps(payload)
+    assert payload["embedding_model_path_basename"] == "embed.gguf"
+    assert str(tmp_path) not in blob
+
+
+def test_memory_doctor_verify_runtime_embedding_is_explicit_and_mocked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["memory"]["embedding_provider"] = "runtime-local"
+    data["memory"]["embedding_model_id"] = "april-embedding"
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    models = yaml.safe_load((tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    embed = tmp_path / "models" / "embed.gguf"
+    embed.parent.mkdir()
+    embed.write_bytes(b"GGUF")
+    models["models"]["embedding"] = {
+        "id": "april-embedding",
+        "name": "embed",
+        "path": "models/embed.gguf",
+        "backend": "llama_cpp",
+        "role": "embedding",
+        "threads": 1,
+        "context_size": 512,
+        "temperature": 0.0,
+        "max_output_tokens": 1,
+        "keep_loaded": True,
+    }
+    (tmp_path / "configs" / "models.yaml").write_text(yaml.safe_dump(models), encoding="utf-8")
+    calls: list[str | None] = []
+
+    def _verify(settings: object, model_id: str | None) -> dict[str, object]:
+        calls.append(model_id)
+        return {"status": "ok", "model_id": model_id, "dimensions": 8}
+
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main._verify_runtime_embedding", _verify)
+
+    default = CliRunner().invoke(app, ["april", "memory", "doctor", "--json"])
+    verified = CliRunner().invoke(
+        app, ["april", "memory", "doctor", "--json", "--verify-runtime-embedding"]
+    )
+
+    assert default.exit_code == 0
+    assert calls == ["april-embedding"]
+    payload = json.loads(verified.output)
+    assert verified.exit_code == 0
+    assert payload["runtime_embedding_verification"]["status"] == "ok"
+    assert payload["dimensions"] == 8
 
 
 def test_eval_brain_fake_json_and_errors(tmp_path: Path, monkeypatch) -> None:

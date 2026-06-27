@@ -35,6 +35,9 @@ const state = {
   models: null,
   readiness: null,
   latestReport: null,
+  latestRealModelReport: null,
+  latestWorkflowReport: null,
+  latestVoiceReport: null,
   reportHistory: null,
   approvals: [],
   reminders: [],
@@ -1086,8 +1089,9 @@ function renderLatestReport(latest, latestRealModel, latestVoice) {
   // The "real model verified" status is derived from the latest REAL-MODEL report
   // and the voice warning from the latest VOICE-LIVE report, so a newer report of
   // one kind can never overwrite the apparent status of the other.
-  const realModel = latestRealModel || latest;
-  const voice = latestVoice || latest;
+  const emptyAxis = { status: "not_verified", report: null };
+  const realModel = latestRealModel || emptyAxis;
+  const voice = latestVoice || emptyAxis;
   const summary = D.verificationSummary(latest);
   const realSummary = D.verificationSummary(realModel);
   const voiceWarning = D.voiceLiveWarning(voice);
@@ -1137,6 +1141,28 @@ function renderLatestReport(latest, latestRealModel, latestVoice) {
   return html;
 }
 
+function renderWorkflowStatus(latestWorkflow) {
+  const workflow = D.workflowStatus(latestWorkflow);
+  const report = (latestWorkflow && latestWorkflow.report) || {};
+  let html = "<div class='panel-title'>Workflow verification</div>" +
+    "<div class='row'>" + pill(workflow.label, workflow.status === "ok" ? "ok" : "warn") + "</div>" +
+    kvRows([
+      ["generated", workflow.generated_at],
+      ["summary", workflow.summary],
+      ["failed checks", String(workflow.checks_failed || 0)],
+      ["real model exercised", boolText(report.real_model_exercised === true)],
+    ]);
+  const checks = Array.isArray(report.checks) ? report.checks : [];
+  if (checks.length) {
+    html += "<div class='spacer'></div><strong class='kv'>Checks</strong>";
+    checks.slice(0, 5).forEach((item) => {
+      html += "<div class='kv'>" + esc(item.name || "workflow") + ": " +
+        esc(item.status || "unknown") + "</div>";
+    });
+  }
+  return html;
+}
+
 function renderReportHistory(history) {
   const reports = history && Array.isArray(history.reports) ? history.reports : [];
   let html = "<div class='panel-title'>Report history</div>";
@@ -1176,6 +1202,8 @@ screens.readiness = async function () {
   // newer report of one kind never overwrites the other's apparent status.
   const latestRealModel = await api("GET", "/verification/report/latest?type=real_model").catch(() => null);
   if (latestRealModel) state.latestRealModelReport = latestRealModel;
+  const latestWorkflow = await api("GET", "/verification/report/latest?type=workflow").catch(() => null);
+  if (latestWorkflow) state.latestWorkflowReport = latestWorkflow;
   const latestVoice = await api("GET", "/verification/report/latest?type=voice_live").catch(() => null);
   if (latestVoice) state.latestVoiceReport = latestVoice;
   const history = await api("GET", "/verification/reports").catch(() => null);
@@ -1236,6 +1264,7 @@ screens.readiness = async function () {
   ));
 
   screenEl.appendChild(card(renderLatestReport(latest, latestRealModel, latestVoice)));
+  screenEl.appendChild(card(renderWorkflowStatus(latestWorkflow)));
   screenEl.appendChild(card(renderReportHistory(state.reportHistory)));
 
   screenEl.appendChild(card(

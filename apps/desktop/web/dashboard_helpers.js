@@ -375,6 +375,7 @@
       threshold_failure_count: typeof report.threshold_failure_count === "number"
         ? report.threshold_failure_count
         : Array.isArray(report.threshold_failures) ? report.threshold_failures.length : 0,
+      checks_failed: typeof report.checks_failed === "number" ? report.checks_failed : 0,
     };
   }
 
@@ -404,6 +405,28 @@
   function voiceLiveWarning(latest) {
     if (voiceLiveVerified(latest)) return "";
     return "Voice is not live-verified. Run `run april voice verify-live` on this Mac.";
+  }
+
+  function workflowStatus(latest) {
+    const summary = verificationSummary(latest);
+    const report = (latest && latest.report) || null;
+    if (!report || report.report_type !== "workflow") {
+      return {
+        status: "not_verified",
+        label: "workflow verified: none",
+        summary: "degraded",
+        generated_at: "unknown",
+        checks_failed: 0,
+      };
+    }
+    const passed = summary.summary === "pass" && summary.checks_failed === 0;
+    return {
+      status: passed ? "ok" : "warn",
+      label: "workflow verified: " + (passed ? "pass" : summary.summary),
+      summary: summary.summary,
+      generated_at: summary.generated_at,
+      checks_failed: summary.checks_failed,
+    };
   }
 
   root.AprilDashboard = {
@@ -436,6 +459,7 @@
     realModelVerifiedLabel: realModelVerifiedLabel,
     voiceLiveVerified: voiceLiveVerified,
     voiceLiveWarning: voiceLiveWarning,
+    workflowStatus: workflowStatus,
   };
 
   if (typeof module !== "undefined" && module.exports) {

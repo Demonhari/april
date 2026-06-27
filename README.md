@@ -70,6 +70,7 @@ run april setup bootstrap                 # safe defaults
 run april setup bootstrap --apply-profile # also apply the recommended profile
 run april setup bootstrap --force         # regenerate tokens even if present
 run april setup bootstrap --json          # machine-readable report
+run april setup bootstrap --json --show-paths # opt in to absolute local paths
 ```
 
 It creates APRIL's data/logs/models/vector-index/audit/audio-cache directories
@@ -78,11 +79,15 @@ only if absent (never printing full tokens, and refusing to overwrite existing
 secrets without `--force`); inspects architecture, CPU count, and memory;
 **recommends** a model profile without applying it (apply only with
 `--apply-profile`); reports registered models and missing paths, llama-cpp-python
-availability, voice dependency/binary/model paths, and configured allowed
-filesystem roots; warns about known development tokens; runs configuration
+availability, voice dependency/binary/model paths resolved relative to
+`APRIL_HOME`, and configured allowed filesystem roots; warns about known
+development tokens, `.env.example` placeholders, blank API tokens, and
+blank/missing Runtime tokens without printing token values; runs configuration
 validation; and prints the exact next commands for fake and real-model
-verification. It never installs Homebrew, Python packages, models, or voice
-binaries, and never edits shell startup files.
+verification. JSON output uses basenames by default to avoid leaking private
+local paths; `--show-paths` is the explicit local-operator opt-in for absolute
+paths. It never installs Homebrew, Python packages, models, or voice binaries,
+and never edits shell startup files.
 
 Development installs can use direct dependency constraints without pulling in
 optional runtime or voice wheels:
@@ -91,6 +96,10 @@ optional runtime or voice wheels:
 python3.11 -m venv .venv
 .venv/bin/pip install -e '.[dev]' -c constraints-dev.txt
 ```
+
+`scripts/setup_mac.sh` and `scripts/install_run_april.sh` also use
+`constraints-dev.txt` for base/dev editable installs. Optional runtime/voice
+extras remain opt-in and are not pinned in the base constraints file.
 
 ## Local Models
 
@@ -215,13 +224,14 @@ development and the deterministic verification flows.
 On a target Mac, run setup and verification in this order:
 
 1. `run april readiness`
-2. `run april setup tokens`
-3. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`
-4. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --apply`
-5. `pip install -e '.[runtime]'`
-6. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
-7. `run april verify --workflow --real-model --report data/verification/workflow-real.json`
-8. Optional voice setup/doctor/live verification: `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`, `run april voice doctor`, then `run april voice verify-live --report data/verification/voice-live.json`.
+2. `run april setup bootstrap`
+3. `run april setup tokens` if bootstrap reports token warnings
+4. `run april model profile apply intel_macbook_cpu_low`
+5. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`, then repeat with `--apply`
+6. `pip install -e '.[runtime]'`
+7. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
+8. `run april verify --workflow --real-model --report data/verification/workflow-real.json`
+9. Optional voice setup/doctor/live verification: `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`, `run april voice doctor`, then `run april voice verify-live --report data/verification/voice-live.json`.
 
 Blank API tokens never authenticate, even in development/test. If
 `APRIL_API_TOKEN` is empty, protected endpoints fail closed with an auth/config
@@ -314,7 +324,11 @@ one real model passed") and adds explicit verification levels:
 Reports under `data/verification/` are generated local artifacts and ignored by
 Git. The Desktop Readiness screen reads sanitized summaries from
 `GET /verification/report/latest` and `GET /verification/reports`; it never
-shows raw report JSON, prompt text, generated text, tokens, or full paths.
+shows raw report JSON, prompt text, generated text, tokens, raw tool arguments,
+transcripts, audio paths, or full paths. Latest reports can be filtered with
+`type=any`, `type=real_model`, `type=voice_live`, or `type=workflow`. Report
+history is sorted by safe report time (`generated_at`, then `timestamp`, then
+filesystem mtime fallback).
 
 `real_model`, `voice_live`, and `workflow` reports are separate verification
 axes. Real-model verified level is based only on `multi_model`/`target_mac`
@@ -741,6 +755,7 @@ export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
 export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding   # optional; auto-detected
 
 # 3. Rebuild the index under the new provider
+run april memory doctor --json
 run april memory reindex
 ```
 
@@ -752,6 +767,14 @@ Graceful degradation is built in: if `embedding_provider=runtime-local` is set
 but no embedding-role model is registered (or the runtime reports it
 unavailable), APRIL logs and audits a clear note and **falls back to
 hashed-token embeddings** instead of crashing.
+
+`run april memory doctor --json` reports the configured embedding provider,
+active vector-index provider, dimensions, whether runtime-local was requested,
+fallback/reindex risk, whether an embedding-role model is registered, and
+whether that model path exists. It does not start Runtime or load a model unless
+you explicitly pass `--verify-runtime-embedding`, which probes `/runtime/embed`.
+Real semantic memory requires a runtime-local embedding model plus
+`run april memory reindex` after switching providers.
 
 Switching embedding providers changes the vector space, so APRIL refuses to
 silently mix spaces: searches/writes against an index built with a different
@@ -918,7 +941,8 @@ non-fallback real planning, reading-agent routing, reminders, memory,
 document indexing/search, project registration, read-only coding analysis,
 approval creation/denial, external-action denial, and voice health/doctor status
 only. It does not record audio, use wake-word listening, modify user repos, or
-send external requests.
+send external requests. `--timeout` and `--max-output-tokens` are passed through
+to the real workflow verifier and recorded in the redacted workflow report.
 
 ## Security Model
 

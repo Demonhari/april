@@ -60,7 +60,7 @@ if [[ "${APRIL_INSTALL_SKIP_PIP:-0}" != "1" ]]; then
     .venv/bin/python -c "import apps.runner.main" >/dev/null 2>&1; then
     echo "APRIL is already importable from .venv; skipping editable reinstall."
   else
-    .venv/bin/pip install -e ".[dev]"
+    .venv/bin/pip install -e ".[dev]" -c constraints-dev.txt
   fi
 fi
 

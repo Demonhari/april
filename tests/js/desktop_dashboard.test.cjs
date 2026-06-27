@@ -300,6 +300,14 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
     "workflow report does not imply real model verified",
     D.realModelVerifiedLabel(workflowReport) === "real model verified: none",
   );
+  check(
+    "workflow status shown separately",
+    D.workflowStatus(workflowReport).label === "workflow verified: pass",
+  );
+  check(
+    "missing workflow status is none",
+    D.workflowStatus({ status: "not_verified", report: null }).label === "workflow verified: none",
+  );
 }
 
 if (failures > 0) {

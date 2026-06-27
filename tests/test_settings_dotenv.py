@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import os
 import stat
 from pathlib import Path
 
 import pytest
 
+import april_common.settings as settings_module
 from apps.runner.service_manager import AprilServiceManager
 from april_common.errors import ConfigError
 from april_common.settings import load_settings, reset_settings_cache
@@ -147,6 +149,34 @@ def test_blank_optional_devices_and_runtime_token_become_none(
     assert settings.voice.input_device is None
     assert settings.voice.output_device is None
     assert settings.runtime.token is None
+
+
+def test_optional_blank_env_set_has_no_duplicate_literals() -> None:
+    source = Path(settings_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    values: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            target_names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target_names = [node.target.id]
+            value = node.value
+        else:
+            continue
+        if "_OPTIONAL_BLANK_IS_NONE" not in target_names:
+            continue
+        assert isinstance(value, ast.Call)
+        literal = value.args[0]
+        assert isinstance(literal, ast.Set)
+        values = [
+            item.value
+            for item in literal.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        ]
+        break
+    assert values
+    assert len(values) == len(set(values))
 
 
 def test_blank_optional_path_from_process_env_becomes_none(

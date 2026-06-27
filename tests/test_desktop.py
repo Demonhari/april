@@ -25,6 +25,12 @@ def test_desktop_static_mount_serves_index(settings_tmp) -> None:
     assert response.headers["content-type"].startswith("text/html")
 
 
+def test_desktop_readiness_fetches_workflow_report_separately() -> None:
+    js = Path("apps/desktop/web/app.js").read_text(encoding="utf-8")
+    assert "/verification/report/latest?type=workflow" in js
+    assert "renderWorkflowStatus(latestWorkflow)" in js
+
+
 def test_activity_requires_auth(settings_tmp) -> None:
     container = anyio.run(make_container, settings_tmp)
     client = TestClient(create_app(container))
@@ -377,10 +383,70 @@ def test_latest_workflow_report_is_separate_from_real_model_axis(settings_tmp) -
         real_latest = client.get(
             "/verification/report/latest?type=real_model", headers=headers
         ).json()
+        workflow_latest = client.get(
+            "/verification/report/latest?type=workflow", headers=headers
+        ).json()
     assert any_latest["report"]["report_type"] == "workflow"
     assert any_latest["report"]["real_model_verified"] is False
     assert real_latest["report"]["report_type"] == "multi_model"
+    assert workflow_latest["report"]["report_type"] == "workflow"
+    assert workflow_latest["report"]["basename"] == "workflow.json"
     assert str(settings_tmp.home) not in json.dumps(any_latest)
+
+
+def test_latest_workflow_report_absent_is_not_verified(settings_tmp) -> None:
+    _write_verification_report(
+        settings_tmp.home, "mac-readiness.json", generated_at="2026-06-25T00:00:00Z"
+    )
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        workflow_latest = client.get(
+            "/verification/report/latest?type=workflow", headers=auth(settings_tmp)
+        ).json()
+    assert workflow_latest["status"] == "not_verified"
+    assert workflow_latest["report"] is None
+
+
+def test_newer_real_model_report_does_not_replace_latest_workflow(settings_tmp) -> None:
+    workflow = _write_workflow_report(
+        settings_tmp.home, "workflow.json", generated_at="2026-06-25T00:00:00Z"
+    )
+    real = _write_verification_report(
+        settings_tmp.home,
+        "mac-readiness.json",
+        generated_at="2026-06-26T00:00:00Z",
+        verification_level="core",
+    )
+    os.utime(workflow, (1, 1))
+    os.utime(real, (2, 2))
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        latest_workflow = client.get(
+            "/verification/report/latest?type=workflow", headers=auth(settings_tmp)
+        ).json()
+    assert latest_workflow["report"]["report_type"] == "workflow"
+    assert latest_workflow["report"]["basename"] == "workflow.json"
+
+
+def test_newer_workflow_report_does_not_replace_latest_real_model(settings_tmp) -> None:
+    real = _write_verification_report(
+        settings_tmp.home,
+        "mac-readiness.json",
+        generated_at="2026-06-25T00:00:00Z",
+        verification_level="core",
+    )
+    workflow = _write_workflow_report(
+        settings_tmp.home, "workflow.json", generated_at="2026-06-26T00:00:00Z"
+    )
+    os.utime(real, (1, 1))
+    os.utime(workflow, (2, 2))
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        latest_real = client.get(
+            "/verification/report/latest?type=real_model", headers=auth(settings_tmp)
+        ).json()
+    assert latest_real["report"]["report_type"] == "multi_model"
+    assert latest_real["report"]["basename"] == "mac-readiness.json"
 
 
 def test_latest_voice_live_report_absent_is_not_verified(settings_tmp) -> None:
@@ -438,8 +504,10 @@ def _write_verification_report(
         "threshold_failures": [f"april-brain: path {home}/models/brain.gguf"],
         "prompt": "must not leak",
         "generated_text": "must not leak",
+        "transcript": "SECRET SPOKEN WORDS",
+        "audio_path": str(home / "data" / "audio_cache" / "input.wav"),
         "api_token": "secret-token",
-        "raw_tool_args": {"path": "/etc/passwd"},
+        "raw_tool_args": {"path": "/etc/passwd", "token": "raw-secret-token"},
     }
     path.write_text(json.dumps(report), encoding="utf-8")
     return path
@@ -515,8 +583,8 @@ def test_verification_report_history_sorted_and_sanitized(settings_tmp) -> None:
         verification_level="all",
         summary="pass",
     )
-    os.utime(older, (1, 1))
-    os.utime(newer, (2, 2))
+    os.utime(older, (2, 2))
+    os.utime(newer, (1, 1))
     container = anyio.run(make_container, settings_tmp)
     with TestClient(create_app(container)) as client:
         response = client.get("/verification/reports", headers=auth(settings_tmp))
@@ -531,10 +599,50 @@ def test_verification_report_history_sorted_and_sanitized(settings_tmp) -> None:
     blob = json.dumps(data)
     assert str(settings_tmp.home) not in blob
     assert "must not leak" not in blob
+    assert "SECRET SPOKEN WORDS" not in blob
+    assert "input.wav" not in blob
     assert "secret-token" not in blob
+    assert "raw-secret-token" not in blob
     assert "/etc/passwd" not in blob
     assert detail.status_code == 200
     assert detail.json()["report"]["basename"] == "newer.json"
+
+
+def test_verification_report_history_uses_timestamp_when_generated_at_absent(
+    settings_tmp,
+) -> None:
+    older = _write_timestamp_only_report(
+        settings_tmp.home, "older.json", timestamp="2026-06-25T00:00:00Z"
+    )
+    newer = _write_timestamp_only_report(
+        settings_tmp.home, "newer.json", timestamp="2026-06-26T00:00:00Z"
+    )
+    os.utime(older, (2, 2))
+    os.utime(newer, (1, 1))
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        response = client.get("/verification/reports", headers=auth(settings_tmp))
+    assert [item["basename"] for item in response.json()["reports"]] == [
+        "newer.json",
+        "older.json",
+    ]
+
+
+def test_verification_report_history_invalid_timestamp_falls_back_to_mtime(
+    settings_tmp,
+) -> None:
+    valid = _write_verification_report(
+        settings_tmp.home, "valid.json", generated_at="2026-06-26T00:00:00Z"
+    )
+    invalid = _write_verification_report(
+        settings_tmp.home, "invalid.json", generated_at="not-a-timestamp"
+    )
+    os.utime(valid, (1, 1))
+    os.utime(invalid, (2_000_000_000, 2_000_000_000))
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        response = client.get("/verification/reports", headers=auth(settings_tmp))
+    assert response.json()["reports"][0]["basename"] == "invalid.json"
 
 
 def test_verification_report_history_rejects_traversal_and_query_path(settings_tmp) -> None:

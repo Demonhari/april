@@ -15,6 +15,9 @@ Creates a local .venv and installs APRIL. This script never runs Homebrew,
 never uses sudo, and never downloads model files.
 
 Options:
+  --runtime      Include the optional llama.cpp runtime extra.
+  --voice        Include optional local voice dependencies.
+  --base         Install only base APRIL dependencies, without the dev extra.
   --global       Install the global run/april-run wrappers after setup.
   --add-to-path  With --global, add ~/.local/bin to zsh/bash config.
 HELP
@@ -42,9 +45,9 @@ cd "$ROOT_DIR"
 if [[ "${APRIL_SETUP_SKIP_PIP:-0}" != "1" ]]; then
   "$PYTHON_BIN" -m venv .venv
   if [[ -n "$INSTALL_EXTRAS" ]]; then
-    .venv/bin/pip install -e ".[${INSTALL_EXTRAS}]"
+    .venv/bin/pip install -e ".[${INSTALL_EXTRAS}]" -c constraints-dev.txt
   else
-    .venv/bin/pip install -e .
+    .venv/bin/pip install -e . -c constraints-dev.txt
   fi
 fi
 

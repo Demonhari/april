@@ -17,20 +17,26 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from apps.runner.model_tools import apply_model_profile, model_doctor, recommend_model_profile
 from april_common.config_validation import validate_configuration
 from april_common.settings import (
+    INSECURE_API_TOKENS,
+    INSECURE_RUNTIME_TOKENS,
     KNOWN_DEFAULT_API_TOKENS,
     KNOWN_DEFAULT_RUNTIME_TOKENS,
+    PLACEHOLDER_API_TOKENS,
+    PLACEHOLDER_RUNTIME_TOKENS,
     AprilSettings,
     load_settings,
 )
 from april_common.token_setup import GeneratedTokens, generate_tokens, write_token_env_file
 
 TOKEN_KEYS = ("APRIL_API_TOKEN", "APRIL_RUNTIME_TOKEN")
+_PATH_TEXT_RE = re.compile(r"~?(?:/[\w.\-]+){2,}/?")
 
 
 def bootstrap(
@@ -39,14 +45,16 @@ def bootstrap(
     env_file: Path | None = None,
     force: bool = False,
     apply_profile: bool = False,
+    show_paths: bool = False,
 ) -> dict[str, Any]:
     """Run the bootstrap and return a structured, secret-free report."""
     root = home.expanduser().resolve()
     target_env = (env_file or root / ".env").expanduser()
     if not target_env.is_absolute():
         target_env = root / target_env
+    target_env = target_env.resolve(strict=False)
 
-    directories = _ensure_directories_for(root)
+    directories = _ensure_directories_for(root, show_paths=show_paths)
     tokens = _ensure_tokens(target_env, force=force)
 
     # Reload after writing .env so the report reflects the post-bootstrap state
@@ -62,14 +70,16 @@ def bootstrap(
             apply_model_profile(home=root, profile_name=recommendation["recommended_profile"])
             applied_profile = recommendation["recommended_profile"]
         except Exception as exc:  # surfaced, never raised, so bootstrap stays safe
-            profile_error = str(exc)
+            profile_error = _display_text(str(exc), show_paths=show_paths)
 
-    config_errors = validate_configuration(root)
+    config_errors = [
+        _display_text(error, show_paths=show_paths) for error in validate_configuration(root)
+    ]
 
     return {
-        "home": str(root),
+        "home": _display_path(root, show_paths=show_paths),
         "directories": directories,
-        "env_file": str(target_env),
+        "env_file": _display_path(target_env, show_paths=show_paths),
         "tokens": tokens,
         "dev_token_warnings": _dev_token_warnings(settings),
         "machine": {
@@ -98,15 +108,17 @@ def bootstrap(
         "missing_model_paths": [
             Path(model["path"]).name for model in doctor["models"] if not model["path_exists"]
         ],
-        "voice": _voice_report(settings),
-        "allowed_filesystem_roots": [str(path) for path in settings.allowed_roots],
+        "voice": _voice_report(settings, show_paths=show_paths),
+        "allowed_filesystem_roots": [
+            _display_path(path, show_paths=show_paths) for path in settings.allowed_roots
+        ],
         "config_valid": not config_errors,
         "config_errors": config_errors,
         "next_commands": _next_commands(recommendation["recommended_profile"], target_env),
     }
 
 
-def _ensure_directories_for(root: Path) -> list[dict[str, Any]]:
+def _ensure_directories_for(root: Path, *, show_paths: bool) -> list[dict[str, Any]]:
     settings = load_settings(root=root)
     raw = [
         settings.resolve_path(Path("data")),
@@ -131,7 +143,7 @@ def _ensure_directories_for(root: Path) -> list[dict[str, Any]]:
         # Local-only, owner-accessible directories (db, audit, audio, models).
         with contextlib.suppress(OSError):
             os.chmod(path, 0o700)
-        results.append({"path": key, "created": created})
+        results.append({"path": _display_path(path, show_paths=show_paths), "created": created})
     return results
 
 
@@ -166,39 +178,85 @@ def _ensure_tokens(env_file: Path, *, force: bool) -> dict[str, Any]:
 
 def _dev_token_warnings(settings: AprilSettings) -> list[str]:
     warnings: list[str] = []
-    if settings.api.token in KNOWN_DEFAULT_API_TOKENS:
+    api_token = settings.api.token
+    runtime_token = settings.runtime.token
+    if not api_token:
         warnings.append(
-            "Effective API token is a known development token. Load the generated .env "
-            "or set APRIL_API_TOKEN before any non-development use."
+            "Effective APRIL_API_TOKEN is blank. Load the generated .env or set a "
+            "strong local token before any non-development use."
         )
-    if settings.runtime.token is None or settings.runtime.token in KNOWN_DEFAULT_RUNTIME_TOKENS:
+    elif api_token in KNOWN_DEFAULT_API_TOKENS:
         warnings.append(
-            "Effective Runtime token is unset or a known development token. Load the generated "
-            ".env or set APRIL_RUNTIME_TOKEN before any non-development use."
+            "Effective APRIL_API_TOKEN is a known development token. Load the generated .env "
+            "or set a strong local token before any non-development use."
+        )
+    elif api_token in PLACEHOLDER_API_TOKENS or api_token in INSECURE_API_TOKENS:
+        warnings.append(
+            "Effective APRIL_API_TOKEN is a placeholder token. Load the generated .env "
+            "or set a strong local token before any non-development use."
+        )
+    if runtime_token is None or runtime_token == "":
+        warnings.append(
+            "Effective APRIL_RUNTIME_TOKEN is blank or missing. Load the generated .env "
+            "or set a strong local runtime token before any non-development use."
+        )
+    elif runtime_token in KNOWN_DEFAULT_RUNTIME_TOKENS:
+        warnings.append(
+            "Effective APRIL_RUNTIME_TOKEN is a known development token. Load the generated "
+            ".env or set a strong local runtime token before any non-development use."
+        )
+    elif runtime_token in PLACEHOLDER_RUNTIME_TOKENS or runtime_token in INSECURE_RUNTIME_TOKENS:
+        warnings.append(
+            "Effective APRIL_RUNTIME_TOKEN is a placeholder token. Load the generated "
+            ".env or set a strong local runtime token before any non-development use."
         )
     return warnings
 
 
-def _voice_report(settings: AprilSettings) -> dict[str, Any]:
+def _voice_report(settings: AprilSettings, *, show_paths: bool) -> dict[str, Any]:
     voice = settings.voice
     return {
         "enabled": voice.enabled,
         "sounddevice_available": importlib.util.find_spec("sounddevice") is not None,
         "openwakeword_available": importlib.util.find_spec("openwakeword") is not None,
         "paths": [
-            _path_status("whisper_binary", voice.whisper_binary_path),
-            _path_status("whisper_model", voice.whisper_model_path),
-            _path_status("piper_binary", voice.piper_binary_path),
-            _path_status("piper_model", voice.piper_model_path),
-            _path_status("wake_word_model", voice.wake_word_model_path),
+            _path_status(settings, "whisper_binary", voice.whisper_binary_path, show_paths),
+            _path_status(settings, "whisper_model", voice.whisper_model_path, show_paths),
+            _path_status(settings, "piper_binary", voice.piper_binary_path, show_paths),
+            _path_status(settings, "piper_model", voice.piper_model_path, show_paths),
+            _path_status(settings, "wake_word_model", voice.wake_word_model_path, show_paths),
         ],
     }
 
 
-def _path_status(name: str, value: Any) -> dict[str, Any]:
+def _path_status(
+    settings: AprilSettings, name: str, value: Any, show_paths: bool
+) -> dict[str, Any]:
     configured = value is not None and str(value) != ""
-    exists = configured and Path(str(value)).expanduser().exists()
-    return {"name": name, "configured": configured, "exists": exists}
+    resolved = settings.resolve_path(Path(str(value))) if configured else None
+    exists = bool(resolved and resolved.exists())
+    status: dict[str, Any] = {"name": name, "configured": configured, "exists": exists}
+    if resolved is not None:
+        status["path"] = _display_path(resolved, show_paths=show_paths)
+    return status
+
+
+def _display_path(path: Path, *, show_paths: bool) -> str:
+    resolved = path.expanduser()
+    if show_paths:
+        return str(resolved.resolve(strict=False))
+    return resolved.name or str(resolved)
+
+
+def _display_text(text: str, *, show_paths: bool) -> str:
+    if show_paths:
+        return text
+
+    def _basename(match: re.Match[str]) -> str:
+        name = Path(match.group(0)).name
+        return name or match.group(0)
+
+    return _PATH_TEXT_RE.sub(_basename, text)
 
 
 def _next_commands(profile: str, env_file: Path) -> list[str]:

@@ -15,6 +15,7 @@ run april setup models --brain /absolute/path/granite.gguf --coding /absolute/pa
 run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run
 run april setup app-stub
 run april model doctor
+run april memory doctor --json
 run april model profile list
 run april status
 run april stop
@@ -37,13 +38,14 @@ run april eval brain --fake
 Run target-Mac setup and real verification in this order:
 
 1. `run april readiness`
-2. `run april setup tokens`
-3. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`
-4. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --apply`
-5. `pip install -e '.[runtime]'`
-6. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
-7. `run april verify --workflow --real-model --report data/verification/workflow-real.json`
-8. Optional voice setup/doctor/live verification:
+2. `run april setup bootstrap`
+3. `run april setup tokens` if bootstrap reports token warnings
+4. `run april model profile apply intel_macbook_cpu_low`
+5. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`, then repeat with `--apply`
+6. `pip install -e '.[runtime]'`
+7. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
+8. `run april verify --workflow --real-model --report data/verification/workflow-real.json`
+9. Optional voice setup/doctor/live verification:
    `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`,
    `run april voice doctor`,
    `run april voice verify-live --report data/verification/voice-live.json`
@@ -52,6 +54,13 @@ Blank API tokens never authenticate. If `APRIL_API_TOKEN` is empty, protected
 Core API endpoints fail closed with an auth/config error; token values are not
 printed in responses. The local development default `local-dev-token` remains
 valid in development/test.
+
+`run april setup bootstrap` warns on known development tokens, placeholder
+tokens, blank API tokens, and blank/missing Runtime tokens without printing token
+values. JSON output redacts local absolute paths by default; use `--show-paths`
+only when a local operator needs exact paths. The setup shell scripts use
+`constraints-dev.txt` for reproducible base/dev editable installs and still do
+not use sudo, Homebrew, model downloads, or automatic voice/runtime setup.
 
 Project workflow smoke:
 
@@ -99,7 +108,9 @@ create/list, memory write/search, document indexing/search, temporary project
 registration, read-only coding analysis, code-write approval creation, approval
 denial, external/system action denial, and voice health/doctor status only. It
 does not record audio, play audio, open the microphone, require wake-word models,
-modify user repos, or send external requests.
+modify user repos, or send external requests. `--timeout` and
+`--max-output-tokens` are passed into the real workflow verifier and may be
+recorded as safe verifier settings in the workflow report.
 
 Target-Mac validation is a local checklist for the intended laptop. It reports
 `pass`, `fail`, `skip`, and `manual` statuses; skipped optional checks do not
@@ -166,10 +177,29 @@ downloads models or installs packages.
 
 `data/verification/` is generated and ignored by Git. The Core API exposes only
 authenticated sanitized summaries through `GET /verification/report/latest`,
-`GET /verification/reports`, and `GET /verification/reports/{report_basename}`.
-The basename endpoint rejects traversal, slashes, backslashes, symlinks,
-absolute paths, non-JSON files, and arbitrary query paths. Desktop Readiness
-uses those endpoints for latest-report and report-history display.
+`GET /verification/report/latest?type=any`,
+`GET /verification/report/latest?type=real_model`,
+`GET /verification/report/latest?type=voice_live`,
+`GET /verification/report/latest?type=workflow`,
+`GET /verification/reports`, and
+`GET /verification/reports/{report_basename}`. Report history is sorted by safe
+report time (`generated_at`, then `timestamp`, then mtime fallback). The
+basename endpoint rejects traversal, slashes, backslashes, symlinks, absolute
+paths, non-JSON files, and arbitrary query paths. Desktop Readiness uses those
+endpoints for separate real-model, workflow, voice-live, latest-report, and
+report-history display.
+
+## Semantic Memory Readiness
+
+`run april memory doctor --json` is the offline readiness check for vector
+memory. It reports the configured embedding provider, active vector-index
+provider, dimensions, whether runtime-local was requested, whether APRIL is
+falling back to hashed-token, whether reindex is required, whether an
+embedding-role model is registered, and whether that model path exists. It does
+not start Runtime or load a model unless `--verify-runtime-embedding` is passed,
+and that flag only probes `/runtime/embed`. Real semantic memory requires a
+runtime-local embedding-role model and `run april memory reindex` after switching
+providers.
 
 Fake soak is non-destructive and fake-backend-only:
 

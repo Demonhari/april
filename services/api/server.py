@@ -260,9 +260,10 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         type: str = "any",
         active: ApiContainer = Depends(authorized),
     ) -> object:
-        # ?type=any (default) | real_model (multi_model+target_mac) | voice_live.
-        # An unknown/extra query value falls back to "any", so existing callers
-        # (and the ignored-?path= probe) keep their behaviour.
+        # ?type=any (default) | real_model (multi_model+target_mac)
+        # | voice_live | workflow. An unknown/extra query value falls back to
+        # "any", so existing callers (and the ignored-?path= probe) keep their
+        # behaviour.
         return _latest_verification_report(active.settings, report_type=type)
 
     @app.get("/verification/reports")
@@ -908,7 +909,9 @@ def _latest_verification_report(
     # timestamp first, falling back to mtime only when the report timestamp is
     # absent/invalid. A newer voice-live report can never overwrite the latest
     # real-model report (or vice versa).
-    filter_type = report_type if report_type in {"any", "real_model", "voice_live"} else "any"
+    filter_type = (
+        report_type if report_type in {"any", "real_model", "voice_live", "workflow"} else "any"
+    )
     candidates = _verification_report_files(settings)
     matching: list[tuple[Path, dict[str, Any]]] = []
     for path in candidates:
@@ -939,16 +942,15 @@ def _latest_verification_report(
 
 
 def _verification_report_history(settings: AprilSettings) -> dict[str, Any]:
-    candidates = sorted(
-        _verification_report_files(settings),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    reports: list[dict[str, Any]] = []
-    for path in candidates:
+    matching: list[tuple[Path, dict[str, Any]]] = []
+    for path in _verification_report_files(settings):
         payload = _read_safe_report(path)
         if payload is None:
             continue
+        matching.append((path, payload))
+    matching.sort(key=lambda item: _report_order_key(*item), reverse=True)
+    reports: list[dict[str, Any]] = []
+    for path, payload in matching:
         reports.append(_safe_report_payload(payload, path))
     if not reports:
         return {
@@ -1161,8 +1163,20 @@ def _safe_workflow_checks(value: Any) -> list[dict[str, Any]]:
 
 
 def _safe_workflow_detail(detail: str) -> str:
-    if "decision_summary" in detail.lower():
+    lower = detail.lower()
+    if "decision_summary" in lower:
         return "decision_summary redacted"
+    sensitive_markers = (
+        "prompt",
+        "transcript",
+        "token",
+        "authorization",
+        "bearer",
+        "raw_tool_args",
+        "tool args",
+    )
+    if any(marker in lower for marker in sensitive_markers):
+        return "sensitive detail redacted"
     return _redact_path_text(detail)[:240]
 
 

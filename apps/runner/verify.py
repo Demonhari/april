@@ -64,7 +64,12 @@ def run_fake_verification(home: Path) -> list[VerifyCheck]:
 
 
 def run_workflow_verification(
-    home: Path, *, real_model: bool = False, model_path: Path | None = None
+    home: Path,
+    *,
+    real_model: bool = False,
+    model_path: Path | None = None,
+    max_output_tokens: int = 32,
+    timeout: float = 180.0,
 ) -> list[VerifyCheck]:
     if real_model:
         configured_path = model_path or (
@@ -80,7 +85,12 @@ def run_workflow_verification(
                     detail="APRIL_TEST_GGUF_PATH or --real-model path is required.",
                 )
             ]
-        return RealWorkflowVerifier(home=home, model_path=configured_path).run()
+        return RealWorkflowVerifier(
+            home=home,
+            model_path=configured_path,
+            max_output_tokens=max_output_tokens,
+            timeout=timeout,
+        ).run()
     return WorkflowVerifier(home=home).run()
 
 
@@ -304,10 +314,16 @@ class WorkflowVerificationReport(BaseModel):
     checks: list[WorkflowReportCheck] = Field(default_factory=list)
     checks_failed: int = 0
     check_failures: list[str] = Field(default_factory=list)
+    timeout_seconds: float | None = None
+    max_output_tokens: int | None = None
 
 
 def build_workflow_report(
-    checks: list[VerifyCheck], *, real_model_requested: bool
+    checks: list[VerifyCheck],
+    *,
+    real_model_requested: bool,
+    timeout_seconds: float | None = None,
+    max_output_tokens: int | None = None,
 ) -> WorkflowVerificationReport:
     failed = [check for check in checks if not check.ok]
     real_model_exercised = real_model_requested and any(
@@ -331,19 +347,35 @@ def build_workflow_report(
         checks=rendered,
         checks_failed=len(failed),
         check_failures=[check.name for check in failed],
+        timeout_seconds=timeout_seconds if real_model_requested else None,
+        max_output_tokens=max_output_tokens if real_model_requested else None,
     )
 
 
 def write_workflow_report(report: WorkflowVerificationReport, path: Path) -> Path:
     resolved = path.expanduser()
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    resolved.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    resolved.write_text(
+        report.model_dump_json(indent=2, exclude_none=True) + "\n", encoding="utf-8"
+    )
     return resolved
 
 
 def _safe_workflow_report_detail(detail: str) -> str:
-    if "decision_summary" in detail.lower():
+    lower = detail.lower()
+    if "decision_summary" in lower:
         return "decision_summary redacted"
+    sensitive_markers = (
+        "prompt",
+        "transcript",
+        "token",
+        "authorization",
+        "bearer",
+        "raw_tool_args",
+        "tool args",
+    )
+    if any(marker in lower for marker in sensitive_markers):
+        return "sensitive detail redacted"
     return redact_reason(detail)[:240]
 
 
@@ -420,6 +452,8 @@ class TargetMacValidator:
                     self.home,
                     real_model=True,
                     model_path=selected_model,
+                    max_output_tokens=self.max_output_tokens,
+                    timeout=self.timeout,
                 )
             )
         else:
