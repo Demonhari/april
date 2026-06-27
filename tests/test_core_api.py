@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from agents.registry import default_agent_registry
 from april_common.audit import AuditLogger
+from april_common.token_setup import generate_tokens
 from services.api.dependencies import ApiContainer
 from services.api.server import create_app
 from services.memory.database import Database
@@ -79,6 +80,12 @@ def auth(settings_tmp) -> dict[str, str]:
     return {"Authorization": f"Bearer {settings_tmp.api.token}"}
 
 
+def _settings_with_api_token(settings_tmp, token: str):
+    return settings_tmp.model_copy(
+        update={"api": settings_tmp.api.model_copy(update={"token": token})}
+    )
+
+
 def test_authentication(settings_tmp) -> None:
     import anyio
 
@@ -88,6 +95,64 @@ def test_authentication(settings_tmp) -> None:
     assert response.status_code == 403
     response = client.get("/health")
     assert response.status_code == 200
+
+
+def test_blank_configured_api_token_rejects_blank_bearer(settings_tmp) -> None:
+    import anyio
+
+    blank_settings = _settings_with_api_token(settings_tmp, "")
+    container = anyio.run(make_container, blank_settings)
+    client = TestClient(create_app(container))
+    response = client.get("/readiness", headers={"Authorization": "Bearer "})
+    assert response.status_code == 403
+    assert response.json()["error"]["message"] == "API bearer token is not configured."
+
+
+def test_blank_configured_api_token_rejects_missing_header(settings_tmp) -> None:
+    import anyio
+
+    blank_settings = _settings_with_api_token(settings_tmp, "")
+    container = anyio.run(make_container, blank_settings)
+    client = TestClient(create_app(container))
+    response = client.get("/readiness")
+    assert response.status_code == 403
+    assert response.json()["error"]["message"] == "API bearer token is not configured."
+
+
+def test_local_dev_token_authenticates_in_test(settings_tmp) -> None:
+    import anyio
+
+    local_settings = _settings_with_api_token(settings_tmp, "local-dev-token")
+    container = anyio.run(make_container, local_settings)
+    client = TestClient(create_app(container))
+    response = client.get("/readiness", headers=auth(local_settings))
+    assert response.status_code == 200
+
+
+def test_generated_api_token_authenticates(settings_tmp) -> None:
+    import anyio
+
+    token = generate_tokens().api_token
+    strong_settings = _settings_with_api_token(settings_tmp, token)
+    container = anyio.run(make_container, strong_settings)
+    client = TestClient(create_app(container))
+    response = client.get("/readiness", headers=auth(strong_settings))
+    assert response.status_code == 200
+
+
+def test_auth_error_does_not_include_token_values(settings_tmp) -> None:
+    import anyio
+
+    configured = "a-strong-local-api-token-value-123456"
+    presented = "wrong-presented-token"
+    strong_settings = _settings_with_api_token(settings_tmp, configured)
+    container = anyio.run(make_container, strong_settings)
+    client = TestClient(create_app(container))
+    response = client.get("/readiness", headers={"Authorization": f"Bearer {presented}"})
+    assert response.status_code == 403
+    blob = json.dumps(response.json())
+    assert configured not in blob
+    assert presented not in blob
 
 
 def test_lifespan_shutdown_closes_database(settings_tmp) -> None:

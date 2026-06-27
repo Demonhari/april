@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -27,6 +28,7 @@ from apps.runner.mac_report import (
     build_mac_report,
     environment_snapshot,
     quantization_from_basename,
+    redact_reason,
     routing_report_from_results,
 )
 from apps.runner.multi_model_report import (
@@ -228,6 +230,49 @@ def run_all_configured_models_verification(
     return verifier
 
 
+def latest_brain_decision_marker(database: Path) -> int:
+    if not database.exists():
+        return 0
+    try:
+        with sqlite3.connect(database) as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(MAX(rowid), 0)
+                FROM conversation_events
+                WHERE event_type = 'brain_decision'
+                """
+            ).fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row is not None and row[0] is not None else 0
+
+
+def brain_decision_after_marker(database: Path, marker: int) -> dict[str, Any]:
+    if not database.exists():
+        return {}
+    try:
+        with sqlite3.connect(database) as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM conversation_events
+                WHERE event_type = 'brain_decision' AND rowid > ?
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (marker,),
+            ).fetchone()
+    except sqlite3.Error:
+        return {}
+    if row is None:
+        return {}
+    try:
+        payload = json.loads(str(row[0]))
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 class BenchmarkResult(BaseModel):
     run_index: int
     ok: bool = True
@@ -240,6 +285,66 @@ class BenchmarkResult(BaseModel):
     unload_success: bool = False
     context_size: int = 1024
     backend_settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkflowReportCheck(BaseModel):
+    name: str
+    ok: bool
+    status: VerifyStatus
+    detail: str = ""
+
+
+class WorkflowVerificationReport(BaseModel):
+    schema_version: int = 1
+    report_type: Literal["workflow"] = "workflow"
+    generated_at: str
+    summary: str = "degraded"
+    real_model_verified: bool = False
+    real_model_exercised: bool = False
+    checks: list[WorkflowReportCheck] = Field(default_factory=list)
+    checks_failed: int = 0
+    check_failures: list[str] = Field(default_factory=list)
+
+
+def build_workflow_report(
+    checks: list[VerifyCheck], *, real_model_requested: bool
+) -> WorkflowVerificationReport:
+    failed = [check for check in checks if not check.ok]
+    real_model_exercised = real_model_requested and any(
+        check.name == "real workflow planning route" and check.ok for check in checks
+    )
+    real_model_verified = real_model_exercised and not failed
+    rendered = [
+        WorkflowReportCheck(
+            name=check.name,
+            ok=check.ok,
+            status=check.status or ("pass" if check.ok else "fail"),
+            detail=_safe_workflow_report_detail(check.detail),
+        )
+        for check in checks
+    ]
+    return WorkflowVerificationReport(
+        generated_at=environment_snapshot().generated_at,
+        summary="pass" if not failed else "fail",
+        real_model_verified=real_model_verified,
+        real_model_exercised=real_model_exercised,
+        checks=rendered,
+        checks_failed=len(failed),
+        check_failures=[check.name for check in failed],
+    )
+
+
+def write_workflow_report(report: WorkflowVerificationReport, path: Path) -> Path:
+    resolved = path.expanduser()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    return resolved
+
+
+def _safe_workflow_report_detail(detail: str) -> str:
+    if "decision_summary" in detail.lower():
+        return "decision_summary redacted"
+    return redact_reason(detail)[:240]
 
 
 def run_model_benchmark(
@@ -889,6 +994,15 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         message = error.get("message") or response.text[:1000]
         details = error.get("details") or {}
         return f"{message} {details}".strip()
+
+    def _brain_decision_database(self) -> Path:
+        return self.temp / "data" / "april.db"
+
+    def _brain_decision_marker(self) -> int:
+        return latest_brain_decision_marker(self._brain_decision_database())
+
+    def _brain_decision_after(self, marker: int) -> dict[str, Any]:
+        return brain_decision_after_marker(self._brain_decision_database(), marker)
 
     def _services_stopped(self) -> str:
         alive = []
@@ -1622,9 +1736,44 @@ class WorkflowVerifier(LauncherVerifier):
 class RealWorkflowVerifier(
     RealModelVerifier
 ):  # pragma: no cover - requires optional real GGUF runtime
+    def __init__(
+        self,
+        *,
+        home: Path,
+        model_path: Path,
+        max_output_tokens: int = 32,
+        timeout: float = 180.0,
+    ) -> None:
+        super().__init__(
+            home=home,
+            model_path=model_path,
+            max_output_tokens=max_output_tokens,
+            timeout=timeout,
+        )
+        self.workflow_project = self.temp / "workflow_project"
+        self.documents_dir = self.temp / "workflow_documents"
+
     @property
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_token}"}
+
+    def _prepare(self) -> None:
+        super()._prepare()
+        self.workflow_project.mkdir(parents=True)
+        (self.workflow_project / "README.md").write_text(
+            "# workflow\nanimation bug\n", encoding="utf-8"
+        )
+        (self.workflow_project / "app.py").write_text("value = 'old'\n", encoding="utf-8")
+        _git(self.workflow_project, "init")
+        _git(self.workflow_project, "config", "user.email", "april@example.local")
+        _git(self.workflow_project, "config", "user.name", "APRIL Verify")
+        _git(self.workflow_project, "add", ".")
+        _git(self.workflow_project, "commit", "-m", "initial")
+        self.documents_dir.mkdir(parents=True)
+        (self.documents_dir / "workflow-note.txt").write_text(
+            "APRIL workflow verification indexes this local document for search.\n",
+            encoding="utf-8",
+        )
 
     def run(self) -> list[VerifyCheck]:
         try:
@@ -1639,6 +1788,21 @@ class RealWorkflowVerifier(
             self._check("core health", lambda: self._wait_json(self.api_url + "/health"))
             self._check("real workflow planning route", self._real_planning_route)
             self._check("real workflow specialist-agent request", self._real_specialist_agent)
+            project_id = self._check("workflow project registration", self._register_temp_project)
+            self._check("workflow reminder create/list", self._real_reminder_create_list)
+            self._check("workflow memory write/search", self._real_memory_write_search)
+            self._check("workflow document indexing/search", self._real_document_index_search)
+            self._check(
+                "workflow coding read-only repo analysis",
+                lambda: self._real_coding_repo_analysis(project_id),
+            )
+            approval_id = self._check(
+                "workflow code-write approval creation",
+                lambda: self._real_code_write_approval(project_id),
+            )
+            self._check("workflow approval denial", lambda: self._real_approval_denial(approval_id))
+            self._check("workflow external action denial", self._real_external_action_denial)
+            self._check("workflow voice health", self._real_voice_health)
         finally:
             self._stop()
             self._check("services stopped", self._services_stopped)
@@ -1649,10 +1813,14 @@ class RealWorkflowVerifier(
         with httpx.Client(
             base_url=self.api_url, headers=self.headers, timeout=self.timeout
         ) as client:
+            marker = self._brain_decision_marker()
             response = client.post("/chat", json={"message": "April, plan my work today."})
         if response.status_code >= 400:
             raise RuntimeError(self._response_error(response))
-        decision = BrainDecision.model_validate(self._latest_decision())
+        decision_payload = self._brain_decision_after(marker)
+        if not decision_payload:
+            raise RuntimeError("chat succeeded but no new brain_decision was recorded")
+        decision = BrainDecision.model_validate(decision_payload)
         method = decision.routing_method
         if method == "fallback":
             raise RuntimeError(
@@ -1680,30 +1848,175 @@ class RealWorkflowVerifier(
         return "reading_agent ok"
 
     def _latest_routing_method(self) -> str:
-        payload = self._latest_decision()
+        payload = brain_decision_after_marker(
+            self._brain_decision_database(),
+            max(self._brain_decision_marker() - 1, 0),
+        )
         return str(payload.get("routing_method") or "unknown")
 
     def _latest_decision(self) -> dict[str, Any]:
-        database = self.temp / "data" / "april.db"
-        with sqlite3.connect(database) as conn:
-            row = conn.execute(
-                """
-                SELECT payload_json
-                FROM conversation_events
-                WHERE event_type = 'brain_decision'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        if row is None:
-            return {}
-        try:
-            import json
+        return brain_decision_after_marker(
+            self._brain_decision_database(),
+            max(self._brain_decision_marker() - 1, 0),
+        )
 
-            payload = json.loads(str(row[0]))
-        except ValueError:
-            return {}
-        return payload if isinstance(payload, dict) else {}
+    def _register_temp_project(self) -> str:
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            response = client.post(
+                "/projects",
+                json={"path": str(self.workflow_project), "name": "APRIL workflow verify"},
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(self._response_error(response))
+        project_id = str(response.json().get("id") or "")
+        if not project_id:
+            raise RuntimeError("project id missing")
+        return project_id
+
+    def _real_reminder_create_list(self) -> str:
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            created = client.post(
+                "/reminders",
+                json={"content": "workflow verification", "due_at": "2026-06-21T09:00:00Z"},
+            )
+            if created.status_code >= 400:
+                raise RuntimeError(self._response_error(created))
+            listed = client.get("/reminders")
+        if listed.status_code >= 400:
+            raise RuntimeError(self._response_error(listed))
+        reminders = listed.json().get("reminders", [])
+        if not reminders:
+            raise RuntimeError("no reminders listed after create")
+        return f"{len(reminders)} reminders"
+
+    def _real_memory_write_search(self) -> str:
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            created = client.post(
+                "/memory",
+                json={
+                    "content": "workflow verifier prefers concise local answers",
+                    "memory_type": "preference",
+                    "reason": "Explicit verifier memory write.",
+                },
+            )
+            if created.status_code >= 400:
+                raise RuntimeError(self._response_error(created))
+            searched = client.get("/memory/search", params={"q": "concise local answers"})
+        if searched.status_code >= 400:
+            raise RuntimeError(self._response_error(searched))
+        results = searched.json().get("results", [])
+        if not results:
+            raise RuntimeError("memory search returned no results")
+        return f"{len(results)} memory results"
+
+    def _real_document_index_search(self) -> str:
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            indexed = client.post("/documents", json={"path": str(self.documents_dir)})
+            if indexed.status_code >= 400:
+                raise RuntimeError(self._response_error(indexed))
+            searched = client.get("/documents/search", params={"q": "workflow verification"})
+        if searched.status_code >= 400:
+            raise RuntimeError(self._response_error(searched))
+        chunks = searched.json().get("chunks", [])
+        if not chunks:
+            raise RuntimeError("document search returned no chunks")
+        return f"{len(chunks)} document chunks"
+
+    def _real_coding_repo_analysis(self, project_id: str | None) -> str:
+        if not project_id:
+            raise RuntimeError("project registration failed")
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            marker = self._brain_decision_marker()
+            response = client.post(
+                "/chat",
+                json={
+                    "message": "April, check why the animation in this repository is broken.",
+                    "project_id": project_id,
+                },
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(self._response_error(response))
+        if not self._brain_decision_after(marker):
+            raise RuntimeError("repo analysis succeeded but no new brain_decision was recorded")
+        result = response.json().get("result") or {}
+        if result.get("status") != "ok":
+            raise RuntimeError(str(result))
+        return "coding_agent read-only ok"
+
+    def _real_code_write_approval(self, project_id: str | None) -> str:
+        if not project_id:
+            raise RuntimeError("project registration failed")
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            marker = self._brain_decision_marker()
+            response = client.post(
+                "/chat",
+                json={"message": "Apply the fix.", "project_id": project_id},
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(self._response_error(response))
+        if not self._brain_decision_after(marker):
+            raise RuntimeError(
+                "code-write request succeeded but no new brain_decision was recorded"
+            )
+        result = response.json().get("result") or {}
+        if result.get("status") != "pending_approval":
+            raise RuntimeError(str(result))
+        approval = result.get("pending_approval") or {}
+        approval_id = str(approval.get("approval_id") or "")
+        if not approval_id:
+            raise RuntimeError("approval id missing")
+        return approval_id
+
+    def _real_approval_denial(self, approval_id: str | None) -> str:
+        if not approval_id:
+            raise RuntimeError("approval creation failed")
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            response = client.post("/tools/deny", json={"approval_id": approval_id})
+        if response.status_code >= 400:
+            raise RuntimeError(self._response_error(response))
+        if response.json().get("status") != "denied":
+            raise RuntimeError(str(response.json()))
+        return "denied"
+
+    def _real_external_action_denial(self) -> str:
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            response = client.post(
+                "/tools/request",
+                json={
+                    "tool": "send_email",
+                    "agent": "system_action_agent",
+                    "args": {"to": "nobody@example.invalid", "body": "blocked"},
+                },
+            )
+        if response.status_code != 403:
+            raise RuntimeError(f"expected 403, got {response.status_code}")
+        return "403"
+
+    def _real_voice_health(self) -> str:
+        with httpx.Client(
+            base_url=self.api_url, headers=self.headers, timeout=self.timeout
+        ) as client:
+            response = client.get("/health")
+        if response.status_code >= 400:
+            raise RuntimeError(self._response_error(response))
+        voice = response.json().get("voice") or {}
+        return str(voice.get("status", "unknown"))
 
 
 class AllConfiguredModelsVerifier(
@@ -2009,32 +2322,19 @@ class AllConfiguredModelsVerifier(
             base_url=self.api_url, headers=self.api_headers, timeout=self.timeout
         ) as client:
             for case in cases:
+                marker = self._brain_decision_marker()
                 response = client.post("/chat", json={"message": case.message})
-                decisions.append(self._latest_decision() if response.status_code < 400 else {})
+                decisions.append(
+                    self._brain_decision_after(marker) if response.status_code < 400 else {}
+                )
         # Real-mode routing report: a schema-valid fallback decision is a failure.
         return real_routing_report(cases, decisions)
 
     def _latest_decision(self) -> dict[str, Any]:
-        import json
-
-        database = self.temp / "data" / "april.db"
-        with sqlite3.connect(database) as conn:
-            row = conn.execute(
-                """
-                SELECT payload_json
-                FROM conversation_events
-                WHERE event_type = 'brain_decision'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        if row is None:
-            return {}
-        try:
-            payload = json.loads(str(row[0]))
-        except ValueError:
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        return brain_decision_after_marker(
+            self._brain_decision_database(),
+            max(self._brain_decision_marker() - 1, 0),
+        )
 
     def _verify_switching(self, available: list[ModelPlanEntry]) -> SpecialistSwitchReport:
         by_role = {entry.model.role: entry.model.id for entry in available}

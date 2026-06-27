@@ -319,6 +319,7 @@ def setup_voice_stack(
     talk stays available, while wake-word listening remains explicitly unverified.
     """
     root = home.expanduser().resolve()
+    config_path = _settings_config_path(root)
     required = {
         "whisper_binary_path": whisper_binary,
         "whisper_model_path": whisper_model,
@@ -329,8 +330,12 @@ def setup_voice_stack(
     for key, path in required.items():
         resolved = path.expanduser().resolve()
         if not resolved.exists():
+            if apply:
+                _write_voice_enabled(root, config_path, enabled=False)
             raise ConfigError(f"Voice path does not exist: {path.name}")
         if not resolved.is_file():
+            if apply:
+                _write_voice_enabled(root, config_path, enabled=False)
             raise ConfigError(f"Voice path is not a file: {path.name}")
         resolved_required[key] = resolved
 
@@ -343,7 +348,6 @@ def setup_voice_stack(
         else:
             warnings.append("wake-word model missing; wake-word remains unconfigured")
 
-    config_path = _settings_config_path(root)
     backup: Path | None = None
     if apply:
         backup = _timestamped_backup(config_path)
@@ -355,9 +359,9 @@ def setup_voice_stack(
             voice[key] = str(path)
         if resolved_wake is not None:
             voice["wake_word_model_path"] = str(resolved_wake)
-        if enable:
-            # Reached only after every required path validated above.
-            voice["enabled"] = True
+        # Reached only after every required path validated above. Applying without
+        # --enable is an explicit safe-off write, even if the existing config was on.
+        voice["enabled"] = bool(enable)
         _write_yaml(config_path, data)
         try:
             _validate_after_write(root)
@@ -396,6 +400,18 @@ def setup_voice_stack(
         ],
         "mutating": apply,
     }
+
+
+def _write_voice_enabled(root: Path, config_path: Path, *, enabled: bool) -> None:
+    """Best-effort safe-off write when an applying voice setup cannot validate."""
+    if not config_path.exists():
+        return
+    data = _read_yaml(config_path)
+    voice = data.setdefault("voice", {})
+    if not isinstance(voice, dict):
+        return
+    voice["enabled"] = enabled
+    _write_yaml(config_path, data)
 
 
 def create_macos_app_stub(

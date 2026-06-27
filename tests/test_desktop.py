@@ -215,6 +215,37 @@ def test_latest_voice_live_report_is_sanitized(settings_tmp) -> None:
         assert secret not in blob
 
 
+def test_timestamp_only_voice_report_uses_timestamp_as_generated_at(settings_tmp) -> None:
+    report_dir = settings_tmp.home / "data" / "verification"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "report_type": "voice_live",
+        "timestamp": "2026-06-26T00:00:00Z",
+        "platform": "Darwin 25.5.0",
+        "summary": "pass",
+        "voice_live_verified": True,
+        "recording_success": True,
+        "stt_success": True,
+        "tts_success": True,
+        "playback_user_confirmed": True,
+        "transcript": "SECRET SPOKEN WORDS",
+        "input_path": str(settings_tmp.home / "data" / "audio_cache" / "input.wav"),
+        "input_device_name": "MacBook Pro Microphone",
+    }
+    (report_dir / "voice-live-old.json").write_text(json.dumps(report), encoding="utf-8")
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        response = client.get(
+            "/verification/report/latest?type=voice_live", headers=auth(settings_tmp)
+        )
+    payload = response.json()
+    assert payload["report"]["generated_at"] == "2026-06-26T00:00:00Z"
+    blob = json.dumps(payload)
+    assert "SECRET SPOKEN WORDS" not in blob
+    assert "input.wav" not in blob
+    assert "MacBook Pro Microphone" not in blob
+
+
 def test_failed_voice_live_report_serializes_verified_false(settings_tmp) -> None:
     _write_voice_live_report(
         settings_tmp.home, "voice-live.json", generated_at="2026-06-26T00:00:00Z", passed=False
@@ -227,6 +258,52 @@ def test_failed_voice_live_report_serializes_verified_false(settings_tmp) -> Non
     report = response.json()["report"]
     assert report["voice_live_verified"] is False
     assert report["summary"] == "degraded"
+
+
+def test_latest_report_uses_generated_at_before_mtime(settings_tmp) -> None:
+    older = _write_verification_report(
+        settings_tmp.home, "older.json", generated_at="2026-06-25T00:00:00Z"
+    )
+    newer = _write_verification_report(
+        settings_tmp.home, "newer.json", generated_at="2026-06-26T00:00:00Z"
+    )
+    os.utime(newer, (1, 1))
+    os.utime(older, (2, 2))
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        latest = client.get("/verification/report/latest", headers=auth(settings_tmp)).json()
+    assert latest["report"]["basename"] == "newer.json"
+
+
+def test_latest_report_uses_timestamp_when_generated_at_missing(settings_tmp) -> None:
+    older = _write_timestamp_only_report(
+        settings_tmp.home, "older.json", timestamp="2026-06-25T00:00:00Z"
+    )
+    newer = _write_timestamp_only_report(
+        settings_tmp.home, "newer.json", timestamp="2026-06-26T00:00:00Z"
+    )
+    os.utime(newer, (1, 1))
+    os.utime(older, (2, 2))
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        latest = client.get("/verification/report/latest", headers=auth(settings_tmp)).json()
+    assert latest["report"]["basename"] == "newer.json"
+    assert latest["report"]["generated_at"] == "2026-06-26T00:00:00Z"
+
+
+def test_latest_report_invalid_timestamp_falls_back_to_mtime(settings_tmp) -> None:
+    valid = _write_verification_report(
+        settings_tmp.home, "valid.json", generated_at="2026-06-26T00:00:00Z"
+    )
+    invalid = _write_verification_report(
+        settings_tmp.home, "invalid.json", generated_at="not-a-timestamp"
+    )
+    os.utime(valid, (1, 1))
+    os.utime(invalid, (2_000_000_000, 2_000_000_000))
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        latest = client.get("/verification/report/latest", headers=auth(settings_tmp)).json()
+    assert latest["report"]["basename"] == "invalid.json"
 
 
 def test_latest_real_model_report_is_stable_against_newer_voice_report(settings_tmp) -> None:
@@ -262,6 +339,48 @@ def test_latest_real_model_report_is_stable_against_newer_voice_report(settings_
     # And the voice-live latest is the voice report.
     assert voice_latest["report"]["report_type"] == "voice_live"
     assert voice_latest["report"]["voice_live_verified"] is True
+
+
+def test_newer_real_model_report_does_not_replace_latest_voice_live(settings_tmp) -> None:
+    voice = _write_voice_live_report(
+        settings_tmp.home, "voice-live.json", generated_at="2026-06-25T00:00:00Z", passed=True
+    )
+    real = _write_verification_report(
+        settings_tmp.home,
+        "mac-readiness.json",
+        generated_at="2026-06-26T00:00:00Z",
+        verification_level="core",
+    )
+    os.utime(voice, (1, 1))
+    os.utime(real, (2, 2))
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        latest_voice = client.get(
+            "/verification/report/latest?type=voice_live", headers=auth(settings_tmp)
+        ).json()
+    assert latest_voice["report"]["report_type"] == "voice_live"
+    assert latest_voice["report"]["voice_live_verified"] is True
+
+
+def test_latest_workflow_report_is_separate_from_real_model_axis(settings_tmp) -> None:
+    _write_verification_report(
+        settings_tmp.home,
+        "mac-readiness.json",
+        generated_at="2026-06-25T00:00:00Z",
+        verification_level="core",
+    )
+    _write_workflow_report(settings_tmp.home, "workflow.json", generated_at="2026-06-26T00:00:00Z")
+    container = anyio.run(make_container, settings_tmp)
+    with TestClient(create_app(container)) as client:
+        headers = auth(settings_tmp)
+        any_latest = client.get("/verification/report/latest", headers=headers).json()
+        real_latest = client.get(
+            "/verification/report/latest?type=real_model", headers=headers
+        ).json()
+    assert any_latest["report"]["report_type"] == "workflow"
+    assert any_latest["report"]["real_model_verified"] is False
+    assert real_latest["report"]["report_type"] == "multi_model"
+    assert str(settings_tmp.home) not in json.dumps(any_latest)
 
 
 def test_latest_voice_live_report_absent_is_not_verified(settings_tmp) -> None:
@@ -323,6 +442,42 @@ def _write_verification_report(
         "raw_tool_args": {"path": "/etc/passwd"},
     }
     path.write_text(json.dumps(report), encoding="utf-8")
+    return path
+
+
+def _write_timestamp_only_report(home: Path, basename: str, *, timestamp: str) -> Path:
+    path = _write_verification_report(home, basename, generated_at=timestamp)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("generated_at", None)
+    payload["timestamp"] = timestamp
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _write_workflow_report(home: Path, basename: str, *, generated_at: str) -> Path:
+    report_dir = home / "data" / "verification"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / basename
+    path.write_text(
+        json.dumps(
+            {
+                "report_type": "workflow",
+                "generated_at": generated_at,
+                "summary": "pass",
+                "real_model_verified": False,
+                "real_model_exercised": False,
+                "checks": [
+                    {
+                        "name": "workflow voice health",
+                        "ok": True,
+                        "status": "pass",
+                        "detail": str(home / "private" / "path"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     return path
 
 

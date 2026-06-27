@@ -311,8 +311,8 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         ("wake-word model", settings.voice.wake_word_model_path),
     )
     voice_artifacts: list[VoiceArtifact] = []
-    for name, path in voice_specs:
-        artifact, check = _voice_artifact(settings, name, path, enabled=voice_enabled)
+    for name, voice_path in voice_specs:
+        artifact, check = _voice_artifact(settings, name, voice_path, enabled=voice_enabled)
         voice_artifacts.append(artifact)
         checks.append(check)
 

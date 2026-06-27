@@ -210,6 +210,23 @@ because another is.
 default is `llama_cpp` to match `configs/models.yaml`. Uncomment `=fake` only for
 development and the deterministic verification flows.
 
+### Exact Mac verification order
+
+On a target Mac, run setup and verification in this order:
+
+1. `run april readiness`
+2. `run april setup tokens`
+3. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`
+4. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --apply`
+5. `pip install -e '.[runtime]'`
+6. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
+7. `run april verify --workflow --real-model --report data/verification/workflow-real.json`
+8. Optional voice setup/doctor/live verification: `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`, `run april voice doctor`, then `run april voice verify-live --report data/verification/voice-live.json`.
+
+Blank API tokens never authenticate, even in development/test. If
+`APRIL_API_TOKEN` is empty, protected endpoints fail closed with an auth/config
+error; the default `local-dev-token` still works for local development.
+
 ### Real-model verification
 
 The optional GGUF test and the real-model verification flow read
@@ -230,6 +247,7 @@ run april verify --real-model /absolute/path/to/model.gguf
 run april model benchmark /absolute/path/to/model.gguf --runs 1 --max-output-tokens 32
 run april verify --target-mac --require-real-model /absolute/path/to/model.gguf
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
+run april verify --workflow --real-model --report data/verification/workflow-real.json
 ```
 
 `run april setup models` is dry-run by default. It validates local `.gguf` paths,
@@ -297,6 +315,12 @@ Reports under `data/verification/` are generated local artifacts and ignored by
 Git. The Desktop Readiness screen reads sanitized summaries from
 `GET /verification/report/latest` and `GET /verification/reports`; it never
 shows raw report JSON, prompt text, generated text, tokens, or full paths.
+
+`real_model`, `voice_live`, and `workflow` reports are separate verification
+axes. Real-model verified level is based only on `multi_model`/`target_mac`
+reports. Voice live verified is based only on `voice_live` reports. Workflow
+reports show daily-use workflow coverage and do not imply real-model
+verification unless their sanitized payload explicitly says so.
 
 Fake soak is local and non-destructive:
 
@@ -797,6 +821,13 @@ only writes `configs/april.yaml` with `--apply` after creating a backup. It neve
 records, listens, synthesizes, plays audio, downloads assets, or installs
 packages.
 
+Voice is not enabled by setup unless you pass both `--apply --enable`. Running
+`run april setup voice ... --apply` without `--enable` writes validated paths but
+keeps `voice.enabled: false`, even if it was previously true. A missing
+wake-word model does not block push-to-talk, but wake-word listening remains
+unavailable/unverified until a local wake-word model is configured and live
+verification passes.
+
 ## Proactive Scheduler
 
 The scheduler is optional and **off by default**. When enabled it runs a
@@ -848,6 +879,7 @@ run april verify --fake
 run april verify --soak --fake --minutes 10
 run april verify --target-mac
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
+run april verify --workflow --real-model --report data/verification/workflow-real.json
 node tests/js/desktop_token_bridge.test.cjs
 node tests/js/desktop_dashboard.test.cjs
 node --check apps/desktop/web/app.js
@@ -880,11 +912,21 @@ failures prevent a pass. Reports under `data/verification/` are redacted and are
 ignored by Git; the Desktop Readiness screen reads them only through sanitized
 latest-report and report-history endpoints.
 
+`run april verify --workflow --real-model` is a separate daily-use workflow
+check over temporary local files/repos. It exercises runtime/API health,
+non-fallback real planning, reading-agent routing, reminders, memory,
+document indexing/search, project registration, read-only coding analysis,
+approval creation/denial, external-action denial, and voice health/doctor status
+only. It does not record audio, use wake-word listening, modify user repos, or
+send external requests.
+
 ## Security Model
 
 - Model output is advisory only.
 - Unknown tools are denied.
 - Permission level and risk are computed deterministically from tool policy and arguments.
+- External actions such as git push, deployment, email, payment, and publishing
+  remain out of scope and disabled.
 - Every tool call runs through a trusted `ToolExecutionContext` containing the
   request, actor, agent, selected project, approval, and audit correlation. For
   project tools, APRIL derives the repository root from the registered project;

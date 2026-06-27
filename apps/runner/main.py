@@ -37,11 +37,13 @@ from apps.runner.verify import (
     BenchmarkResult,
     TargetMacValidator,
     VerifyCheck,
+    build_workflow_report,
     run_all_configured_models_verification,
     run_fake_verification,
     run_model_benchmark,
     run_real_model_verification,
     run_workflow_verification,
+    write_workflow_report,
 )
 from apps.runner.voice_live import run_voice_live_verification
 from april_common.config_validation import validate_configuration
@@ -1543,6 +1545,14 @@ def verify(
             console.print_json(data={"checks": [asdict(check) for check in checks]})
         else:
             _print_verification_table("APRIL Workflow Verification", checks)
+        if report is not None:
+            workflow_report = build_workflow_report(checks, real_model_requested=real_model)
+            written = write_workflow_report(workflow_report, report)
+            console.print(
+                f"[green]Wrote workflow verification report to {written}[/green] "
+                f"(summary: {workflow_report.summary}, "
+                f"real_model_verified: {str(workflow_report.real_model_verified).lower()})"
+            )
         if not all(check.ok for check in checks):
             raise typer.Exit(1)
         raise typer.Exit(0)

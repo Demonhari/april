@@ -6,7 +6,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +90,7 @@ _VERIFICATION_REPORT_TYPES = {
     "multi_model",
     "target_mac",
     "voice_live",
+    "workflow",
     "soak",
 }
 _VERIFICATION_REPORT_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json$")
@@ -747,6 +748,8 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "commands": [
                 "run april verify --all-configured-models --require-real-model "
                 "--report data/verification/mac-readiness.json",
+                "run april verify --workflow --real-model "
+                "--report data/verification/workflow-real.json",
                 "run april verify /absolute/path/to/model.gguf --target-mac "
                 "--require-real-model --report data/verification/single-model.json",
             ],
@@ -901,9 +904,10 @@ def _report_matches_filter(report_type: str, filter_type: str) -> bool:
 def _latest_verification_report(
     settings: AprilSettings, *, report_type: str = "any"
 ) -> dict[str, Any]:
-    # The latest report is selected *within the requested class* by modification
-    # time, so a newer voice-live report can never overwrite the latest real-model
-    # report (or vice versa).
+    # The latest report is selected *within the requested class* by the safe report
+    # timestamp first, falling back to mtime only when the report timestamp is
+    # absent/invalid. A newer voice-live report can never overwrite the latest
+    # real-model report (or vice versa).
     filter_type = report_type if report_type in {"any", "real_model", "voice_live"} else "any"
     candidates = _verification_report_files(settings)
     matching: list[tuple[Path, dict[str, Any]]] = []
@@ -926,7 +930,7 @@ def _latest_verification_report(
             "message": "not verified yet",
             "report": None,
         }
-    latest_path, latest_payload = max(matching, key=lambda item: item[0].stat().st_mtime)
+    latest_path, latest_payload = max(matching, key=lambda item: _report_order_key(*item))
     return {
         "status": "ok",
         "message": "latest verification report",
@@ -1001,7 +1005,7 @@ def _safe_report_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
     safe: dict[str, Any] = {
         "file_basename": path.name,
         "basename": path.name,
-        "generated_at": str(payload.get("generated_at", "")),
+        "generated_at": str(payload.get("generated_at") or payload.get("timestamp") or ""),
         "report_type": report_type,
         "summary": summary,
         "real_model_verified": _report_real_model_verified(payload, report_type),
@@ -1057,6 +1061,9 @@ def _safe_report_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
         safe["stt_success"] = bool(payload.get("stt_success", False))
         safe["tts_success"] = bool(payload.get("tts_success", False))
         safe["playback_user_confirmed"] = bool(payload.get("playback_user_confirmed", False))
+    if report_type == "workflow":
+        safe["real_model_exercised"] = bool(payload.get("real_model_exercised", False))
+        safe["checks"] = _safe_workflow_checks(payload.get("checks"))
     if "checks_failed" in payload:
         safe["checks_failed"] = payload.get("checks_failed")
     if "check_failures" in payload:
@@ -1080,13 +1087,21 @@ def _infer_report_type(payload: dict[str, Any]) -> str:
         return "target_mac"
     if "recording_success" in payload or "playback_user_confirmed" in payload:
         return "voice_live"
+    if "checks" in payload and str(payload.get("report_type")) == "workflow":
+        return "workflow"
     if "iterations" in payload and "latency_ms" in payload:
         return "soak"
     return "unknown"
 
 
 def _report_real_model_verified(payload: dict[str, Any], report_type: str) -> bool:
-    if isinstance(payload.get("real_model_verified"), bool):
+    if report_type == "voice_live":
+        return False
+    if report_type == "workflow":
+        return bool(payload.get("real_model_verified", False))
+    if report_type in _REAL_MODEL_REPORT_TYPES and isinstance(
+        payload.get("real_model_verified"), bool
+    ):
         return bool(payload["real_model_verified"])
     if report_type == "target_mac" and isinstance(payload.get("real_model"), dict):
         real_model = payload["real_model"]
@@ -1099,6 +1114,56 @@ def _report_real_model_verified(payload: dict[str, Any], report_type: str) -> bo
             and bool(real_model.get("unload_success"))
         )
     return False
+
+
+def _report_order_key(path: Path, payload: dict[str, Any]) -> float:
+    parsed = _safe_report_timestamp(payload)
+    if parsed is not None:
+        return parsed.timestamp()
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _safe_report_timestamp(payload: dict[str, Any]) -> datetime | None:
+    raw = payload.get("generated_at") or payload.get("timestamp")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        value = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _safe_workflow_checks(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    checks: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        checks.append(
+            {
+                "name": str(item.get("name", "unknown")),
+                "status": str(item.get("status", "unknown")),
+                "ok": bool(item.get("ok", False)),
+                "detail": _safe_workflow_detail(str(item.get("detail", ""))),
+            }
+        )
+    return checks
+
+
+def _safe_workflow_detail(detail: str) -> str:
+    if "decision_summary" in detail.lower():
+        return "decision_summary redacted"
+    return _redact_path_text(detail)[:240]
 
 
 def _safe_skipped(value: Any) -> list[dict[str, str]]:

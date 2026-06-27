@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from apps.runner.voice_live import run_voice_live_verification
+from apps.runner.voice_live import (
+    VoiceLiveReport,
+    run_voice_live_verification,
+    write_voice_live_report,
+)
 from services.voice.audio_player import FakeAudioPlayer
 from services.voice.microphone import Microphone
 from services.voice.speech_to_text import FakeSpeechToText
@@ -25,6 +29,48 @@ class InterruptingMicrophone(Microphone):
     async def record_push_to_talk(self, output_path: Path) -> Path:
         output_path.write_bytes(b"partial")
         raise KeyboardInterrupt
+
+
+def _minimal_voice_report(**timestamps: str) -> VoiceLiveReport:
+    return VoiceLiveReport(
+        **timestamps,
+        platform="Darwin 25",
+        sounddevice_available=True,
+        input_device_count=1,
+        output_device_count=1,
+        whisper_binary_available=True,
+        whisper_model_available=True,
+        piper_binary_available=True,
+        piper_model_available=True,
+        wake_word_model_available=False,
+    )
+
+
+def test_voice_live_report_accepts_generated_at_only() -> None:
+    report = _minimal_voice_report(generated_at="2026-06-26T00:00:00Z")
+    assert report.timestamp == "2026-06-26T00:00:00Z"
+    assert report.generated_at == report.timestamp
+
+
+def test_voice_live_report_accepts_timestamp_only() -> None:
+    report = _minimal_voice_report(timestamp="2026-06-26T00:00:00Z")
+    assert report.generated_at == "2026-06-26T00:00:00Z"
+    assert report.generated_at == report.timestamp
+
+
+def test_voice_live_report_missing_timestamps_are_filled() -> None:
+    report = _minimal_voice_report()
+    assert report.generated_at
+    assert report.timestamp == report.generated_at
+
+
+def test_write_voice_live_report_includes_both_timestamps(tmp_path: Path) -> None:
+    report = _minimal_voice_report(generated_at="2026-06-26T00:00:00Z")
+    out = tmp_path / "voice-live.json"
+    write_voice_live_report(report, out)
+    text = out.read_text(encoding="utf-8")
+    assert '"generated_at": "2026-06-26T00:00:00Z"' in text
+    assert '"timestamp": "2026-06-26T00:00:00Z"' in text
 
 
 @pytest.mark.anyio

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from apps.runner.mac_report import RoutingReport, routing_report_from_results
 from services.brain.fallback_router import FallbackRouter
+from services.brain.schemas import BrainDecision
 
 from .verify import RealModelVerifier
 
@@ -109,24 +110,40 @@ def _evaluate_case(
         expected_intent=case.expected_intent,
         expected_agent=case.expected_agent,
         actual=actual,
-        detail="" if schema_valid and routing_ok else "; ".join(mismatches),
+        detail="" if schema_valid and routing_ok else "; ".join(mismatches or ["schema invalid"]),
     )
 
 
-def real_routing_report(
-    cases: list[BrainEvalCase], decisions: list[dict[str, Any]]
-) -> RoutingReport:
+def real_routing_report(cases: list[BrainEvalCase], decisions: list[Any]) -> RoutingReport:
     """Build a real-mode RoutingReport, disallowing fallback for every case.
 
     ``decisions[i]`` is the Brain decision recorded for ``cases[i]`` (or an empty
     dict when the request errored). Used by the all-configured-models verifier so
     its routing report counts a schema-valid fallback decision as a failure.
     """
-    results = [
-        _evaluate_case(case, actual, schema_valid=bool(actual), allow_fallback=False)
-        for case, actual in zip(cases, decisions, strict=False)
-    ]
+    results: list[BrainEvalResult] = []
+    for index, case in enumerate(cases):
+        actual = decisions[index] if index < len(decisions) else {}
+        actual_dict, schema_valid = _validated_decision(actual)
+        results.append(
+            _evaluate_case(
+                case,
+                actual_dict,
+                schema_valid=schema_valid,
+                allow_fallback=False,
+            )
+        )
     return routing_report_from_results(results)
+
+
+def _validated_decision(value: Any) -> tuple[dict[str, Any], bool]:
+    if not value:
+        return {}, False
+    try:
+        decision = BrainDecision.model_validate(value)
+    except ValueError:
+        return value if isinstance(value, dict) else {}, False
+    return decision.model_dump(), True
 
 
 def _expect(mismatches: list[str], key: str, expected: object, actual: object) -> None:
@@ -171,6 +188,7 @@ class RealBrainEvalRunner(
         return results
 
     def _run_case(self, client: httpx.Client, case: BrainEvalCase) -> BrainEvalResult:
+        marker = self._brain_decision_marker()
         response = client.post("/chat", json={"message": case.message})
         if response.status_code >= 400:
             return BrainEvalResult(
@@ -182,14 +200,7 @@ class RealBrainEvalRunner(
                 expected_agent=case.expected_agent,
                 detail=response.text[:500],
             )
-        actual = self._latest_decision()
-        try:
-            from services.brain.schemas import BrainDecision
-
-            BrainDecision.model_validate(actual)
-            schema_valid = True
-        except ValueError:
-            schema_valid = False
+        actual, schema_valid = _validated_decision(self._brain_decision_after(marker))
         # Real-model eval: fallback routing is a failure, not an accepted route.
         return _evaluate_case(case, actual, schema_valid=schema_valid, allow_fallback=False)
 

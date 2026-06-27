@@ -17,11 +17,20 @@ def _matching_decision(case: BrainEvalCase, *, routing_method: str) -> dict[str,
     return {
         "intent": case.expected_intent,
         "agent": case.expected_agent,
-        "model_id": case.expected_model_id,
+        "model_id": case.expected_model_id or "april-brain",
         "tools_needed": list(case.expected_tools or []),
-        "permission_level": case.expected_permission_level,
-        "risk_level": case.expected_risk_level,
-        "needs_confirmation": case.expected_needs_confirmation,
+        "memory_queries": [],
+        "permission_level": (
+            case.expected_permission_level if case.expected_permission_level is not None else 0
+        ),
+        "risk_level": case.expected_risk_level or "none",
+        "needs_confirmation": (
+            case.expected_needs_confirmation
+            if case.expected_needs_confirmation is not None
+            else False
+        ),
+        "task_steps": ["Route request"],
+        "decision_summary": "Route request.",
         "routing_method": routing_method,
     }
 
@@ -107,6 +116,80 @@ def test_all_configured_routing_report_uses_real_mode() -> None:
     assert report.passed == 1
     assert report.fallback_count == 1
     assert report.accuracy == 0.5
+
+
+def test_real_routing_report_missing_decision_counts_as_failure() -> None:
+    cases = [
+        BrainEvalCase(
+            id="c1",
+            message="hello",
+            expected_intent="normal_conversation",
+            expected_agent="general_agent",
+        ),
+        BrainEvalCase(
+            id="c2",
+            message="plan",
+            expected_intent="planning",
+            expected_agent="general_agent",
+        ),
+    ]
+    report = real_routing_report(cases, [_matching_decision(cases[0], routing_method="model")])
+    assert report.total == 2
+    assert report.passed == 1
+    assert report.accuracy == 0.5
+
+
+def test_real_routing_report_fails_schema_invalid_matching_strings() -> None:
+    case = BrainEvalCase(
+        id="c1",
+        message="hello",
+        expected_intent="normal_conversation",
+        expected_agent="general_agent",
+    )
+    invalid = {
+        "intent": "normal_conversation",
+        "agent": "general_agent",
+        "routing_method": "model",
+    }
+    report = real_routing_report([case], [invalid])
+    assert report.total == 1
+    assert report.passed == 0
+
+
+def test_real_routing_report_fails_malformed_decision() -> None:
+    case = BrainEvalCase(
+        id="c1",
+        message="hello",
+        expected_intent="normal_conversation",
+        expected_agent="general_agent",
+    )
+    report = real_routing_report([case], ["not json"])
+    assert report.total == 1
+    assert report.passed == 0
+
+
+def test_real_routing_report_fails_wrong_expected_fields() -> None:
+    case = BrainEvalCase(
+        id="c1",
+        message="apply",
+        expected_intent="code_modification",
+        expected_agent="coding_agent",
+        expected_tools=["patch_generator", "patch_applier"],
+        expected_permission_level=3,
+        expected_risk_level="code_write",
+        expected_needs_confirmation=True,
+    )
+    for key, value in (
+        ("agent", "general_agent"),
+        ("tools_needed", ["read_file"]),
+        ("permission_level", 1),
+        ("risk_level", "read_only"),
+        ("needs_confirmation", False),
+    ):
+        decision = _matching_decision(case, routing_method="model")
+        decision[key] = value
+        report = real_routing_report([case], [decision])
+        assert report.passed == 0, key
 
 
 def test_real_routing_report_counts_model_repair() -> None:

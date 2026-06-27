@@ -31,7 +31,7 @@ class VoiceLiveReport(BaseModel):
     # backward compatibility with any already-written voice-live reports. When only
     # ``timestamp`` is supplied, ``generated_at`` mirrors it (see validator below).
     generated_at: str = ""
-    timestamp: str
+    timestamp: str = ""
     platform: str
     sounddevice_available: bool
     input_device_count: int
@@ -63,6 +63,10 @@ class VoiceLiveReport(BaseModel):
             self.generated_at = self.timestamp
         elif not self.timestamp and self.generated_at:
             self.timestamp = self.generated_at
+        elif not self.generated_at and not self.timestamp:
+            now = utc_now_iso()
+            self.generated_at = now
+            self.timestamp = now
         return self
 
 

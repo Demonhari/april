@@ -486,6 +486,37 @@ def test_run_april_verify_workflow_json_and_failure(tmp_path: Path, monkeypatch)
     assert "bad" in failed.output
 
 
+def test_run_april_verify_workflow_writes_report(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.run_workflow_verification",
+        lambda home, **kwargs: [
+            VerifyCheck(name="real workflow planning route", ok=True, detail="/tmp/private/path"),
+            VerifyCheck(name="workflow voice health", ok=True, detail="disabled"),
+        ],
+    )
+    out = tmp_path / "workflow.json"
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "verify",
+            "--workflow",
+            "--real-model",
+            str(tmp_path / "m.gguf"),
+            "--report",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["report_type"] == "workflow"
+    assert payload["real_model_verified"] is True
+    assert payload["checks_failed"] == 0
+    assert str(tmp_path) not in json.dumps(payload)
+
+
 def test_run_april_verify_target_mac_json(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
@@ -772,6 +803,40 @@ def test_setup_voice_apply_without_enable_keeps_voice_disabled(tmp_path: Path, m
     assert "remains DISABLED" in result.output
 
 
+def test_setup_voice_apply_without_enable_disables_existing_true(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["voice"]["enabled"] = True
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, [*_voice_setup_args(tmp_path), "--apply"])
+    assert result.exit_code == 0, result.output
+    written = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert written["voice"]["enabled"] is False
+    assert "remains DISABLED" in result.output
+
+
+def test_setup_voice_dry_run_enable_leaves_existing_true_unchanged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["voice"]["enabled"] = True
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    before = config.read_text(encoding="utf-8")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, [*_voice_setup_args(tmp_path), "--dry-run", "--enable"])
+    assert result.exit_code == 0, result.output
+    assert config.read_text(encoding="utf-8") == before
+    assert "--apply --enable" in result.output
+
+
 def test_setup_voice_enable_turns_voice_on_after_validation(tmp_path: Path, monkeypatch) -> None:
     _copy_configs(tmp_path)
     wake = tmp_path / "april.onnx"
@@ -790,6 +855,25 @@ def test_setup_voice_enable_turns_voice_on_after_validation(tmp_path: Path, monk
     assert "UNVERIFIED" in result.output
 
 
+def test_setup_voice_apply_enable_missing_required_path_fails_safe_off(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["voice"]["enabled"] = True
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    args = _voice_setup_args(tmp_path)
+    missing_index = args.index("--whisper-binary") + 1
+    args[missing_index] = str(tmp_path / "missing-whisper")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, [*args, "--apply", "--enable"])
+    assert result.exit_code == 1
+    written = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert written["voice"]["enabled"] is False
+
+
 def test_setup_voice_enable_without_wake_word_keeps_ptt_and_marks_wake_unavailable(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -805,6 +889,7 @@ def test_setup_voice_enable_without_wake_word_keeps_ptt_and_marks_wake_unavailab
     # Push-to-talk is available; wake-word listening is unavailable, not a blocker.
     assert "Push-to-talk is available" in result.output
     assert "UNAVAILABLE" in result.output
+    assert "UNVERIFIED" not in result.output
     assert "wake-word model missing" in result.output
 
 

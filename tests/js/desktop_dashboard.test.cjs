@@ -209,6 +209,18 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
   check("verification passed count", latest.real_models_passed === 1);
   check("verification skipped count", latest.skipped_count === 1);
   check("verification threshold count", latest.threshold_failure_count === 1);
+  const workflow = D.verificationSummary({
+    status: "ok",
+    report: {
+      report_type: "workflow",
+      summary: "pass",
+      real_model_verified: false,
+      checks_failed: 0,
+    },
+  });
+  check("verification workflow report type", workflow.report_type === "workflow");
+  check("verification workflow level none", workflow.verification_level === "none");
+  check("verification workflow real false", workflow.real_model_verified === false);
   const core = D.verificationSummary({ status: "ok", report: { verification_level: "core" } });
   const all = D.verificationSummary({ status: "ok", report: { verification_level: "all" } });
   check("verification core true", core.core_or_all_verified === true);
@@ -279,6 +291,14 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
   check(
     "real-model report does not clear voice warning",
     D.voiceLiveWarning(realModelReport).indexOf("not live-verified") !== -1,
+  );
+  const workflowReport = {
+    status: "ok",
+    report: { report_type: "workflow", summary: "pass", real_model_verified: false },
+  };
+  check(
+    "workflow report does not imply real model verified",
+    D.realModelVerifiedLabel(workflowReport) === "real model verified: none",
   );
 }
 

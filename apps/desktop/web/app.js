@@ -1162,6 +1162,7 @@ screens.readiness = async function () {
   commandRegistry = [];
   screenEl.appendChild(screenHeader("Readiness", "Local setup state, safe verification reports, and explicit next commands."));
   const macReadinessCommand = "run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json";
+  const workflowCommand = "run april verify --workflow --real-model --report data/verification/workflow-real.json";
   const singleModelCommand = "run april verify /absolute/path/to/model.gguf --target-mac --require-real-model --report data/verification/single-model.json";
   const voiceLiveCommand = "run april voice verify-live --report data/verification/voice-live.json";
   const modelSetupCommand = "run april setup models --brain /absolute/path/granite.gguf --coding /absolute/path/qwen-coding.gguf --reading /absolute/path/qwen-reading.gguf --dry-run";
@@ -1226,7 +1227,7 @@ screens.readiness = async function () {
   });
   screenEl.appendChild(card(modelHtml));
 
-  const commands = guidance.commands || [macReadinessCommand, singleModelCommand];
+  const commands = guidance.commands || [macReadinessCommand, workflowCommand, singleModelCommand];
   screenEl.appendChild(card(
     "<div class='panel-title'>Verification guidance</div>" +
     commands.map(commandBlock).join("") +

@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
+from apps.runner.evals import BrainEvalCase
 from apps.runner.verify import (
     AllConfiguredModelsVerifier,
     LauncherVerifier,
@@ -19,6 +21,8 @@ from apps.runner.verify import (
     TargetMacValidator,
     VerifyCheck,
     WorkflowVerifier,
+    brain_decision_after_marker,
+    latest_brain_decision_marker,
     run_model_benchmark,
     run_real_model_verification,
     run_target_mac_validation,
@@ -531,6 +535,153 @@ def test_real_workflow_latest_routing_method(tmp_path: Path, monkeypatch) -> Non
         assert verifier._latest_routing_method() == "model"
     finally:
         shutil.rmtree(verifier.temp, ignore_errors=True)
+
+
+def test_real_workflow_run_uses_expanded_safe_checklist(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19531, 19532])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    verifier = RealWorkflowVerifier(home=Path.cwd(), model_path=tmp_path / "model.gguf")
+    monkeypatch.setattr(verifier, "_prepare", lambda: None)
+    monkeypatch.setattr(verifier, "_env", lambda: {})
+    monkeypatch.setattr(verifier, "_start", lambda *args: subprocess.Popen(["true"]))
+    monkeypatch.setattr(verifier, "_wait_json", lambda *args, **kwargs: {"status": "ok"})
+    monkeypatch.setattr(verifier, "_real_planning_route", lambda: "routing_method=model")
+    monkeypatch.setattr(verifier, "_real_specialist_agent", lambda: "reading_agent ok")
+    monkeypatch.setattr(verifier, "_register_temp_project", lambda: "project")
+    monkeypatch.setattr(verifier, "_real_reminder_create_list", lambda: "1 reminders")
+    monkeypatch.setattr(verifier, "_real_memory_write_search", lambda: "1 memory results")
+    monkeypatch.setattr(verifier, "_real_document_index_search", lambda: "1 document chunks")
+    monkeypatch.setattr(verifier, "_real_coding_repo_analysis", lambda project_id: "coding ok")
+    monkeypatch.setattr(verifier, "_real_code_write_approval", lambda project_id: "approval")
+    monkeypatch.setattr(verifier, "_real_approval_denial", lambda approval_id: "denied")
+    monkeypatch.setattr(verifier, "_real_external_action_denial", lambda: "403")
+    monkeypatch.setattr(verifier, "_real_voice_health", lambda: "disabled")
+    checks = verifier.run()
+    names = {check.name for check in checks}
+    for name in (
+        "runtime health",
+        "core health",
+        "real workflow planning route",
+        "real workflow specialist-agent request",
+        "workflow project registration",
+        "workflow reminder create/list",
+        "workflow memory write/search",
+        "workflow document indexing/search",
+        "workflow coding read-only repo analysis",
+        "workflow code-write approval creation",
+        "workflow approval denial",
+        "workflow external action denial",
+        "workflow voice health",
+    ):
+        assert name in names
+    assert all(check.ok for check in checks)
+
+
+def _create_decision_table(database: Path) -> None:
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "CREATE TABLE conversation_events("
+            "id TEXT PRIMARY KEY, event_type TEXT, payload_json TEXT, created_at TEXT)"
+        )
+
+
+def test_brain_decision_after_marker_does_not_reuse_stale_decision(tmp_path: Path) -> None:
+    database = tmp_path / "april.db"
+    _create_decision_table(database)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO conversation_events VALUES(?, ?, ?, ?)",
+            ("old", "brain_decision", '{"routing_method":"model"}', "2026-01-01T00:00:00Z"),
+        )
+    marker = latest_brain_decision_marker(database)
+    assert marker > 0
+    assert brain_decision_after_marker(database, marker) == {}
+
+
+def test_brain_decision_after_marker_uses_new_decision(tmp_path: Path) -> None:
+    database = tmp_path / "april.db"
+    _create_decision_table(database)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO conversation_events VALUES(?, ?, ?, ?)",
+            ("old", "brain_decision", '{"routing_method":"fallback"}', "2026-01-01T00:00:00Z"),
+        )
+    marker = latest_brain_decision_marker(database)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO conversation_events VALUES(?, ?, ?, ?)",
+            ("new", "brain_decision", '{"routing_method":"model"}', "2026-01-01T00:00:01Z"),
+        )
+    assert brain_decision_after_marker(database, marker)["routing_method"] == "model"
+
+
+def test_real_workflow_planning_route_fails_when_no_new_decision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ports = iter([19521, 19522])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    verifier = RealWorkflowVerifier(home=Path.cwd(), model_path=tmp_path / "model.gguf")
+
+    class PlanningClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> PlanningClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def post(self, path: str, json: dict[str, Any]) -> FakeResponse:
+            assert path == "/chat"
+            return FakeResponse({"result": {"status": "ok"}})
+
+    monkeypatch.setattr("apps.runner.verify.httpx.Client", PlanningClient)
+    try:
+        with pytest.raises(RuntimeError, match="no new brain_decision"):
+            verifier._real_planning_route()
+    finally:
+        shutil.rmtree(verifier.temp, ignore_errors=True)
+
+
+def test_all_configured_routing_report_counts_missing_decisions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    verifier = object.__new__(AllConfiguredModelsVerifier)
+    verifier.repo_home = Path.cwd()
+    verifier.temp = tmp_path
+    verifier.api_port = 19999
+    verifier.api_token = "token"
+    verifier.timeout = 1.0
+    cases = [
+        BrainEvalCase(
+            id="c1",
+            message="hello",
+            expected_intent="normal_conversation",
+            expected_agent="general_agent",
+        )
+    ]
+    monkeypatch.setattr("apps.runner.evals.load_brain_eval_cases", lambda home: cases)
+
+    class RoutingClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RoutingClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def post(self, path: str, json: dict[str, Any]) -> FakeResponse:
+            assert path == "/chat"
+            return FakeResponse({"result": {"status": "ok"}})
+
+    monkeypatch.setattr("apps.runner.verify.httpx.Client", RoutingClient)
+    report = verifier._routing_report()
+    assert report.total == 1
+    assert report.passed == 0
 
 
 def test_real_workflow_specialist_agent_request(tmp_path: Path, monkeypatch) -> None:

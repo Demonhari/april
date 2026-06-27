@@ -10,6 +10,7 @@ run april verify --soak --fake --minutes 10
 run april verify --workflow
 run april verify --target-mac
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
+run april verify --workflow --real-model --report data/verification/workflow-real.json
 run april setup models --brain /absolute/path/granite.gguf --coding /absolute/path/qwen-coding.gguf --reading /absolute/path/qwen-reading.gguf --dry-run
 run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run
 run april setup app-stub
@@ -31,6 +32,27 @@ run april memory doctor
 run april eval brain --fake
 ```
 
+## Exact Target Mac Order
+
+Run target-Mac setup and real verification in this order:
+
+1. `run april readiness`
+2. `run april setup tokens`
+3. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`
+4. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --apply`
+5. `pip install -e '.[runtime]'`
+6. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
+7. `run april verify --workflow --real-model --report data/verification/workflow-real.json`
+8. Optional voice setup/doctor/live verification:
+   `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`,
+   `run april voice doctor`,
+   `run april voice verify-live --report data/verification/voice-live.json`
+
+Blank API tokens never authenticate. If `APRIL_API_TOKEN` is empty, protected
+Core API endpoints fail closed with an auth/config error; token values are not
+printed in responses. The local development default `local-dev-token` remains
+valid in development/test.
+
 Project workflow smoke:
 
 ```bash
@@ -49,6 +71,7 @@ To run it, provide a local GGUF path:
 ```bash
 APRIL_TEST_GGUF_PATH=/absolute/path/to/small-local-model.gguf run april verify --real-model
 APRIL_TEST_GGUF_PATH=/absolute/path/to/small-local-model.gguf run april verify --workflow --real-model
+APRIL_TEST_GGUF_PATH=/absolute/path/to/small-local-model.gguf run april verify --workflow --real-model --report data/verification/workflow-real.json
 run april eval brain --real-model /absolute/path/to/small-local-model.gguf
 run april model benchmark /absolute/path/to/small-local-model.gguf --runs 1 --max-output-tokens 32
 run april verify --target-mac /absolute/path/to/small-local-model.gguf --require-real-model
@@ -67,6 +90,16 @@ reports it. If `llama-cpp-python` is missing, install the local runtime extra:
 ```bash
 pip install -e '.[runtime]'
 ```
+
+`run april verify --workflow --real-model` is a separate daily-use workflow
+report, not the multi-model readiness report. It uses only verifier temporary
+files/repos and checks runtime health, Core API health, non-fallback real
+planning with `BrainDecision` validation, a `reading_agent` request, reminder
+create/list, memory write/search, document indexing/search, temporary project
+registration, read-only coding analysis, code-write approval creation, approval
+denial, external/system action denial, and voice health/doctor status only. It
+does not record audio, play audio, open the microphone, require wake-word models,
+modify user repos, or send external requests.
 
 Target-Mac validation is a local checklist for the intended laptop. It reports
 `pass`, `fail`, `skip`, and `manual` statuses; skipped optional checks do not
@@ -123,6 +156,14 @@ arguments, file contents, or full paths. Model paths are basenames only. Real
 verification requires local GGUF files and `llama-cpp-python`; APRIL never
 downloads models or installs packages.
 
+`real_model`, `voice_live`, and `workflow` reports are separate axes:
+
+- `real_model` latest status includes only `multi_model` and `target_mac`
+  reports.
+- `voice_live` latest status includes only `voice_live` reports.
+- `workflow` reports show local workflow coverage and do not imply real-model
+  verification unless their sanitized payload explicitly says so.
+
 `data/verification/` is generated and ignored by Git. The Core API exposes only
 authenticated sanitized summaries through `GET /verification/report/latest`,
 `GET /verification/reports`, and `GET /verification/reports/{report_basename}`.
@@ -149,6 +190,16 @@ It runs voice doctor, shows macOS microphone guidance, asks before recording,
 uses push-to-talk only, runs local whisper.cpp and Piper if configured, stores
 transcript length rather than transcript text, deletes temporary audio by
 default, and never starts wake-word listening or uploads audio.
+
+`run april setup voice` never enables voice unless both `--apply --enable` are
+present. `run april setup voice ... --apply` without `--enable` leaves
+`voice.enabled: false`, even if it was previously true. A missing wake-word model
+does not block push-to-talk, but wake-word listening remains unavailable or
+unverified until a local wake-word model is configured and live verification
+passes.
+
+External actions such as git push, deployment, email, payment, and publishing
+remain out of scope and disabled; they must not be simulated as successful.
 
 The fake brain eval uses the deterministic fallback router and validates schema
 validity plus routing expectations for ordinary chat, planning, coding,
