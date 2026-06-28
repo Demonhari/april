@@ -22,6 +22,20 @@ def home_with_configs(settings_tmp) -> Path:
     for model in data["models"].values():
         model["path"] = str(home / "models" / f"{model['id']}.gguf")
     models_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    april_path = home / "configs" / "april.yaml"
+    april = yaml.safe_load(april_path.read_text(encoding="utf-8"))
+    voice = april.setdefault("voice", {})
+    voice.update(
+        {
+            "enabled": False,
+            "whisper_binary_path": None,
+            "whisper_model_path": None,
+            "piper_binary_path": None,
+            "piper_model_path": None,
+            "wake_word_model_path": None,
+        }
+    )
+    april_path.write_text(yaml.safe_dump(april, sort_keys=False), encoding="utf-8")
     return home
 
 

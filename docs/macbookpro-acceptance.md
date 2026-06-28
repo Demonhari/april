@@ -161,20 +161,27 @@ Voice stays **OFF** until you explicitly enable it. Validate paths first, then
 apply and enable:
 
 ```bash
+.venv/bin/python -m pip install -e '.[voice,dev,runtime]' -c constraints-dev.txt
+.venv/bin/python -m pip install piper-tts
+
+# Example local artifacts for this Mac, all under Git-ignored data/voice_artifacts:
+#   data/voice_artifacts/whisper.cpp/build/bin/whisper-cli
+#   data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin
+#   data/voice_artifacts/piper/en_US-lessac-medium.onnx
+#   data/voice_artifacts/piper/en_US-lessac-medium.onnx.json
+
 run april setup voice \
-  --whisper-binary /absolute/path/whisper.cpp/main \
-  --whisper-model  /absolute/path/ggml-base.en.bin \
-  --piper-binary   /absolute/path/piper \
-  --piper-model    /absolute/path/voice.onnx \
-  --wake-word-model /absolute/path/april.onnx \
+  --whisper-binary data/voice_artifacts/whisper.cpp/build/bin/whisper-cli \
+  --whisper-model  data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin \
+  --piper-binary   .venv/bin/piper \
+  --piper-model    data/voice_artifacts/piper/en_US-lessac-medium.onnx \
   --dry-run
 
 run april setup voice \
-  --whisper-binary /absolute/path/whisper.cpp/main \
-  --whisper-model  /absolute/path/ggml-base.en.bin \
-  --piper-binary   /absolute/path/piper \
-  --piper-model    /absolute/path/voice.onnx \
-  --wake-word-model /absolute/path/april.onnx \
+  --whisper-binary data/voice_artifacts/whisper.cpp/build/bin/whisper-cli \
+  --whisper-model  data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin \
+  --piper-binary   .venv/bin/piper \
+  --piper-model    data/voice_artifacts/piper/en_US-lessac-medium.onnx \
   --apply --enable
 
 run april voice doctor    # microphone permission, devices, and configured paths
@@ -183,6 +190,20 @@ run april voice doctor    # microphone permission, devices, and configured paths
 The wake-word model is a custom local openWakeWord model for "April"; APRIL never
 downloads or trains one. Push-to-talk works without any wake-word model.
 
+Shortest real wake-word path:
+
+1. Record Hari's positive "April" samples and negative/background samples under
+   `data/voice_artifacts/wake/training/` or another ignored local directory.
+2. Train/export an openWakeWord-compatible ONNX model with the official
+   openWakeWord tooling outside CI.
+3. Save the exported model as `data/voice_artifacts/wake/april.onnx`.
+4. Re-run `run april setup voice ... --wake-word-model
+   data/voice_artifacts/wake/april.onnx --apply --enable`.
+5. Run `run april voice verify-wake-live --report data/verification/wake-live.json`.
+
+Until that actual ONNX model exists and the live wake-word command passes,
+`wake_word_live_verified=false`.
+
 ## Push-to-talk live verification
 
 ```bash
@@ -190,9 +211,10 @@ run april voice verify-live --report data/verification/voice-live.json
 ```
 
 Records a short push-to-talk sample, transcribes it with whisper.cpp, synthesizes
-a phrase with Piper, and asks you to confirm playback. The report stores only
-transcript **length**, never transcript text. Temporary audio is deleted unless
-you pass `--retain-debug-audio`.
+a phrase with Piper, and asks you to confirm transcription and playback. The
+terminal shows the transcript once so the operator can confirm it; the report
+stores only transcript **length**, never transcript text. Temporary audio is
+deleted unless you pass `--retain-debug-audio`.
 
 ## Wake-word live verification
 

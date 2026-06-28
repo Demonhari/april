@@ -737,6 +737,8 @@ class TargetMacValidator:
             message = str(component.get("message")) if component else "not reported"
             if status == "ok":
                 self._pass(check_name, message)
+            elif component_name == "wake-word model":
+                self._manual(check_name, message)
             elif settings.voice.enabled:
                 self._fail(check_name, message)
             else:

@@ -346,6 +346,13 @@ def setup_voice_stack(
         if not resolved.is_file():
             raise ConfigError(f"Voice path is not a file: {path.name}")
         resolved_required[key] = resolved
+    piper_config = resolved_required["piper_model_path"].with_name(
+        f"{resolved_required['piper_model_path'].name}.json"
+    )
+    if not piper_config.exists():
+        raise ConfigError(f"Piper model companion config is missing: {piper_config.name}")
+    if not piper_config.is_file():
+        raise ConfigError(f"Piper model companion config is not a file: {piper_config.name}")
 
     warnings: list[str] = []
     resolved_wake: Path | None = None

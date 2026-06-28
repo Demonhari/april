@@ -48,6 +48,8 @@ class PiperTextToSpeech(TextToSpeech):
                 "Piper failed.",
                 {"stderr": stderr.decode("utf-8", errors="replace")[:1000]},
             )
+        if not output_path.exists() or not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeUnavailableError("Piper did not create a non-empty WAV output.")
         return output_path
 
 

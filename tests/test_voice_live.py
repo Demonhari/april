@@ -155,6 +155,7 @@ async def test_voice_live_retains_audio_only_with_explicit_flag(settings_tmp) ->
 @pytest.mark.anyio
 async def test_voice_live_report_redacts_transcript(settings_tmp, tmp_path: Path) -> None:
     report_path = tmp_path / "voice-live.json"
+    observed: list[str] = []
     report = await run_voice_live_verification(
         settings=settings_tmp,
         confirm_recording=lambda _message: True,
@@ -164,9 +165,11 @@ async def test_voice_live_report_redacts_transcript(settings_tmp, tmp_path: Path
         stt=FakeSpeechToText("secret transcript words"),
         tts=FakeTextToSpeech(),
         player=FakeAudioPlayer(),
+        transcript_observer=observed.append,
         report_path=report_path,
     )
     text = report_path.read_text(encoding="utf-8")
+    assert observed == ["secret transcript words"]
     assert "secret transcript words" not in text
     assert "transcript_length" in text
     assert settings_tmp.api.token not in text

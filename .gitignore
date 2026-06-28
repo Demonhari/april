@@ -7,10 +7,16 @@ data/artifacts/
 data/audio_cache/
 data/verification/
 data/run/
+data/voice_artifacts/
 logs/*.log
 logs/*.jsonl
 models/*.gguf
 models/*.bin
+tools/voice/
+*.wav
+*.onnx
+*.onnx.json
+*.bin
 audio_cache/
 dist/
 *.app/

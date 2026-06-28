@@ -39,13 +39,13 @@ brain:
   model_id: april-brain
 
 voice:
-  enabled: false
+  enabled: true
   audio_cache_path: data/audio_cache
   retain_debug_audio: false
-  whisper_binary_path: null
-  whisper_model_path: null
-  piper_binary_path: null
-  piper_model_path: null
+  whisper_binary_path: data/voice_artifacts/whisper.cpp/build/bin/whisper-cli
+  whisper_model_path: data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin
+  piper_binary_path: .venv/bin/piper
+  piper_model_path: data/voice_artifacts/piper/en_US-lessac-medium.onnx
   wake_word_model_path: null
 
 # Proactive scheduler. OFF by default: with these safe defaults APRIL never fires

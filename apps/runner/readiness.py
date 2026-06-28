@@ -119,29 +119,32 @@ def _token_status(value: str | None, defaults: set[str], placeholders: set[str])
 
 
 def _voice_artifact(
-    settings: AprilSettings, name: str, path: Path | None, *, enabled: bool
+    settings: AprilSettings, name: str, path: Path | None, *, enabled: bool, required: bool = True
 ) -> tuple[VoiceArtifact, ReadinessCheck]:
     if path is None:
         artifact = VoiceArtifact(name=name, configured=False, exists=False, basename=None)
-        status: CheckStatus = "blocker" if enabled else "skipped"
+        status: CheckStatus = "blocker" if enabled and required else "skipped"
         detail = "Not configured." if enabled else "Voice disabled; not configured."
+        if enabled and not required:
+            status = "warning"
+            detail = "Not configured; wake-word live verification remains unavailable."
         return artifact, ReadinessCheck(
             name=f"voice: {name}",
             status=status,
             detail=detail,
-            action=_SETUP_VOICE if enabled else None,
+            action=_SETUP_VOICE if enabled and required else None,
         )
     resolved = settings.resolve_path(path)
     exists = resolved.exists()
     artifact = VoiceArtifact(name=name, configured=True, exists=exists, basename=resolved.name)
     if exists:
         return artifact, ReadinessCheck(name=f"voice: {name}", status="ok", detail=resolved.name)
-    status = "blocker" if enabled else "warning"
+    status = "blocker" if enabled and required else "warning"
     return artifact, ReadinessCheck(
         name=f"voice: {name}",
         status=status,
         detail=redact_reason(f"Missing: {resolved}"),
-        action=_SETUP_VOICE,
+        action=_SETUP_VOICE if required else None,
     )
 
 
@@ -308,15 +311,17 @@ def build_readiness_report(home: Path) -> ReadinessReport:
     # --- voice artifacts (optional) -----------------------------------------
     voice_enabled = settings.voice.enabled
     voice_specs = (
-        ("whisper.cpp binary", settings.voice.whisper_binary_path),
-        ("whisper model", settings.voice.whisper_model_path),
-        ("piper binary", settings.voice.piper_binary_path),
-        ("piper voice model", settings.voice.piper_model_path),
-        ("wake-word model", settings.voice.wake_word_model_path),
+        ("whisper.cpp binary", settings.voice.whisper_binary_path, True),
+        ("whisper model", settings.voice.whisper_model_path, True),
+        ("piper binary", settings.voice.piper_binary_path, True),
+        ("piper voice model", settings.voice.piper_model_path, True),
+        ("wake-word model", settings.voice.wake_word_model_path, False),
     )
     voice_artifacts: list[VoiceArtifact] = []
-    for name, voice_path in voice_specs:
-        artifact, check = _voice_artifact(settings, name, voice_path, enabled=voice_enabled)
+    for name, voice_path, required in voice_specs:
+        artifact, check = _voice_artifact(
+            settings, name, voice_path, enabled=voice_enabled, required=required
+        )
         voice_artifacts.append(artifact)
         checks.append(check)
 

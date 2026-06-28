@@ -338,11 +338,22 @@ async def test_voice_subprocess_adapters_success_and_failure(tmp_path: Path, mon
     assert await stt.transcribe(audio) == "transcript"
 
     async def fake_piper(*argv: str, **kwargs: object) -> FakeProcess:
+        output_path = Path(argv[argv.index("--output_file") + 1])
+        output_path.write_bytes(b"RIFFfake")
         return FakeProcess(stdout=b"", stderr=b"")
 
     monkeypatch.setattr("services.voice.text_to_speech.asyncio.create_subprocess_exec", fake_piper)
     tts = PiperTextToSpeech(binary, model)
     assert await tts.synthesize("hello", tmp_path / "out.wav") == tmp_path / "out.wav"
+
+    async def silent_piper(*argv: str, **kwargs: object) -> FakeProcess:
+        return FakeProcess(stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(
+        "services.voice.text_to_speech.asyncio.create_subprocess_exec", silent_piper
+    )
+    with pytest.raises(RuntimeUnavailableError, match="non-empty WAV"):
+        await tts.synthesize("hello", tmp_path / "missing.wav")
 
     async def failing_exec(*argv: str, **kwargs: object) -> FakeProcess:
         return FakeProcess(returncode=1, stderr=b"bad")

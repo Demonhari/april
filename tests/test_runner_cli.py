@@ -898,6 +898,7 @@ def test_setup_voice_dry_run_apply_and_missing_wake_word(tmp_path: Path, monkeyp
     piper_model = tmp_path / "voice.onnx"
     for path in (whisper_bin, whisper_model, piper_bin, piper_model):
         path.write_bytes(b"asset")
+    piper_model.with_name(f"{piper_model.name}.json").write_bytes(b"{}")
     before = (tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8")
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
@@ -941,6 +942,7 @@ def test_setup_voice_missing_required_path_fails(tmp_path: Path, monkeypatch) ->
     piper_model = tmp_path / "voice.onnx"
     for path in (whisper_model, piper_bin, piper_model):
         path.write_bytes(b"asset")
+    piper_model.with_name(f"{piper_model.name}.json").write_bytes(b"{}")
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     result = CliRunner().invoke(
@@ -964,6 +966,41 @@ def test_setup_voice_missing_required_path_fails(tmp_path: Path, monkeypatch) ->
     assert config.read_text(encoding="utf-8") == before
 
 
+def test_setup_voice_missing_piper_companion_config_fails(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    before = config.read_bytes()
+    whisper_bin = tmp_path / "whisper-main"
+    whisper_model = tmp_path / "ggml-base.en.bin"
+    piper_bin = tmp_path / "piper"
+    piper_model = tmp_path / "voice.onnx"
+    for path in (whisper_bin, whisper_model, piper_bin, piper_model):
+        path.write_bytes(b"asset")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "setup",
+            "voice",
+            "--whisper-binary",
+            str(whisper_bin),
+            "--whisper-model",
+            str(whisper_model),
+            "--piper-binary",
+            str(piper_bin),
+            "--piper-model",
+            str(piper_model),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "voice.onnx.json" in result.output
+    assert config.read_bytes() == before
+
+
 def test_setup_voice_stack_apply_missing_required_path_preserves_config_bytes(
     tmp_path: Path,
 ) -> None:
@@ -975,6 +1012,7 @@ def test_setup_voice_stack_apply_missing_required_path_preserves_config_bytes(
     piper_model = tmp_path / "voice.onnx"
     for path in (whisper_model, piper_bin, piper_model):
         path.write_bytes(b"asset")
+    piper_model.with_name(f"{piper_model.name}.json").write_bytes(b"{}")
 
     with pytest.raises(ConfigError, match="missing-whisper"):
         setup_voice_stack(
@@ -1003,6 +1041,7 @@ def test_setup_voice_stack_apply_missing_required_path_preserves_existing_enable
     piper_model = tmp_path / "voice.onnx"
     for path in (whisper_model, piper_bin, piper_model):
         path.write_bytes(b"asset")
+    piper_model.with_name(f"{piper_model.name}.json").write_bytes(b"{}")
 
     with pytest.raises(ConfigError, match="missing-whisper"):
         setup_voice_stack(
@@ -1044,6 +1083,7 @@ def _voice_setup_args(tmp_path: Path, *, wake_word: Path | None = None) -> list[
     for path in (whisper_bin, whisper_model, piper_bin, piper_model):
         if not path.exists():
             path.write_bytes(b"asset")
+    piper_model.with_name(f"{piper_model.name}.json").write_bytes(b"{}")
     args = [
         "april",
         "setup",
@@ -1070,6 +1110,7 @@ def _voice_setup_paths(tmp_path: Path) -> dict[str, Path]:
     for path in (whisper_bin, whisper_model, piper_bin, piper_model):
         if not path.exists():
             path.write_bytes(b"asset")
+    piper_model.with_name(f"{piper_model.name}.json").write_bytes(b"{}")
     return {
         "whisper_binary": whisper_bin,
         "whisper_model": whisper_model,

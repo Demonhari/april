@@ -1314,6 +1314,10 @@ def voice_verify_live(
     def confirm(message: str) -> bool:
         return typer.confirm(message, default=False)
 
+    def show_transcript(transcript: str) -> None:
+        console.print("Local whisper.cpp transcript:")
+        console.print(transcript if transcript else "[yellow]<empty>[/yellow]")
+
     result = asyncio.run(
         run_voice_live_verification(
             settings=settings,
@@ -1322,6 +1326,7 @@ def voice_verify_live(
             confirm_playback=confirm,
             seconds=seconds,
             retain_debug_audio=retain_debug_audio,
+            transcript_observer=show_transcript,
             report_path=report,
         )
     )

@@ -128,7 +128,9 @@ def test_voice_enabled_missing_artifacts_block_voice_only(tmp_path: Path) -> Non
     assert report.voice_enabled is True
     assert report.voice_ready is False
     voice_blockers = [name for name in report.blockers if name.startswith("voice:")]
-    assert len(voice_blockers) == 5
+    assert len(voice_blockers) == 4
+    assert "voice: wake-word model" not in voice_blockers
+    assert "voice: wake-word model" in report.warnings
     # A voice-only blocker must not flip real_model_ready on its own.
     model_blockers = [name for name in report.blockers if not name.startswith("voice:")]
     assert "runtime backend" not in model_blockers
@@ -136,6 +138,31 @@ def test_voice_enabled_missing_artifacts_block_voice_only(tmp_path: Path) -> Non
     assert "run april voice verify-live --report data/verification/voice-live.json" in (
         report.next_actions
     )
+
+
+def test_voice_enabled_without_wake_model_can_be_ptt_preflight_ready(tmp_path: Path) -> None:
+    voice_root = tmp_path / "voice"
+    voice_root.mkdir()
+    for name in ("whisper", "whisper.bin", "piper", "piper.onnx"):
+        (voice_root / name).write_bytes(b"asset")
+    home = _write_home(
+        tmp_path,
+        backend="llama_cpp",
+        voice={
+            "enabled": True,
+            "whisper_binary_path": "voice/whisper",
+            "whisper_model_path": "voice/whisper.bin",
+            "piper_binary_path": "voice/piper",
+            "piper_model_path": "voice/piper.onnx",
+            "wake_word_model_path": None,
+        },
+    )
+
+    report = build_readiness_report(home)
+
+    assert report.voice_preflight_ready is True
+    assert "voice: wake-word model" not in report.blockers
+    assert "voice: wake-word model" in report.warnings
 
 
 def test_default_development_tokens_warn_not_block(tmp_path: Path) -> None:

@@ -954,17 +954,31 @@ Piper, optional `sounddevice`, and optional openWakeWord model paths in
 wake-word model, or binary is downloaded by APRIL.
 
 ```bash
+.venv/bin/python -m pip install -e '.[voice,dev,runtime]' -c constraints-dev.txt
+.venv/bin/python -m pip install piper-tts
+
+# Example target-Mac local artifacts, all Git-ignored:
+#   data/voice_artifacts/whisper.cpp/build/bin/whisper-cli
+#   data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin
+#   data/voice_artifacts/piper/en_US-lessac-medium.onnx
+#   data/voice_artifacts/piper/en_US-lessac-medium.onnx.json
+
 april voice health
 april voice devices
 april voice ptt
 april voice listen
 run april setup voice \
-  --whisper-binary /path/to/whisper.cpp/main \
-  --whisper-model /path/to/ggml-base.en.bin \
-  --piper-binary /path/to/piper \
-  --piper-model /path/to/voice.onnx \
-  --wake-word-model /path/to/april.onnx \
+  --whisper-binary data/voice_artifacts/whisper.cpp/build/bin/whisper-cli \
+  --whisper-model data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin \
+  --piper-binary .venv/bin/piper \
+  --piper-model data/voice_artifacts/piper/en_US-lessac-medium.onnx \
   --dry-run
+run april setup voice \
+  --whisper-binary data/voice_artifacts/whisper.cpp/build/bin/whisper-cli \
+  --whisper-model data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin \
+  --piper-binary .venv/bin/piper \
+  --piper-model data/voice_artifacts/piper/en_US-lessac-medium.onnx \
+  --apply --enable
 run april voice verify-live --report data/verification/voice-live.json
 ```
 
@@ -984,13 +998,23 @@ wake-word model. Push-to-talk works without any wake-word model, and wake-word
 mode falls back to push-to-talk when no model is configured. `run april voice
 doctor` states this explicitly.
 
+Shortest real wake-word path: collect Hari's positive "April" samples and
+negative/background samples outside Git, train/export an openWakeWord-compatible
+ONNX model with the official openWakeWord tooling, save it as
+`data/voice_artifacts/wake/april.onnx`, then re-run `run april setup voice ... 
+--wake-word-model data/voice_artifacts/wake/april.onnx --apply --enable` and
+`run april voice verify-wake-live --report data/verification/wake-live.json`.
+Until that real ONNX model exists and the live wake check passes,
+`wake_word_live_verified` remains false.
+
 Push-to-talk starts only from explicit CLI invocation. API, Runtime, desktop, and
 normal CLI startup never activate the microphone.
 
 `run april voice verify-live` is the explicit live hardware check. It runs voice
 doctor, prints macOS microphone permission guidance, asks before recording a
-short push-to-talk sample, runs local whisper.cpp STT, stores transcript length
-only, asks whether transcription was correct, synthesizes a local Piper phrase,
+short push-to-talk sample, runs local whisper.cpp STT, displays the transcript
+once in the terminal for operator confirmation, stores transcript length only,
+asks whether transcription was correct, synthesizes a local Piper phrase,
 plays it, asks whether playback was heard, and writes a redacted report when
 `--report` is supplied. Temporary audio is deleted by default and retained only
 with `--retain-debug-audio` or `retain_debug_audio`.

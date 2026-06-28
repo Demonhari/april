@@ -71,6 +71,7 @@ class VoiceLiveReport(BaseModel):
 
 
 Confirm = Callable[[str], bool]
+TranscriptObserver = Callable[[str], None]
 
 
 def _resolved(settings: AprilSettings, path: Path | None) -> Path | None:
@@ -138,6 +139,7 @@ async def run_voice_live_verification(
     stt: SpeechToText | None = None,
     tts: TextToSpeech | None = None,
     player: AudioPlayer | None = None,
+    transcript_observer: TranscriptObserver | None = None,
     report_path: Path | None = None,
 ) -> VoiceLiveReport:
     # Runs doctor first for operator guidance, but the report stores only safe
@@ -181,6 +183,8 @@ async def run_voice_live_verification(
         transcript = await speech.transcribe(recorded_path)
         report.stt_success = True
         report.transcript_length = len(transcript)
+        if transcript_observer is not None:
+            transcript_observer(transcript)
         report.transcription_user_confirmed = confirm_transcription(
             "Was the transcription correct? The report stores only transcript length."
         )
