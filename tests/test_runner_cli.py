@@ -13,6 +13,7 @@ from apps.runner.service_manager import ServiceInfo, ServiceStatus
 from apps.runner.soak import SoakReport
 from apps.runner.verify import BenchmarkResult, VerifyCheck
 from apps.runner.voice_live import VoiceLiveReport
+from apps.runner.wake_live import WakeWordLiveReport
 from april_common.config_validation import validate_configuration
 from april_common.settings import load_settings
 
@@ -259,6 +260,69 @@ def test_run_april_voice_verify_live_uses_local_verifier(tmp_path: Path, monkeyp
     assert captured["seconds"] == 1
     assert captured["report_path"] == out
     assert "transcript_length=10" in result.output
+
+
+def test_run_april_voice_verify_wake_live_uses_local_verifier(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = FakeManager(tmp_path)
+    manager.settings = load_settings(root=tmp_path)  # type: ignore[attr-defined]
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.collect_voice_doctor",
+        lambda settings: {
+            "status": "ok",
+            "macos_microphone_permission_guidance": "guidance",
+            "wake_word_guidance": "say April",
+        },
+    )
+    captured: dict[str, object] = {}
+
+    async def _fake_wake_live(**kwargs: object) -> WakeWordLiveReport:
+        captured.update(kwargs)
+        return WakeWordLiveReport(
+            summary="pass",
+            wake_word_configured=True,
+            wake_word_detected=True,
+            recording_success=True,
+            stt_success=True,
+            transcript_length=12,
+            normalized_transcript_length=8,
+            api_success=True,
+            tts_success=True,
+            playback_user_confirmed=True,
+            wake_word_live_verified=True,
+        )
+
+    monkeypatch.setattr("apps.runner.main.run_wake_word_live_verification", _fake_wake_live)
+    out = tmp_path / "wake-live.json"
+    result = CliRunner().invoke(
+        app,
+        ["april", "voice", "verify-wake-live", "--wake-wait-seconds", "5", "--report", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["settings"] is manager.settings
+    assert captured["wake_wait_seconds"] == 5
+    assert captured["report_path"] == out
+    assert "wake_word_detected=True" in result.output
+
+
+def test_run_april_voice_verify_wake_live_exits_nonzero_on_fail(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = FakeManager(tmp_path)
+    manager.settings = load_settings(root=tmp_path)  # type: ignore[attr-defined]
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.collect_voice_doctor", lambda settings: {"status": "degraded"}
+    )
+
+    async def _fake_wake_live(**kwargs: object) -> WakeWordLiveReport:
+        return WakeWordLiveReport(summary="fail")
+
+    monkeypatch.setattr("apps.runner.main.run_wake_word_live_verification", _fake_wake_live)
+    result = CliRunner().invoke(app, ["april", "voice", "verify-wake-live"])
+    assert result.exit_code == 1
 
 
 def test_run_april_config_validate_reports_success(tmp_path: Path, monkeypatch) -> None:

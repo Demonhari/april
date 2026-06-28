@@ -16,6 +16,12 @@ import typer
 from rich.table import Table
 
 from apps.cli.render import console
+from apps.runner.acceptance import (
+    AcceptanceReport,
+    default_acceptance_report_path,
+    run_acceptance,
+    write_acceptance_report,
+)
 from apps.runner.bootstrap import bootstrap as run_bootstrap
 from apps.runner.evals import run_fake_brain_eval, run_real_brain_eval
 from apps.runner.install import is_april_wrapper, path_contains_dir
@@ -46,7 +52,8 @@ from apps.runner.verify import (
     run_workflow_verification,
     write_workflow_report,
 )
-from apps.runner.voice_live import run_voice_live_verification
+from apps.runner.voice_live import VoiceLiveReport, run_voice_live_verification
+from apps.runner.wake_live import WakeWordLiveReport, run_wake_word_live_verification
 from april_common.config_validation import validate_configuration
 from april_common.effective_config import load_agents_file, load_permissions_file, load_tools_file
 from april_common.errors import ConfigError
@@ -1203,6 +1210,74 @@ def voice_verify_live(
         raise typer.Exit(1)
 
 
+@voice_app.command("verify-wake-live")
+def voice_verify_wake_live(
+    report: Path | None = typer.Option(
+        None, "--report", help="Write a redacted live wake-word verification report JSON here."
+    ),
+    wake_wait_seconds: float | None = typer.Option(
+        None, "--wake-wait-seconds", min=1.0, max=120.0, help="How long to wait for the wake word."
+    ),
+    utterance_max_seconds: float | None = typer.Option(
+        None, "--utterance-max-seconds", min=1.0, max=60.0, help="Max command length after wake."
+    ),
+    retain_debug_audio: bool = typer.Option(
+        False,
+        "--retain-debug-audio",
+        help="Keep the exact temporary audio files created by this explicit verification run.",
+    ),
+) -> None:
+    """Verify the live wake-word ('April') path end to end on this Mac.
+
+    Start APRIL services first (``run april`` or ``run april --fake``) so the
+    Core ``/voice/input`` endpoint can be reached during verification.
+    """
+    settings = _manager().settings
+    doctor = collect_voice_doctor(settings)
+    console.print(f"Voice doctor status: {doctor['status']}")
+    for key in ("macos_microphone_permission_guidance", "wake_word_guidance"):
+        guidance = doctor.get(key)
+        if guidance:
+            console.print(str(guidance))
+    if settings.voice.wake_word_model_path is None:
+        console.print(
+            "[yellow]No wake-word model is configured.[/yellow] Configure one with "
+            "`run april setup voice --wake-word-model /absolute/path/april.onnx` first."
+        )
+
+    def confirm(message: str) -> bool:
+        return typer.confirm(message, default=False)
+
+    result = asyncio.run(
+        run_wake_word_live_verification(
+            settings=settings,
+            confirm_microphone=confirm,
+            confirm_playback=confirm,
+            wake_wait_seconds=wake_wait_seconds,
+            utterance_max_seconds=utterance_max_seconds,
+            retain_debug_audio=retain_debug_audio,
+            report_path=report,
+        )
+    )
+    console.print(
+        "Wake-word live verification: "
+        f"{result.summary} (wake_word_detected={result.wake_word_detected}, "
+        f"recording={result.recording_success}, stt={result.stt_success}, "
+        f"transcript_length={result.transcript_length}, "
+        f"normalized_transcript_length={result.normalized_transcript_length}, "
+        f"api={result.api_success}, tts={result.tts_success}, "
+        f"playback_confirmed={result.playback_user_confirmed})"
+    )
+    for skipped in result.skipped:
+        console.print(f"[yellow]Skipped {skipped.name}:[/yellow] {skipped.reason}")
+    if report is not None:
+        console.print(
+            f"[green]Wrote wake-word verification report to {report.expanduser()}[/green]"
+        )
+    if result.summary != "pass":
+        raise typer.Exit(1)
+
+
 @voice_app.command("devices")
 def voice_devices(
     ctx: typer.Context,
@@ -1784,6 +1859,195 @@ def verify(
     else:
         _print_verification_table("APRIL Verification", checks)
     if not all(check.ok for check in checks):
+        raise typer.Exit(1)
+
+
+_ACCEPTANCE_STATUS_STYLE = {
+    "pass": "[green]PASS[/green]",
+    "warning": "[yellow]WARNING[/yellow]",
+    "fail": "[red]FAIL[/red]",
+}
+
+
+def _voice_live_runner(settings: Any) -> Callable[[], VoiceLiveReport]:
+    def run() -> VoiceLiveReport:
+        doctor = collect_voice_doctor(settings)
+        console.print(f"Voice doctor status: {doctor['status']}")
+        guidance = doctor.get("macos_microphone_permission_guidance")
+        if guidance:
+            console.print(str(guidance))
+
+        def confirm(message: str) -> bool:
+            return typer.confirm(message, default=False)
+
+        return asyncio.run(
+            run_voice_live_verification(
+                settings=settings,
+                confirm_recording=confirm,
+                confirm_transcription=confirm,
+                confirm_playback=confirm,
+            )
+        )
+
+    return run
+
+
+def _wake_word_live_runner(settings: Any) -> Callable[[], WakeWordLiveReport]:
+    def run() -> WakeWordLiveReport:
+        doctor = collect_voice_doctor(settings)
+        console.print(f"Voice doctor status: {doctor['status']}")
+        for key in ("macos_microphone_permission_guidance", "wake_word_guidance"):
+            guidance = doctor.get(key)
+            if guidance:
+                console.print(str(guidance))
+
+        def confirm(message: str) -> bool:
+            return typer.confirm(message, default=False)
+
+        return asyncio.run(
+            run_wake_word_live_verification(
+                settings=settings,
+                confirm_microphone=confirm,
+                confirm_playback=confirm,
+            )
+        )
+
+    return run
+
+
+def _print_acceptance(report: AcceptanceReport) -> None:
+    status = _ACCEPTANCE_STATUS_STYLE.get(report.final_status, report.final_status)
+    env = report.environment
+    console.print(
+        f"APRIL acceptance — {status} "
+        f"(backend={report.runtime_backend}, env={env.deployment}, "
+        f"arch={env.cpu_architecture})"
+    )
+    table = Table(title="Acceptance gates")
+    table.add_column("Gate")
+    table.add_column("Result")
+    table.add_column("Detail")
+    table.add_row(
+        "configuration",
+        "valid" if report.config_valid else "invalid",
+        "ok" if report.config_valid else "; ".join(report.config_errors) or "invalid",
+    )
+    fake = report.fake_verification
+    table.add_row(
+        "fake verification",
+        fake.summary,
+        (
+            f"{fake.checks_passed}/{fake.checks_total} checks passed"
+            if fake.ran
+            else "skipped (configuration invalid)"
+        ),
+    )
+    readiness = report.readiness
+    table.add_row(
+        "readiness",
+        "ready" if readiness.real_model_ready else "not ready",
+        f"{len(readiness.blockers)} blocker(s), {len(readiness.warnings)} warning(s)",
+    )
+    if report.real_model_verification is not None:
+        real = report.real_model_verification
+        table.add_row(
+            "real models",
+            real.summary,
+            f"level={real.verification_level}, "
+            f"{real.models_passed}/{real.models_attempted} passed",
+        )
+    if report.voice_live is not None:
+        voice = report.voice_live
+        table.add_row(
+            "voice (push-to-talk)",
+            voice.summary,
+            f"recording={voice.recording_success}, stt={voice.stt_success}, "
+            f"playback_confirmed={voice.playback_user_confirmed}",
+        )
+    if report.wake_word_live is not None:
+        wake = report.wake_word_live
+        table.add_row(
+            "voice (wake word)",
+            wake.summary,
+            f"wake_detected={wake.wake_word_detected}, stt={wake.stt_success}, "
+            f"api={wake.api_success}, playback_confirmed={wake.playback_user_confirmed}",
+        )
+    console.print(table)
+    if report.next_actions:
+        console.print("[bold]Next actions:[/bold]")
+        for action in report.next_actions:
+            # markup=False so command tokens like '.[runtime]' are not parsed as tags.
+            console.print(f"  {action}", markup=False)
+
+
+@april_app.command()
+def acceptance(
+    require_real_models: bool = typer.Option(
+        False,
+        "--require-real-models",
+        help="Fail unless every configured chat GGUF model loads, chats, streams, and unloads.",
+    ),
+    voice_live: bool = typer.Option(
+        False, "--voice-live", help="Also run interactive push-to-talk voice verification."
+    ),
+    wake_word_live: bool = typer.Option(
+        False, "--wake-word-live", help="Also run interactive live wake-word verification."
+    ),
+    write_report: bool = typer.Option(
+        False,
+        "--write-report",
+        help="Write a redacted report to data/verification/acceptance-<timestamp>.json.",
+    ),
+    report: Path | None = typer.Option(
+        None, "--report", help="Write the redacted acceptance report JSON to this path instead."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+    max_output_tokens: int = typer.Option(32, "--max-output-tokens", min=1, max=4096),
+    timeout: float = typer.Option(180.0, "--timeout", min=1.0),
+    min_tokens_per_second: float | None = typer.Option(None, "--min-tokens-per-second", min=0.0),
+    max_load_seconds: float | None = typer.Option(None, "--max-load-seconds", min=0.0),
+    max_first_token_latency_seconds: float | None = typer.Option(
+        None, "--max-first-token-latency-seconds", min=0.0
+    ),
+    max_rss_mb: float | None = typer.Option(None, "--max-rss-mb", min=0.0),
+) -> None:
+    """Single MacBook Pro acceptance gate: config + readiness + fake (+ real/voice)."""
+    manager = _manager()
+    home = manager.home
+    settings = manager.settings
+    thresholds = ReportThresholds(
+        min_tokens_per_second=min_tokens_per_second,
+        max_load_seconds=max_load_seconds,
+        max_first_token_latency_seconds=max_first_token_latency_seconds,
+        max_rss_mb=max_rss_mb,
+    )
+    report_obj = run_acceptance(
+        home,
+        require_real_models=require_real_models,
+        max_output_tokens=max_output_tokens,
+        timeout=timeout,
+        thresholds=thresholds,
+        voice_live_runner=_voice_live_runner(settings) if voice_live else None,
+        wake_word_live_runner=_wake_word_live_runner(settings) if wake_word_live else None,
+    )
+
+    target = report
+    if target is None and write_report:
+        target = default_acceptance_report_path(home)
+
+    if json_output:
+        console.print_json(data=report_obj.model_dump())
+    else:
+        _print_acceptance(report_obj)
+
+    if target is not None:
+        written = write_acceptance_report(report_obj, target)
+        console.print(
+            f"[green]Wrote acceptance report to {written}[/green] "
+            f"(final_status: {report_obj.final_status})"
+        )
+
+    if report_obj.final_status == "fail":
         raise typer.Exit(1)
 
 
