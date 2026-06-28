@@ -241,35 +241,93 @@ contain tokens, transcripts, generated text, or absolute paths. A `warning` exit
 
 `run april setup mac-activation` is one guided local command that validates the
 intended GGUF model set and (unless `--skip-voice`) the local voice tools, writes
-config only with `--apply`, and can chain straight into real-model acceptance. It
-is **dry-run by default** and never downloads models, installs packages, uses
+config only with `--apply`, and can chain straight into acceptance. It is
+**dry-run by default** and never downloads models, installs packages, uses
 `sudo`/Homebrew, or records audio.
 
-```bash
-# Validate paths only (writes nothing):
-run april setup mac-activation \
-  --brain /absolute/path/brain.gguf \
-  --coding /absolute/path/coding.gguf \
-  --reading /absolute/path/reading.gguf \
-  --dry-run
+### Transactional apply and rollback
 
-# Apply config, then run real-model acceptance and write a report:
+Apply is **transactional and validate-first**:
+
+- Every supplied model and voice path is validated *before* anything is written.
+  If validation fails, **nothing** is written.
+- The model (`configs/models.yaml`) and voice (`configs/april.yaml`) config files
+  are snapshotted, then applied in order.
+- If a later step fails, the previous config is **restored automatically** so you
+  never end up with models applied but voice half-written. The report's
+  `transaction` block records `backup_created`, `committed`, `rolled_back`, and a
+  redacted `rollback_reason`. (`--no-rollback` exists for debugging only and
+  leaves the partial state in place; the default is always rollback-on-failure.)
+
+### Enabling voice
+
+The wizard configures voice paths but, by default, leaves voice **OFF** (no
+surprises). Pass `--enable-voice` to turn voice on — but only after every required
+voice artifact validates. `--enable-voice` may not be combined with `--skip-voice`.
+
+```bash
+# Models only — validate, apply, then run real-model acceptance and write a report:
 run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
+  --skip-voice \
   --apply \
   --run-acceptance \
   --write-report
+
+# Full activation — models + voice enabled + full acceptance with live voice/wake
+# and service orchestration:
+run april setup mac-activation \
+  --brain /absolute/path/brain.gguf \
+  --coding /absolute/path/coding.gguf \
+  --reading /absolute/path/reading.gguf \
+  --whisper-binary /absolute/path/whisper \
+  --whisper-model /absolute/path/whisper-model.bin \
+  --piper-binary /absolute/path/piper \
+  --piper-model /absolute/path/piper-voice.onnx \
+  --wake-word-model /absolute/path/april.onnx \
+  --enable-voice \
+  --apply \
+  --run-acceptance \
+  --acceptance-voice-live \
+  --acceptance-wake-word-live \
+  --start-services \
+  --write-report
 ```
 
-Add `--whisper-binary/--whisper-model/--piper-binary/--piper-model`
-(and optional `--wake-word-model`) to validate/apply voice paths too, or
-`--skip-voice` to activate models only. The wizard configures voice paths but
-never **enables** voice — turn it on explicitly later with
-`run april setup voice ... --apply --enable`. With `--write-report`, a redacted
-report is written to `data/verification/mac-activation-<timestamp>.json`
-(Git-ignored).
+`--run-acceptance` runs **real-model** acceptance after a successful apply.
+`--acceptance-voice-live` / `--acceptance-wake-word-live` add the live voice and
+wake-word checks (both require `--run-acceptance` and `--enable-voice`, and are
+incompatible with `--skip-voice`). `--start-services` orchestrates APRIL services
+for those live checks using the same logic as `run april acceptance`; services the
+wizard started are always stopped afterward unless `--keep-services-running`.
+`--fake-services` cannot be combined with real-model acceptance. With
+`--write-report`, a redacted report is written to
+`data/verification/mac-activation-<timestamp>.json` (Git-ignored).
+
+## Browsing reports
+
+`run april reports` is a read-only browser over the redacted JSON reports under
+`data/verification` (acceptance, mac-activation, voice-live, wake-word-live,
+multi-model, fake-soak). It never prints tokens, transcripts, generated text, or
+absolute paths.
+
+```bash
+run april reports list                          # newest first
+run april reports latest                        # newest report of any known type
+run april reports show data/verification/acceptance-….json
+run april reports show-latest --type acceptance
+run april reports show-latest --type mac_activation
+run april reports clean --older-than-days 14 --dry-run
+run april reports clean --older-than-days 14 --apply
+```
+
+`reports clean` is **dry-run by default** and deletes only `*.json` files older
+than the given age that live directly inside `data/verification`; nothing outside
+that directory is ever touched. The Core API exposes the same data read-only at
+`GET /reports`, `GET /reports/latest`, and `GET /reports/latest/{report_type}`,
+and the Desktop dashboard shows the latest acceptance/activation status.
 
 ## Troubleshooting
 

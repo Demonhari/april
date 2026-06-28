@@ -1,24 +1,32 @@
-"""Guided local Mac activation wizard for APRIL.
+"""Guided, transactional local Mac activation wizard for APRIL.
 
 ``run april setup mac-activation`` gives one command that validates the intended
 local GGUF model set and (optionally) the local voice tools, applies the config
-only when ``--apply`` is supplied, and can chain straight into a real-model
-acceptance run. It is a thin, redacted orchestration layer over the existing,
-separately-tested ``setup_model_set`` / ``setup_voice_stack`` helpers and
-``run_acceptance`` — it never downloads models, installs packages, runs ``sudo``
-or Homebrew, records audio, or touches the network.
+only when ``--apply`` is supplied, and can chain straight into a real-model (and
+optionally live voice/wake-word) acceptance run. It is a thin, redacted
+orchestration layer over the existing, separately-tested ``setup_model_set`` /
+``setup_voice_stack`` helpers and the acceptance runner — it never downloads
+models, installs packages, runs ``sudo`` or Homebrew, records audio, or touches
+the network.
+
+Apply is **transactional**: every supplied model and voice path is validated
+first, nothing is written if validation fails, and if a later apply step fails the
+previous config files are restored automatically (unless ``--no-rollback`` is set
+for debugging). The on-disk report is redacted by construction: only basenames,
+booleans, counts, status strings, and commands — never tokens, transcripts,
+generated text, or absolute paths.
 
 The orchestrator is dependency-injected and separated from the CLI so it can be
 unit-tested with mocked validators and a mocked acceptance runner, with no GGUF,
 llama-cpp-python, microphone, speaker, whisper.cpp, Piper, openWakeWord, or
-network required. The on-disk report is redacted by construction: only basenames,
-booleans, counts, status strings, and commands — never tokens, transcripts,
-generated text, or absolute paths.
+network required.
 """
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -39,6 +47,49 @@ AcceptanceRunner = Callable[[], AcceptanceReport]
 
 _MODEL_ROLES = ("brain", "coding", "reading")
 _VOICE_REQUIRED = ("whisper_binary", "whisper_model", "piper_binary", "piper_model")
+_MODELS_CONFIG = ("configs", "models.yaml")
+_VOICE_CONFIG = ("configs", "april.yaml")
+
+
+class ActivationFlagError(ValueError):
+    """Raised for an incompatible combination of activation flags."""
+
+
+def validate_activation_flags(
+    *,
+    apply: bool,
+    dry_run: bool,
+    skip_voice: bool,
+    enable_voice: bool,
+    run_acceptance_after: bool,
+    acceptance_voice_live: bool,
+    acceptance_wake_word_live: bool,
+    start_services: bool,
+    fake_services: bool,
+) -> None:
+    """Reject contradictory activation flag combinations before doing any work."""
+    if apply and dry_run:
+        raise ActivationFlagError("Use either --apply or --dry-run, not both.")
+    if enable_voice and skip_voice:
+        raise ActivationFlagError("Cannot combine --enable-voice with --skip-voice.")
+    live = acceptance_voice_live or acceptance_wake_word_live
+    if live and not run_acceptance_after:
+        raise ActivationFlagError(
+            "--acceptance-voice-live/--acceptance-wake-word-live require --run-acceptance."
+        )
+    if live and skip_voice:
+        raise ActivationFlagError(
+            "Live voice acceptance cannot be combined with --skip-voice."
+        )
+    if live and not enable_voice:
+        raise ActivationFlagError("Live voice acceptance requires --enable-voice.")
+    # Activation acceptance is always real-model, so fake services can never satisfy it.
+    if fake_services and run_acceptance_after:
+        raise ActivationFlagError(
+            "--fake-services cannot verify real-model acceptance (--run-acceptance)."
+        )
+    if fake_services and not start_services:
+        raise ActivationFlagError("--fake-services requires --start-services.")
 
 
 class ModelActivationEntry(BaseModel):
@@ -66,9 +117,22 @@ class VoiceActivationSummary(BaseModel):
     validated: bool = False
     applied: bool = False
     enabled: bool = False
+    enabled_requested: bool = False
+    enabled_after_apply: bool = False
     artifacts: list[VoiceArtifactEntry] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
+
+
+class TransactionSummary(BaseModel):
+    requested: bool = False
+    backup_created: bool = False
+    backup_basename: str | None = None
+    committed: bool = False
+    rolled_back: bool = False
+    # not_applicable | not_needed | restored | failed | skipped
+    rollback_status: str = "not_applicable"
+    rollback_reason: str | None = None
 
 
 class AcceptanceLink(BaseModel):
@@ -77,6 +141,9 @@ class AcceptanceLink(BaseModel):
     acceptance_level: str | None = None
     runtime_backend: str | None = None
     real_model_summary: str | None = None
+    voice_live_summary: str | None = None
+    wake_word_live_summary: str | None = None
+    services_startup: str | None = None
     skipped_reason: str | None = None
 
 
@@ -87,6 +154,7 @@ class MacActivationReport(BaseModel):
     mode: Literal["dry_run", "apply"]
     models: ModelsActivationSummary
     voice: VoiceActivationSummary
+    transaction: TransactionSummary = Field(default_factory=TransactionSummary)
     acceptance: AcceptanceLink = Field(default_factory=AcceptanceLink)
     final_status: ActivationStatus
     next_actions: list[str] = Field(default_factory=list)
@@ -150,12 +218,13 @@ def _voice_summary(
     voice_paths: dict[str, Path | None],
     skip_voice: bool,
     apply: bool,
+    enable_voice: bool,
     voice_setup: VoiceSetup,
 ) -> VoiceActivationSummary:
     if skip_voice:
         return VoiceActivationSummary(skipped=True)
     missing = [name for name in _VOICE_REQUIRED if voice_paths.get(name) is None]
-    summary = VoiceActivationSummary(requested=True)
+    summary = VoiceActivationSummary(requested=True, enabled_requested=enable_voice)
     if missing:
         summary.error = (
             "Voice activation needs --whisper-binary, --whisper-model, --piper-binary, "
@@ -163,8 +232,8 @@ def _voice_summary(
         )
         return summary
     try:
-        # Voice paths are configured but never enabled by the wizard; enabling stays
-        # an explicit, separate `setup voice --apply --enable` step (no surprises).
+        # Voice is enabled only when --apply AND --enable-voice are both supplied,
+        # and only after every required artifact validates inside setup_voice_stack.
         result = voice_setup(
             home=home,
             whisper_binary=voice_paths["whisper_binary"],
@@ -173,7 +242,7 @@ def _voice_summary(
             piper_model=voice_paths["piper_model"],
             wake_word_model=voice_paths.get("wake_word_model"),
             apply=apply,
-            enable=False,
+            enable=enable_voice and apply,
         )
     except ConfigError as exc:
         summary.error = redact_reason(str(exc))
@@ -181,6 +250,7 @@ def _voice_summary(
     summary.validated = True
     summary.applied = bool(result.get("applied"))
     summary.enabled = bool(result.get("voice_enabled"))
+    summary.enabled_after_apply = bool(result.get("voice_enabled"))
     for artifact in result.get("artifacts", []):
         summary.artifacts.append(
             VoiceArtifactEntry(
@@ -190,6 +260,92 @@ def _voice_summary(
         )
     summary.warnings = [redact_reason(str(warning)) for warning in result.get("warnings", [])]
     return summary
+
+
+@dataclass
+class _ConfigBackup:
+    directory: Path
+    # config path -> whether it existed at snapshot time
+    entries: dict[Path, bool] = field(default_factory=dict)
+
+
+def _config_paths_to_protect(home: Path, *, skip_voice: bool) -> list[Path]:
+    paths = [home.joinpath(*_MODELS_CONFIG)]
+    if not skip_voice:
+        paths.append(home.joinpath(*_VOICE_CONFIG))
+    return paths
+
+
+def _snapshot_config(home: Path, paths: list[Path]) -> _ConfigBackup:
+    stamp = utc_now().strftime("%Y%m%dT%H%M%S%fZ")
+    directory = home / ".april_tmp" / f"mac-activation-backup-{stamp}"
+    directory.mkdir(parents=True, exist_ok=True)
+    backup = _ConfigBackup(directory=directory)
+    for path in paths:
+        existed = path.exists()
+        backup.entries[path] = existed
+        if existed:
+            shutil.copy2(path, directory / path.name)
+    return backup
+
+
+def _restore_config(backup: _ConfigBackup) -> bool:
+    try:
+        for path, existed in backup.entries.items():
+            if existed:
+                shutil.copy2(backup.directory / path.name, path)
+            elif path.exists():
+                path.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _apply_transaction(
+    *,
+    home: Path,
+    model_paths: dict[str, Path | None],
+    voice_paths: dict[str, Path | None],
+    skip_voice: bool,
+    enable_voice: bool,
+    model_setup: ModelSetup,
+    voice_setup: VoiceSetup,
+    no_rollback: bool,
+) -> tuple[ModelsActivationSummary, VoiceActivationSummary, TransactionSummary]:
+    backup = _snapshot_config(home, _config_paths_to_protect(home, skip_voice=skip_voice))
+    transaction = TransactionSummary(
+        requested=True, backup_created=True, backup_basename=backup.directory.name
+    )
+
+    models = _model_summary(home=home, model_paths=model_paths, apply=True, model_setup=model_setup)
+    voice = VoiceActivationSummary(skipped=True)
+    failure_reason = models.error
+    if not failure_reason and not skip_voice:
+        voice = _voice_summary(
+            home=home,
+            voice_paths=voice_paths,
+            skip_voice=False,
+            apply=True,
+            enable_voice=enable_voice,
+            voice_setup=voice_setup,
+        )
+        failure_reason = voice.error
+
+    if failure_reason:
+        transaction.committed = False
+        if no_rollback:
+            # Debug-only: leave the partial state in place but report it honestly.
+            transaction.rollback_status = "skipped"
+            transaction.rollback_reason = redact_reason(failure_reason)
+        else:
+            restored = _restore_config(backup)
+            transaction.rolled_back = restored
+            transaction.rollback_status = "restored" if restored else "failed"
+            transaction.rollback_reason = redact_reason(failure_reason)
+    else:
+        transaction.committed = True
+        transaction.rollback_status = "not_needed"
+    return models, voice, transaction
 
 
 def _acceptance_link(
@@ -205,7 +361,7 @@ def _acceptance_link(
         return AcceptanceLink(ran=False, skipped_reason="Acceptance runs only after --apply.")
     if blocked:
         return AcceptanceLink(
-            ran=False, skipped_reason="Activation validation failed; acceptance not run."
+            ran=False, skipped_reason="Activation apply failed/rolled back; acceptance not run."
         )
     if acceptance_runner is None:  # pragma: no cover - CLI always supplies a runner
         return AcceptanceLink(ran=False, skipped_reason="No acceptance runner available.")
@@ -217,6 +373,13 @@ def _acceptance_link(
         acceptance_level=report.acceptance_level,
         runtime_backend=report.runtime_backend,
         real_model_summary=real.summary if real is not None else None,
+        voice_live_summary=report.voice_live.summary if report.voice_live is not None else None,
+        wake_word_live_summary=(
+            report.wake_word_live.summary if report.wake_word_live is not None else None
+        ),
+        services_startup=(
+            report.services.startup_status if report.services.requested else None
+        ),
     )
 
 
@@ -225,6 +388,7 @@ def _next_actions(
     apply: bool,
     models: ModelsActivationSummary,
     voice: VoiceActivationSummary,
+    transaction: TransactionSummary,
     acceptance: AcceptanceLink,
     final_status: ActivationStatus,
 ) -> list[str]:
@@ -245,6 +409,8 @@ def _next_actions(
             "--whisper-model /absolute/path/model.bin --piper-binary /absolute/path/piper "
             "--piper-model /absolute/path/voice.onnx --dry-run  (or add --skip-voice)"
         )
+    if transaction.rolled_back:
+        add("Apply failed and was rolled back; fix the reported path and re-run with --apply.")
     if final_status == "validated":
         add("Re-run with --apply to write the validated configuration.")
     if final_status == "applied":
@@ -257,9 +423,11 @@ def _next_actions(
         if voice.applied and not voice.enabled:
             add(
                 "Voice paths configured but OFF. Enable with "
-                "run april setup voice ... --apply --enable, then "
+                "run april setup mac-activation ... --enable-voice --apply, then "
                 "run april voice verify-live --report data/verification/voice-live.json"
             )
+        if voice.enabled:
+            add("Voice is ON. Verify it with run april voice verify-live and verify-wake-live.")
     return actions
 
 
@@ -270,40 +438,54 @@ def run_mac_activation(
     voice_paths: dict[str, Path | None],
     skip_voice: bool = False,
     apply: bool = False,
+    enable_voice: bool = False,
     run_acceptance_after: bool = False,
+    no_rollback: bool = False,
     model_setup: ModelSetup | None = None,
     voice_setup: VoiceSetup | None = None,
     acceptance_runner: AcceptanceRunner | None = None,
 ) -> MacActivationReport:
-    """Validate (and optionally apply) the local model + voice activation.
+    """Validate, then transactionally apply, the local model + voice activation.
 
     Dry-run by default. ``model_setup`` / ``voice_setup`` / ``acceptance_runner``
     are injected so the wizard can be exercised without real GGUF files, voice
-    binaries, or a real acceptance run. The setup helpers default to the real,
-    module-level functions, resolved at call time so they stay monkeypatchable.
+    binaries, or a real acceptance run; they default to the real, module-level
+    functions resolved at call time so they stay monkeypatchable.
     """
     home = home.expanduser()
+    model_setup = model_setup or setup_model_set
+    voice_setup = voice_setup or setup_voice_stack
+
+    # Phase 1 — validate everything up front. This never writes config.
     models = _model_summary(
-        home=home,
-        model_paths=model_paths,
-        apply=apply,
-        model_setup=model_setup or setup_model_set,
+        home=home, model_paths=model_paths, apply=False, model_setup=model_setup
     )
     voice = _voice_summary(
         home=home,
         voice_paths=voice_paths,
         skip_voice=skip_voice,
-        apply=apply,
-        voice_setup=voice_setup or setup_voice_stack,
+        apply=False,
+        enable_voice=enable_voice,
+        voice_setup=voice_setup,
     )
+    validation_blocked = bool(models.error) or bool(voice.error)
+    transaction = TransactionSummary(requested=apply)
 
-    blocked = bool(models.error) or bool(voice.error)
-    acceptance = _acceptance_link(
-        apply=apply,
-        run_acceptance_after=run_acceptance_after,
-        blocked=blocked,
-        acceptance_runner=acceptance_runner,
-    )
+    # Phase 2 — apply transactionally only when validation passed.
+    if apply and not validation_blocked:
+        models, voice, transaction = _apply_transaction(
+            home=home,
+            model_paths=model_paths,
+            voice_paths=voice_paths,
+            skip_voice=skip_voice,
+            enable_voice=enable_voice,
+            model_setup=model_setup,
+            voice_setup=voice_setup,
+            no_rollback=no_rollback,
+        )
+
+    apply_failed = apply and (bool(models.error) or bool(voice.error))
+    blocked = validation_blocked or apply_failed
 
     if blocked:
         final_status: ActivationStatus = "failed"
@@ -312,8 +494,20 @@ def run_mac_activation(
     else:
         final_status = "validated"
 
+    acceptance = _acceptance_link(
+        apply=apply,
+        run_acceptance_after=run_acceptance_after,
+        blocked=blocked,
+        acceptance_runner=acceptance_runner,
+    )
+
     next_actions = _next_actions(
-        apply=apply, models=models, voice=voice, acceptance=acceptance, final_status=final_status
+        apply=apply,
+        models=models,
+        voice=voice,
+        transaction=transaction,
+        acceptance=acceptance,
+        final_status=final_status,
     )
 
     return MacActivationReport(
@@ -321,6 +515,7 @@ def run_mac_activation(
         mode="apply" if apply else "dry_run",
         models=models,
         voice=voice,
+        transaction=transaction,
         acceptance=acceptance,
         final_status=final_status,
         next_actions=next_actions,

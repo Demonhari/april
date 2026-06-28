@@ -285,6 +285,36 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="query parameters are not supported")
         return _verification_report_detail(active.settings, report_basename)
 
+    @app.get("/reports")
+    async def reports_index(
+        request: Request,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        if request.query_params:
+            raise HTTPException(status_code=400, detail="query parameters are not supported")
+        return _browser_reports(active.settings)
+
+    @app.get("/reports/latest")
+    async def reports_latest_any(
+        request: Request,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        if request.query_params:
+            raise HTTPException(status_code=400, detail="query parameters are not supported")
+        return _browser_latest(active.settings)
+
+    @app.get("/reports/latest/{report_type}")
+    async def reports_latest_typed(
+        report_type: str,
+        request: Request,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        if request.query_params:
+            raise HTTPException(status_code=400, detail="query parameters are not supported")
+        if report_type not in _BROWSER_REPORT_TYPES:
+            raise HTTPException(status_code=404, detail="unknown report type")
+        return _browser_latest(active.settings, report_type=report_type)
+
     @app.post("/chat")
     async def chat(
         request: ChatRequest,
@@ -977,6 +1007,104 @@ def _verification_report_detail(settings: AprilSettings, report_basename: str) -
         "message": "verification report",
         "report": _safe_report_payload(payload, path),
     }
+
+
+# The read-only ``/reports`` browser surface. Its allowlist projection covers the
+# acceptance/mac-activation/wake-word axes the older ``/verification`` projection
+# does not, while still emitting only basenames, statuses, levels, booleans, and
+# redacted next-action commands — never tokens, transcripts, or absolute paths.
+_BROWSER_REPORT_TYPES = {
+    "acceptance",
+    "mac_activation",
+    "voice_live",
+    "wake_word_live",
+    "multi_model",
+    "fake_soak",
+}
+_BROWSER_TYPE_ALIASES = {
+    "acceptance": "acceptance",
+    "mac_activation": "mac_activation",
+    "voice_live": "voice_live",
+    "wake_word_live": "wake_word_live",
+    "multi_model": "multi_model",
+    "soak": "fake_soak",
+    "fake_soak": "fake_soak",
+}
+
+
+def _browser_report_type(payload: dict[str, Any]) -> str:
+    declared = str(payload.get("report_type") or "")
+    if declared in _BROWSER_TYPE_ALIASES:
+        return _BROWSER_TYPE_ALIASES[declared]
+    if "verification_level" in payload and "models" in payload:
+        return "multi_model"
+    if "iterations" in payload and "latency_ms" in payload:
+        return "fake_soak"
+    return "unknown"
+
+
+def _browser_report_summary(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    report_type = _browser_report_type(payload)
+    status = (
+        payload.get("final_status")
+        if report_type in {"acceptance", "mac_activation"}
+        else payload.get("summary")
+    )
+    services = payload.get("services")
+    services_summary: dict[str, Any] | None = None
+    if isinstance(services, dict) and services.get("requested"):
+        services_summary = {
+            "mode": str(services.get("mode", "none")),
+            "startup_status": str(services.get("startup_status", "unknown")),
+            "shutdown_status": str(services.get("shutdown_status", "unknown")),
+            "api_reachable": bool(services.get("api_reachable", False)),
+            "runtime_reachable": bool(services.get("runtime_reachable", False)),
+        }
+    level = payload.get("acceptance_level")
+    backend = payload.get("runtime_backend")
+    return {
+        "basename": path.name,
+        "report_type": report_type,
+        "generated_at": str(payload.get("generated_at") or payload.get("timestamp") or ""),
+        "status": str(status) if status is not None else None,
+        "acceptance_level": str(level) if level else None,
+        "runtime_backend": str(backend) if backend else None,
+        "services": services_summary,
+        "next_actions": _safe_string_list(payload.get("next_actions")),
+    }
+
+
+def _sorted_browser_items(settings: AprilSettings) -> list[tuple[Path, dict[str, Any]]]:
+    items: list[tuple[Path, dict[str, Any]]] = []
+    for path in _verification_report_files(settings):
+        payload = _read_safe_report(path)
+        if payload is not None:
+            items.append((path, payload))
+    items.sort(key=lambda item: _report_order_key(*item), reverse=True)
+    return items
+
+
+def _browser_reports(settings: AprilSettings) -> dict[str, Any]:
+    reports = [
+        _browser_report_summary(payload, path)
+        for path, payload in _sorted_browser_items(settings)
+    ]
+    return {
+        "status": "ok" if reports else "empty",
+        "count": len(reports),
+        "reports": reports,
+    }
+
+
+def _browser_latest(settings: AprilSettings, *, report_type: str | None = None) -> dict[str, Any]:
+    for path, payload in _sorted_browser_items(settings):
+        summary = _browser_report_summary(payload, path)
+        if report_type is None:
+            if summary["report_type"] in _BROWSER_REPORT_TYPES:
+                return {"status": "ok", "report": summary}
+        elif summary["report_type"] == report_type:
+            return {"status": "ok", "report": summary}
+    return {"status": "not_found", "report": None}
 
 
 def _safe_report_path(settings: AprilSettings, report_basename: str) -> Path:

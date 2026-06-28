@@ -357,26 +357,57 @@ Ctrl-C) unless `--keep-services-running`; `--fake-services` uses the fake runtim
 for plumbing only and cannot be combined with `--require-real-models`.
 
 `run april setup mac-activation` is the guided local activation wizard: it
-validates the GGUF model set (and, unless `--skip-voice`, the voice tools),
-writes config only with `--apply`, and can chain into real-model acceptance with
-`--run-acceptance`. It is dry-run by default and never downloads, installs, uses
-`sudo`/Homebrew, or records audio.
+validates the GGUF model set (and, unless `--skip-voice`, the voice tools), then
+applies config **transactionally** with `--apply` (validate-first; a failed apply
+step is rolled back automatically so model and voice config can never be left
+half-written), can enable voice with `--enable-voice`, and can chain into
+real-model and live voice/wake acceptance with `--run-acceptance`. It is dry-run
+by default and never downloads, installs, uses `sudo`/Homebrew, or records audio.
 
 ```bash
+# Models only — validate, apply, then run real-model acceptance:
 run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
-  --dry-run
-
-run april setup mac-activation \
-  --brain /absolute/path/brain.gguf \
-  --coding /absolute/path/coding.gguf \
-  --reading /absolute/path/reading.gguf \
+  --skip-voice \
   --apply \
   --run-acceptance \
   --write-report
+
+# Full activation — models + voice enabled + full acceptance with live checks:
+run april setup mac-activation \
+  --brain /absolute/path/brain.gguf \
+  --coding /absolute/path/coding.gguf \
+  --reading /absolute/path/reading.gguf \
+  --whisper-binary /absolute/path/whisper \
+  --whisper-model /absolute/path/whisper-model.bin \
+  --piper-binary /absolute/path/piper \
+  --piper-model /absolute/path/piper-voice.onnx \
+  --wake-word-model /absolute/path/april.onnx \
+  --enable-voice \
+  --apply \
+  --run-acceptance \
+  --acceptance-voice-live \
+  --acceptance-wake-word-live \
+  --start-services \
+  --write-report
 ```
+
+`run april reports` browses the redacted reports under `data/verification`
+read-only (`list`, `latest`, `show PATH`, `show-latest --type <type>`, and a
+dry-run-by-default `clean --older-than-days N`):
+
+```bash
+run april reports list
+run april reports latest
+run april reports show-latest --type acceptance
+run april reports clean --older-than-days 14 --dry-run
+```
+
+The Core API mirrors this read-only at `GET /reports`, `GET /reports/latest`, and
+`GET /reports/latest/{report_type}`, and the Desktop dashboard surfaces the latest
+acceptance/activation status.
 
 See [docs/macbookpro-acceptance.md](docs/macbookpro-acceptance.md) for the full
 target-Mac acceptance walkthrough.

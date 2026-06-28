@@ -38,6 +38,8 @@ const state = {
   latestRealModelReport: null,
   latestWorkflowReport: null,
   latestVoiceReport: null,
+  latestAcceptanceReport: null,
+  latestActivationReport: null,
   reportHistory: null,
   approvals: [],
   reminders: [],
@@ -254,6 +256,7 @@ screens.dashboard = async function () {
   center.appendChild(panel("Runtime Models", "dash-models"));
 
   const right = el("div", "col-right");
+  right.appendChild(panel("Acceptance & Activation", "dash-acceptance"));
   right.appendChild(panel("Approvals", "dash-approvals"));
   right.appendChild(panel("Reminders & Tasks", "dash-reminders"));
 
@@ -285,9 +288,51 @@ function renderDashboard() {
   renderPermission();
   renderTelemetry();
   renderModels();
+  renderAcceptanceActivation();
   renderApprovals();
   renderReminders();
   renderFeed();
+}
+
+// Read-only summary of the latest acceptance + Mac-activation reports. The API
+// already redacts these to statuses/levels/commands, and the SPA renders only
+// those allowlisted fields — never a token, transcript, or filesystem path.
+function statusKindFor(status) {
+  if (status === "pass" || status === "applied" || status === "validated") return "ok";
+  if (status === "warning") return "warn";
+  if (status === "fail" || status === "failed") return "bad";
+  return "neutral";
+}
+
+function renderReportLine(label, report) {
+  if (!report || !report.report) {
+    return sysRow(label, state.online ? "not run yet" : "unavailable", "neutral");
+  }
+  const r = report.report;
+  let value = String(r.status || "unknown");
+  if (r.acceptance_level) value += " · " + r.acceptance_level;
+  return sysRow(label, value, statusKindFor(r.status));
+}
+
+function renderAcceptanceActivation() {
+  renderInto("dash-acceptance", (host) => {
+    let html =
+      renderReportLine("Acceptance", state.latestAcceptanceReport) +
+      renderReportLine("Activation", state.latestActivationReport);
+    const next = nextActionsFrom(state.latestAcceptanceReport) ||
+      nextActionsFrom(state.latestActivationReport);
+    if (next && next.length) {
+      html += "<div class='muted next-actions'>" + esc(next[0]) + "</div>";
+    }
+    host.innerHTML = html;
+  });
+}
+
+function nextActionsFrom(report) {
+  if (report && report.report && Array.isArray(report.report.next_actions)) {
+    return report.report.next_actions;
+  }
+  return null;
 }
 
 function renderInto(id, build) {
@@ -787,7 +832,12 @@ async function refreshSlow() {
   if (tasks) state.tasks = (tasks && tasks.tasks) || [];
   const briefing = await pollGet("/scheduler/briefing/preview");
   if (briefing) state.briefing = briefing;
+  const acceptance = await pollGet("/reports/latest/acceptance");
+  if (acceptance) state.latestAcceptanceReport = acceptance;
+  const activation = await pollGet("/reports/latest/mac_activation");
+  if (activation) state.latestActivationReport = activation;
   renderReminders();
+  renderAcceptanceActivation();
 }
 
 async function refreshDashboard() {

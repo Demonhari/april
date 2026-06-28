@@ -30,9 +30,11 @@ from apps.runner.bootstrap import bootstrap as run_bootstrap
 from apps.runner.evals import run_fake_brain_eval, run_real_brain_eval
 from apps.runner.install import is_april_wrapper, path_contains_dir
 from apps.runner.mac_activation import (
+    ActivationFlagError,
     MacActivationReport,
     default_activation_report_path,
     run_mac_activation,
+    validate_activation_flags,
     write_activation_report,
 )
 from apps.runner.mac_report import ReportThresholds, write_report
@@ -48,6 +50,17 @@ from apps.runner.model_tools import (
 )
 from apps.runner.multi_model_report import write_multi_model_report
 from apps.runner.readiness import ReadinessReport, build_readiness_report
+from apps.runner.reports import (
+    CleanResult,
+    ReportListing,
+    ReportSummary,
+    clean_reports,
+    known_report_types,
+    latest_report,
+    latest_report_of_type,
+    list_report_summaries,
+    summarize_path,
+)
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
 from apps.runner.soak import run_fake_soak, write_soak_report
 from apps.runner.verify import (
@@ -93,6 +106,7 @@ task_app = typer.Typer(help="Task inspection operations.")
 eval_app = typer.Typer(help="Local evaluation operations.")
 setup_app = typer.Typer(help="Local setup utilities.")
 user_profile_app = typer.Typer(help="Local user-profile operations.")
+reports_app = typer.Typer(help="Browse local verification reports.")
 app.add_typer(april_app, name="april")
 april_app.add_typer(model_app, name="model")
 april_app.add_typer(project_app, name="project")
@@ -106,6 +120,7 @@ april_app.add_typer(task_app, name="task")
 april_app.add_typer(eval_app, name="eval")
 april_app.add_typer(setup_app, name="setup")
 april_app.add_typer(user_profile_app, name="profile")
+april_app.add_typer(reports_app, name="reports")
 
 
 def _manager() -> AprilServiceManager:
@@ -1627,12 +1642,29 @@ def _print_activation(report: MacActivationReport) -> None:
             console.print(f"  {artifact.name}: {artifact.basename or 'not configured'}")
         for warning in voice.warnings:
             console.print(f"[yellow]Warning:[/yellow] {warning}")
+    transaction = report.transaction
+    if transaction.requested:
+        if transaction.committed:
+            console.print(
+                f"Transaction: committed (backup={transaction.backup_basename or 'none'})"
+            )
+        elif transaction.rolled_back:
+            console.print(
+                f"[yellow]Transaction: rolled back ({transaction.rollback_status}) — "
+                f"{transaction.rollback_reason}[/yellow]"
+            )
+        else:
+            console.print(
+                f"[yellow]Transaction: not committed ({transaction.rollback_status})[/yellow]"
+            )
     acceptance_link = report.acceptance
     if acceptance_link.ran:
         console.print(
             f"Acceptance: {acceptance_link.final_status} "
             f"(level={acceptance_link.acceptance_level}, "
-            f"backend={acceptance_link.runtime_backend})"
+            f"backend={acceptance_link.runtime_backend}, "
+            f"voice={acceptance_link.voice_live_summary or 'n/a'}, "
+            f"wake={acceptance_link.wake_word_live_summary or 'n/a'})"
         )
     elif acceptance_link.skipped_reason:
         console.print(f"Acceptance: skipped — {acceptance_link.skipped_reason}")
@@ -1656,11 +1688,39 @@ def setup_mac_activation(
     skip_voice: bool = typer.Option(
         False, "--skip-voice", help="Activate models only; skip voice."
     ),
+    enable_voice: bool = typer.Option(
+        False,
+        "--enable-voice",
+        help="Turn voice ON after all voice artifacts validate (with --apply).",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run"),
     apply_changes: bool = typer.Option(False, "--apply"),
+    no_rollback: bool = typer.Option(
+        False, "--no-rollback", help="Debug only: leave partial config if an apply step fails."
+    ),
     run_acceptance_after: bool = typer.Option(
         False, "--run-acceptance", help="After --apply, run real-model acceptance."
     ),
+    acceptance_voice_live: bool = typer.Option(
+        False,
+        "--acceptance-voice-live",
+        help="Run push-to-talk voice acceptance (needs --run-acceptance).",
+    ),
+    acceptance_wake_word_live: bool = typer.Option(
+        False,
+        "--acceptance-wake-word-live",
+        help="Run wake-word acceptance (needs --run-acceptance).",
+    ),
+    start_services: bool = typer.Option(
+        False, "--start-services", help="Start missing services for live acceptance checks."
+    ),
+    fake_services: bool = typer.Option(
+        False, "--fake-services", help="Start fake services (incompatible with real acceptance)."
+    ),
+    keep_services_running: bool = typer.Option(
+        False, "--keep-services-running", help="Leave services acceptance started running."
+    ),
+    service_timeout: float = typer.Option(20.0, "--service-timeout", min=1.0),
     write_report: bool = typer.Option(
         False,
         "--write-report",
@@ -1668,22 +1728,56 @@ def setup_mac_activation(
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Guided local activation: validate models + voice, optionally apply and verify.
+    """Guided, transactional local activation: validate models + voice, apply, verify.
 
     Dry-run by default. Never downloads models, installs packages, uses sudo or
-    Homebrew, or records audio. Config is written only with --apply.
+    Homebrew, or records audio. Config is written only with --apply, all paths are
+    validated first, and a failed apply step is rolled back automatically.
     """
-    if apply_changes and dry_run:
-        console.print("[red]Use either --apply or --dry-run, not both.[/red]")
-        raise typer.Exit(1)
+    try:
+        validate_activation_flags(
+            apply=apply_changes,
+            dry_run=dry_run,
+            skip_voice=skip_voice,
+            enable_voice=enable_voice,
+            run_acceptance_after=run_acceptance_after,
+            acceptance_voice_live=acceptance_voice_live,
+            acceptance_wake_word_live=acceptance_wake_word_live,
+            start_services=start_services,
+            fake_services=fake_services,
+        )
+    except ActivationFlagError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
     manager = _manager()
     home = manager.home
+    settings = manager.settings
 
     acceptance_runner: Callable[[], AcceptanceReport] | None = None
     if run_acceptance_after and apply_changes:
 
         def _activation_acceptance() -> AcceptanceReport:
-            return run_acceptance(home, require_real_models=True)
+            # Reuse the acceptance service orchestration verbatim; activation
+            # acceptance is always real-model and may add live voice/wake checks.
+            return _run_acceptance_with_services(
+                manager=manager,
+                require_real_models=True,
+                allow_sanity_pass=False,
+                start_services=start_services,
+                fake_services=fake_services,
+                keep_services_running=keep_services_running,
+                service_timeout=service_timeout,
+                max_output_tokens=32,
+                timeout=180.0,
+                thresholds=ReportThresholds(),
+                voice_live_runner=(
+                    _voice_live_runner(settings) if acceptance_voice_live else None
+                ),
+                wake_word_live_runner=(
+                    _wake_word_live_runner(settings) if acceptance_wake_word_live else None
+                ),
+            )
 
         acceptance_runner = _activation_acceptance
 
@@ -1699,7 +1793,9 @@ def setup_mac_activation(
         },
         skip_voice=skip_voice,
         apply=apply_changes,
+        enable_voice=enable_voice,
         run_acceptance_after=run_acceptance_after,
+        no_rollback=no_rollback,
         acceptance_runner=acceptance_runner,
     )
 
@@ -2331,6 +2427,146 @@ def logs(
     tail: int | None = typer.Option(None, "--tail", min=1, max=1000),
 ) -> None:
     console.print(_manager().logs(lines=tail or lines))
+
+
+def _reports_dir() -> Path:
+    return _manager().home / "data" / "verification"
+
+
+def _print_report_summary(summary: ReportSummary, *, with_actions: bool = True) -> None:
+    console.print(
+        f"[bold]{summary.basename}[/bold] — {summary.report_type} "
+        f"(status={summary.status or 'n/a'})"
+    )
+    details = []
+    if summary.generated_at:
+        details.append(f"generated_at={summary.generated_at}")
+    if summary.acceptance_level:
+        details.append(f"level={summary.acceptance_level}")
+    if summary.runtime_backend:
+        details.append(f"backend={summary.runtime_backend}")
+    if summary.services:
+        details.append(f"services[{summary.services}]")
+    if details:
+        console.print("  " + ", ".join(details))
+    if with_actions and summary.next_actions:
+        console.print("  Next actions:")
+        for action in summary.next_actions:
+            console.print(f"    {action}", markup=False)
+
+
+def _print_report_listing(listing: ReportListing) -> None:
+    if not listing.reports:
+        console.print(f"No reports found under {listing.directory}.")
+        return
+    table = Table(title=f"Verification reports ({listing.directory}, newest first)")
+    table.add_column("Report")
+    table.add_column("Type")
+    table.add_column("Status")
+    table.add_column("Level")
+    table.add_column("Generated at")
+    for summary in listing.reports:
+        table.add_row(
+            summary.basename,
+            summary.report_type,
+            summary.status or "-",
+            summary.acceptance_level or "-",
+            summary.generated_at or "-",
+        )
+    console.print(table)
+
+
+@reports_app.command("list")
+def reports_list(json_output: bool = typer.Option(False, "--json")) -> None:
+    """List redacted verification reports under data/verification, newest first."""
+    listing = list_report_summaries(_reports_dir())
+    if json_output:
+        console.print_json(data=listing.model_dump())
+    else:
+        _print_report_listing(listing)
+
+
+@reports_app.command("latest")
+def reports_latest(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Show the newest report of any known type."""
+    summary = latest_report(_reports_dir())
+    if summary is None:
+        console.print("No known verification reports found under data/verification.")
+        raise typer.Exit(1)
+    if json_output:
+        console.print_json(data=summary.model_dump())
+    else:
+        _print_report_summary(summary)
+
+
+@reports_app.command("show")
+def reports_show(
+    path: Path,
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show a concise, redacted summary of a single report JSON file."""
+    summary = summarize_path(path)
+    if summary is None:
+        console.print(f"[red]Could not read a JSON report at {path.name}.[/red]")
+        raise typer.Exit(1)
+    if json_output:
+        console.print_json(data=summary.model_dump())
+    else:
+        _print_report_summary(summary)
+
+
+@reports_app.command("show-latest")
+def reports_show_latest(
+    report_type: str = typer.Option(..., "--type", help="Report type to show the latest of."),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show the newest report of a specific type (e.g. acceptance, mac_activation)."""
+    known = tuple(known_report_types())
+    if report_type not in known:
+        console.print(f"[red]Unknown report type '{report_type}'. Known: {', '.join(known)}.[/red]")
+        raise typer.Exit(1)
+    summary = latest_report_of_type(_reports_dir(), report_type)
+    if summary is None:
+        console.print(f"No {report_type} report found under data/verification.")
+        raise typer.Exit(1)
+    if json_output:
+        console.print_json(data=summary.model_dump())
+    else:
+        _print_report_summary(summary)
+
+
+@reports_app.command("clean")
+def reports_clean(
+    older_than_days: int = typer.Option(..., "--older-than-days", min=0),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    apply_changes: bool = typer.Option(False, "--apply"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Delete report JSON files older than N days (dry-run by default).
+
+    Only ``*.json`` files directly inside data/verification are ever touched, and
+    deletion happens only with --apply. Nothing outside data/verification is removed.
+    """
+    if apply_changes and dry_run:
+        console.print("[red]Use either --apply or --dry-run, not both.[/red]")
+        raise typer.Exit(1)
+    result = clean_reports(_reports_dir(), older_than_days=older_than_days, apply=apply_changes)
+    if json_output:
+        console.print_json(data=result.model_dump())
+    else:
+        _print_reports_clean(result)
+
+
+def _print_reports_clean(result: CleanResult) -> None:
+    label = "Deleted" if result.applied else "Would delete"
+    console.print(
+        f"{label} {len(result.candidates)} report(s) older than {result.older_than_days} day(s) "
+        f"in {result.directory}."
+    )
+    for candidate in result.candidates:
+        console.print(f"  {candidate.basename} (age {candidate.age_days}d)")
+    if not result.applied and result.candidates:
+        console.print("Re-run with --apply to delete these report files.")
 
 
 if __name__ == "__main__":
