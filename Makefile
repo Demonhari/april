@@ -34,12 +34,25 @@ typecheck:
 # Mirror the important CI quality gates: lint, format check, type check, tests.
 check: lint format-check typecheck test
 
-# Full CI-equivalent gate, including coverage threshold, compile, config
-# validation and the fake-backend verification run.
-ci: lint format-check typecheck coverage
+# Full CI-equivalent gate, including compile, regular pytest, coverage threshold,
+# ResourceWarning-visible pytest, config validation, fake verification, and
+# desktop static checks when Node is available locally.
+ci: lint format-check typecheck
 	$(PY) -m compileall -q april_common apps services agents skills tests
+	$(PY) -m pytest -q -ra
+	$(PY) -m pytest --cov=april_common --cov=apps --cov=services --cov=agents --cov=skills --cov-report=term-missing --cov-fail-under=85
+	$(PY) -W default::ResourceWarning -m pytest -q -ra
 	$(PY) -m apps.runner.main april config validate
-	$(PY) -m apps.runner.main april verify --fake
+	APRIL_RUNTIME_BACKEND=fake $(PY) -m apps.runner.main april verify --fake
+	@if command -v node >/dev/null 2>&1; then \
+		node tests/js/desktop_token_bridge.test.cjs; \
+		node tests/js/desktop_dashboard.test.cjs; \
+		node --check apps/desktop/web/app.js; \
+		node --check apps/desktop/web/token_bridge.js; \
+		node --check apps/desktop/web/dashboard_helpers.js; \
+	else \
+		echo "Skipping desktop JS checks: node not found."; \
+	fi
 
 run-runtime:
 	$(PY) -m services.april_runtime.server

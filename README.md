@@ -366,6 +366,8 @@ step is rolled back automatically so model and voice config can never be left
 half-written), can enable voice with `--enable-voice`, and can chain into
 real-model and live voice/wake acceptance with `--run-acceptance`. It is dry-run
 by default and never downloads, installs, uses `sudo`/Homebrew, or records audio.
+`--reasoning` / `--reasoning-id` are optional; omit them to keep the reasoning
+agent on the brain model.
 
 ```bash
 # Models only — validate, apply, then run real-model acceptance:
@@ -373,6 +375,7 @@ run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
+  --reasoning /absolute/path/reasoning.gguf \
   --skip-voice \
   --apply \
   --run-acceptance \
@@ -383,6 +386,7 @@ run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
+  --reasoning /absolute/path/reasoning.gguf \
   --whisper-binary /absolute/path/whisper \
   --whisper-model /absolute/path/whisper-model.bin \
   --piper-binary /absolute/path/piper \
@@ -987,6 +991,7 @@ renders the title and body. `GET /health` reports the scheduler block
 ## Quality Gates
 
 ```bash
+make ci
 make test
 make lint
 make typecheck
@@ -1004,10 +1009,16 @@ node --check apps/desktop/web/token_bridge.js
 node --check apps/desktop/web/dashboard_helpers.js
 ```
 
-CI runs these Python gates across Ubuntu Python 3.11/3.12/3.13 and one macOS
-Python job, plus the Node/static Desktop checks in a separate job. Tests use
-fake model/audio components and do not require GGUF files, network access,
-microphones, speakers, whisper.cpp, Piper, openWakeWord, or `llama-cpp-python`.
+`make ci` is the full local CI mirror: Ruff check, Ruff format check, mypy,
+compileall, pytest, coverage with `--cov-fail-under=85`,
+ResourceWarning-visible pytest, config validation, fake verification, and the
+Desktop Node checks when `node` is available locally (otherwise it prints a clear
+skip for the JS checks). CI runs the same Python gates across Ubuntu Python
+3.11/3.12/3.13 and one macOS Python job, plus the Node/static Desktop checks in
+a separate job. These fake-CI gates do not require real GGUF files, network
+access, microphones, speakers, whisper.cpp, Piper, openWakeWord, or
+`llama-cpp-python`; real GGUF and live voice checks remain separate target-Mac
+acceptance steps.
 
 `run april verify --fake` is a release smoke gate. It checks project-bound
 conversations, immutable patch application, tampered artifact rejection, repo

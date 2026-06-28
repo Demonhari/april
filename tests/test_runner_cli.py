@@ -4,17 +4,20 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
 from apps.runner.install import install_wrappers
 from apps.runner.main import app
+from apps.runner.model_tools import setup_voice_stack
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
 from apps.runner.soak import SoakReport
 from apps.runner.verify import BenchmarkResult, VerifyCheck
 from apps.runner.voice_live import VoiceLiveReport
 from apps.runner.wake_live import WakeWordLiveReport
 from april_common.config_validation import validate_configuration
+from april_common.errors import ConfigError
 from april_common.settings import load_settings
 
 
@@ -826,6 +829,8 @@ def test_setup_voice_dry_run_apply_and_missing_wake_word(tmp_path: Path, monkeyp
 
 def test_setup_voice_missing_required_path_fails(tmp_path: Path, monkeypatch) -> None:
     _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    before = config.read_text(encoding="utf-8")
     whisper_model = tmp_path / "ggml-base.en.bin"
     piper_bin = tmp_path / "piper"
     piper_model = tmp_path / "voice.onnx"
@@ -851,6 +856,79 @@ def test_setup_voice_missing_required_path_fails(tmp_path: Path, monkeypatch) ->
     )
     assert result.exit_code == 1
     assert "missing-whisper" in result.output
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_setup_voice_stack_apply_missing_required_path_preserves_config_bytes(
+    tmp_path: Path,
+) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    before = config.read_bytes()
+    whisper_model = tmp_path / "ggml-base.en.bin"
+    piper_bin = tmp_path / "piper"
+    piper_model = tmp_path / "voice.onnx"
+    for path in (whisper_model, piper_bin, piper_model):
+        path.write_bytes(b"asset")
+
+    with pytest.raises(ConfigError, match="missing-whisper"):
+        setup_voice_stack(
+            home=tmp_path,
+            whisper_binary=tmp_path / "missing-whisper",
+            whisper_model=whisper_model,
+            piper_binary=piper_bin,
+            piper_model=piper_model,
+            apply=True,
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_setup_voice_stack_apply_missing_required_path_preserves_existing_enabled_true(
+    tmp_path: Path,
+) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["voice"]["enabled"] = True
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    before = config.read_bytes()
+    whisper_model = tmp_path / "ggml-base.en.bin"
+    piper_bin = tmp_path / "piper"
+    piper_model = tmp_path / "voice.onnx"
+    for path in (whisper_model, piper_bin, piper_model):
+        path.write_bytes(b"asset")
+
+    with pytest.raises(ConfigError, match="missing-whisper"):
+        setup_voice_stack(
+            home=tmp_path,
+            whisper_binary=tmp_path / "missing-whisper",
+            whisper_model=whisper_model,
+            piper_binary=piper_bin,
+            piper_model=piper_model,
+            apply=True,
+        )
+
+    assert config.read_bytes() == before
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["voice"]["enabled"] is True
+
+
+def test_setup_voice_stack_restores_config_when_post_write_validation_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    before = config.read_bytes()
+    args = _voice_setup_paths(tmp_path)
+    monkeypatch.setattr(
+        "apps.runner.model_tools.validate_configuration",
+        lambda home: ["invalid voice config"],
+    )
+
+    with pytest.raises(ConfigError, match="Configuration validation failed"):
+        setup_voice_stack(home=tmp_path, apply=True, enable=True, **args)
+
+    assert config.read_bytes() == before
 
 
 def _voice_setup_args(tmp_path: Path, *, wake_word: Path | None = None) -> list[str]:
@@ -877,6 +955,22 @@ def _voice_setup_args(tmp_path: Path, *, wake_word: Path | None = None) -> list[
     if wake_word is not None:
         args.extend(["--wake-word-model", str(wake_word)])
     return args
+
+
+def _voice_setup_paths(tmp_path: Path) -> dict[str, Path]:
+    whisper_bin = tmp_path / "whisper-main"
+    whisper_model = tmp_path / "ggml-base.en.bin"
+    piper_bin = tmp_path / "piper"
+    piper_model = tmp_path / "voice.onnx"
+    for path in (whisper_bin, whisper_model, piper_bin, piper_model):
+        if not path.exists():
+            path.write_bytes(b"asset")
+    return {
+        "whisper_binary": whisper_bin,
+        "whisper_model": whisper_model,
+        "piper_binary": piper_bin,
+        "piper_model": piper_model,
+    }
 
 
 def test_setup_voice_apply_without_enable_keeps_voice_disabled(tmp_path: Path, monkeypatch) -> None:
@@ -944,7 +1038,7 @@ def test_setup_voice_enable_turns_voice_on_after_validation(tmp_path: Path, monk
     assert "UNVERIFIED" in result.output
 
 
-def test_setup_voice_apply_enable_missing_required_path_fails_safe_off(
+def test_setup_voice_apply_enable_missing_required_path_preserves_config(
     tmp_path: Path, monkeypatch
 ) -> None:
     _copy_configs(tmp_path)
@@ -952,6 +1046,7 @@ def test_setup_voice_apply_enable_missing_required_path_fails_safe_off(
     data = yaml.safe_load(config.read_text(encoding="utf-8"))
     data["voice"]["enabled"] = True
     config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    before = config.read_bytes()
     args = _voice_setup_args(tmp_path)
     missing_index = args.index("--whisper-binary") + 1
     args[missing_index] = str(tmp_path / "missing-whisper")
@@ -959,8 +1054,9 @@ def test_setup_voice_apply_enable_missing_required_path_fails_safe_off(
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     result = CliRunner().invoke(app, [*args, "--apply", "--enable"])
     assert result.exit_code == 1
+    assert config.read_bytes() == before
     written = yaml.safe_load(config.read_text(encoding="utf-8"))
-    assert written["voice"]["enabled"] is False
+    assert written["voice"]["enabled"] is True
 
 
 def test_setup_voice_enable_without_wake_word_keeps_ptt_and_marks_wake_unavailable(

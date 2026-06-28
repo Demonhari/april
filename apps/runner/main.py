@@ -1683,6 +1683,10 @@ def setup_mac_activation(
     brain: Path | None = typer.Option(None, "--brain", help="Local brain GGUF path."),
     coding: Path | None = typer.Option(None, "--coding", help="Local coding GGUF path."),
     reading: Path | None = typer.Option(None, "--reading", help="Local reading GGUF path."),
+    reasoning: Path | None = typer.Option(
+        None, "--reasoning", help="Optional reasoning GGUF path."
+    ),
+    reasoning_id: str | None = typer.Option(None, "--reasoning-id"),
     whisper_binary: Path | None = typer.Option(None, "--whisper-binary"),
     whisper_model: Path | None = typer.Option(None, "--whisper-model"),
     piper_binary: Path | None = typer.Option(None, "--piper-binary"),
@@ -1784,7 +1788,8 @@ def setup_mac_activation(
 
     report_obj = run_mac_activation(
         home,
-        model_paths={"brain": brain, "coding": coding, "reading": reading},
+        model_paths={"brain": brain, "coding": coding, "reading": reading, "reasoning": reasoning},
+        model_ids={"reasoning": reasoning_id},
         voice_paths={
             "whisper_binary": whisper_binary,
             "whisper_model": whisper_model,

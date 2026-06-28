@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from apps.runner.acceptance import (
@@ -19,6 +21,7 @@ from apps.runner.mac_activation import (
     validate_activation_flags,
 )
 from apps.runner.main import app
+from april_common.config_validation import validate_configuration
 from april_common.errors import ConfigError
 from april_common.settings import load_settings
 
@@ -35,6 +38,16 @@ def _seed_configs(
     (home / "configs").mkdir(parents=True, exist_ok=True)
     (home / "configs" / "models.yaml").write_text(models, encoding="utf-8")
     (home / "configs" / "april.yaml").write_text(voice, encoding="utf-8")
+
+
+def _copy_configs(home: Path) -> None:
+    shutil.copytree(Path.cwd() / "configs", home / "configs")
+
+
+def _gguf(home: Path, name: str) -> Path:
+    path = home / name
+    path.write_bytes(b"gguf")
+    return path
 
 
 def _voice_paths() -> dict[str, Path]:
@@ -126,6 +139,15 @@ def _model_result() -> dict[str, Any]:
         "applied": False,
         "backup_basename": None,
         "entries": [{"role": "brain", "source_basename": "brain.gguf"}],
+        "next_commands": [],
+    }
+
+
+def _model_result_for_roles(*roles: str) -> dict[str, Any]:
+    return {
+        "applied": False,
+        "backup_basename": None,
+        "entries": [{"role": role, "source_basename": f"{role}.gguf"} for role in roles],
         "next_commands": [],
     }
 
@@ -319,6 +341,100 @@ def test_activation_redacts_config_error_paths(tmp_path: Path) -> None:
     assert "/Users/secret/models" not in report.models.error
 
 
+def test_activation_dry_run_accepts_optional_reasoning_and_reports_supplied_roles(
+    tmp_path: Path,
+) -> None:
+    _copy_configs(tmp_path)
+    paths = {
+        "brain": _gguf(tmp_path, "brain.gguf"),
+        "coding": _gguf(tmp_path, "coding.gguf"),
+        "reading": _gguf(tmp_path, "reading.gguf"),
+        "reasoning": _gguf(tmp_path, "reasoning.gguf"),
+    }
+    before = (tmp_path / "configs" / "models.yaml").read_bytes()
+
+    report = run_mac_activation(
+        tmp_path,
+        model_paths=paths,
+        voice_paths={},
+        skip_voice=True,
+    )
+
+    assert report.final_status == "validated"
+    assert [(entry.role, entry.basename) for entry in report.models.entries] == [
+        ("brain", "brain.gguf"),
+        ("coding", "coding.gguf"),
+        ("reading", "reading.gguf"),
+        ("reasoning", "reasoning.gguf"),
+    ]
+    assert str(tmp_path) not in report.model_dump_json()
+    assert (tmp_path / "configs" / "models.yaml").read_bytes() == before
+
+
+def test_activation_apply_registers_reasoning_model_when_supplied(tmp_path: Path) -> None:
+    _copy_configs(tmp_path)
+    paths = {
+        "brain": _gguf(tmp_path, "brain.gguf"),
+        "coding": _gguf(tmp_path, "coding.gguf"),
+        "reading": _gguf(tmp_path, "reading.gguf"),
+        "reasoning": _gguf(tmp_path, "reasoning.gguf"),
+    }
+
+    report = run_mac_activation(
+        tmp_path,
+        model_paths=paths,
+        model_ids={"reasoning": "local-reasoning"},
+        voice_paths={},
+        skip_voice=True,
+        apply=True,
+    )
+
+    assert report.final_status == "applied"
+    data = yaml.safe_load((tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    reasoning = next(model for model in data["models"].values() if model["role"] == "reasoning")
+    assert reasoning["id"] == "local-reasoning"
+    assert reasoning["path"] == str(paths["reasoning"].resolve())
+    assert validate_configuration(tmp_path) == []
+
+
+def test_activation_omitted_reasoning_model_does_not_fail(tmp_path: Path) -> None:
+    _copy_configs(tmp_path)
+    report = run_mac_activation(
+        tmp_path,
+        model_paths={
+            "brain": _gguf(tmp_path, "brain.gguf"),
+            "coding": _gguf(tmp_path, "coding.gguf"),
+            "reading": _gguf(tmp_path, "reading.gguf"),
+            "reasoning": None,
+        },
+        voice_paths={},
+        skip_voice=True,
+    )
+
+    assert report.final_status == "validated"
+    assert [entry.role for entry in report.models.entries] == ["brain", "coding", "reading"]
+
+
+def test_activation_non_gguf_reasoning_path_fails_without_writing_config(tmp_path: Path) -> None:
+    _copy_configs(tmp_path)
+    before = (tmp_path / "configs" / "models.yaml").read_bytes()
+    reasoning = tmp_path / "reasoning.txt"
+    reasoning.write_text("not gguf", encoding="utf-8")
+
+    report = run_mac_activation(
+        tmp_path,
+        model_paths={"brain": _gguf(tmp_path, "brain.gguf"), "reasoning": reasoning},
+        voice_paths={},
+        skip_voice=True,
+        apply=True,
+    )
+
+    assert report.final_status == "failed"
+    assert report.models.error is not None
+    assert "reasoning model must be a local .gguf file" in report.models.error
+    assert (tmp_path / "configs" / "models.yaml").read_bytes() == before
+
+
 # --- CLI -------------------------------------------------------------------
 
 
@@ -400,6 +516,33 @@ def test_activation_cli_apply_and_dry_run_conflict(tmp_path: Path, monkeypatch) 
         ["april", "setup", "mac-activation", "--brain", "/m/b.gguf", "--apply", "--dry-run"],
     )
     assert result.exit_code == 1
+
+
+def test_activation_cli_passes_reasoning_and_reasoning_id(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    model_setup = RecordingSetup(_model_result_for_roles("brain", "reasoning"))
+    monkeypatch.setattr("apps.runner.mac_activation.setup_model_set", model_setup)
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "setup",
+            "mac-activation",
+            "--brain",
+            "/models/brain.gguf",
+            "--reasoning",
+            "/models/reasoning.gguf",
+            "--reasoning-id",
+            "local-reasoning",
+            "--skip-voice",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "reasoning: reasoning.gguf" in result.output
+    call = model_setup.calls[0]
+    assert call["role_paths"]["reasoning"] == Path("/models/reasoning.gguf")
+    assert call["role_ids"]["reasoning"] == "local-reasoning"
 
 
 # --- transactional apply ---------------------------------------------------

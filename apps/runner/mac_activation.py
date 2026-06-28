@@ -45,7 +45,7 @@ ModelSetup = Callable[..., dict[str, Any]]
 VoiceSetup = Callable[..., dict[str, Any]]
 AcceptanceRunner = Callable[[], AcceptanceReport]
 
-_MODEL_ROLES = ("brain", "coding", "reading")
+_MODEL_ROLES = ("brain", "coding", "reading", "reasoning")
 _VOICE_REQUIRED = ("whisper_binary", "whisper_model", "piper_binary", "piper_model")
 _MODELS_CONFIG = ("configs", "models.yaml")
 _VOICE_CONFIG = ("configs", "april.yaml")
@@ -175,6 +175,7 @@ def _model_summary(
     *,
     home: Path,
     model_paths: dict[str, Path | None],
+    model_ids: dict[str, str | None] | None,
     apply: bool,
     model_setup: ModelSetup,
 ) -> ModelsActivationSummary:
@@ -193,6 +194,9 @@ def _model_summary(
         result = model_setup(
             home=home,
             role_paths={role: model_paths.get(role) for role in _MODEL_ROLES},
+            role_ids={role: model_ids.get(role) for role in _MODEL_ROLES}
+            if model_ids is not None
+            else None,
             apply=apply,
         )
     except ConfigError as exc:
@@ -303,6 +307,7 @@ def _apply_transaction(
     *,
     home: Path,
     model_paths: dict[str, Path | None],
+    model_ids: dict[str, str | None] | None,
     voice_paths: dict[str, Path | None],
     skip_voice: bool,
     enable_voice: bool,
@@ -315,7 +320,13 @@ def _apply_transaction(
         requested=True, backup_created=True, backup_basename=backup.directory.name
     )
 
-    models = _model_summary(home=home, model_paths=model_paths, apply=True, model_setup=model_setup)
+    models = _model_summary(
+        home=home,
+        model_paths=model_paths,
+        model_ids=model_ids,
+        apply=True,
+        model_setup=model_setup,
+    )
     voice = VoiceActivationSummary(skipped=True)
     failure_reason = models.error
     if not failure_reason and not skip_voice:
@@ -397,7 +408,8 @@ def _next_actions(
     if models.error:
         add(
             "run april setup mac-activation --brain /absolute/path/brain.gguf "
-            "--coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run"
+            "--coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf "
+            "[--reasoning /absolute/path/reasoning.gguf] --dry-run"
         )
     if voice.error:
         add(
@@ -432,6 +444,7 @@ def run_mac_activation(
     *,
     model_paths: dict[str, Path | None],
     voice_paths: dict[str, Path | None],
+    model_ids: dict[str, str | None] | None = None,
     skip_voice: bool = False,
     apply: bool = False,
     enable_voice: bool = False,
@@ -454,7 +467,11 @@ def run_mac_activation(
 
     # Phase 1 — validate everything up front. This never writes config.
     models = _model_summary(
-        home=home, model_paths=model_paths, apply=False, model_setup=model_setup
+        home=home,
+        model_paths=model_paths,
+        model_ids=model_ids,
+        apply=False,
+        model_setup=model_setup,
     )
     voice = _voice_summary(
         home=home,
@@ -472,6 +489,7 @@ def run_mac_activation(
         models, voice, transaction = _apply_transaction(
             home=home,
             model_paths=model_paths,
+            model_ids=model_ids,
             voice_paths=voice_paths,
             skip_voice=skip_voice,
             enable_voice=enable_voice,

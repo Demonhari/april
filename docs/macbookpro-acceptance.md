@@ -243,7 +243,8 @@ contain tokens, transcripts, generated text, or absolute paths. A `warning` exit
 intended GGUF model set and (unless `--skip-voice`) the local voice tools, writes
 config only with `--apply`, and can chain straight into acceptance. It is
 **dry-run by default** and never downloads models, installs packages, uses
-`sudo`/Homebrew, or records audio.
+`sudo`/Homebrew, or records audio. `--reasoning` / `--reasoning-id` are optional;
+when omitted, the reasoning agent keeps using the configured brain model.
 
 ### Transactional apply and rollback
 
@@ -271,6 +272,7 @@ run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
+  --reasoning /absolute/path/reasoning.gguf \
   --skip-voice \
   --apply \
   --run-acceptance \
@@ -282,6 +284,7 @@ run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
+  --reasoning /absolute/path/reasoning.gguf \
   --whisper-binary /absolute/path/whisper \
   --whisper-model /absolute/path/whisper-model.bin \
   --piper-binary /absolute/path/piper \

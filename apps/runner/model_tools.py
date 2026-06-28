@@ -330,12 +330,8 @@ def setup_voice_stack(
     for key, path in required.items():
         resolved = path.expanduser().resolve()
         if not resolved.exists():
-            if apply:
-                _write_voice_enabled(root, config_path, enabled=False)
             raise ConfigError(f"Voice path does not exist: {path.name}")
         if not resolved.is_file():
-            if apply:
-                _write_voice_enabled(root, config_path, enabled=False)
             raise ConfigError(f"Voice path is not a file: {path.name}")
         resolved_required[key] = resolved
 
@@ -351,19 +347,19 @@ def setup_voice_stack(
     backup: Path | None = None
     if apply:
         backup = _timestamped_backup(config_path)
-        data = _read_yaml(config_path)
-        voice = data.setdefault("voice", {})
-        if not isinstance(voice, dict):
-            raise ConfigError("configs/april.yaml voice field must be a mapping.")
-        for key, path in resolved_required.items():
-            voice[key] = str(path)
-        if resolved_wake is not None:
-            voice["wake_word_model_path"] = str(resolved_wake)
-        # Reached only after every required path validated above. Applying without
-        # --enable is an explicit safe-off write, even if the existing config was on.
-        voice["enabled"] = bool(enable)
-        _write_yaml(config_path, data)
         try:
+            data = _read_yaml(config_path)
+            voice = data.setdefault("voice", {})
+            if not isinstance(voice, dict):
+                raise ConfigError("configs/april.yaml voice field must be a mapping.")
+            for key, path in resolved_required.items():
+                voice[key] = str(path)
+            if resolved_wake is not None:
+                voice["wake_word_model_path"] = str(resolved_wake)
+            # Reached only after every required path validated above. Applying without
+            # --enable is an explicit safe-off write, even if the existing config was on.
+            voice["enabled"] = bool(enable)
+            _write_yaml(config_path, data)
             _validate_after_write(root)
         except Exception:
             shutil.copy2(backup, config_path)
@@ -400,18 +396,6 @@ def setup_voice_stack(
         ],
         "mutating": apply,
     }
-
-
-def _write_voice_enabled(root: Path, config_path: Path, *, enabled: bool) -> None:
-    """Best-effort safe-off write when an applying voice setup cannot validate."""
-    if not config_path.exists():
-        return
-    data = _read_yaml(config_path)
-    voice = data.setdefault("voice", {})
-    if not isinstance(voice, dict):
-        return
-    voice["enabled"] = enabled
-    _write_yaml(config_path, data)
 
 
 def create_macos_app_stub(
