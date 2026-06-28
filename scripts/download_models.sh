@@ -3,52 +3,87 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_DIR="$ROOT_DIR/models"
-OVERWRITE="false"
-SHA256=""
-URL=""
-OUT=""
+PYTHON="${APRIL_PYTHON:-$ROOT_DIR/.venv/bin/python}"
+if [[ ! -x "$PYTHON" ]]; then
+  PYTHON="python3"
+fi
 
 show_help() {
   cat <<'HELP'
-Usage: scripts/download_models.sh --url URL --out FILENAME [--sha256 HASH] [--overwrite]
+Usage:
+  scripts/download_models.sh --all-core --apply --yes [--skip-existing]
+  scripts/download_models.sh --role brain --apply --yes [--skip-existing]
 
-APRIL does not provide undocumented model URLs and does not download models
-automatically. You must supply an explicit URL or manually place GGUF files in
-models/. Existing files are never overwritten unless --overwrite is supplied.
+Manifest mode delegates to:
+  run april model download ...
+
+APRIL never downloads models during tests, CI, config validation, import, or
+fake verification. This script downloads only when you run it explicitly.
+
+Legacy explicit URL mode is still available but deprecated:
+  scripts/download_models.sh --url URL --out FILENAME [--sha256 HASH] [--overwrite]
 HELP
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --url) URL="$2"; shift 2 ;;
-    --out) OUT="$2"; shift 2 ;;
-    --sha256) SHA256="$2"; shift 2 ;;
-    --overwrite) OVERWRITE="true"; shift ;;
-    -h|--help) show_help; exit 0 ;;
-    *) echo "Unknown option: $1" >&2; exit 2 ;;
-  esac
-done
+legacy_download() {
+  local overwrite="false"
+  local sha256=""
+  local url=""
+  local out=""
 
-if [[ -z "$URL" || -z "$OUT" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --url) url="$2"; shift 2 ;;
+      --out) out="$2"; shift 2 ;;
+      --sha256) sha256="$2"; shift 2 ;;
+      --overwrite|--force) overwrite="true"; shift ;;
+      -h|--help) show_help; exit 0 ;;
+      *) echo "Unknown legacy option: $1" >&2; exit 2 ;;
+    esac
+  done
+
+  if [[ -z "$url" || -z "$out" ]]; then
+    show_help
+    exit 2
+  fi
+
+  mkdir -p "$MODEL_DIR"
+  local target="$MODEL_DIR/$out"
+  local part="$target.part"
+  if [[ -e "$target" && "$overwrite" != "true" ]]; then
+    echo "Refusing to overwrite existing file: $target" >&2
+    exit 1
+  fi
+  if [[ -e "$part" ]]; then
+    echo "Refusing to overwrite existing partial file: $part" >&2
+    exit 1
+  fi
+
+  echo "Deprecated explicit URL mode; prefer: run april model download --all-core --apply --yes" >&2
+  curl -L --fail "$url" -o "$part"
+  if [[ -n "$sha256" ]]; then
+    local actual
+    actual="$(shasum -a 256 "$part" | awk '{print $1}')"
+    if [[ "$actual" != "$sha256" ]]; then
+      echo "SHA-256 mismatch. Expected $sha256 got $actual" >&2
+      rm -f "$part"
+      exit 1
+    fi
+  fi
+  mv -f "$part" "$target"
+  echo "Saved $target"
+}
+
+if [[ $# -eq 0 ]]; then
   show_help
   exit 2
 fi
 
-mkdir -p "$MODEL_DIR"
-TARGET="$MODEL_DIR/$OUT"
-if [[ -e "$TARGET" && "$OVERWRITE" != "true" ]]; then
-  echo "Refusing to overwrite existing file: $TARGET" >&2
-  exit 1
-fi
-
-curl -L --fail "$URL" -o "$TARGET"
-if [[ -n "$SHA256" ]]; then
-  ACTUAL="$(shasum -a 256 "$TARGET" | awk '{print $1}')"
-  if [[ "$ACTUAL" != "$SHA256" ]]; then
-    echo "SHA-256 mismatch. Expected $SHA256 got $ACTUAL" >&2
-    rm -f "$TARGET"
-    exit 1
+for arg in "$@"; do
+  if [[ "$arg" == "--url" || "$arg" == "--out" ]]; then
+    legacy_download "$@"
+    exit $?
   fi
-fi
+done
 
-echo "Saved $TARGET"
+exec "$PYTHON" -m apps.runner.main april model download "$@"

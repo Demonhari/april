@@ -103,7 +103,12 @@ extras remain opt-in and are not pinned in the base constraints file.
 
 ## Local Models
 
-APRIL never downloads models. Register existing local GGUF files with:
+APRIL never downloads models implicitly. Model files are large local artifacts
+and are not committed to Git; tests and CI stay offline and never fetch them.
+You can either place existing GGUF files yourself or explicitly run the
+manifest-backed downloader on the target Mac.
+
+Register existing local GGUF files with:
 
 ```bash
 run april model import --role brain --id april-brain --name granite3.3-2b --path /absolute/path/model.gguf
@@ -126,6 +131,38 @@ run april model doctor
 run april verify --real-model /absolute/path/model.gguf
 run april model benchmark /absolute/path/model.gguf --runs 1 --max-output-tokens 32
 ```
+
+### Target Mac model install
+
+The default full Mac activation core is `brain`, `coding`, and `reading`.
+Reasoning remains optional. To explicitly download APRIL's manifest-approved
+default core GGUFs from Hugging Face, run:
+
+```bash
+run april model download --all-core --apply --yes
+run april model doctor
+run april setup mac-activation \
+  --brain models/granite3.3-2b-q4_k_m.gguf \
+  --coding models/qwen3-1.7b-q8_0.gguf \
+  --reading models/qwen3-0.6b-q8_0.gguf \
+  --skip-voice \
+  --apply \
+  --run-acceptance \
+  --start-services
+run april verify --all-configured-models \
+  --require-real-model \
+  --report data/verification/mac-readiness.json
+```
+
+`run april model download` is dry-run by default and only downloads entries from
+`configs/model_downloads.yaml`. Network access requires `--apply`;
+non-interactive use also requires `--yes`. Downloads go through a `.part` file,
+validate GGUF magic/size, atomically rename on success, compute SHA-256, and
+then update `configs/models.yaml` through the same validated model setup path.
+Existing targets are refused unless you pass `--skip-existing` or `--force`.
+Downloading is **not** verification: `real_model_ready` and
+`real_model_verified` remain false until a real GGUF load/chat/stream/unload
+verification passes.
 
 Missing files do not crash startup. With the real `llama_cpp` backend, runtime
 health reports `degraded` and lists the missing model ids. With the fake backend
@@ -230,7 +267,7 @@ On a target Mac, run setup and verification in this order:
 2. `run april setup bootstrap`
 3. `run april setup tokens` if bootstrap reports token warnings
 4. `run april model profile apply intel_macbook_cpu_low`
-5. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`, then repeat with `--apply` (add optional `--reasoning /absolute/path/reasoning.gguf` only if you have one)
+5. Either place existing GGUFs and run `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`, then repeat with `--apply`, or explicitly run `run april model download --all-core --apply --yes`
 6. `pip install -e '.[runtime]'`
 7. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
 8. `run april verify --workflow --real-model --report data/verification/workflow-real.json`

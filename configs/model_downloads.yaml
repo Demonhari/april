@@ -1,0 +1,38 @@
+brain:
+  role: brain
+  id: april-brain
+  name: granite3.3-2b
+  repo_id: ibm-granite/granite-3.3-2b-instruct-GGUF
+  filename: granite-3.3-2b-instruct-Q4_K_M.gguf
+  target_path: models/granite3.3-2b-q4_k_m.gguf
+  required_for_full_activation: true
+  license_hint: apache-2.0
+  source: huggingface
+
+coding:
+  role: coding
+  id: april-coding
+  name: qwen3-1.7b
+  repo_id: Qwen/Qwen3-1.7B-GGUF
+  filename: Qwen3-1.7B-Q8_0.gguf
+  target_path: models/qwen3-1.7b-q8_0.gguf
+  required_for_full_activation: true
+  license_hint: check-upstream
+  source: huggingface
+
+reading:
+  role: reading
+  id: april-reading
+  name: qwen3-0.6b
+  repo_id: Qwen/Qwen3-0.6B-GGUF
+  filename: Qwen3-0.6B-Q8_0.gguf
+  target_path: models/qwen3-0.6b-q8_0.gguf
+  required_for_full_activation: true
+  license_hint: check-upstream
+  source: huggingface
+
+# Optional future entries may be added for:
+# reasoning:
+# embedding:
+# Do not add a default reasoning or embedding download until the model choice is
+# explicit and intentionally reviewed.

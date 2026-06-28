@@ -38,6 +38,12 @@ from apps.runner.mac_activation import (
     write_activation_report,
 )
 from apps.runner.mac_report import ReportThresholds, write_report
+from apps.runner.model_downloads import (
+    ModelDownloadReport,
+    default_model_download_report_path,
+    run_model_downloads,
+    write_model_download_report,
+)
 from apps.runner.model_tools import (
     apply_model_profile,
     create_macos_app_stub,
@@ -751,6 +757,89 @@ def model_import_command(
     console.print(f"[green]Registered {result.model_id} for role {result.role}.[/green]")
     console.print(f"Model path: {result.path}")
     console.print(result.next_command)
+
+
+def _print_model_download(report: ModelDownloadReport) -> None:
+    heading = "APPLIED" if report.applied else "DRY RUN"
+    console.print(f"APRIL model download — {heading}")
+    console.print(
+        "Download only installs local GGUF files and updates model config; "
+        "it does not verify real model readiness."
+    )
+    for entry in report.entries:
+        suffix = f", sha256={entry.sha256}" if entry.sha256 else ""
+        console.print(
+            f"{entry.role}: {entry.repo_id}/{entry.filename} -> "
+            f"{entry.target_path} ({entry.status}{suffix})"
+        )
+    if report.registration_applied:
+        console.print(
+            "Model registry updated"
+            + (
+                f" (backup={report.registration_backup_basename})"
+                if report.registration_backup_basename
+                else ""
+            )
+        )
+    console.print("Real model verified: false")
+    console.print("Next commands:")
+    for command in report.next_commands:
+        console.print(f"  {command}", markup=False)
+
+
+@model_app.command("download")
+def model_download_command(
+    all_core: bool = typer.Option(False, "--all-core", help="Download brain/coding/reading."),
+    role: str | None = typer.Option(
+        None, "--role", help="Download one manifest role: brain/coding/reading/reasoning/embedding."
+    ),
+    apply_changes: bool = typer.Option(False, "--apply"),
+    yes: bool = typer.Option(False, "--yes", help="Confirm non-interactive network download."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing target file."),
+    skip_existing: bool = typer.Option(
+        False, "--skip-existing", help="Skip roles whose target file already exists."
+    ),
+    write_report: bool = typer.Option(
+        False,
+        "--write-report",
+        help="Write a redacted report to data/verification/model-download-<timestamp>.json.",
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Explicit user-run GGUF downloader for manifest-approved local models."""
+    confirmed = yes
+    if apply_changes and not confirmed:
+        if not sys.stdin.isatty():
+            console.print("[red]Model downloads require --yes when --apply is used.[/red]")
+            raise typer.Exit(1)
+        confirmed = typer.confirm(
+            "Download GGUF model files from the manifest-approved source?",
+            default=False,
+        )
+        if not confirmed:
+            console.print("[yellow]Cancelled; no downloads were started.[/yellow]")
+            raise typer.Exit(1)
+    try:
+        report = run_model_downloads(
+            _manager().home,
+            all_core=all_core,
+            role=role,
+            apply=apply_changes,
+            yes=confirmed,
+            force=force,
+            skip_existing=skip_existing,
+        )
+    except ConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if json_output:
+        console.print_json(data=report.model_dump())
+    else:
+        _print_model_download(report)
+    if write_report:
+        target = default_model_download_report_path(_manager().home)
+        written = write_model_download_report(report, target)
+        console.print(f"[green]Wrote model download report to {written}[/green]")
 
 
 @model_app.command("benchmark")

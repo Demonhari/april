@@ -62,8 +62,36 @@ for real-model and real-voice readiness.
 
 ## Configure GGUF models
 
-Validate first with `--dry-run`, then apply. Use **absolute paths**; APRIL never
-downloads models and never commits them.
+GGUF files are large local artifacts, so APRIL does not commit them and CI never
+downloads them. You can either explicitly download APRIL's default core models
+from the checked-in manifest or place existing local GGUFs yourself. Downloading
+is not verification; real-model readiness remains false until load/chat/stream/
+unload verification actually passes.
+
+### Target Mac model install
+
+```bash
+run april model download --all-core --apply --yes
+run april model doctor
+run april setup mac-activation \
+  --brain models/granite3.3-2b-q4_k_m.gguf \
+  --coding models/qwen3-1.7b-q8_0.gguf \
+  --reading models/qwen3-0.6b-q8_0.gguf \
+  --skip-voice \
+  --apply \
+  --run-acceptance \
+  --start-services
+```
+
+`run april model download` reads only `configs/model_downloads.yaml`, is dry-run
+by default, and requires `--apply --yes` before network access starts. It writes
+to `.part`, validates GGUF magic/size, atomically renames on success, records a
+SHA-256, and registers the model through the same validated setup path. Use
+`--skip-existing` to reuse existing targets or `--force` to overwrite them.
+Reasoning remains optional and is not downloaded by default.
+
+If you already have GGUF files, validate first with `--dry-run`, then apply. Use
+**absolute paths**; APRIL never downloads models from model import/setup.
 
 ```bash
 # Optional: add --reasoning /absolute/path/reasoning.gguf when configured.
