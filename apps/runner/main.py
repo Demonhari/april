@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -17,14 +18,23 @@ from rich.table import Table
 
 from apps.cli.render import console
 from apps.runner.acceptance import (
+    AcceptanceFlagError,
     AcceptanceReport,
+    ServicesSummary,
     default_acceptance_report_path,
     run_acceptance,
+    validate_acceptance_flags,
     write_acceptance_report,
 )
 from apps.runner.bootstrap import bootstrap as run_bootstrap
 from apps.runner.evals import run_fake_brain_eval, run_real_brain_eval
 from apps.runner.install import is_april_wrapper, path_contains_dir
+from apps.runner.mac_activation import (
+    MacActivationReport,
+    default_activation_report_path,
+    run_mac_activation,
+    write_activation_report,
+)
 from apps.runner.mac_report import ReportThresholds, write_report
 from apps.runner.model_tools import (
     apply_model_profile,
@@ -1586,6 +1596,133 @@ def setup_voice(
         console.print(f"  {command}")
 
 
+_ACTIVATION_STATUS_STYLE = {
+    "validated": "[green]VALIDATED[/green]",
+    "applied": "[green]APPLIED[/green]",
+    "failed": "[red]FAILED[/red]",
+}
+
+
+def _print_activation(report: MacActivationReport) -> None:
+    status = _ACTIVATION_STATUS_STYLE.get(report.final_status, report.final_status)
+    console.print(f"APRIL Mac activation — {status} (mode={report.mode})")
+    models = report.models
+    if models.error:
+        console.print(f"[red]Models: {models.error}[/red]")
+    else:
+        console.print(f"Models: validated={models.validated}, applied={models.applied}")
+        for entry in models.entries:
+            console.print(f"  {entry.role}: {entry.basename}")
+    voice = report.voice
+    if voice.skipped:
+        console.print("Voice: skipped (--skip-voice)")
+    elif voice.error:
+        console.print(f"[red]Voice: {voice.error}[/red]")
+    else:
+        console.print(
+            f"Voice: validated={voice.validated}, applied={voice.applied}, "
+            f"enabled={voice.enabled}"
+        )
+        for artifact in voice.artifacts:
+            console.print(f"  {artifact.name}: {artifact.basename or 'not configured'}")
+        for warning in voice.warnings:
+            console.print(f"[yellow]Warning:[/yellow] {warning}")
+    acceptance_link = report.acceptance
+    if acceptance_link.ran:
+        console.print(
+            f"Acceptance: {acceptance_link.final_status} "
+            f"(level={acceptance_link.acceptance_level}, "
+            f"backend={acceptance_link.runtime_backend})"
+        )
+    elif acceptance_link.skipped_reason:
+        console.print(f"Acceptance: skipped — {acceptance_link.skipped_reason}")
+    if report.next_actions:
+        console.print("[bold]Next commands:[/bold]")
+        for action in report.next_actions:
+            # markup=False so command tokens like '.[runtime]' are not parsed as tags.
+            console.print(f"  {action}", markup=False)
+
+
+@setup_app.command("mac-activation")
+def setup_mac_activation(
+    brain: Path | None = typer.Option(None, "--brain", help="Local brain GGUF path."),
+    coding: Path | None = typer.Option(None, "--coding", help="Local coding GGUF path."),
+    reading: Path | None = typer.Option(None, "--reading", help="Local reading GGUF path."),
+    whisper_binary: Path | None = typer.Option(None, "--whisper-binary"),
+    whisper_model: Path | None = typer.Option(None, "--whisper-model"),
+    piper_binary: Path | None = typer.Option(None, "--piper-binary"),
+    piper_model: Path | None = typer.Option(None, "--piper-model"),
+    wake_word_model: Path | None = typer.Option(None, "--wake-word-model"),
+    skip_voice: bool = typer.Option(
+        False, "--skip-voice", help="Activate models only; skip voice."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    apply_changes: bool = typer.Option(False, "--apply"),
+    run_acceptance_after: bool = typer.Option(
+        False, "--run-acceptance", help="After --apply, run real-model acceptance."
+    ),
+    write_report: bool = typer.Option(
+        False,
+        "--write-report",
+        help="Write a redacted report to data/verification/mac-activation-<timestamp>.json.",
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Guided local activation: validate models + voice, optionally apply and verify.
+
+    Dry-run by default. Never downloads models, installs packages, uses sudo or
+    Homebrew, or records audio. Config is written only with --apply.
+    """
+    if apply_changes and dry_run:
+        console.print("[red]Use either --apply or --dry-run, not both.[/red]")
+        raise typer.Exit(1)
+    manager = _manager()
+    home = manager.home
+
+    acceptance_runner: Callable[[], AcceptanceReport] | None = None
+    if run_acceptance_after and apply_changes:
+
+        def _activation_acceptance() -> AcceptanceReport:
+            return run_acceptance(home, require_real_models=True)
+
+        acceptance_runner = _activation_acceptance
+
+    report_obj = run_mac_activation(
+        home,
+        model_paths={"brain": brain, "coding": coding, "reading": reading},
+        voice_paths={
+            "whisper_binary": whisper_binary,
+            "whisper_model": whisper_model,
+            "piper_binary": piper_binary,
+            "piper_model": piper_model,
+            "wake_word_model": wake_word_model,
+        },
+        skip_voice=skip_voice,
+        apply=apply_changes,
+        run_acceptance_after=run_acceptance_after,
+        acceptance_runner=acceptance_runner,
+    )
+
+    target = default_activation_report_path(home) if write_report else None
+
+    if json_output:
+        console.print_json(data=report_obj.model_dump())
+    else:
+        _print_activation(report_obj)
+
+    if target is not None:
+        written = write_activation_report(report_obj, target)
+        console.print(
+            f"[green]Wrote activation report to {written}[/green] "
+            f"(final_status: {report_obj.final_status})"
+        )
+
+    if report_obj.final_status == "failed":
+        raise typer.Exit(1)
+    if report_obj.acceptance.ran and report_obj.acceptance.final_status == "fail":
+        raise typer.Exit(1)
+
+
 @setup_app.command("app-stub")
 def setup_app_stub(
     output: Path = typer.Option(Path("dist/APRIL.app"), "--output"),
@@ -1920,8 +2057,8 @@ def _print_acceptance(report: AcceptanceReport) -> None:
     env = report.environment
     console.print(
         f"APRIL acceptance — {status} "
-        f"(backend={report.runtime_backend}, env={env.deployment}, "
-        f"arch={env.cpu_architecture})"
+        f"(level={report.acceptance_level}, backend={report.runtime_backend}, "
+        f"env={env.deployment}, arch={env.cpu_architecture})"
     )
     table = Table(title="Acceptance gates")
     table.add_column("Gate")
@@ -1972,12 +2109,95 @@ def _print_acceptance(report: AcceptanceReport) -> None:
             f"wake_detected={wake.wake_word_detected}, stt={wake.stt_success}, "
             f"api={wake.api_success}, playback_confirmed={wake.playback_user_confirmed}",
         )
+    services = report.services
+    if services.requested:
+        table.add_row(
+            "services",
+            services.mode,
+            f"startup={services.startup_status}, shutdown={services.shutdown_status}, "
+            f"api={services.api_reachable}, runtime={services.runtime_reachable}",
+        )
     console.print(table)
     if report.next_actions:
         console.print("[bold]Next actions:[/bold]")
         for action in report.next_actions:
             # markup=False so command tokens like '.[runtime]' are not parsed as tags.
             console.print(f"  {action}", markup=False)
+
+
+def _run_acceptance_with_services(
+    *,
+    manager: AprilServiceManager,
+    require_real_models: bool,
+    allow_sanity_pass: bool,
+    start_services: bool,
+    fake_services: bool,
+    keep_services_running: bool,
+    service_timeout: float,
+    max_output_tokens: int,
+    timeout: float,
+    thresholds: ReportThresholds,
+    voice_live_runner: Callable[[], VoiceLiveReport] | None,
+    wake_word_live_runner: Callable[[], WakeWordLiveReport] | None,
+) -> AcceptanceReport:
+    """Orchestrate APRIL services around an acceptance run and record the lifecycle.
+
+    Services are only touched when ``start_services`` is set. Services that
+    acceptance itself started are always stopped at the end (success, failure,
+    timeout, cancellation, or KeyboardInterrupt) unless ``keep_services_running``.
+    The redacted lifecycle is embedded in the returned report's ``services``.
+    """
+    services = ServicesSummary(
+        requested=start_services,
+        mode=("fake" if fake_services else "real") if start_services else "none",
+    )
+    started_by_acceptance = False
+    try:
+        if start_services:
+            manager.startup_timeout_seconds = service_timeout
+            before = manager.status()
+            if before.ok:
+                services.startup_status = "already_running"
+            else:
+                status = manager.start(fake_backend=fake_services)
+                started_by_acceptance = True
+                services.started_by_acceptance = True
+                services.startup_status = "ok" if status.ok else "failed"
+            current = manager.status()
+            services.api_reachable = current.api.healthy
+            services.runtime_reachable = current.runtime.healthy
+        report = run_acceptance(
+            manager.home,
+            require_real_models=require_real_models,
+            allow_sanity_pass=allow_sanity_pass,
+            max_output_tokens=max_output_tokens,
+            timeout=timeout,
+            thresholds=thresholds,
+            services=services,
+            voice_live_runner=voice_live_runner,
+            wake_word_live_runner=wake_word_live_runner,
+        )
+    except BaseException:
+        # Always release services acceptance started, even on timeout/cancel/Ctrl-C.
+        if started_by_acceptance and not keep_services_running:
+            with contextlib.suppress(Exception):
+                manager.stop()
+        raise
+
+    # Mutate report.services (not the local) so the lifecycle is recorded regardless
+    # of how pydantic stored the embedded summary.
+    if started_by_acceptance and not keep_services_running:
+        try:
+            manager.stop()
+            report.services.stopped_after_acceptance = True
+            report.services.shutdown_status = "stopped"
+        except Exception:
+            report.services.shutdown_status = "failed"
+    elif started_by_acceptance:
+        report.services.shutdown_status = "kept_running"
+    else:
+        report.services.shutdown_status = "not_applicable"
+    return report
 
 
 @april_app.command()
@@ -1987,12 +2207,33 @@ def acceptance(
         "--require-real-models",
         help="Fail unless every configured chat GGUF model loads, chats, streams, and unloads.",
     ),
+    allow_sanity_pass: bool = typer.Option(
+        False,
+        "--allow-sanity-pass",
+        help="Allow a clean fake-only run to report pass (otherwise fake-only is a warning).",
+    ),
     voice_live: bool = typer.Option(
         False, "--voice-live", help="Also run interactive push-to-talk voice verification."
     ),
     wake_word_live: bool = typer.Option(
         False, "--wake-word-live", help="Also run interactive live wake-word verification."
     ),
+    start_services: bool = typer.Option(
+        False,
+        "--start-services",
+        help="Start missing APRIL services before live voice/wake-word checks.",
+    ),
+    fake_services: bool = typer.Option(
+        False,
+        "--fake-services",
+        help="With --start-services, start services with the fake runtime (plumbing only).",
+    ),
+    keep_services_running: bool = typer.Option(
+        False,
+        "--keep-services-running",
+        help="Leave services that acceptance started running afterwards.",
+    ),
+    service_timeout: float = typer.Option(20.0, "--service-timeout", min=1.0),
     write_report: bool = typer.Option(
         False,
         "--write-report",
@@ -2011,9 +2252,24 @@ def acceptance(
     ),
     max_rss_mb: float | None = typer.Option(None, "--max-rss-mb", min=0.0),
 ) -> None:
-    """Single MacBook Pro acceptance gate: config + readiness + fake (+ real/voice)."""
+    """Single MacBook Pro acceptance gate: config + readiness + fake (+ real/voice).
+
+    ``run april acceptance`` is fake/local sanity only and reports a warning unless
+    ``--require-real-models`` is supplied (or ``--allow-sanity-pass`` for a clean
+    fake-only pass). Add ``--start-services`` so live voice/wake-word checks can
+    reach the Core API; ``--fake-services`` uses the fake runtime for plumbing only.
+    """
+    try:
+        validate_acceptance_flags(
+            require_real_models=require_real_models,
+            start_services=start_services,
+            fake_services=fake_services,
+        )
+    except AcceptanceFlagError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
     manager = _manager()
-    home = manager.home
     settings = manager.settings
     thresholds = ReportThresholds(
         min_tokens_per_second=min_tokens_per_second,
@@ -2021,9 +2277,14 @@ def acceptance(
         max_first_token_latency_seconds=max_first_token_latency_seconds,
         max_rss_mb=max_rss_mb,
     )
-    report_obj = run_acceptance(
-        home,
+    report_obj = _run_acceptance_with_services(
+        manager=manager,
         require_real_models=require_real_models,
+        allow_sanity_pass=allow_sanity_pass,
+        start_services=start_services,
+        fake_services=fake_services,
+        keep_services_running=keep_services_running,
+        service_timeout=service_timeout,
         max_output_tokens=max_output_tokens,
         timeout=timeout,
         thresholds=thresholds,
@@ -2033,7 +2294,7 @@ def acceptance(
 
     target = report
     if target is None and write_report:
-        target = default_acceptance_report_path(home)
+        target = default_acceptance_report_path(manager.home)
 
     if json_output:
         console.print_json(data=report_obj.model_dump())

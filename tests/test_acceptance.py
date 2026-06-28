@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
-from apps.runner.acceptance import AcceptanceReport, run_acceptance
+from apps.runner.acceptance import (
+    AcceptanceFlagError,
+    AcceptanceReport,
+    run_acceptance,
+    validate_acceptance_flags,
+)
 from apps.runner.main import app
 from apps.runner.multi_model_report import MultiModelVerificationReport
 from apps.runner.readiness import ReadinessReport
+from apps.runner.service_manager import ServiceInfo, ServiceStatus
 from apps.runner.verify import VerifyCheck
 from apps.runner.voice_live import VoiceLiveReport
 from apps.runner.wake_live import WakeWordLiveReport
@@ -18,6 +25,50 @@ class FakeManager:
     def __init__(self, home: Path) -> None:
         self.home = home
         self.settings = load_settings(root=home)
+
+
+class FakeServiceManager:
+    """Records service start/stop calls without spawning anything."""
+
+    def __init__(self, home: Path, *, initially_ok: bool = False, start_ok: bool = True) -> None:
+        self.home = home
+        self.settings = load_settings(root=home)
+        self.startup_timeout_seconds = 20.0
+        self._running = initially_ok
+        self._start_ok = start_ok
+        self.started: list[bool] = []
+        self.stopped = 0
+
+    def _status(self, ok: bool) -> ServiceStatus:
+        return ServiceStatus(
+            runtime=ServiceInfo(
+                name="runtime",
+                pid=1 if ok else None,
+                running=ok,
+                healthy=ok,
+                log_path=self.home / "logs" / "runtime.log",
+            ),
+            api=ServiceInfo(
+                name="api",
+                pid=2 if ok else None,
+                running=ok,
+                healthy=ok,
+                log_path=self.home / "logs" / "api.log",
+            ),
+        )
+
+    def status(self) -> ServiceStatus:
+        return self._status(self._running)
+
+    def start(self, *, fake_backend: bool = False) -> ServiceStatus:
+        self.started.append(fake_backend)
+        self._running = self._start_ok
+        return self._status(self._start_ok)
+
+    def stop(self) -> ServiceStatus:
+        self.stopped += 1
+        self._running = False
+        return self._status(False)
 
 
 def _readiness(
@@ -123,16 +174,39 @@ def _patch_core(monkeypatch, *, errors=None, readiness=None, fake_checks=None) -
 # --- orchestrator ----------------------------------------------------------
 
 
-def test_acceptance_passes_with_fake_only_and_reports_real_not_required(
+def test_acceptance_fake_only_is_warning_not_pass_by_default(
     tmp_path: Path, monkeypatch
 ) -> None:
     _patch_core(monkeypatch, readiness=_readiness())
     report = run_acceptance(tmp_path)
-    assert report.final_status == "pass"
+    # Fake/local sanity must never silently look like full Mac readiness.
+    assert report.final_status == "warning"
+    assert report.acceptance_level == "fake_sanity"
     assert report.fake_verification.summary == "pass"
     assert report.real_model_verification is None
     assert report.requested["require_real_models"] is False
     assert any("not requested" in action.lower() for action in report.next_actions)
+    assert any("sanity" in action.lower() for action in report.next_actions)
+
+
+def test_acceptance_fake_only_passes_with_allow_sanity_pass(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_core(monkeypatch, readiness=_readiness())
+    report = run_acceptance(tmp_path, allow_sanity_pass=True)
+    # Only with the explicit opt-in does a clean fake-only run report pass.
+    assert report.final_status == "pass"
+    assert report.acceptance_level == "fake_sanity"
+    assert report.requested["allow_sanity_pass"] is True
+
+
+def test_acceptance_allow_sanity_pass_still_warns_with_readiness_warnings(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_core(monkeypatch, readiness=_readiness(warnings=["api/runtime tokens"]))
+    report = run_acceptance(tmp_path, allow_sanity_pass=True)
+    # Sanity pass only applies when nothing is even advisory.
+    assert report.final_status == "warning"
 
 
 def test_acceptance_warns_when_readiness_has_blockers_but_real_not_required(
@@ -194,7 +268,51 @@ def test_acceptance_folds_live_voice_and_wake_runners(tmp_path: Path, monkeypatc
     assert report.wake_word_live.summary == "pass"
     assert report.requested["voice_live"] is True
     assert report.requested["wake_word_live"] is True
+    # Voice/wake passing cannot claim a voice acceptance level without real models;
+    # and without real models the run is still only a warning.
+    assert report.acceptance_level == "fake_sanity"
+    assert report.final_status == "warning"
+
+
+def test_acceptance_full_wake_voice_level_requires_real_plus_both_voice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_core(monkeypatch, readiness=_readiness(runtime_backend="llama_cpp"))
+    monkeypatch.setattr(
+        "apps.runner.acceptance.run_all_configured_models_verification",
+        lambda home, **kwargs: _StubRealVerifier(_multi_report("pass")),
+    )
+    report = run_acceptance(
+        tmp_path,
+        require_real_models=True,
+        voice_live_runner=lambda: _voice_report("pass"),
+        wake_word_live_runner=lambda: _wake_report("pass"),
+    )
+    assert report.acceptance_level == "full_wake_voice"
     assert report.final_status == "pass"
+
+
+def test_acceptance_real_models_only_level_without_voice(tmp_path: Path, monkeypatch) -> None:
+    _patch_core(monkeypatch, readiness=_readiness(runtime_backend="llama_cpp"))
+    monkeypatch.setattr(
+        "apps.runner.acceptance.run_all_configured_models_verification",
+        lambda home, **kwargs: _StubRealVerifier(_multi_report("pass")),
+    )
+    report = run_acceptance(tmp_path, require_real_models=True)
+    assert report.acceptance_level == "real_models"
+    assert report.final_status == "pass"
+
+
+def test_acceptance_require_real_models_fails_on_fake_backend(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # A fake runtime backend can never satisfy --require-real-models.
+    _patch_core(monkeypatch, readiness=_readiness(runtime_backend="fake"))
+    report = run_acceptance(tmp_path, require_real_models=True)
+    assert report.final_status == "fail"
+    assert report.real_model_verification is not None
+    assert report.real_model_verification.summary == "fail"
+    assert any("backend is fake" in action.lower() for action in report.next_actions)
 
 
 def test_acceptance_fails_when_requested_wake_word_fails(tmp_path: Path, monkeypatch) -> None:
@@ -232,7 +350,7 @@ def test_acceptance_cli_json_output_contains_no_full_tokens(
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     _patch_core(monkeypatch, readiness=_readiness())
-    result = CliRunner().invoke(app, ["april", "acceptance", "--json"])
+    result = CliRunner().invoke(app, ["april", "acceptance", "--json", "--allow-sanity-pass"])
     assert result.exit_code == 0, result.output
     assert "tok-secret-acceptance-xyz" not in result.output
     assert '"final_status": "pass"' in result.output
@@ -260,3 +378,176 @@ def test_acceptance_cli_custom_report_path(tmp_path: Path, monkeypatch) -> None:
     assert out.exists()
     parsed = AcceptanceReport.model_validate_json(out.read_text(encoding="utf-8"))
     assert parsed.report_type == "acceptance"
+
+
+# --- flag validation -------------------------------------------------------
+
+
+def test_validate_acceptance_flags_rejects_fake_services_with_require_real() -> None:
+    with pytest.raises(AcceptanceFlagError):
+        validate_acceptance_flags(
+            require_real_models=True, start_services=True, fake_services=True
+        )
+
+
+def test_validate_acceptance_flags_rejects_fake_services_without_start() -> None:
+    with pytest.raises(AcceptanceFlagError):
+        validate_acceptance_flags(
+            require_real_models=False, start_services=False, fake_services=True
+        )
+
+
+def test_validate_acceptance_flags_allows_valid_combos() -> None:
+    validate_acceptance_flags(require_real_models=True, start_services=True, fake_services=False)
+    validate_acceptance_flags(require_real_models=False, start_services=True, fake_services=True)
+    validate_acceptance_flags(require_real_models=False, start_services=False, fake_services=False)
+
+
+def test_acceptance_cli_rejects_fake_services_with_require_real_models(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = FakeServiceManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app, ["april", "acceptance", "--require-real-models", "--fake-services"]
+    )
+    assert result.exit_code == 1
+    assert "Cannot combine --fake-services" in result.output
+    # No services were touched by a rejected invocation.
+    assert manager.started == []
+    assert manager.stopped == 0
+
+
+# --- service orchestration -------------------------------------------------
+
+
+def _patch_wake_runner(monkeypatch, summary: str) -> None:
+    monkeypatch.setattr(
+        "apps.runner.main.collect_voice_doctor", lambda settings: {"status": "ok"}
+    )
+
+    async def _fake_wake(**kwargs: object) -> WakeWordLiveReport:
+        return _wake_report(summary)
+
+    monkeypatch.setattr("apps.runner.main.run_wake_word_live_verification", _fake_wake)
+
+
+def test_acceptance_cli_starts_and_stops_services(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeServiceManager(tmp_path, initially_ok=False, start_ok=True)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    _patch_core(monkeypatch, readiness=_readiness())
+    out = tmp_path / "acc.json"
+    result = CliRunner().invoke(
+        app,
+        ["april", "acceptance", "--start-services", "--fake-services", "--report", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    # Fake services were started, then stopped because acceptance started them.
+    assert manager.started == [True]
+    assert manager.stopped == 1
+    report = AcceptanceReport.model_validate_json(out.read_text(encoding="utf-8"))
+    assert report.services.requested is True
+    assert report.services.mode == "fake"
+    assert report.services.started_by_acceptance is True
+    assert report.services.startup_status == "ok"
+    assert report.services.stopped_after_acceptance is True
+    assert report.services.shutdown_status == "stopped"
+
+
+def test_acceptance_cli_keeps_services_running_with_flag(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeServiceManager(tmp_path, initially_ok=False, start_ok=True)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    _patch_core(monkeypatch, readiness=_readiness())
+    out = tmp_path / "acc.json"
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "acceptance",
+            "--start-services",
+            "--fake-services",
+            "--keep-services-running",
+            "--report",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert manager.started == [True]
+    assert manager.stopped == 0
+    report = AcceptanceReport.model_validate_json(out.read_text(encoding="utf-8"))
+    assert report.services.shutdown_status == "kept_running"
+
+
+def test_acceptance_cli_stops_services_on_live_check_failure(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeServiceManager(tmp_path, initially_ok=False, start_ok=True)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    _patch_core(monkeypatch, readiness=_readiness())
+    _patch_wake_runner(monkeypatch, "fail")
+    result = CliRunner().invoke(
+        app,
+        ["april", "acceptance", "--start-services", "--fake-services", "--wake-word-live"],
+    )
+    # The live check failed (exit 1), but services acceptance started were stopped.
+    assert result.exit_code == 1
+    assert manager.started == [True]
+    assert manager.stopped == 1
+
+
+def test_acceptance_cli_stops_services_on_exception(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeServiceManager(tmp_path, initially_ok=False, start_ok=True)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    def _boom(*args: object, **kwargs: object) -> AcceptanceReport:
+        raise RuntimeError("verifier exploded")
+
+    monkeypatch.setattr("apps.runner.main.run_acceptance", _boom)
+    result = CliRunner().invoke(
+        app, ["april", "acceptance", "--start-services", "--fake-services"]
+    )
+    assert result.exit_code != 0
+    # Services started by acceptance are released even when the run raises.
+    assert manager.started == [True]
+    assert manager.stopped == 1
+
+
+def test_acceptance_cli_does_not_stop_already_running_services(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = FakeServiceManager(tmp_path, initially_ok=True)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    _patch_core(monkeypatch, readiness=_readiness())
+    out = tmp_path / "acc.json"
+    result = CliRunner().invoke(
+        app, ["april", "acceptance", "--start-services", "--report", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    # Acceptance did not start them, so it must not stop them.
+    assert manager.started == []
+    assert manager.stopped == 0
+    report = AcceptanceReport.model_validate_json(out.read_text(encoding="utf-8"))
+    assert report.services.startup_status == "already_running"
+    assert report.services.shutdown_status == "not_applicable"
+
+
+def test_acceptance_cli_without_start_services_never_touches_manager(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = FakeServiceManager(tmp_path, initially_ok=False)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    _patch_core(monkeypatch, readiness=_readiness())
+    result = CliRunner().invoke(app, ["april", "acceptance"])
+    assert result.exit_code == 0, result.output
+    # Preserve existing behavior: no service orchestration without --start-services.
+    assert manager.started == []
+    assert manager.stopped == 0
+
+
+# --- documentation ---------------------------------------------------------
+
+
+def test_docs_no_longer_mix_fake_with_require_real_models() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for relative in ("docs/macbookpro-acceptance.md", "README.md"):
+        text = (root / relative).read_text(encoding="utf-8")
+        assert "run april --fake acceptance --require-real-models" not in text
+        assert "--fake acceptance" not in text

@@ -321,6 +321,66 @@ one real model passed") and adds explicit verification levels:
 - `all`: every configured model exists, was exercised, passed acceptance gates,
   and specialist switching passed when applicable.
 
+#### One-command MacBook Pro acceptance gate
+
+`run april acceptance` composes config validation, offline readiness,
+deterministic fake verification, and (on request) real-model and live-voice
+checks into a single `pass` / `warning` / `fail` status with an honest
+`acceptance_level` (`fake_sanity` → `real_models` → `real_models_plus_voice` →
+`full_wake_voice`). It is **fake/local sanity only** by default and reports a
+**warning** (exit 0), never a silent pass, unless real models are required (or you
+pass `--allow-sanity-pass` for a clean fake-only run).
+
+```bash
+# Fake/local sanity (warning unless --allow-sanity-pass):
+run april acceptance --write-report
+
+# Real-model acceptance:
+run april acceptance --require-real-models --write-report
+
+# Wake-word plumbing with fake services:
+run april acceptance --wake-word-live --start-services --fake-services --write-report
+
+# Full target-Mac acceptance (real models + both live-voice paths):
+run april acceptance \
+  --require-real-models \
+  --voice-live \
+  --wake-word-live \
+  --start-services \
+  --write-report
+```
+
+`--require-real-models` fails if the runtime backend is fake or any configured
+chat model is missing/unavailable. `--start-services` starts missing services for
+the live checks and always stops the ones it started (even on failure, timeout, or
+Ctrl-C) unless `--keep-services-running`; `--fake-services` uses the fake runtime
+for plumbing only and cannot be combined with `--require-real-models`.
+
+`run april setup mac-activation` is the guided local activation wizard: it
+validates the GGUF model set (and, unless `--skip-voice`, the voice tools),
+writes config only with `--apply`, and can chain into real-model acceptance with
+`--run-acceptance`. It is dry-run by default and never downloads, installs, uses
+`sudo`/Homebrew, or records audio.
+
+```bash
+run april setup mac-activation \
+  --brain /absolute/path/brain.gguf \
+  --coding /absolute/path/coding.gguf \
+  --reading /absolute/path/reading.gguf \
+  --dry-run
+
+run april setup mac-activation \
+  --brain /absolute/path/brain.gguf \
+  --coding /absolute/path/coding.gguf \
+  --reading /absolute/path/reading.gguf \
+  --apply \
+  --run-acceptance \
+  --write-report
+```
+
+See [docs/macbookpro-acceptance.md](docs/macbookpro-acceptance.md) for the full
+target-Mac acceptance walkthrough.
+
 Reports under `data/verification/` are generated local artifacts and ignored by
 Git. The Desktop Readiness screen reads sanitized summaries from
 `GET /verification/report/latest` and `GET /verification/reports`; it never

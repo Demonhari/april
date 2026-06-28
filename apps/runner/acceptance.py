@@ -42,6 +42,13 @@ from april_common.config_validation import validate_configuration
 from april_common.time import utc_now, utc_now_iso
 
 FinalStatus = Literal["pass", "warning", "fail"]
+# Honest ladder of what acceptance actually proved on this Mac. ``fake_sanity`` is
+# the floor (fake plumbing only); each higher rung additionally requires the named
+# checks to have been *requested and passed*.
+AcceptanceLevel = Literal[
+    "fake_sanity", "real_models", "real_models_plus_voice", "full_wake_voice"
+]
+ServiceMode = Literal["none", "real", "fake"]
 
 _VERIFY_REAL = (
     "run april verify --all-configured-models --require-real-model "
@@ -55,6 +62,38 @@ _REAL_NOT_REQUIRED = (
     "Real-model verification was not requested; re-run with --require-real-models "
     "to load and exercise every configured GGUF model."
 )
+_SANITY_ONLY = (
+    "This is fake/local sanity only, not Mac readiness. Re-run with "
+    "--require-real-models for real-model acceptance, or pass --allow-sanity-pass "
+    "to accept a clean fake-only run as a pass."
+)
+_REAL_BACKEND_FAKE = (
+    "Runtime backend is fake; real-model acceptance is impossible. Set "
+    "runtime.backend=llama_cpp (or unset APRIL_RUNTIME_BACKEND=fake) and install "
+    "pip install -e '.[runtime]'."
+)
+
+
+class AcceptanceFlagError(ValueError):
+    """Raised for an incompatible combination of acceptance flags."""
+
+
+def validate_acceptance_flags(
+    *, require_real_models: bool, start_services: bool, fake_services: bool
+) -> None:
+    """Reject contradictory acceptance flag combinations before doing any work.
+
+    A fake runtime can never verify real models, so ``--fake-services`` may not be
+    combined with ``--require-real-models``; and fake services only make sense when
+    acceptance is also starting services.
+    """
+    if fake_services and require_real_models:
+        raise AcceptanceFlagError(
+            "Cannot combine --fake-services with --require-real-models: a fake runtime "
+            "cannot verify real models."
+        )
+    if fake_services and not start_services:
+        raise AcceptanceFlagError("--fake-services requires --start-services.")
 
 
 class AcceptanceEnvironment(BaseModel):
@@ -121,12 +160,26 @@ class WakeWordLiveSummary(BaseModel):
     wake_word_live_verified: bool
 
 
+class ServicesSummary(BaseModel):
+    requested: bool = False
+    mode: ServiceMode = "none"
+    started_by_acceptance: bool = False
+    stopped_after_acceptance: bool = False
+    api_reachable: bool = False
+    runtime_reachable: bool = False
+    # not_requested | already_running | ok | failed
+    startup_status: str = "not_requested"
+    # not_applicable | stopped | kept_running | failed
+    shutdown_status: str = "not_applicable"
+
+
 class AcceptanceReport(BaseModel):
     schema_version: int = 1
     report_type: Literal["acceptance"] = "acceptance"
     generated_at: str
     environment: AcceptanceEnvironment
     runtime_backend: str
+    acceptance_level: AcceptanceLevel = "fake_sanity"
     config_valid: bool
     config_errors: list[str] = Field(default_factory=list)
     requested: dict[str, bool] = Field(default_factory=dict)
@@ -135,6 +188,7 @@ class AcceptanceReport(BaseModel):
     real_model_verification: RealModelSummary | None = None
     voice_live: VoiceLiveSummary | None = None
     wake_word_live: WakeWordLiveSummary | None = None
+    services: ServicesSummary = Field(default_factory=ServicesSummary)
     final_status: FinalStatus = "fail"
     next_actions: list[str] = Field(default_factory=list)
 
@@ -244,30 +298,77 @@ def _wake_summary(report: WakeWordLiveReport) -> WakeWordLiveSummary:
     )
 
 
+def _fake_backend_real_summary() -> RealModelSummary:
+    """Synthetic real-model failure when the runtime backend is fake.
+
+    ``--require-real-models`` cannot be satisfied by a fake/simulated runtime, so
+    we fail closed and explain the fix without spawning a pointless verifier run.
+    """
+    return RealModelSummary(
+        summary="fail",
+        verification_level="none",
+        real_model_verified=False,
+        models_attempted=0,
+        models_available=0,
+        models_passed=0,
+        checks_failed=1,
+        check_failures=["runtime backend is fake; real-model verification is impossible"],
+    )
+
+
+def _acceptance_level(
+    *,
+    require_real_models: bool,
+    real: RealModelSummary | None,
+    voice: VoiceLiveSummary | None,
+    wake: WakeWordLiveSummary | None,
+) -> AcceptanceLevel:
+    # A higher rung is only claimed when the named checks were requested and passed.
+    real_ok = require_real_models and real is not None and real.summary == "pass"
+    if not real_ok:
+        return "fake_sanity"
+    if voice is None or voice.summary != "pass":
+        return "real_models"
+    if wake is None or wake.summary != "pass":
+        return "real_models_plus_voice"
+    return "full_wake_voice"
+
+
 def _final_status(
     *,
     config_valid: bool,
     fake: FakeVerificationSummary,
     readiness: ReadinessReport,
     require_real_models: bool,
+    allow_sanity_pass: bool,
     real: RealModelSummary | None,
     voice: VoiceLiveSummary | None,
     wake: WakeWordLiveSummary | None,
+    services: ServicesSummary,
 ) -> FinalStatus:
-    # Honesty first: invalid config, a failed fake run, a required-but-failed real
-    # model run, or any requested live check that did not pass is a hard fail.
+    # Honesty first: invalid config, a failed fake run, an explicitly-requested
+    # service that could not start, a fake backend when real models are required,
+    # a required-but-failed real model run, or any requested live check that did
+    # not pass is a hard fail.
     hard_fail = (
         not config_valid
         or (fake.ran and fake.summary == "fail")
+        or (services.requested and services.startup_status == "failed")
+        or (require_real_models and readiness.runtime_is_fake)
         or (require_real_models and (real is None or real.summary == "fail"))
         or (voice is not None and voice.summary != "pass")
         or (wake is not None and wake.summary != "pass")
     )
     if hard_fail:
         return "fail"
-    # Structurally fine, but real-model/voice readiness advisories (e.g. fake
-    # backend, missing GGUF when real models were not required, default tokens)
-    # downgrade a clean fake-only run to a warning, never a silent pass.
+    # Fake/local sanity only: never silently look like full Mac readiness. Without
+    # --require-real-models, the ceiling is a warning unless the operator opts in
+    # to a sanity pass AND nothing else is even advisory.
+    if not require_real_models:
+        if allow_sanity_pass and not (readiness.blockers or readiness.warnings):
+            return "pass"
+        return "warning"
+    # Real models were required and passed; readiness advisories still downgrade.
     if readiness.blockers or readiness.warnings:
         return "warning"
     return "pass"
@@ -291,6 +392,8 @@ def _next_actions(
 
     if not config_valid:
         add(_CONFIG_VALIDATE)
+    if require_real_models and readiness.runtime_is_fake:
+        add(_REAL_BACKEND_FAKE)
     # readiness already computes the canonical, redacted next commands.
     for action in readiness.next_actions:
         add(action)
@@ -298,6 +401,8 @@ def _next_actions(
         add(_VERIFY_REAL)
     if not require_real_models:
         add(_REAL_NOT_REQUIRED)
+        if final_status == "warning":
+            add(_SANITY_ONLY)
     if voice is not None and voice.summary != "pass":
         add(_VOICE_DOCTOR)
         add(_VERIFY_VOICE_LIVE)
@@ -313,9 +418,11 @@ def run_acceptance(
     home: Path,
     *,
     require_real_models: bool = False,
+    allow_sanity_pass: bool = False,
     max_output_tokens: int = 32,
     timeout: float = 180.0,
     thresholds: ReportThresholds | None = None,
+    services: ServicesSummary | None = None,
     voice_live_runner: Callable[[], VoiceLiveReport] | None = None,
     wake_word_live_runner: Callable[[], WakeWordLiveReport] | None = None,
 ) -> AcceptanceReport:
@@ -324,9 +431,13 @@ def run_acceptance(
     ``voice_live_runner`` / ``wake_word_live_runner`` are injected so the
     interactive live checks stay out of this pure orchestrator: the CLI passes
     closures that drive the real verifiers, and tests pass fakes. A live check is
-    considered *requested* exactly when its runner is provided.
+    considered *requested* exactly when its runner is provided. ``services`` is the
+    service-lifecycle record built by the caller (the CLI) when it orchestrates
+    APRIL services for live checks; it is embedded verbatim and factored into the
+    final status (a requested service that failed to start is a hard fail).
     """
     home = home.expanduser()
+    services = services or ServicesSummary()
     errors = list(validate_configuration(home))
     config_valid = not errors
     readiness = build_readiness_report(home)
@@ -335,12 +446,17 @@ def run_acceptance(
 
     real: RealModelSummary | None = None
     if require_real_models:
-        real = _real_model_summary(
-            home,
-            max_output_tokens=max_output_tokens,
-            timeout=timeout,
-            thresholds=thresholds,
-        )
+        # A fake/simulated runtime can never verify real models: fail closed
+        # without spawning a verifier rather than risk mistaking fake for real.
+        if readiness.runtime_is_fake:
+            real = _fake_backend_real_summary()
+        else:
+            real = _real_model_summary(
+                home,
+                max_output_tokens=max_output_tokens,
+                timeout=timeout,
+                thresholds=thresholds,
+            )
 
     voice: VoiceLiveSummary | None = None
     if voice_live_runner is not None:
@@ -355,9 +471,14 @@ def run_acceptance(
         fake=fake,
         readiness=readiness,
         require_real_models=require_real_models,
+        allow_sanity_pass=allow_sanity_pass,
         real=real,
         voice=voice,
         wake=wake,
+        services=services,
+    )
+    acceptance_level = _acceptance_level(
+        require_real_models=require_real_models, real=real, voice=voice, wake=wake
     )
     next_actions = _next_actions(
         config_valid=config_valid,
@@ -373,10 +494,12 @@ def run_acceptance(
         generated_at=utc_now_iso(),
         environment=_environment(readiness),
         runtime_backend=readiness.runtime_backend,
+        acceptance_level=acceptance_level,
         config_valid=config_valid,
         config_errors=[redact_reason(error) for error in errors],
         requested={
             "require_real_models": require_real_models,
+            "allow_sanity_pass": allow_sanity_pass,
             "voice_live": voice_live_runner is not None,
             "wake_word_live": wake_word_live_runner is not None,
         },
@@ -391,6 +514,7 @@ def run_acceptance(
         real_model_verification=real,
         voice_live=voice,
         wake_word_live=wake,
+        services=services,
         final_status=final_status,
         next_actions=next_actions,
     )

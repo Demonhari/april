@@ -178,19 +178,55 @@ audio is deleted unless `--retain-debug-audio` is set.
 
 One command folds configuration validation, offline readiness, deterministic fake
 verification, and (on request) real-model + live-voice checks into a single
-`pass` / `warning` / `fail` status with copy-pasteable next actions:
+`pass` / `warning` / `fail` status with copy-pasteable next actions. The report
+records an honest **`acceptance_level`**:
+
+- `fake_sanity` — only fake plumbing was proven.
+- `real_models` — every configured GGUF model loaded/chatted/streamed/unloaded.
+- `real_models_plus_voice` — real models **and** push-to-talk voice passed.
+- `full_wake_voice` — real models, push-to-talk voice, **and** wake word passed.
+
+`run april acceptance` is **fake/local sanity only**. It reports a **warning**
+(exit 0), not a pass, unless you require real models — or explicitly opt in with
+`--allow-sanity-pass` for a clean fake-only run. A fake run can never look like
+full Mac readiness, and `--require-real-models` **fails** if the runtime backend
+is fake or any configured chat model is missing/unavailable.
 
 ```bash
-# Local sanity gate (fake plumbing only → pass or warning, never a real pass):
+# Fake/local sanity (warning unless --allow-sanity-pass):
 run april acceptance --write-report
 
+# Real-model acceptance:
+run april acceptance --require-real-models --write-report
+
+# Wake-word plumbing with fake services (no real models, no real backend):
+run april acceptance --wake-word-live --start-services --fake-services --write-report
+
 # Full target-Mac acceptance (real models + both live-voice paths):
-run april --fake acceptance \
+run april acceptance \
   --require-real-models \
   --voice-live \
   --wake-word-live \
+  --start-services \
   --write-report
 ```
+
+### Service orchestration
+
+Live voice and wake-word checks call the Core `/voice/input` endpoint, so the API
+must be running. `--start-services` lets acceptance become a true one-command gate:
+
+- `--start-services` starts any missing APRIL services before the live checks.
+- `--fake-services` starts them with the **fake** runtime (plumbing only). It may
+  not be combined with `--require-real-models` (a fake runtime cannot verify real
+  models) and requires `--start-services`.
+- Services that acceptance started are **always** stopped at the end — including
+  on failure, timeout, cancellation, or Ctrl-C — unless `--keep-services-running`.
+- `--service-timeout FLOAT` bounds startup health-wait.
+
+The report's `services` block records `mode`, `started_by_acceptance`,
+`stopped_after_acceptance`, `startup_status`, `shutdown_status`, and API/runtime
+reachability.
 
 Useful options: `--report PATH` (write to a chosen path), `--json`,
 `--max-output-tokens`, `--timeout`, and the optional performance gates
@@ -198,7 +234,42 @@ Useful options: `--report PATH` (write to a chosen path), `--json`,
 `--max-first-token-latency-seconds`, `--max-rss-mb`. With `--write-report` and no
 `--report`, the redacted report is written to
 `data/verification/acceptance-<timestamp>.json` (Git-ignored). Reports never
-contain tokens, transcripts, generated text, or absolute paths.
+contain tokens, transcripts, generated text, or absolute paths. A `warning` exits
+0; only `fail` exits 1.
+
+## The Mac activation wizard
+
+`run april setup mac-activation` is one guided local command that validates the
+intended GGUF model set and (unless `--skip-voice`) the local voice tools, writes
+config only with `--apply`, and can chain straight into real-model acceptance. It
+is **dry-run by default** and never downloads models, installs packages, uses
+`sudo`/Homebrew, or records audio.
+
+```bash
+# Validate paths only (writes nothing):
+run april setup mac-activation \
+  --brain /absolute/path/brain.gguf \
+  --coding /absolute/path/coding.gguf \
+  --reading /absolute/path/reading.gguf \
+  --dry-run
+
+# Apply config, then run real-model acceptance and write a report:
+run april setup mac-activation \
+  --brain /absolute/path/brain.gguf \
+  --coding /absolute/path/coding.gguf \
+  --reading /absolute/path/reading.gguf \
+  --apply \
+  --run-acceptance \
+  --write-report
+```
+
+Add `--whisper-binary/--whisper-model/--piper-binary/--piper-model`
+(and optional `--wake-word-model`) to validate/apply voice paths too, or
+`--skip-voice` to activate models only. The wizard configures voice paths but
+never **enables** voice — turn it on explicitly later with
+`run april setup voice ... --apply --enable`. With `--write-report`, a redacted
+report is written to `data/verification/mac-activation-<timestamp>.json`
+(Git-ignored).
 
 ## Troubleshooting
 
