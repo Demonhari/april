@@ -60,6 +60,15 @@ def _voice_paths() -> dict[str, Path]:
     }
 
 
+def _mock_core_model_paths(prefix: str = "/models") -> dict[str, Path | None]:
+    return {
+        "brain": Path(prefix) / "brain.gguf",
+        "coding": Path(prefix) / "coding.gguf",
+        "reading": Path(prefix) / "reading.gguf",
+        "reasoning": None,
+    }
+
+
 class WritingModelSetup:
     """Stand-in for setup_model_set that writes a marker into models.yaml on apply."""
 
@@ -192,7 +201,7 @@ def test_activation_is_dry_run_by_default(tmp_path: Path) -> None:
     model_setup = RecordingSetup(_model_result())
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf"), "coding": None, "reading": None},
+        model_paths=_mock_core_model_paths(),
         voice_paths={},
         skip_voice=True,
         model_setup=model_setup,
@@ -210,7 +219,7 @@ def test_activation_does_not_modify_config_without_apply(tmp_path: Path) -> None
     voice_setup = RecordingSetup(_voice_result())
     run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths={
             "whisper_binary": Path("/v/whisper"),
             "whisper_model": Path("/v/model.bin"),
@@ -231,7 +240,7 @@ def test_activation_applies_model_and_voice_with_mocked_validators(tmp_path: Pat
     voice_setup = RecordingSetup(_voice_result())
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths={
             "whisper_binary": Path("/v/whisper"),
             "whisper_model": Path("/v/model.bin"),
@@ -255,7 +264,7 @@ def test_activation_applies_model_and_voice_with_mocked_validators(tmp_path: Pat
 def test_activation_runs_mocked_acceptance_after_apply(tmp_path: Path) -> None:
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths={},
         skip_voice=True,
         apply=True,
@@ -271,7 +280,7 @@ def test_activation_runs_mocked_acceptance_after_apply(tmp_path: Path) -> None:
 def test_activation_acceptance_skipped_without_apply(tmp_path: Path) -> None:
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths={},
         skip_voice=True,
         apply=False,
@@ -315,7 +324,7 @@ def test_activation_requires_a_model_path(tmp_path: Path) -> None:
 def test_activation_requires_voice_paths_unless_skipped(tmp_path: Path) -> None:
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths={},
         skip_voice=False,
         model_setup=RecordingSetup(_model_result()),
@@ -331,7 +340,7 @@ def test_activation_redacts_config_error_paths(tmp_path: Path) -> None:
 
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths={},
         skip_voice=True,
         model_setup=_raising,
@@ -361,6 +370,11 @@ def test_activation_dry_run_accepts_optional_reasoning_and_reports_supplied_role
     )
 
     assert report.final_status == "validated"
+    assert report.models.core_model_set_complete is True
+    assert report.models.missing_required_roles == []
+    assert report.models.partial_model_set is False
+    assert report.models.supplied_roles == ["brain", "coding", "reading", "reasoning"]
+    assert report.models.optional_roles == ["reasoning"]
     assert [(entry.role, entry.basename) for entry in report.models.entries] == [
         ("brain", "brain.gguf"),
         ("coding", "coding.gguf"),
@@ -369,6 +383,27 @@ def test_activation_dry_run_accepts_optional_reasoning_and_reports_supplied_role
     ]
     assert str(tmp_path) not in report.model_dump_json()
     assert (tmp_path / "configs" / "models.yaml").read_bytes() == before
+
+
+def test_activation_core_model_set_complete_with_required_roles(tmp_path: Path) -> None:
+    _copy_configs(tmp_path)
+    report = run_mac_activation(
+        tmp_path,
+        model_paths={
+            "brain": _gguf(tmp_path, "brain.gguf"),
+            "coding": _gguf(tmp_path, "coding.gguf"),
+            "reading": _gguf(tmp_path, "reading.gguf"),
+            "reasoning": None,
+        },
+        voice_paths={},
+        skip_voice=True,
+    )
+
+    assert report.final_status == "validated"
+    assert report.models.core_model_set_complete is True
+    assert report.models.partial_model_set is False
+    assert report.models.missing_required_roles == []
+    assert report.models.supplied_roles == ["brain", "coding", "reading"]
 
 
 def test_activation_apply_registers_reasoning_model_when_supplied(tmp_path: Path) -> None:
@@ -412,7 +447,98 @@ def test_activation_omitted_reasoning_model_does_not_fail(tmp_path: Path) -> Non
     )
 
     assert report.final_status == "validated"
+    assert report.models.core_model_set_complete is True
+    assert report.models.optional_roles == ["reasoning"]
     assert [entry.role for entry in report.models.entries] == ["brain", "coding", "reading"]
+
+
+def test_activation_only_brain_without_partial_flag_fails_without_writing(tmp_path: Path) -> None:
+    _copy_configs(tmp_path)
+    before = (tmp_path / "configs" / "models.yaml").read_bytes()
+
+    report = run_mac_activation(
+        tmp_path,
+        model_paths={"brain": _gguf(tmp_path, "brain.gguf")},
+        voice_paths={},
+        skip_voice=True,
+        apply=True,
+    )
+
+    assert report.final_status == "failed"
+    assert report.models.core_model_set_complete is False
+    assert report.models.partial_model_set is True
+    assert report.models.missing_required_roles == ["coding", "reading"]
+    assert report.models.error is not None
+    assert "--allow-partial-model-set" in report.models.error
+    assert (tmp_path / "configs" / "models.yaml").read_bytes() == before
+
+
+def test_activation_only_brain_with_partial_flag_writes_incomplete_registration(
+    tmp_path: Path,
+) -> None:
+    _copy_configs(tmp_path)
+    brain = _gguf(tmp_path, "brain.gguf")
+
+    report = run_mac_activation(
+        tmp_path,
+        model_paths={"brain": brain},
+        voice_paths={},
+        skip_voice=True,
+        apply=True,
+        allow_partial_model_set=True,
+    )
+
+    assert report.final_status == "incomplete"
+    assert report.models.applied is True
+    assert report.models.core_model_set_complete is False
+    assert report.models.partial_model_set is True
+    assert report.models.missing_required_roles == ["coding", "reading"]
+    assert any("incomplete" in action.lower() for action in report.next_actions)
+    data = yaml.safe_load((tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    assert data["models"]["brain"]["path"] == str(brain.resolve())
+    assert data["models"]["coding"]["path"] != str(brain.resolve())
+
+
+def test_activation_run_acceptance_requires_complete_core_model_set(tmp_path: Path) -> None:
+    _copy_configs(tmp_path)
+    before = (tmp_path / "configs" / "models.yaml").read_bytes()
+
+    report = run_mac_activation(
+        tmp_path,
+        model_paths={"brain": _gguf(tmp_path, "brain.gguf")},
+        voice_paths={},
+        skip_voice=True,
+        apply=True,
+        allow_partial_model_set=True,
+        run_acceptance_after=True,
+        acceptance_runner=lambda: _fake_acceptance(),
+    )
+
+    assert report.final_status == "failed"
+    assert report.models.error is not None
+    assert "--run-acceptance requires a complete core model set" in report.models.error
+    assert report.models.missing_required_roles == ["coding", "reading"]
+    assert report.acceptance.ran is False
+    assert (tmp_path / "configs" / "models.yaml").read_bytes() == before
+
+
+def test_activation_missing_required_roles_appear_in_report_and_next_actions(
+    tmp_path: Path,
+) -> None:
+    _copy_configs(tmp_path)
+    report = run_mac_activation(
+        tmp_path,
+        model_paths={"brain": _gguf(tmp_path, "brain.gguf")},
+        voice_paths={},
+        skip_voice=True,
+        allow_partial_model_set=True,
+    )
+
+    assert report.final_status == "incomplete"
+    assert report.models.missing_required_roles == ["coding", "reading"]
+    joined = "\n".join(report.next_actions)
+    assert "coding, reading" in joined
+    assert "Activation is incomplete" in joined
 
 
 def test_activation_non_gguf_reasoning_path_fails_without_writing_config(tmp_path: Path) -> None:
@@ -445,7 +571,18 @@ def test_activation_cli_dry_run_by_default(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("apps.runner.mac_activation.setup_model_set", model_setup)
     result = CliRunner().invoke(
         app,
-        ["april", "setup", "mac-activation", "--brain", "/models/brain.gguf", "--skip-voice"],
+        [
+            "april",
+            "setup",
+            "mac-activation",
+            "--brain",
+            "/models/brain.gguf",
+            "--coding",
+            "/models/coding.gguf",
+            "--reading",
+            "/models/reading.gguf",
+            "--skip-voice",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert "VALIDATED" in result.output
@@ -468,6 +605,10 @@ def test_activation_cli_writes_redacted_report_under_data_verification(
             "mac-activation",
             "--brain",
             "/models/brain.gguf",
+            "--coding",
+            "/models/coding.gguf",
+            "--reading",
+            "/models/reading.gguf",
             "--skip-voice",
             "--write-report",
         ],
@@ -498,6 +639,10 @@ def test_activation_cli_apply_runs_mocked_acceptance(tmp_path: Path, monkeypatch
             "mac-activation",
             "--brain",
             "/models/brain.gguf",
+            "--coding",
+            "/models/coding.gguf",
+            "--reading",
+            "/models/reading.gguf",
             "--skip-voice",
             "--apply",
             "--run-acceptance",
@@ -531,6 +676,10 @@ def test_activation_cli_passes_reasoning_and_reasoning_id(tmp_path: Path, monkey
             "mac-activation",
             "--brain",
             "/models/brain.gguf",
+            "--coding",
+            "/models/coding.gguf",
+            "--reading",
+            "/models/reading.gguf",
             "--reasoning",
             "/models/reasoning.gguf",
             "--reasoning-id",
@@ -545,6 +694,31 @@ def test_activation_cli_passes_reasoning_and_reasoning_id(tmp_path: Path, monkey
     assert call["role_ids"]["reasoning"] == "local-reasoning"
 
 
+def test_activation_cli_allow_partial_model_set(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    model_setup = RecordingSetup(_model_result())
+    monkeypatch.setattr("apps.runner.mac_activation.setup_model_set", model_setup)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "setup",
+            "mac-activation",
+            "--brain",
+            "/models/brain.gguf",
+            "--allow-partial-model-set",
+            "--skip-voice",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "INCOMPLETE" in result.output
+    assert "missing required: coding, reading" in result.output
+    assert model_setup.calls[0]["role_paths"]["brain"] == Path("/models/brain.gguf")
+
+
 # --- transactional apply ---------------------------------------------------
 
 
@@ -554,7 +728,7 @@ def test_activation_validates_everything_before_writing(tmp_path: Path) -> None:
     voice_setup = RecordingSetup(_voice_result())
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths=_voice_paths(),
         skip_voice=False,
         apply=True,
@@ -575,7 +749,7 @@ def test_activation_writes_nothing_if_voice_validation_fails(tmp_path: Path) -> 
     voice_setup = FailValidationVoiceSetup()
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths=_voice_paths(),
         skip_voice=False,
         apply=True,
@@ -596,7 +770,7 @@ def test_activation_rolls_back_model_config_on_later_failure(tmp_path: Path) -> 
     voice_setup = FailOnApplyVoiceSetup()
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths=_voice_paths(),
         skip_voice=False,
         apply=True,
@@ -622,7 +796,7 @@ def test_activation_no_rollback_leaves_partial_state(tmp_path: Path) -> None:
     voice_setup = FailOnApplyVoiceSetup()
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths=_voice_paths(),
         skip_voice=False,
         apply=True,
@@ -640,7 +814,7 @@ def test_activation_no_rollback_leaves_partial_state(tmp_path: Path) -> None:
 def test_activation_transaction_not_requested_in_dry_run(tmp_path: Path) -> None:
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths={},
         skip_voice=True,
         apply=False,
@@ -660,7 +834,7 @@ def test_activation_enable_voice_passes_enable_true_only_when_supplied(tmp_path:
     voice_setup = RecordingSetup(enabled_result)
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths=_voice_paths(),
         skip_voice=False,
         apply=True,
@@ -682,7 +856,7 @@ def test_activation_does_not_enable_voice_without_flag(tmp_path: Path) -> None:
     voice_setup = RecordingSetup(_voice_result())
     report = run_mac_activation(
         tmp_path,
-        model_paths={"brain": Path("/models/brain.gguf")},
+        model_paths=_mock_core_model_paths(),
         voice_paths=_voice_paths(),
         skip_voice=False,
         apply=True,
@@ -784,6 +958,10 @@ def test_activation_cli_live_acceptance_requires_run_acceptance(
             "mac-activation",
             "--brain",
             "/m/b.gguf",
+            "--coding",
+            "/m/c.gguf",
+            "--reading",
+            "/m/r.gguf",
             "--whisper-binary",
             "/v/w",
             "--whisper-model",
@@ -807,6 +985,7 @@ def test_docs_contain_new_activation_and_reports_examples() -> None:
         assert "--enable-voice" in text
         assert "--acceptance-voice-live" in text
         assert "--acceptance-wake-word-live" in text
+        assert "--allow-partial-model-set" in text
         assert "run april reports" in text
         # The fake/real contradictory command must never reappear.
         assert "--fake acceptance" not in text
@@ -839,6 +1018,10 @@ def test_activation_cli_runs_live_acceptance_with_orchestration(
             "mac-activation",
             "--brain",
             "/m/b.gguf",
+            "--coding",
+            "/m/c.gguf",
+            "--reading",
+            "/m/r.gguf",
             "--whisper-binary",
             "/v/w",
             "--whisper-model",

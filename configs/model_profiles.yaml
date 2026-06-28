@@ -27,6 +27,15 @@ profiles:
       use_mmap: true
       keep_loaded: false
       idle_unload_seconds: 120
+    reasoning:
+      context_size: 4096
+      threads: 8
+      n_batch: 128
+      n_gpu_layers: 0
+      use_mmap: true
+      keep_loaded: false
+      idle_unload_seconds: 180
+      temperature: 0.4
   apple_silicon_macbook:
     description: >-
       Apple Silicon MacBook Pro. Metal-accelerated llama.cpp (n_gpu_layers: -1
@@ -56,3 +65,12 @@ profiles:
       use_mmap: true
       keep_loaded: false
       idle_unload_seconds: 240
+    reasoning:
+      context_size: 8192
+      threads: 6
+      n_batch: 256
+      n_gpu_layers: -1
+      use_mmap: true
+      keep_loaded: false
+      idle_unload_seconds: 300
+      temperature: 0.4

@@ -37,8 +37,9 @@ from apps.runner.mac_report import redact_reason
 from apps.runner.model_tools import setup_model_set, setup_voice_stack
 from april_common.errors import ConfigError
 from april_common.time import utc_now, utc_now_iso
+from services.april_runtime.model_registry import ModelRegistry
 
-ActivationStatus = Literal["validated", "applied", "failed"]
+ActivationStatus = Literal["validated", "applied", "incomplete", "failed"]
 
 # Injection points mirror the real helper signatures so tests can pass fakes.
 ModelSetup = Callable[..., dict[str, Any]]
@@ -46,6 +47,8 @@ VoiceSetup = Callable[..., dict[str, Any]]
 AcceptanceRunner = Callable[[], AcceptanceReport]
 
 _MODEL_ROLES = ("brain", "coding", "reading", "reasoning")
+_CORE_MODEL_ROLES = ("brain", "coding", "reading")
+_OPTIONAL_MODEL_ROLES = ("reasoning",)
 _VOICE_REQUIRED = ("whisper_binary", "whisper_model", "piper_binary", "piper_model")
 _MODELS_CONFIG = ("configs", "models.yaml")
 _VOICE_CONFIG = ("configs", "april.yaml")
@@ -99,6 +102,11 @@ class ModelsActivationSummary(BaseModel):
     requested: bool = False
     validated: bool = False
     applied: bool = False
+    core_model_set_complete: bool = False
+    missing_required_roles: list[str] = Field(default_factory=list)
+    supplied_roles: list[str] = Field(default_factory=list)
+    optional_roles: list[str] = Field(default_factory=lambda: list(_OPTIONAL_MODEL_ROLES))
+    partial_model_set: bool = False
     entries: list[ModelActivationEntry] = Field(default_factory=list)
     backup_basename: str | None = None
     error: str | None = None
@@ -171,25 +179,73 @@ def write_activation_report(report: MacActivationReport, path: Path) -> Path:
     return resolved
 
 
+def _configured_existing_gguf_roles(home: Path) -> set[str]:
+    root = home.expanduser().resolve()
+    try:
+        registry = ModelRegistry.from_file(root / "configs" / "models.yaml", root=root)
+    except ConfigError:
+        return set()
+    roles: set[str] = set()
+    for model in registry.list():
+        role = str(model.role)
+        if role not in _MODEL_ROLES or model.backend != "llama_cpp":
+            continue
+        path = model.resolved_path(root)
+        if path.suffix.lower() == ".gguf" and path.exists() and path.is_file():
+            roles.add(role)
+    return roles
+
+
+def _missing_core_roles(home: Path, supplied_roles: list[str]) -> list[str]:
+    covered = set(supplied_roles) | _configured_existing_gguf_roles(home)
+    return [role for role in _CORE_MODEL_ROLES if role not in covered]
+
+
 def _model_summary(
     *,
     home: Path,
     model_paths: dict[str, Path | None],
     model_ids: dict[str, str | None] | None,
     apply: bool,
+    allow_partial_model_set: bool,
     model_setup: ModelSetup,
 ) -> ModelsActivationSummary:
-    supplied = {role: path for role, path in model_paths.items() if path is not None}
-    summary = ModelsActivationSummary(requested=bool(supplied))
-    if not supplied:
-        summary.error = "Supply at least one of --brain / --coding / --reading."
-        return summary
+    supplied: dict[str, Path] = {}
+    for role in _MODEL_ROLES:
+        path = model_paths.get(role)
+        if path is not None:
+            supplied[role] = path
+    supplied_roles = list(supplied)
+    missing_required = _missing_core_roles(home, supplied_roles)
+    core_complete = not missing_required
+    summary = ModelsActivationSummary(
+        requested=bool(supplied),
+        core_model_set_complete=core_complete,
+        missing_required_roles=missing_required,
+        supplied_roles=supplied_roles,
+        optional_roles=list(_OPTIONAL_MODEL_ROLES),
+        partial_model_set=not core_complete,
+    )
     # Pre-validate the suffix locally so a non-GGUF path fails with a clear message
     # even before the shared validator runs (which also checks existence).
     for role, path in supplied.items():
         if path.suffix.lower() != ".gguf":
             summary.error = f"{role} model must be a local .gguf file: {path.name}"
             return summary
+    if missing_required and not allow_partial_model_set:
+        missing = ", ".join(missing_required)
+        summary.error = (
+            "Core model set is incomplete; missing required roles: "
+            f"{missing}. Full Mac activation requires brain, coding, and reading. "
+            "Pass --allow-partial-model-set only to register a partial model set."
+        )
+        return summary
+    if not supplied:
+        if core_complete:
+            summary.validated = True
+        else:
+            summary.error = "Supply at least one model path to register a partial model set."
+        return summary
     try:
         result = model_setup(
             home=home,
@@ -308,6 +364,7 @@ def _apply_transaction(
     home: Path,
     model_paths: dict[str, Path | None],
     model_ids: dict[str, str | None] | None,
+    allow_partial_model_set: bool,
     voice_paths: dict[str, Path | None],
     skip_voice: bool,
     enable_voice: bool,
@@ -325,6 +382,7 @@ def _apply_transaction(
         model_paths=model_paths,
         model_ids=model_ids,
         apply=True,
+        allow_partial_model_set=allow_partial_model_set,
         model_setup=model_setup,
     )
     voice = VoiceActivationSummary(skipped=True)
@@ -411,6 +469,17 @@ def _next_actions(
             "--coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf "
             "[--reasoning /absolute/path/reasoning.gguf] --dry-run"
         )
+    if models.partial_model_set:
+        missing = ", ".join(models.missing_required_roles)
+        add(
+            "Activation is incomplete: register valid local GGUF files for the missing "
+            f"required roles ({missing}) to complete Mac activation."
+        )
+        if models.applied:
+            add(
+                "Partial model registration was applied. Re-run mac activation with "
+                "--brain, --coding, and --reading before running acceptance."
+            )
     if voice.error:
         add(
             "run april setup mac-activation ... --whisper-binary /absolute/path/whisper "
@@ -421,6 +490,11 @@ def _next_actions(
         add("Apply failed and was rolled back; fix the reported path and re-run with --apply.")
     if final_status == "validated":
         add("Re-run with --apply to write the validated configuration.")
+    if final_status == "incomplete" and not apply:
+        add(
+            "Re-run with --apply --allow-partial-model-set only if you intentionally want "
+            "partial model registration instead of full Mac activation."
+        )
     if final_status == "applied":
         add("pip install -e '.[runtime]'")
         if not acceptance.ran:
@@ -449,6 +523,7 @@ def run_mac_activation(
     apply: bool = False,
     enable_voice: bool = False,
     run_acceptance_after: bool = False,
+    allow_partial_model_set: bool = False,
     no_rollback: bool = False,
     model_setup: ModelSetup | None = None,
     voice_setup: VoiceSetup | None = None,
@@ -471,6 +546,7 @@ def run_mac_activation(
         model_paths=model_paths,
         model_ids=model_ids,
         apply=False,
+        allow_partial_model_set=allow_partial_model_set,
         model_setup=model_setup,
     )
     voice = _voice_summary(
@@ -481,6 +557,12 @@ def run_mac_activation(
         enable_voice=enable_voice,
         voice_setup=voice_setup,
     )
+    if run_acceptance_after and not models.core_model_set_complete and not models.error:
+        missing = ", ".join(models.missing_required_roles)
+        models.error = (
+            "--run-acceptance requires a complete core model set; missing required roles: "
+            f"{missing}."
+        )
     validation_blocked = bool(models.error) or bool(voice.error)
     transaction = TransactionSummary(requested=apply)
 
@@ -490,6 +572,7 @@ def run_mac_activation(
             home=home,
             model_paths=model_paths,
             model_ids=model_ids,
+            allow_partial_model_set=allow_partial_model_set,
             voice_paths=voice_paths,
             skip_voice=skip_voice,
             enable_voice=enable_voice,
@@ -503,6 +586,8 @@ def run_mac_activation(
 
     if blocked:
         final_status: ActivationStatus = "failed"
+    elif models.partial_model_set:
+        final_status = "incomplete"
     elif apply:
         final_status = "applied"
     else:

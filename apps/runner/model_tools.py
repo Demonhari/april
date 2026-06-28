@@ -255,33 +255,45 @@ def setup_model_set(
 
     backup: Path | None = None
     imported: list[ModelImportResult] = []
+    copied_during_command: list[Path] = []
     if apply:
         backup = _timestamped_backup(config_path)
         try:
             for entry in entries:
-                imported.append(
-                    import_model(
-                        home=root,
-                        role=str(entry["role"]),
-                        model_id=str(entry["model_id"]),
-                        name=str(entry["name"]),
-                        source_path=supplied[str(entry["role"])],
-                        copy_into_models=copy_into_models,
-                        force=force,
-                    )
+                destination_existed = False
+                if copy_into_models:
+                    source = supplied[str(entry["role"])].expanduser().resolve()
+                    destination_existed = (root / "models" / source.name).exists()
+                result = import_model(
+                    home=root,
+                    role=str(entry["role"]),
+                    model_id=str(entry["model_id"]),
+                    name=str(entry["name"]),
+                    source_path=supplied[str(entry["role"])],
+                    copy_into_models=copy_into_models,
+                    force=force,
                 )
+                imported.append(result)
+                if result.copied and not destination_existed:
+                    copied_during_command.append(result.path)
         except Exception:
             shutil.copy2(backup, config_path)
+            for copied_path in copied_during_command:
+                try:
+                    if copied_path.exists() and copied_path.is_file():
+                        copied_path.unlink()
+                except OSError:
+                    pass
             raise
 
     by_role = {result.role: result for result in imported}
     rendered_entries: list[dict[str, Any]] = []
     for entry in entries:
-        result = by_role.get(str(entry["role"]))
+        rendered_result = by_role.get(str(entry["role"]))
         rendered = dict(entry)
-        if result is not None:
-            rendered["copied"] = result.copied
-            rendered["registered_basename"] = result.path.name
+        if rendered_result is not None:
+            rendered["copied"] = rendered_result.copied
+            rendered["registered_basename"] = rendered_result.path.name
         else:
             rendered["copied"] = False
             rendered["registered_basename"] = entry["source_basename"]

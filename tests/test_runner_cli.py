@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from apps.runner.install import install_wrappers
 from apps.runner.main import app
-from apps.runner.model_tools import setup_voice_stack
+from apps.runner.model_tools import setup_model_set, setup_voice_stack
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
 from apps.runner.soak import SoakReport
 from apps.runner.verify import BenchmarkResult, VerifyCheck
@@ -781,6 +781,111 @@ def test_setup_models_copy_into_models_uses_local_home(tmp_path: Path, monkeypat
     )
     assert result.exit_code == 0, result.output
     assert (home / "models" / "source.gguf").exists()
+    data = yaml.safe_load((home / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    assert data["models"]["brain"]["path"] == "models/source.gguf"
+
+
+def test_setup_model_set_copy_rollback_removes_new_copy_and_restores_config(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _copy_configs(home)
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    brain = source_dir / "brain.gguf"
+    coding = source_dir / "coding.gguf"
+    brain.write_bytes(b"brain")
+    coding.write_bytes(b"coding")
+    models_dir = home / "models"
+    models_dir.mkdir()
+    existing_coding = models_dir / "coding.gguf"
+    existing_coding.write_bytes(b"existing")
+    before = (home / "configs" / "models.yaml").read_bytes()
+
+    with pytest.raises(ConfigError):
+        setup_model_set(
+            home=home,
+            role_paths={"brain": brain, "coding": coding},
+            copy_into_models=True,
+            apply=True,
+        )
+
+    assert not (models_dir / "brain.gguf").exists()
+    assert existing_coding.read_bytes() == b"existing"
+    assert (home / "configs" / "models.yaml").read_bytes() == before
+    assert brain.exists()
+    assert coding.exists()
+
+
+def test_setup_model_set_copy_rollback_does_not_delete_preexisting_destination(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _copy_configs(home)
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    models_dir = home / "models"
+    models_dir.mkdir()
+    existing_brain = models_dir / "brain.gguf"
+    existing_brain.write_bytes(b"existing brain")
+    existing_coding = models_dir / "coding.gguf"
+    existing_coding.write_bytes(b"existing coding")
+    coding = source_dir / "coding.gguf"
+    coding.write_bytes(b"new coding")
+    before = (home / "configs" / "models.yaml").read_bytes()
+
+    with pytest.raises(ConfigError):
+        setup_model_set(
+            home=home,
+            role_paths={"brain": existing_brain, "coding": coding},
+            copy_into_models=True,
+            apply=True,
+        )
+
+    assert existing_brain.read_bytes() == b"existing brain"
+    assert existing_coding.read_bytes() == b"existing coding"
+    assert (home / "configs" / "models.yaml").read_bytes() == before
+
+
+def test_setup_model_set_copy_dry_run_copies_nothing(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _copy_configs(home)
+    source = tmp_path / "source.gguf"
+    source.write_bytes(b"gguf")
+    before = (home / "configs" / "models.yaml").read_bytes()
+
+    result = setup_model_set(
+        home=home,
+        role_paths={"brain": source},
+        copy_into_models=True,
+        apply=False,
+    )
+
+    assert result["applied"] is False
+    assert not (home / "models" / "source.gguf").exists()
+    assert (home / "configs" / "models.yaml").read_bytes() == before
+
+
+def test_setup_model_set_successful_copy_keeps_file_and_config(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _copy_configs(home)
+    source = tmp_path / "source.gguf"
+    source.write_bytes(b"gguf")
+
+    result = setup_model_set(
+        home=home,
+        role_paths={"brain": source},
+        copy_into_models=True,
+        apply=True,
+    )
+
+    copied = home / "models" / "source.gguf"
+    assert result["applied"] is True
+    assert copied.exists()
     data = yaml.safe_load((home / "configs" / "models.yaml").read_text(encoding="utf-8"))
     assert data["models"]["brain"]["path"] == "models/source.gguf"
 

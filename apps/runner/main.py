@@ -1618,6 +1618,7 @@ def setup_voice(
 _ACTIVATION_STATUS_STYLE = {
     "validated": "[green]VALIDATED[/green]",
     "applied": "[green]APPLIED[/green]",
+    "incomplete": "[yellow]INCOMPLETE[/yellow]",
     "failed": "[red]FAILED[/red]",
 }
 
@@ -1629,7 +1630,19 @@ def _print_activation(report: MacActivationReport) -> None:
     if models.error:
         console.print(f"[red]Models: {models.error}[/red]")
     else:
-        console.print(f"Models: validated={models.validated}, applied={models.applied}")
+        console.print(
+            "Models: "
+            f"validated={models.validated}, applied={models.applied}, "
+            f"core_complete={models.core_model_set_complete}, "
+            f"partial={models.partial_model_set}"
+        )
+        if models.supplied_roles:
+            console.print(f"  supplied: {', '.join(models.supplied_roles)}")
+        console.print(f"  optional: {', '.join(models.optional_roles)}")
+        if models.missing_required_roles:
+            console.print(
+                f"[yellow]  missing required: {', '.join(models.missing_required_roles)}[/yellow]"
+            )
         for entry in models.entries:
             console.print(f"  {entry.role}: {entry.basename}")
     voice = report.voice
@@ -1724,6 +1737,11 @@ def setup_mac_activation(
     fake_services: bool = typer.Option(
         False, "--fake-services", help="Start fake services (incompatible with real acceptance)."
     ),
+    allow_partial_model_set: bool = typer.Option(
+        False,
+        "--allow-partial-model-set",
+        help="Register supplied models even when brain/coding/reading are not all complete.",
+    ),
     keep_services_running: bool = typer.Option(
         False, "--keep-services-running", help="Leave services acceptance started running."
     ),
@@ -1801,6 +1819,7 @@ def setup_mac_activation(
         apply=apply_changes,
         enable_voice=enable_voice,
         run_acceptance_after=run_acceptance_after,
+        allow_partial_model_set=allow_partial_model_set,
         no_rollback=no_rollback,
         acceptance_runner=acceptance_runner,
     )

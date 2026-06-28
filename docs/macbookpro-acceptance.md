@@ -66,12 +66,14 @@ Validate first with `--dry-run`, then apply. Use **absolute paths**; APRIL never
 downloads models and never commits them.
 
 ```bash
+# Optional: add --reasoning /absolute/path/reasoning.gguf when configured.
 run april setup models \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
   --dry-run
 
+# Optional: add --reasoning /absolute/path/reasoning.gguf when configured.
 run april setup models \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
@@ -82,6 +84,12 @@ run april model doctor          # confirm each role resolves to a present file
 run april model profile list    # inspect available hardware profiles
 run april model profile apply intel_macbook_cpu_low   # or apple_silicon_macbook
 ```
+
+Full Mac activation requires the core GGUF roles `brain`, `coding`, and
+`reading`. `reasoning` is optional; configure it only when you have a separate
+local model for deeper reasoning. If `--copy-into-models` is used and a later
+role fails, APRIL restores `configs/models.yaml` and removes only files copied by
+that failed command.
 
 ## Switch the runtime to llama_cpp
 
@@ -246,6 +254,18 @@ config only with `--apply`, and can chain straight into acceptance. It is
 `sudo`/Homebrew, or records audio. `--reasoning` / `--reasoning-id` are optional;
 when omitted, the reasoning agent keeps using the configured brain model.
 
+The wizard distinguishes partial model registration from full activation. Full
+activation requires `brain`, `coding`, and `reading`, either supplied in the
+command or already configured to existing local GGUF files. Supplying only part
+of that core set fails before config writes by default. Use
+`--allow-partial-model-set` only when you intentionally want to register the
+supplied subset; the report is `incomplete`, includes
+`core_model_set_complete: false`, lists `missing_required_roles`, and blocks
+`--run-acceptance` until the core set is complete. Real GGUF verification still
+requires an actual load/chat/stream/unload pass, and live voice verification
+requires the live path to run. Fake verification remains explicitly
+fake/simulated.
+
 ### Transactional apply and rollback
 
 Apply is **transactional and validate-first**:
@@ -268,11 +288,11 @@ voice artifact validates. `--enable-voice` may not be combined with `--skip-voic
 
 ```bash
 # Models only — validate, apply, then run real-model acceptance and write a report:
+# Optional: add --reasoning /absolute/path/reasoning.gguf when configured.
 run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
-  --reasoning /absolute/path/reasoning.gguf \
   --skip-voice \
   --apply \
   --run-acceptance \
@@ -280,11 +300,11 @@ run april setup mac-activation \
 
 # Full activation — models + voice enabled + full acceptance with live voice/wake
 # and service orchestration:
+# Optional: add --reasoning /absolute/path/reasoning.gguf when configured.
 run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
-  --reasoning /absolute/path/reasoning.gguf \
   --whisper-binary /absolute/path/whisper \
   --whisper-model /absolute/path/whisper-model.bin \
   --piper-binary /absolute/path/piper \
