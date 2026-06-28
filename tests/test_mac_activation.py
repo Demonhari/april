@@ -582,9 +582,7 @@ def test_flags_live_rejects_skip_voice() -> None:
 def test_flags_live_requires_enable_voice() -> None:
     with pytest.raises(ActivationFlagError):
         validate_activation_flags(
-            **_flags(
-                acceptance_wake_word_live=True, run_acceptance_after=True, enable_voice=False
-            )
+            **_flags(acceptance_wake_word_live=True, run_acceptance_after=True, enable_voice=False)
         )
 
 

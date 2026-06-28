@@ -226,9 +226,7 @@ async def test_wake_live_retains_audio_only_with_explicit_flag(
 
 
 @pytest.mark.anyio
-async def test_wake_live_report_redacts_transcript_and_token(
-    settings_tmp, tmp_path: Path
-) -> None:
+async def test_wake_live_report_redacts_transcript_and_token(settings_tmp, tmp_path: Path) -> None:
     settings = _configured_settings(settings_tmp, tmp_path)
     out = tmp_path / "wake-live.json"
     await run_wake_word_live_verification(

@@ -1086,8 +1086,7 @@ def _sorted_browser_items(settings: AprilSettings) -> list[tuple[Path, dict[str,
 
 def _browser_reports(settings: AprilSettings) -> dict[str, Any]:
     reports = [
-        _browser_report_summary(payload, path)
-        for path, payload in _sorted_browser_items(settings)
+        _browser_report_summary(payload, path) for path, payload in _sorted_browser_items(settings)
     ]
     return {
         "status": "ok" if reports else "empty",

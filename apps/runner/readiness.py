@@ -89,9 +89,15 @@ class ReadinessReport(BaseModel):
     runtime_is_fake: bool
     llama_cpp_python_available: bool
     environment: str
-    real_model_ready: bool
     voice_enabled: bool
-    voice_ready: bool
+    # Offline readiness never proves a real GGUF or live voice path. These stay
+    # false until populated from actual verification reports elsewhere.
+    real_model_ready: bool = False
+    voice_ready: bool = False
+    # Preflight means the local prerequisites appear present; it is still not
+    # proof that load/chat/stream/unload or live voice succeeded.
+    real_model_preflight_ready: bool = False
+    voice_preflight_ready: bool = False
     models: list[ReadinessModel] = Field(default_factory=list)
     voice_artifacts: list[VoiceArtifact] = Field(default_factory=list)
     api_token_status: str = "missing"
@@ -156,9 +162,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
             runtime_is_fake=False,
             llama_cpp_python_available=importlib.util.find_spec("llama_cpp") is not None,
             environment="unknown",
-            real_model_ready=False,
             voice_enabled=False,
-            voice_ready=False,
             checks=[
                 ReadinessCheck(
                     name="configuration load",
@@ -322,8 +326,29 @@ def build_readiness_report(home: Path) -> ReadinessReport:
     # Voice readiness is its own axis; model blockers are the voice "voice:" rows.
     model_blockers = [name for name in blockers if not name.startswith("voice:")]
     voice_blockers = [name for name in blockers if name.startswith("voice:")]
-    real_model_ready = not model_blockers
-    voice_ready = voice_enabled and not voice_blockers
+    real_model_preflight_ready = not model_blockers
+    voice_preflight_ready = voice_enabled and not voice_blockers
+
+    checks.append(
+        ReadinessCheck(
+            name="real-model verification",
+            status="skipped",
+            detail="Offline readiness did not load/chat/stream/unload a GGUF model.",
+            action=_VERIFY_REAL,
+        )
+    )
+    checks.append(
+        ReadinessCheck(
+            name="live voice verification",
+            status="skipped",
+            detail=(
+                "Offline readiness did not run microphone/STT/TTS playback verification."
+                if voice_enabled
+                else "Voice disabled; live verification not requested."
+            ),
+            action=_VERIFY_VOICE if voice_enabled else None,
+        )
+    )
 
     next_actions: list[str] = []
     for check in checks:
@@ -344,9 +369,9 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         runtime_is_fake=runtime_is_fake,
         llama_cpp_python_available=llama_available,
         environment=settings.environment,
-        real_model_ready=real_model_ready,
         voice_enabled=voice_enabled,
-        voice_ready=voice_ready,
+        real_model_preflight_ready=real_model_preflight_ready,
+        voice_preflight_ready=voice_preflight_ready,
         models=models,
         voice_artifacts=voice_artifacts,
         api_token_status=api_status,

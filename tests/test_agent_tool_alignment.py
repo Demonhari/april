@@ -13,9 +13,11 @@ import anyio
 import pytest
 from fastapi.testclient import TestClient
 
+from agents.registry import default_agent_registry
 from april_common.effective_config import (
     build_agent_registry_from_config,
     build_configured_tool_registry,
+    load_agents_file,
 )
 from april_common.errors import PermissionDeniedError
 from april_common.settings import project_root
@@ -36,6 +38,24 @@ def _configured_engine() -> PermissionEngine:
         tool_registry=default_registry(),
     )
     return PermissionEngine(build_configured_tool_registry(home, agent_registry))
+
+
+def test_default_bundled_agent_registry_matches_active_yaml_defaults() -> None:
+    """The bundled fallback factories must not drift from configs/agents.yaml."""
+    home = project_root()
+    yaml_agents = load_agents_file(home).agents
+    bundled = {agent.name: agent.config for agent in default_agent_registry().list()}
+
+    assert set(bundled) == set(yaml_agents)
+    for name, configured in yaml_agents.items():
+        agent = bundled[name]
+        assert agent.description == configured.description
+        assert agent.model_id == configured.model_id
+        assert agent.allowed_tools == set(configured.allowed_tools)
+        assert agent.blocked_tools == set(configured.blocked_tools)
+        assert agent.memory_access_policy == configured.memory_access
+        assert agent.maximum_tool_iterations == configured.maximum_tool_iterations
+        assert agent.output_schema == configured.output_schema
 
 
 # --- Task 1.1: reminder chat creates a local reminder without Level 3 approval ---

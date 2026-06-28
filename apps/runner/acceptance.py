@@ -45,9 +45,7 @@ FinalStatus = Literal["pass", "warning", "fail"]
 # Honest ladder of what acceptance actually proved on this Mac. ``fake_sanity`` is
 # the floor (fake plumbing only); each higher rung additionally requires the named
 # checks to have been *requested and passed*.
-AcceptanceLevel = Literal[
-    "fake_sanity", "real_models", "real_models_plus_voice", "full_wake_voice"
-]
+AcceptanceLevel = Literal["fake_sanity", "real_models", "real_models_plus_voice", "full_wake_voice"]
 ServiceMode = Literal["none", "real", "fake"]
 
 _VERIFY_REAL = (
@@ -116,8 +114,10 @@ class FakeVerificationSummary(BaseModel):
 
 class ReadinessSummary(BaseModel):
     real_model_ready: bool
+    real_model_preflight_ready: bool = False
     voice_enabled: bool
     voice_ready: bool
+    voice_preflight_ready: bool = False
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -506,8 +506,10 @@ def run_acceptance(
         fake_verification=fake,
         readiness=ReadinessSummary(
             real_model_ready=readiness.real_model_ready,
+            real_model_preflight_ready=readiness.real_model_preflight_ready,
             voice_enabled=readiness.voice_enabled,
             voice_ready=readiness.voice_ready,
+            voice_preflight_ready=readiness.voice_preflight_ready,
             blockers=list(readiness.blockers),
             warnings=list(readiness.warnings),
         ),

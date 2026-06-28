@@ -11,11 +11,11 @@ def creative_agent() -> BaseAgent:
     return BaseAgent(
         AgentConfig(
             name="creative_agent",
-            description="Emails, ideas, scripts, and concepts.",
+            description="Ideas, scripts, concepts, and local notes.",
             model_id="april-brain",
             system_prompt_path=str(prompt_path),
             allowed_tools={"create_note", "search_notes", "remember_memory"},
-            blocked_tools={"send_email", "open_url"},
+            blocked_tools={"open_url"},
             memory_access_policy="conversation_and_safe_memory",
             maximum_tool_iterations=3,
             system_prompt=load_prompt(prompt_path),

@@ -157,26 +157,24 @@ def _wake_report(summary: str) -> WakeWordLiveReport:
 
 
 def _patch_core(monkeypatch, *, errors=None, readiness=None, fake_checks=None) -> None:
-    monkeypatch.setattr(
-        "apps.runner.acceptance.validate_configuration", lambda home: errors or []
-    )
+    monkeypatch.setattr("apps.runner.acceptance.validate_configuration", lambda home: errors or [])
     monkeypatch.setattr(
         "apps.runner.acceptance.build_readiness_report", lambda home: readiness or _readiness()
     )
     monkeypatch.setattr(
         "apps.runner.acceptance.run_fake_verification",
-        lambda home: fake_checks
-        if fake_checks is not None
-        else [VerifyCheck(name="runtime health", ok=True, detail="ok")],
+        lambda home: (
+            fake_checks
+            if fake_checks is not None
+            else [VerifyCheck(name="runtime health", ok=True, detail="ok")]
+        ),
     )
 
 
 # --- orchestrator ----------------------------------------------------------
 
 
-def test_acceptance_fake_only_is_warning_not_pass_by_default(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_acceptance_fake_only_is_warning_not_pass_by_default(tmp_path: Path, monkeypatch) -> None:
     _patch_core(monkeypatch, readiness=_readiness())
     report = run_acceptance(tmp_path)
     # Fake/local sanity must never silently look like full Mac readiness.
@@ -189,9 +187,7 @@ def test_acceptance_fake_only_is_warning_not_pass_by_default(
     assert any("sanity" in action.lower() for action in report.next_actions)
 
 
-def test_acceptance_fake_only_passes_with_allow_sanity_pass(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_acceptance_fake_only_passes_with_allow_sanity_pass(tmp_path: Path, monkeypatch) -> None:
     _patch_core(monkeypatch, readiness=_readiness())
     report = run_acceptance(tmp_path, allow_sanity_pass=True)
     # Only with the explicit opt-in does a clean fake-only run report pass.
@@ -303,9 +299,7 @@ def test_acceptance_real_models_only_level_without_voice(tmp_path: Path, monkeyp
     assert report.final_status == "pass"
 
 
-def test_acceptance_require_real_models_fails_on_fake_backend(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_acceptance_require_real_models_fails_on_fake_backend(tmp_path: Path, monkeypatch) -> None:
     # A fake runtime backend can never satisfy --require-real-models.
     _patch_core(monkeypatch, readiness=_readiness(runtime_backend="fake"))
     report = run_acceptance(tmp_path, require_real_models=True)
@@ -343,9 +337,7 @@ def test_acceptance_cli_writes_redacted_report_under_data_verification(
         assert manager.settings.runtime.token not in text
 
 
-def test_acceptance_cli_json_output_contains_no_full_tokens(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_acceptance_cli_json_output_contains_no_full_tokens(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("APRIL_API_TOKEN", "tok-secret-acceptance-xyz")
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
@@ -385,9 +377,7 @@ def test_acceptance_cli_custom_report_path(tmp_path: Path, monkeypatch) -> None:
 
 def test_validate_acceptance_flags_rejects_fake_services_with_require_real() -> None:
     with pytest.raises(AcceptanceFlagError):
-        validate_acceptance_flags(
-            require_real_models=True, start_services=True, fake_services=True
-        )
+        validate_acceptance_flags(require_real_models=True, start_services=True, fake_services=True)
 
 
 def test_validate_acceptance_flags_rejects_fake_services_without_start() -> None:
@@ -422,9 +412,7 @@ def test_acceptance_cli_rejects_fake_services_with_require_real_models(
 
 
 def _patch_wake_runner(monkeypatch, summary: str) -> None:
-    monkeypatch.setattr(
-        "apps.runner.main.collect_voice_doctor", lambda settings: {"status": "ok"}
-    )
+    monkeypatch.setattr("apps.runner.main.collect_voice_doctor", lambda settings: {"status": "ok"})
 
     async def _fake_wake(**kwargs: object) -> WakeWordLiveReport:
         return _wake_report(summary)
@@ -501,18 +489,14 @@ def test_acceptance_cli_stops_services_on_exception(tmp_path: Path, monkeypatch)
         raise RuntimeError("verifier exploded")
 
     monkeypatch.setattr("apps.runner.main.run_acceptance", _boom)
-    result = CliRunner().invoke(
-        app, ["april", "acceptance", "--start-services", "--fake-services"]
-    )
+    result = CliRunner().invoke(app, ["april", "acceptance", "--start-services", "--fake-services"])
     assert result.exit_code != 0
     # Services started by acceptance are released even when the run raises.
     assert manager.started == [True]
     assert manager.stopped == 1
 
 
-def test_acceptance_cli_does_not_stop_already_running_services(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_acceptance_cli_does_not_stop_already_running_services(tmp_path: Path, monkeypatch) -> None:
     manager = FakeServiceManager(tmp_path, initially_ok=True)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     _patch_core(monkeypatch, readiness=_readiness())

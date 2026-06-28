@@ -216,13 +216,11 @@ class AprilOrchestrator:
             if result.pending_approval is not None:
                 yield (
                     "approval_required",
-                    {
-                        "approval": result.pending_approval,
-                        "message": result.final_message,
-                        "proposed_changes": [
-                            change.model_dump() for change in result.proposed_changes
-                        ],
-                    },
+                    self._approval_required_payload(
+                        approval=result.pending_approval,
+                        message=result.final_message,
+                        proposed_changes=result.proposed_changes,
+                    ),
                 )
                 yield ("done", {"finish_reason": "approval_required"})
                 return
@@ -245,13 +243,11 @@ class AprilOrchestrator:
         if prepared.pending_approval is not None:
             yield (
                 "approval_required",
-                {
-                    "approval": prepared.pending_approval,
-                    "message": prepared.final_message,
-                    "proposed_changes": [
-                        change.model_dump() for change in prepared.proposed_changes
-                    ],
-                },
+                self._approval_required_payload(
+                    approval=prepared.pending_approval,
+                    message=prepared.final_message,
+                    proposed_changes=prepared.proposed_changes,
+                ),
             )
             await self._finish_pending(prepared)
             yield ("done", {"finish_reason": "approval_required"})
@@ -313,6 +309,19 @@ class AprilOrchestrator:
             "completed" if finish_reason != "error" else "error",
         )
         yield ("done", {"finish_reason": finish_reason})
+
+    @staticmethod
+    def _approval_required_payload(
+        *,
+        approval: dict[str, Any],
+        message: str | None,
+        proposed_changes: list[ProposedChange],
+    ) -> dict[str, Any]:
+        return {
+            "approval": approval,
+            "message": message,
+            "proposed_changes": [change.model_dump() for change in proposed_changes],
+        }
 
     async def _prepare_turn(
         self,

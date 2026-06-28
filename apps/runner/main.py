@@ -537,12 +537,14 @@ _READINESS_STATUS_STYLE = {
 
 def _print_readiness(report: ReadinessReport) -> None:
     headline = (
-        "[green]real model ready[/green]"
-        if report.real_model_ready
-        else "[red]NOT real-model ready[/red]"
+        "[green]preflight ready[/green]"
+        if report.real_model_preflight_ready
+        else "[red]preflight blocked[/red]"
     )
     console.print(
-        f"APRIL readiness — {headline} (backend={report.runtime_backend}, env={report.environment})"
+        "APRIL readiness — "
+        f"{headline}; real verification not run "
+        f"(backend={report.runtime_backend}, env={report.environment})"
     )
     table = Table(title="Readiness checks")
     table.add_column("Check")
@@ -561,7 +563,9 @@ def _print_readiness(report: ReadinessReport) -> None:
             # markup=False so tokens like '.[runtime]' are not parsed as Rich tags.
             console.print(f"  {action}", markup=False)
     if not report.blockers:
-        console.print("[green]No blockers: run the real verification command to confirm.[/green]")
+        console.print(
+            "[green]No preflight blockers: run the real verification command to confirm.[/green]"
+        )
 
 
 @april_app.command()
@@ -1635,8 +1639,7 @@ def _print_activation(report: MacActivationReport) -> None:
         console.print(f"[red]Voice: {voice.error}[/red]")
     else:
         console.print(
-            f"Voice: validated={voice.validated}, applied={voice.applied}, "
-            f"enabled={voice.enabled}"
+            f"Voice: validated={voice.validated}, applied={voice.applied}, enabled={voice.enabled}"
         )
         for artifact in voice.artifacts:
             console.print(f"  {artifact.name}: {artifact.basename or 'not configured'}")
@@ -1771,9 +1774,7 @@ def setup_mac_activation(
                 max_output_tokens=32,
                 timeout=180.0,
                 thresholds=ReportThresholds(),
-                voice_live_runner=(
-                    _voice_live_runner(settings) if acceptance_voice_live else None
-                ),
+                voice_live_runner=(_voice_live_runner(settings) if acceptance_voice_live else None),
                 wake_word_live_runner=(
                     _wake_word_live_runner(settings) if acceptance_wake_word_live else None
                 ),
@@ -2177,8 +2178,8 @@ def _print_acceptance(report: AcceptanceReport) -> None:
     )
     readiness = report.readiness
     table.add_row(
-        "readiness",
-        "ready" if readiness.real_model_ready else "not ready",
+        "readiness preflight",
+        "ready" if readiness.real_model_preflight_ready else "not ready",
         f"{len(readiness.blockers)} blocker(s), {len(readiness.warnings)} warning(s)",
     )
     if report.real_model_verification is not None:
@@ -2186,8 +2187,7 @@ def _print_acceptance(report: AcceptanceReport) -> None:
         table.add_row(
             "real models",
             real.summary,
-            f"level={real.verification_level}, "
-            f"{real.models_passed}/{real.models_attempted} passed",
+            f"level={real.verification_level}, {real.models_passed}/{real.models_attempted} passed",
         )
     if report.voice_live is not None:
         voice = report.voice_live

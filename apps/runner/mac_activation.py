@@ -78,9 +78,7 @@ def validate_activation_flags(
             "--acceptance-voice-live/--acceptance-wake-word-live require --run-acceptance."
         )
     if live and skip_voice:
-        raise ActivationFlagError(
-            "Live voice acceptance cannot be combined with --skip-voice."
-        )
+        raise ActivationFlagError("Live voice acceptance cannot be combined with --skip-voice.")
     if live and not enable_voice:
         raise ActivationFlagError("Live voice acceptance requires --enable-voice.")
     # Activation acceptance is always real-model, so fake services can never satisfy it.
@@ -377,9 +375,7 @@ def _acceptance_link(
         wake_word_live_summary=(
             report.wake_word_live.summary if report.wake_word_live is not None else None
         ),
-        services_startup=(
-            report.services.startup_status if report.services.requested else None
-        ),
+        services_startup=(report.services.startup_status if report.services.requested else None),
     )
 
 

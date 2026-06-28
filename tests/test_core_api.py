@@ -403,6 +403,38 @@ def test_chat_stream_specialist_uses_structured_events(settings_tmp) -> None:
     assert container.runtime_client.stream_called is False  # type: ignore[attr-defined]
 
 
+def test_chat_stream_structured_approval_payload_shape(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    project = client.post(
+        "/projects",
+        json={"path": str(settings_tmp.home)},
+        headers=auth(settings_tmp),
+    ).json()
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "Apply the fix.", "project_id": project["id"]},
+        headers=auth(settings_tmp),
+    ) as response:
+        body = response.read().decode()
+
+    assert response.status_code == 200
+    approval_events = [
+        json.loads(line.removeprefix("data: "))
+        for line in body.splitlines()
+        if line.startswith("data: ") and '"event": "approval_required"' in line
+    ]
+    assert len(approval_events) == 1
+    payload = approval_events[0]["payload"]
+    assert set(payload) == {"approval", "message", "proposed_changes"}
+    assert payload["approval"]["tool"] == "patch_applier"
+    assert isinstance(payload["message"], str)
+    assert isinstance(payload["proposed_changes"], list)
+
+
 def test_memory_retrieval_in_prompt(settings_tmp) -> None:
     import anyio
 

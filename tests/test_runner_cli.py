@@ -262,9 +262,7 @@ def test_run_april_voice_verify_live_uses_local_verifier(tmp_path: Path, monkeyp
     assert "transcript_length=10" in result.output
 
 
-def test_run_april_voice_verify_wake_live_uses_local_verifier(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_run_april_voice_verify_wake_live_uses_local_verifier(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     manager.settings = load_settings(root=tmp_path)  # type: ignore[attr-defined]
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
@@ -677,6 +675,10 @@ def test_readiness_cli_human_and_json_are_offline_and_redacted(tmp_path: Path, m
     assert structured.exit_code == 0, structured.output
     payload = json.loads(structured.output)
     assert "real_model_ready" in payload
+    assert payload["real_model_ready"] is False
+    assert payload["voice_ready"] is False
+    assert "real_model_preflight_ready" in payload
+    assert "voice_preflight_ready" in payload
     assert "blockers" in payload
     assert "next_actions" in payload
     # Offline + redacted: no absolute home path, no token value in JSON output.

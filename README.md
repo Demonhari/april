@@ -178,8 +178,11 @@ It reports, with a blocker/warning/skipped verdict each: the runtime backend
 (fake vs `llama_cpp`), whether the `llama-cpp-python` extra is installed, which
 configured GGUF model files are missing, the whisper.cpp / Piper / wake-word
 artifacts (only blocking when voice is enabled), whether default development
-tokens are still active, and the exact next command for each gap. `run april
-readiness` only diagnoses; it never fixes anything for you.
+tokens are still active, and the exact next command for each gap. The JSON
+`*_preflight_ready` fields mean prerequisites appear present; `real_model_ready`
+and `voice_ready` remain false because offline readiness does not load a GGUF or
+run live voice verification. `run april readiness` only diagnoses; it never
+fixes anything for you.
 
 ### Memory embeddings (honest default)
 
