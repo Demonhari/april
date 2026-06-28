@@ -308,6 +308,46 @@ def test_cli_model_download_wiring(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert captured["skip_existing"] is True
 
 
+def test_cli_model_download_writes_explicit_report_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = types.SimpleNamespace(home=tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    report_path = tmp_path / "data" / "verification" / "model-downloads.json"
+
+    def _fake_run(home: Path, **kwargs: Any) -> ModelDownloadReport:
+        return ModelDownloadReport(
+            generated_at="2026-06-28T00:00:00Z",
+            mode="apply",
+            applied=True,
+            selected_roles=["brain"],
+            entries=[],
+            next_commands=[],
+        )
+
+    monkeypatch.setattr("apps.runner.main.run_model_downloads", _fake_run)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "model",
+            "download",
+            "--role",
+            "brain",
+            "--apply",
+            "--yes",
+            "--write-report",
+            str(report_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert report_path.exists()
+    parsed = ModelDownloadReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+    assert parsed.report_type == "model_download"
+
+
 def test_cli_model_download_apply_requires_yes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

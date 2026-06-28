@@ -42,6 +42,11 @@ def _seed_configs(
 
 def _copy_configs(home: Path) -> None:
     shutil.copytree(Path.cwd() / "configs", home / "configs")
+    models_path = home / "configs" / "models.yaml"
+    data = yaml.safe_load(models_path.read_text(encoding="utf-8"))
+    for model in data["models"].values():
+        model["path"] = str(home / "models" / f"{model['id']}.gguf")
+    models_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
 def _gguf(home: Path, name: str) -> Path:
@@ -620,6 +625,35 @@ def test_activation_cli_writes_redacted_report_under_data_verification(
     assert parsed.report_type == "mac_activation"
     text = reports[0].read_text(encoding="utf-8")
     assert manager.settings.api.token not in text
+
+
+def test_activation_cli_writes_explicit_report_path(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.mac_activation.setup_model_set", RecordingSetup(_model_result())
+    )
+    report_path = tmp_path / "data" / "verification" / "mac-activation.json"
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "setup",
+            "mac-activation",
+            "--brain",
+            "/models/brain.gguf",
+            "--coding",
+            "/models/coding.gguf",
+            "--reading",
+            "/models/reading.gguf",
+            "--skip-voice",
+            "--write-report",
+            str(report_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    parsed = MacActivationReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+    assert parsed.report_type == "mac_activation"
 
 
 def test_activation_cli_apply_runs_mocked_acceptance(tmp_path: Path, monkeypatch) -> None:

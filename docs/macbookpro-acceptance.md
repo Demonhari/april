@@ -5,9 +5,11 @@ This is the operator checklist for taking APRIL from a fresh clone to a
 one gate command — `run april acceptance` — plus the exact setup and live-voice
 commands that gate depends on.
 
-Nothing here downloads a model, installs a Homebrew package, runs `sudo`, or
-reaches the network. Every command is something *you* run; APRIL only validates,
-reports, and (when you pass `--apply`) edits local config.
+Network access is explicit: the only model download path here is the
+manifest-backed `run april model download --apply --yes` command that *you* run.
+Import, config validation, fake verification, CI, and readiness checks do not
+download models, install Homebrew packages, run `sudo`, or silently reach the
+network.
 
 ## What fake verification proves
 
@@ -81,6 +83,10 @@ run april setup mac-activation \
   --apply \
   --run-acceptance \
   --start-services
+run april verify --all-configured-models --require-real-model \
+  --report data/verification/real-model-verification.json
+run april acceptance --require-real-models --start-services \
+  --report data/verification/mac-readiness.json
 ```
 
 `run april model download` reads only `configs/model_downloads.yaml`, is dry-run
@@ -142,8 +148,10 @@ run april verify --all-configured-models --require-real-model \
 
 This loads, chats, streams, and unloads **every** configured chat GGUF in one
 runtime, verifies specialist switching keeps the brain resident, checks
-structured brain JSON and routing accuracy, and fails if any configured chat
-model is missing, skipped, unavailable, or fake. The report under
+structured brain JSON, and fails if any configured chat model is missing,
+skipped, unavailable, or fake. Optional routing evals can be enabled for deeper
+diagnostics with `APRIL_VERIFY_ROUTING_EVALS=1`; they are not required for the
+core load/chat/stream/unload readiness proof. The report under
 `data/verification/` is redacted (basenames, counts, booleans only) and is
 Git-ignored.
 

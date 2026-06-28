@@ -787,8 +787,9 @@ def _print_model_download(report: ModelDownloadReport) -> None:
         console.print(f"  {command}", markup=False)
 
 
-@model_app.command("download")
+@model_app.command("download", context_settings={"allow_extra_args": True})
 def model_download_command(
+    ctx: typer.Context,
     all_core: bool = typer.Option(False, "--all-core", help="Download brain/coding/reading."),
     role: str | None = typer.Option(
         None, "--role", help="Download one manifest role: brain/coding/reading/reasoning/embedding."
@@ -832,12 +833,20 @@ def model_download_command(
     except ConfigError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+    if ctx.args and not write_report:
+        console.print("[red]Unexpected extra argument. Did you mean --write-report PATH?[/red]")
+        raise typer.Exit(1)
+    if len(ctx.args) > 1:
+        console.print("[red]Only one --write-report path may be supplied.[/red]")
+        raise typer.Exit(1)
     if json_output:
         console.print_json(data=report.model_dump())
     else:
         _print_model_download(report)
     if write_report:
-        target = default_model_download_report_path(_manager().home)
+        target = (
+            Path(ctx.args[0]) if ctx.args else default_model_download_report_path(_manager().home)
+        )
         written = write_model_download_report(report, target)
         console.print(f"[green]Wrote model download report to {written}[/green]")
 
@@ -1780,8 +1789,9 @@ def _print_activation(report: MacActivationReport) -> None:
             console.print(f"  {action}", markup=False)
 
 
-@setup_app.command("mac-activation")
+@setup_app.command("mac-activation", context_settings={"allow_extra_args": True})
 def setup_mac_activation(
+    ctx: typer.Context,
     brain: Path | None = typer.Option(None, "--brain", help="Local brain GGUF path."),
     coding: Path | None = typer.Option(None, "--coding", help="Local coding GGUF path."),
     reading: Path | None = typer.Option(None, "--reading", help="Local reading GGUF path."),
@@ -1913,7 +1923,19 @@ def setup_mac_activation(
         acceptance_runner=acceptance_runner,
     )
 
-    target = default_activation_report_path(home) if write_report else None
+    if ctx.args and not write_report:
+        console.print("[red]Unexpected extra argument. Did you mean --write-report PATH?[/red]")
+        raise typer.Exit(1)
+    if len(ctx.args) > 1:
+        console.print("[red]Only one --write-report path may be supplied.[/red]")
+        raise typer.Exit(1)
+    target = (
+        Path(ctx.args[0])
+        if write_report and ctx.args
+        else default_activation_report_path(home)
+        if write_report
+        else None
+    )
 
     if json_output:
         console.print_json(data=report_obj.model_dump())

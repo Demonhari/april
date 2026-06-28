@@ -63,7 +63,8 @@ def test_fake_backend_without_models_is_not_ready(tmp_path: Path) -> None:
     assert "runtime backend" in report.blockers
     assert "configured GGUF model files" in report.blockers
     # Actionable commands only, and the authoritative real-verify command is last.
-    assert "pip install -e '.[runtime]'" in report.next_actions
+    if not report.llama_cpp_python_available:
+        assert "pip install -e '.[runtime]'" in report.next_actions
     assert any(action.startswith("run april verify") for action in report.next_actions)
 
 

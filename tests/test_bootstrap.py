@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from apps.runner.bootstrap import bootstrap
@@ -16,6 +17,11 @@ from apps.runner.main import app
 def home_with_configs(settings_tmp) -> Path:
     home = settings_tmp.home
     shutil.copytree(Path.cwd() / "configs", home / "configs")
+    models_path = home / "configs" / "models.yaml"
+    data = yaml.safe_load(models_path.read_text(encoding="utf-8"))
+    for model in data["models"].values():
+        model["path"] = str(home / "models" / f"{model['id']}.gguf")
+    models_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return home
 
 

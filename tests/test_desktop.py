@@ -478,7 +478,7 @@ def _write_verification_report(
         "report_type": "multi_model",
         "generated_at": generated_at,
         "summary": summary,
-        "real_model_verified": verification_level in {"partial", "core", "all"},
+        "real_model_verified": verification_level in {"core", "all"},
         "verification_level": verification_level,
         "real_models_exercised": 1,
         "real_models_passed": 1,

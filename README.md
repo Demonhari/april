@@ -151,6 +151,10 @@ run april setup mac-activation \
   --start-services
 run april verify --all-configured-models \
   --require-real-model \
+  --report data/verification/real-model-verification.json
+run april acceptance \
+  --require-real-models \
+  --start-services \
   --report data/verification/mac-readiness.json
 ```
 
@@ -191,13 +195,15 @@ real models, live audio, or native Mac packaging.
 | Scoped log/cache cleanup (plan + Level 4 approved apply) | Implemented, security-tested |
 | Secure first-run bootstrap (`setup bootstrap`) | Implemented, tested with temp homes |
 | Interactive push-to-talk (stop-controlled capture) | Implemented, tested with fake mic + mocked input |
-| Real GGUF model load/chat/stream/unload | **Not verified here** — requires your local GGUF + `[runtime]` extra |
+| Real GGUF model load/chat/stream/unload | Implemented; verified only by target-Mac `--require-real-model` reports with local GGUFs |
 | Live microphone, whisper.cpp, Piper, wake-word | **Not verified here** — requires your local binaries/models |
 | Real-model target-Mac acceptance report | Implemented; runs real checks only when you supply a GGUF |
 | Signed/notarized packaging, launch-at-login | Out of scope (see below) |
 
-Nothing in this repository has been run against a real GGUF model, a live
-microphone, or native Mac packaging in the environment that produced it.
+CI and fake verification are not proof of real GGUF readiness. Real-model
+readiness is proven only by a target-Mac report that loads, chats, streams, and
+unloads the configured local GGUF files. Live microphone/wake-word and signed
+native packaging remain separate target-Mac checks.
 
 ### Offline readiness check
 
@@ -343,17 +349,20 @@ run april verify --all-configured-models \
 ```
 
 `--mac-readiness` is the same command. The Brain must load/chat/stream/unload,
-produce structured Brain JSON, run routing evals, and meet
-`--min-routing-accuracy` (default `0.90`). Specialists must also pass a role
-smoke check. Coding and system-action smokes validate tiny JSON schemas; prompts
-and outputs are not stored in reports. Missing optional specialists are
+produce structured Brain JSON, and remain usable through specialist switching.
+Specialists must load/chat/stream/unload and pass a role smoke check. Coding and
+system-action smokes validate tiny JSON schemas; prompts and outputs are not
+stored in reports. Optional routing evals can be enabled with
+`APRIL_VERIFY_ROUTING_EVALS=1`; they are diagnostics, not part of the default
+core load/chat/stream/unload readiness proof. Missing optional specialists are
 skipped/degraded, not passed. Useful gates include `--max-rss-mb`,
 `--min-tokens-per-second`, `--max-load-seconds`, and
 `--max-first-token-latency-seconds`. Fake or simulated runs can never set
 `real_model_verified: true`.
 
-The multi-model report keeps `real_model_verified` for compatibility ("at least
-one real model passed") and adds explicit verification levels:
+The multi-model report sets `real_model_verified` only when the required core
+model set is verified. Partial success is reported separately through
+`any_real_model_passed` and `verification_level`:
 
 - `none`: no real model was exercised and passed, or the backend is fake.
 - `partial`: at least one real model passed, but the core model set is not

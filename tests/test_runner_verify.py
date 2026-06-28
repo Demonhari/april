@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 import pytest
+import yaml
 
 from apps.runner.evals import BrainEvalCase
 from apps.runner.verify import (
@@ -49,14 +50,51 @@ def test_all_configured_specialist_smoke_schema_validators() -> None:
     assert coding_kind == "coding_plan"
     assert coding_validator is not None
     assert coding_validator('{"plan":["edit","test"]}') is True
+    assert coding_validator('```json\n{"plan":["edit","test"]}\n```') is True
+    assert coding_validator('<think>short</think>\n{"plan":["edit","test"]}') is True
     assert coding_validator('{"plan":"edit"}') is False
     assert system_kind == "system_decision"
     assert system_validator is not None
     assert system_validator('{"execute":false,"permission_level":0}') is True
+    assert system_validator('Result: {"execute":false,"permission_level":0}') is True
     assert system_validator('{"execute":true,"permission_level":5}') is False
     assert reading_kind == "reading_summary"
     assert reading_validator is None
     assert "summarize" in reading_prompt.lower()
+
+
+def test_all_configured_prepare_resolves_relative_model_paths(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    verify_home = tmp_path / "verify_home"
+    (home / "configs").mkdir(parents=True)
+    (home / "configs" / "models.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "brain": {
+                        "id": "april-brain",
+                        "name": "brain",
+                        "path": "models/brain.gguf",
+                        "backend": "llama_cpp",
+                        "role": "brain",
+                        "threads": 1,
+                        "context_size": 1024,
+                        "temperature": 0.0,
+                        "max_output_tokens": 16,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    verifier = object.__new__(AllConfiguredModelsVerifier)
+    verifier.repo_home = home
+    verifier.verify_home = verify_home
+
+    verifier._prepare()
+
+    copied = yaml.safe_load((verify_home / "configs" / "models.yaml").read_text())
+    assert copied["models"]["brain"]["path"] == str(home / "models" / "brain.gguf")
 
 
 class FakeResponse:

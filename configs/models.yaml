@@ -13,7 +13,6 @@ models:
     keep_loaded: true
     idle_unload_seconds: null
     priority: 100
-
   coding:
     id: april-coding
     name: qwen3-1.7b
@@ -28,7 +27,6 @@ models:
     keep_loaded: false
     idle_unload_seconds: 300
     priority: 50
-
   reading:
     id: april-reading
     name: qwen3-0.6b

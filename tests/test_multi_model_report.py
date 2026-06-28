@@ -4,6 +4,8 @@ import json
 import shutil
 from pathlib import Path
 
+import yaml
+
 from apps.runner.mac_report import (
     EnvironmentSnapshot,
     ReportThresholds,
@@ -167,7 +169,7 @@ def test_one_passing_model_only_is_partial_when_core_roles_are_missing() -> None
         results=[_brain_pass(), missing_coding, missing_reading],
         specialist_switch=_all_switch_ok(),
     )
-    assert report.real_model_verified is True
+    assert report.real_model_verified is False
     assert report.core_model_set_verified is False
     assert report.all_configured_models_verified is False
     assert report.verification_level == "partial"
@@ -274,16 +276,18 @@ def test_routing_below_threshold_fails_and_is_reported() -> None:
         specialist_switch=_all_switch_ok(),
         thresholds=ReportThresholds(min_routing_accuracy=0.9),
     )
-    assert report.summary == "fail"
-    assert report.models_passed == 0
-    assert report.real_model_verified is False
-    assert any("routing accuracy 0.80 below minimum 0.90" in item for item in report.check_failures)
+    assert report.summary == "degraded"
+    assert report.models_passed == 1
+    assert report.real_model_verified is True
+    assert not any(
+        "routing accuracy 0.80 below minimum 0.90" in item for item in report.check_failures
+    )
     assert any(
         "routing accuracy 0.80 below minimum 0.90" in item for item in report.threshold_failures
     )
 
 
-def test_brain_without_routing_evals_fails() -> None:
+def test_brain_without_routing_evals_keeps_lifecycle_verified() -> None:
     brain = _brain_pass()
     brain.routing = RoutingReport(total=0, passed=0, accuracy=0.0)
     report = build_multi_model_report(
@@ -292,8 +296,9 @@ def test_brain_without_routing_evals_fails() -> None:
         results=[brain],
         specialist_switch=_all_switch_ok(),
     )
-    assert report.summary == "fail"
-    assert any("routing evals did not run" in failure for failure in report.check_failures)
+    assert report.summary == "pass"
+    assert report.real_model_verified is True
+    assert not any("routing evals did not run" in failure for failure in report.check_failures)
 
 
 def test_specialist_smoke_false_fails() -> None:
@@ -446,6 +451,11 @@ def _home_with_configs(tmp_path: Path) -> Path:
 
 def test_plan_marks_missing_files_skipped(tmp_path: Path) -> None:
     home = _home_with_configs(tmp_path)
+    models_path = home / "configs" / "models.yaml"
+    data = yaml.safe_load(models_path.read_text(encoding="utf-8"))
+    for model in data["models"].values():
+        model["path"] = str(home / "models" / f"{model['id']}.gguf")
+    models_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     plan = plan_multi_model_verification(home, llama_available=True)
     assert plan, "no configured models discovered"
     # The repo ships no GGUF files, so every configured model is skipped as

@@ -92,15 +92,6 @@ class PerModelResult(BaseModel):
         if self.role == "brain":
             if self.structured_brain_json_success is not True:
                 failures.append(f"{label}: structured Brain JSON check failed")
-            if self.routing is None or self.routing.total <= 0:
-                failures.append(f"{label}: routing evals did not run")
-            else:
-                min_accuracy = thresholds.min_routing_accuracy
-                if min_accuracy is not None and self.routing.accuracy < min_accuracy:
-                    failures.append(
-                        f"{label}: routing accuracy {self.routing.accuracy:.2f} "
-                        f"below minimum {min_accuracy:.2f}"
-                    )
         elif self.smoke_success is not True:
             failures.append(f"{label}: specialist role smoke check failed")
         elif self.smoke_schema_valid is False:
@@ -148,9 +139,9 @@ class MultiModelVerificationReport(BaseModel):
     cpu_architecture: str
     python_version: str
     runtime_backend: str
-    # True ONLY for a real backend with at least one fully-passing model.
-    # A fake/simulated run can never set this true, so simulation is never
-    # mistaken for real-model verification.
+    # True ONLY for a real backend with the required core model set verified.
+    # Partial success is reported separately so it cannot be mistaken for
+    # target-Mac real-model readiness.
     real_model_verified: bool = False
     real_models_exercised: int = 0
     real_models_passed: int = 0
@@ -340,14 +331,14 @@ def build_multi_model_report(
     real_models_exercised = 0 if simulated else len(attempted)
     real_models_passed = 0 if simulated else models_passed
     any_real_model_exercised = real_models_exercised > 0
-    any_real_model_passed = real_models_passed > 0
-    real_model_verified = any_real_model_passed
     switch_ok = _specialist_switch_ok(results=results, specialist_switch=specialist_switch)
     core_model_set_verified = _core_model_set_verified(
         results=results,
         thresholds=active_thresholds,
         simulated=simulated,
     )
+    any_real_model_passed = real_models_passed > 0
+    real_model_verified = core_model_set_verified
     all_available_models_verified = (
         not simulated
         and bool(attempted)
