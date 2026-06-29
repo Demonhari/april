@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,25 @@ def test_missing_model_file_is_a_blocker(tmp_path: Path) -> None:
     assert "configured GGUF model files" in report.blockers
     assert report.real_model_ready is False
     assert report.models[0].path_exists is False
+
+
+def test_default_repo_config_keeps_voice_out_of_blockers(tmp_path: Path) -> None:
+    # Guard the *shipped* configs/april.yaml end-to-end: with voice off by default
+    # and no voice artifacts present, every voice row is skipped (never a blocker),
+    # `run april setup voice` is not pushed, and live voice verification is skipped
+    # with the "not requested" message.
+    home = tmp_path / "home"
+    shutil.copytree(Path.cwd() / "configs", home / "configs")
+    report = build_readiness_report(home)
+    assert report.voice_enabled is False
+    voice_checks = [c for c in report.checks if c.name.startswith("voice:")]
+    assert voice_checks
+    assert all(c.status == "skipped" for c in voice_checks)
+    assert all(not name.startswith("voice:") for name in report.blockers)
+    assert "run april setup voice" not in report.next_actions
+    live = next(c for c in report.checks if c.name == "live voice verification")
+    assert live.status == "skipped"
+    assert live.detail == "Voice disabled; live verification not requested."
 
 
 def test_voice_disabled_artifacts_are_skipped_not_blockers(tmp_path: Path) -> None:

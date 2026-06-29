@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
+import pytest
 import yaml
 
 from april_common.config_validation import validate_configuration
@@ -11,6 +13,7 @@ from april_common.effective_config import (
     build_configured_tool_registry,
     load_permissions_file,
 )
+from april_common.settings import load_settings
 from services.april_runtime.model_registry import ModelRegistry
 from skills.registry import default_registry
 
@@ -24,6 +27,24 @@ def copy_configs(tmp_path: Path) -> Path:
 def test_config_validation_accepts_default_configs(tmp_path: Path) -> None:
     home = copy_configs(tmp_path)
     assert validate_configuration(home) == []
+
+
+def test_default_config_keeps_voice_opt_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shipped configs/april.yaml must keep voice opt-in: disabled, with every
+    # artifact path unset. This guards against re-introducing the regression where
+    # voice.enabled=true plus configured (but absent) paths made a fresh target Mac
+    # show voice blockers before voice was intentionally configured.
+    for key in list(os.environ):
+        if key.startswith("APRIL_"):
+            monkeypatch.delenv(key, raising=False)
+    home = copy_configs(tmp_path)
+    settings = load_settings(root=home)
+    assert settings.voice.enabled is False
+    assert settings.voice.whisper_binary_path is None
+    assert settings.voice.whisper_model_path is None
+    assert settings.voice.piper_binary_path is None
+    assert settings.voice.piper_model_path is None
+    assert settings.voice.wake_word_model_path is None
 
 
 def test_config_validation_rejects_unknown_agent_tool(tmp_path: Path) -> None:

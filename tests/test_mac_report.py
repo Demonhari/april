@@ -278,3 +278,118 @@ def test_target_mac_report_does_not_claim_real_when_simulated(monkeypatch) -> No
     validator.run()
     report = validator.build_report()
     assert report.summary != "pass"
+
+
+# --- voice opt-in semantics for target-Mac verification --------------------
+
+
+def _voice_components(
+    *, whisper: str = "degraded", piper: str = "degraded", wake: str = "degraded"
+) -> dict:
+    """A scripted ``voice_doctor`` payload so target-Mac tests do not depend on
+    whether voice artifacts happen to exist on the developer machine."""
+    return {
+        "components": [
+            {"name": "whisper binary", "status": whisper, "message": "whisper binary"},
+            {"name": "whisper model", "status": whisper, "message": "whisper model"},
+            {"name": "piper binary", "status": piper, "message": "piper binary"},
+            {"name": "piper model", "status": piper, "message": "piper model"},
+            {"name": "wake-word model", "status": wake, "message": "wake-word model"},
+        ]
+    }
+
+
+def _patch_target_mac(monkeypatch, *, voice_components: dict, devices_present: bool) -> None:
+    monkeypatch.setattr("apps.runner.verify.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("apps.runner.verify.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("apps.runner.verify._llama_cpp_installed", lambda: False)
+    devices = (
+        {
+            "sounddevice_installed": True,
+            "input_devices": [{"index": 0, "name": "Mic"}],
+            "output_devices": [{"index": 1, "name": "Speaker"}],
+        }
+        if devices_present
+        else {
+            "sounddevice_installed": False,
+            "input_devices": [],
+            "output_devices": [],
+            "error": "missing",
+        }
+    )
+    monkeypatch.setattr("apps.runner.verify.query_audio_devices", lambda: devices)
+    monkeypatch.setattr("apps.runner.verify.voice_doctor", lambda settings: voice_components)
+    monkeypatch.delenv("APRIL_TEST_GGUF_PATH", raising=False)
+
+
+def test_target_mac_default_config_voice_disabled_skips_voice(monkeypatch) -> None:
+    # On a clean target Mac with no voice artifacts present, the shipped default
+    # (voice off) must SKIP the voice checks, never fail them. With no real model
+    # the report is degraded — not fail — and no `run april setup voice` is forced.
+    monkeypatch.delenv("APRIL_VOICE_ENABLED", raising=False)
+    _patch_target_mac(monkeypatch, voice_components=_voice_components(), devices_present=False)
+    validator = TargetMacValidator(
+        home=Path.cwd(),
+        model_path=None,
+        require_real_model=False,
+        max_output_tokens=8,
+        timeout=5.0,
+    )
+    validator.run()
+    report = validator.build_report()
+    assert report.real_model.attempted is False
+    assert report.checks_failed == 0
+    assert report.summary == "degraded"
+    assert all(check.status != "fail" for check in validator.checks)
+    skipped = {item.name for item in report.skipped}
+    assert "whisper.cpp executable availability" in skipped
+    assert "Piper voice availability" in skipped
+
+
+def test_target_mac_voice_enabled_missing_artifacts_block(monkeypatch) -> None:
+    # With voice explicitly enabled, missing whisper.cpp / Piper artifacts are
+    # hard failures, so the report fails honestly rather than hiding the gap.
+    monkeypatch.setenv("APRIL_VOICE_ENABLED", "true")
+    _patch_target_mac(monkeypatch, voice_components=_voice_components(), devices_present=True)
+    validator = TargetMacValidator(
+        home=Path.cwd(),
+        model_path=None,
+        require_real_model=False,
+        max_output_tokens=8,
+        timeout=5.0,
+    )
+    validator.run()
+    report = validator.build_report()
+    failed = {check.name for check in validator.checks if check.status == "fail"}
+    assert "whisper.cpp executable availability" in failed
+    assert "whisper.cpp model availability" in failed
+    assert "Piper executable availability" in failed
+    assert "Piper voice availability" in failed
+    # A missing wake-word model stays a manual path, never a hard failure.
+    assert "wake-word model availability" not in failed
+    assert report.summary == "fail"
+
+
+def test_target_mac_voice_enabled_missing_wake_word_only_is_manual(monkeypatch) -> None:
+    # Push-to-talk works without a wake-word model: with whisper/Piper present and
+    # only the wake-word model missing, voice contributes no hard failure — the
+    # wake-word check is a manual/optional path, and the run stays degraded.
+    monkeypatch.setenv("APRIL_VOICE_ENABLED", "true")
+    _patch_target_mac(
+        monkeypatch,
+        voice_components=_voice_components(whisper="ok", piper="ok", wake="degraded"),
+        devices_present=True,
+    )
+    validator = TargetMacValidator(
+        home=Path.cwd(),
+        model_path=None,
+        require_real_model=False,
+        max_output_tokens=8,
+        timeout=5.0,
+    )
+    validator.run()
+    report = validator.build_report()
+    assert {check.name for check in validator.checks if check.status == "fail"} == set()
+    wake = next(c for c in validator.checks if c.name == "wake-word model availability")
+    assert wake.status == "manual"
+    assert report.summary == "degraded"

@@ -63,6 +63,18 @@ def test_all_configured_specialist_smoke_schema_validators() -> None:
     assert "summarize" in reading_prompt.lower()
 
 
+def test_fake_brain_routing_passes_without_models_or_voice() -> None:
+    # The deterministic fake/core verification path (brain routing eval) proves
+    # routing succeeds without any GGUF model file or voice artifact present. The
+    # full `run april verify --fake` exercises this end-to-end with the fake
+    # backend; this keeps the no-model/no-voice guarantee covered as a fast test.
+    from apps.runner.evals import run_fake_brain_eval
+
+    results = run_fake_brain_eval(Path.cwd())
+    assert results
+    assert all(result.ok for result in results)
+
+
 def test_all_configured_prepare_resolves_relative_model_paths(tmp_path: Path) -> None:
     home = tmp_path / "home"
     verify_home = tmp_path / "verify_home"

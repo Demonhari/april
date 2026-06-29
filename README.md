@@ -202,8 +202,15 @@ real models, live audio, or native Mac packaging.
 
 CI and fake verification are not proof of real GGUF readiness. Real-model
 readiness is proven only by a target-Mac report that loads, chats, streams, and
-unloads the configured local GGUF files. Live microphone/wake-word and signed
-native packaging remain separate target-Mac checks.
+unloads the configured local GGUF files:
+
+```bash
+run april verify --all-configured-models --require-real-model \
+  --report data/verification/mac-readiness.json
+```
+
+Live microphone/wake-word and signed native packaging remain separate
+target-Mac checks.
 
 ### Offline readiness check
 
@@ -246,20 +253,29 @@ APRIL has three clearly separated execution paths. Do not assume one is verified
 because another is.
 
 - **Fake-backend development (`APRIL_RUNTIME_BACKEND=fake`).** Deterministic,
-  needs no model files, and is what the automated suite and `run april verify
-  --fake` exercise. A green test suite verifies the orchestration, permissions,
-  memory, indexing, and API contracts — it does **not** verify any real model,
-  audio device, or native window. Passing fake/mocked tests does not make a
-  component production-ready.
+  needs no model files **and no voice artifacts**, and is what the automated
+  suite and `run april verify --fake` exercise. A green test suite verifies the
+  orchestration, permissions, memory, indexing, and API contracts — it does
+  **not** verify any real model, audio device, or native window. Passing
+  fake/mocked tests does not make a component production-ready.
 - **Real llama.cpp runtime (`APRIL_RUNTIME_BACKEND=llama_cpp`, the default).**
   Requires the optional `.[runtime]` extra (`llama-cpp-python`) and local GGUF
   files that **you** provide. APRIL never downloads or commits models; the
   `models/` directory ships empty.
-- **Optional voice dependencies.** Voice is off by default. It requires the
-  `.[voice]` extra (`sounddevice`, `openwakeword`) plus whisper.cpp and Piper
-  binaries/models you install yourself. It is entirely local. The voice pipeline
-  has unit tests against synthetic PCM only; live microphone, openWakeWord,
-  whisper.cpp, and Piper have not been verified in this environment.
+- **Optional voice dependencies.** Voice is **off by default** and entirely
+  local; core/fake verification never needs it. Enabling it is a deliberate,
+  two-part step: set `voice.enabled: true` (or `APRIL_VOICE_ENABLED=true`) **and**
+  install the `.[voice]` extra (`sounddevice`, `openwakeword`) plus the
+  whisper.cpp and Piper binaries/models you provide, then run `run april setup
+  voice`. While voice is disabled, missing voice artifacts are *skipped* by
+  readiness and target-Mac verification — never treated as blockers. Once a
+  microphone, whisper.cpp (STT), and Piper (TTS) are configured, **push-to-talk
+  (`run april voice ptt`) works without any wake-word model**. Hands-free
+  wake-word listening for "April" additionally requires a configured local
+  openWakeWord model at `voice.wake_word_model_path`; APRIL never downloads or
+  trains one. The voice pipeline has unit tests against synthetic PCM only; live
+  microphone, openWakeWord, whisper.cpp, and Piper have not been verified in this
+  environment.
 
 `.env.example` documents `APRIL_RUNTIME_BACKEND` as commented-out: the effective
 default is `llama_cpp` to match `configs/models.yaml`. Uncomment `=fake` only for
