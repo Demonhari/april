@@ -225,13 +225,15 @@ class ModelLifecycle:
         if state.backend is None:
             raise ModelUnavailableError(request.model_id, "Model backend is not available.")
         options = effective_generation_options(state.model, request.options)
+        metadata = state.backend.prompt_metadata()
         context = await self.context_manager.fit(
             model=state.model,
             backend=state.backend,
             messages=request.messages,
             max_output_tokens=options.max_output_tokens,
+            metadata=metadata,
         )
-        prompt = render_prompt(state.model, context.messages)
+        prompt = render_prompt(state.model, context.messages, metadata=metadata)
         lock = (
             state.generation_lock
             if not state.backend.supports_concurrent_generation
@@ -327,13 +329,15 @@ class ModelLifecycle:
         if state.backend is None:
             raise ModelUnavailableError(request.model_id, "Model backend is not available.")
         options = effective_generation_options(state.model, request.options)
+        metadata = state.backend.prompt_metadata()
         context = await self.context_manager.fit(
             model=state.model,
             backend=state.backend,
             messages=request.messages,
             max_output_tokens=options.max_output_tokens,
+            metadata=metadata,
         )
-        prompt = render_prompt(state.model, context.messages)
+        prompt = render_prompt(state.model, context.messages, metadata=metadata)
         input_tokens = context.input_tokens
         output_tokens = 0
         start = time.monotonic()

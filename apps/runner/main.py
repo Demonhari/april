@@ -59,6 +59,7 @@ from apps.runner.model_tools import (
     load_model_profiles,
     model_doctor,
     recommend_model_profile,
+    setup_embedding_model,
     setup_model_set,
     setup_voice_stack,
 )
@@ -1078,12 +1079,24 @@ def _memory_doctor_report(
         "fell_back_to_hashed_token": fallback_to_hashed,
         "fallback_risk": runtime_local_requested and not verified_ok,
         "reindex_required": reindex_required,
+        # The exact command to rebuild the index under the active provider. Always
+        # present so switching providers never leaves the operator guessing; it is
+        # the required next step whenever reindex_required is true.
+        "reindex_command": "run april memory reindex",
         "embedding_model_id": model_info.get("model_id"),
         "embedding_role_model_registered": model_info["embedding_model_registered"],
         "embedding_model_path_exists": model_info["embedding_model_path_exists"],
         "embedding_model_path_basename": model_info.get("path_basename"),
         "vector_index": index,
     }
+    if runtime_local_requested and not (
+        model_info["embedding_model_registered"] and model_info["embedding_model_path_exists"]
+    ):
+        # Highly visible setup hint when runtime-local is requested but unusable.
+        report["setup_command"] = (
+            "run april setup embeddings --model /absolute/path/to/embedding.gguf "
+            "--id april-embedding --apply"
+        )
     if verification is not None:
         report["runtime_embedding_verification"] = verification
     return report
@@ -1193,6 +1206,17 @@ def _print_memory_doctor(data: dict[str, Any]) -> None:
     ):
         table.add_row(key, str(data.get(key)))
     console.print(table)
+    if data.get("reindex_required"):
+        console.print(
+            "[yellow]Index provider/dimension does not match the active provider; "
+            "reindex is required.[/yellow]"
+        )
+        console.print("Next command:")
+        # markup=False so command tokens are not parsed as Rich tags.
+        console.print(f"  {data.get('reindex_command')}", markup=False)
+    if data.get("setup_command"):
+        console.print("Configure a runtime-local embedding model:")
+        console.print(f"  {data.get('setup_command')}", markup=False)
 
 
 @conversation_app.command("delete")
@@ -1656,6 +1680,56 @@ def setup_models(
     console.print("Next commands:")
     for command in result["next_commands"]:
         console.print(f"  {command}")
+
+
+@setup_app.command("embeddings")
+def setup_embeddings(
+    model: Path = typer.Option(
+        ..., "--model", help="Local embedding GGUF path (never downloaded)."
+    ),
+    model_id: str = typer.Option("april-embedding", "--id", help="Embedding model id."),
+    name: str | None = typer.Option(None, "--name", help="Optional display name."),
+    copy_into_models: bool = typer.Option(False, "--copy-into-models"),
+    apply_changes: bool = typer.Option(False, "--apply"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """Register a local runtime-local embedding model (dry-run unless --apply).
+
+    Never downloads a model. Switching to runtime-local embeddings changes the
+    vector space, so the printed next commands always include the reindex command.
+    """
+    if apply_changes and dry_run:
+        console.print("[red]Use either --apply or --dry-run, not both.[/red]")
+        raise typer.Exit(1)
+    try:
+        result = setup_embedding_model(
+            home=_manager().home,
+            source_path=model,
+            model_id=model_id,
+            name=name,
+            copy_into_models=copy_into_models,
+            apply=apply_changes,
+            force=force,
+        )
+    except ConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(
+        "[green]Embedding setup applied; memory.embedding_provider=runtime-local.[/green]"
+        if result["applied"]
+        else "[yellow]Embedding setup dry run; no files were changed.[/yellow]"
+    )
+    plan = result["plan"]
+    console.print(
+        f"embedding: {plan['source_basename']} -> {plan['model_id']} "
+        f"(copy_into_models={plan['copy_into_models']})"
+    )
+    for backup in result["backup_basenames"]:
+        console.print(f"Config backup: {backup}")
+    console.print("[bold]Switching providers requires a reindex.[/bold] Next commands:")
+    for command in result["next_commands"]:
+        console.print(f"  {command}", markup=False)
 
 
 @setup_app.command("voice")
@@ -2764,6 +2838,22 @@ def _print_go_live(report: GoLiveReport) -> None:
         f"(level={report.acceptance_level}, backend={report.runtime_backend}, "
         f"env={env.deployment}, arch={env.cpu_architecture})"
     )
+    # The headline distinction: a working real-model core is reported separately
+    # from the hardened go-live rung so a hardening advisory never hides it.
+    core_label = {"ready": "ready", "fail": "fail", "not_run": "not run"}.get(
+        report.real_model_core_status, report.real_model_core_status
+    )
+    console.print(f"Real model core: {core_label}")
+    if report.hardened_go_live_ready:
+        console.print("Hardened go-live: ready")
+    elif report.hardening_blockers:
+        reason = "; ".join(report.hardening_blockers)
+        console.print(f"Hardened go-live: blocked because {reason}", markup=False)
+    elif report.hardening_warnings:
+        reason = "; ".join(report.hardening_warnings)
+        console.print(f"Hardened go-live: warning because {reason}", markup=False)
+    else:
+        console.print("Hardened go-live: not ready")
     table = Table(title="Go-live proof gates")
     table.add_column("Gate")
     table.add_column("Result")

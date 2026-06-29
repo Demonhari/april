@@ -1164,6 +1164,23 @@ function renderLatestReport(latest, latestRealModel, latestVoice) {
       ["real models passed", String(summary.real_models_passed || 0)],
       ["core/all verified", boolText(summary.core_or_all_verified)],
     ]);
+  // Go-live's headline distinction: a working real-model core is reported
+  // separately from the hardened go-live rung. A hardening advisory (dev tokens,
+  // non-runtime-local embeddings) holds the hardened rung at "warning" but must
+  // never hide a ready core.
+  if (summary.report_type === "go_live") {
+    const coreReady = summary.real_model_core_status === "ready";
+    html += "<div class='spacer'></div>" +
+      "<div class='row'>" +
+      pill("Real model core: " + summary.real_model_core_status, coreReady ? "ok" : "warn") +
+      pill("Hardened go-live: " + (summary.hardened_go_live_ready ? "ready" : "warning"),
+        summary.hardened_go_live_ready ? "ok" : "warn") +
+      "</div>";
+    if (!summary.hardened_go_live_ready && summary.hardening_warnings.length) {
+      html += "<div class='kv warn'>Hardened go-live held back by: " +
+        esc(summary.hardening_warnings.join("; ")) + "</div>";
+    }
+  }
   const skipped = Array.isArray(report.skipped) ? report.skipped : [];
   const thresholdFailures = Array.isArray(report.threshold_failures)
     ? report.threshold_failures
@@ -1305,6 +1322,25 @@ screens.readiness = async function () {
   });
   screenEl.appendChild(card(modelHtml));
 
+  const embeddings = readiness.embeddings || {};
+  let embeddingHtml = "<div class='panel-title'>Memory embeddings</div>" +
+    kvRows([
+      ["Configured provider", embeddings.configured_provider || "hashed-token"],
+      ["Active provider", embeddings.active_provider || "hashed-token"],
+      ["Embedding model", embeddings.embedding_model_id || "not configured"],
+      ["Dimensions", D.formatInt(embeddings.dimensions)],
+      ["Index compatible", boolText(embeddings.index_compatible !== false)],
+      ["Reindex required", boolText(embeddings.reindex_required === true)],
+    ]);
+  if (embeddings.fell_back_to_hashed_token) {
+    embeddingHtml += "<div class='kv warn'>runtime-local requested but unavailable; " +
+      "fell back to hashed-token embeddings (weaker semantic memory).</div>";
+  }
+  if (embeddings.reindex_required) {
+    embeddingHtml += commandBlock(embeddings.reindex_command || "run april memory reindex");
+  }
+  screenEl.appendChild(card(embeddingHtml));
+
   const commands = guidance.commands || [macReadinessCommand, workflowCommand, singleModelCommand];
   screenEl.appendChild(card(
     "<div class='panel-title'>Verification guidance</div>" +
@@ -1338,6 +1374,7 @@ screens.readiness = async function () {
   let voiceHtml = "<div class='panel-title'>Voice readiness</div>" +
     kvRows([
       ["Voice enabled", boolText(voice.enabled)],
+      ["Voice milestone", voice.voice_milestone || "disabled"],
       ["sounddevice", voice.sounddevice_available ? "available" : "missing"],
       ["Input devices", D.formatInt(voice.input_device_count)],
       ["Output devices", D.formatInt(voice.output_device_count)],

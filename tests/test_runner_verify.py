@@ -719,6 +719,26 @@ def test_real_workflow_run_uses_expanded_safe_checklist(tmp_path: Path, monkeypa
     monkeypatch.setattr(verifier, "_real_approval_denial", lambda approval_id: "denied")
     monkeypatch.setattr(verifier, "_real_external_action_denial", lambda: "403")
     monkeypatch.setattr(verifier, "_real_voice_health", lambda: "disabled")
+    # The deterministic security checklist (model-independent) mirrors the fake
+    # workflow/security checks; stub each so this test verifies wiring, not HTTP.
+    monkeypatch.setattr(verifier, "_register_second_project", lambda: "second")
+    monkeypatch.setattr(verifier, "_security_patch_request", lambda project_id: "approval2")
+    monkeypatch.setattr(verifier, "_security_patch_apply", lambda approval_id: "applied")
+    monkeypatch.setattr(verifier, "_security_replay_rejected", lambda approval_id: "403")
+    monkeypatch.setattr(
+        verifier, "_security_tampered_artifact_rejected", lambda project_id: "failed"
+    )
+    monkeypatch.setattr(verifier, "_security_path_escape_rejected", lambda project_id: "403")
+    monkeypatch.setattr(verifier, "_security_repo_override_rejected", lambda second_id: "403")
+    monkeypatch.setattr(verifier, "_security_run_command_cwd_forced", lambda project_id: "forced")
+    monkeypatch.setattr(
+        verifier, "_security_command_allowlist_enforced", lambda project_id: "allowlist enforced"
+    )
+    monkeypatch.setattr(verifier, "_security_audit_records", lambda: "ok")
+    monkeypatch.setattr(verifier, "_security_tool_call_records", lambda: "3")
+    monkeypatch.setattr(
+        verifier, "_security_agent_run_records", lambda: "runs=1, iterations=1, suspended=1"
+    )
     checks = verifier.run()
     names = {check.name for check in checks}
     for name in (
@@ -735,9 +755,76 @@ def test_real_workflow_run_uses_expanded_safe_checklist(tmp_path: Path, monkeypa
         "workflow approval denial",
         "workflow external action denial",
         "workflow voice health",
+        # expanded deterministic security checklist
+        "workflow second project registration",
+        "workflow patch approval creation",
+        "workflow exact patch approval application",
+        "workflow approval replay rejection",
+        "workflow tampered artifact rejection",
+        "workflow path escape patch rejection",
+        "workflow repo override rejection",
+        "workflow run_command cwd forcing",
+        "workflow command allowlist enforcement",
+        "workflow audit records",
+        "workflow tool_call records",
+        "workflow agent_run records",
     ):
         assert name in names
     assert all(check.ok for check in checks)
+
+
+def test_security_run_command_cwd_forcing_and_allowlist(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19541, 19542])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    verifier = RealWorkflowVerifier(home=Path.cwd(), model_path=tmp_path / "model.gguf")
+    project = tmp_path / "selected_project"
+    project.mkdir()
+    verifier.workflow_project = project
+
+    class CwdClient:
+        def __enter__(self) -> CwdClient:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+        def post(self, path: str, json: dict[str, Any]) -> FakeResponse:
+            argv = json["args"].get("argv", [])
+            if argv and argv[0] != "pytest":
+                # Non-allowlisted executables are rejected by the command policy.
+                return FakeResponse({"error": "not allowlisted"}, status_code=403)
+            # run_command is level 3: it always returns a pending approval whose cwd
+            # is forced to the selected project, never the caller-supplied cwd.
+            return FakeResponse(
+                {
+                    "status": "pending_approval",
+                    "approval": {"args": {"cwd": str(project)}},
+                }
+            )
+
+    monkeypatch.setattr(verifier, "_api_client", lambda: CwdClient())
+    assert verifier._security_run_command_cwd_forced("project") == "forced"
+    assert verifier._security_command_allowlist_enforced("project") == "allowlist enforced"
+
+
+def test_security_repo_override_rejected_expects_403(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19551, 19552])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    verifier = RealWorkflowVerifier(home=Path.cwd(), model_path=tmp_path / "model.gguf")
+    verifier.second_project = tmp_path / "second"
+
+    class DenyClient:
+        def __enter__(self) -> DenyClient:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+        def post(self, path: str, json: dict[str, Any]) -> FakeResponse:
+            return FakeResponse({"error": "repo override"}, status_code=403)
+
+    monkeypatch.setattr(verifier, "_api_client", lambda: DenyClient())
+    assert verifier._security_repo_override_rejected("second") == "403"
 
 
 def _create_decision_table(database: Path) -> None:

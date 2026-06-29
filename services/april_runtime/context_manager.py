@@ -38,6 +38,7 @@ class ContextManager:
         backend: RuntimeBackend,
         messages: list[ChatMessage],
         max_output_tokens: int,
+        metadata: dict[str, object] | None = None,
     ) -> ContextResult:
         budget = model.context_size - max_output_tokens
         if budget <= 0:
@@ -58,7 +59,7 @@ class ContextManager:
 
         selected_indexes = set(required_indexes)
         selected_messages = _messages_for_indexes(messages, selected_indexes)
-        total = await self._count_rendered_tokens(model, backend, selected_messages)
+        total = await self._count_rendered_tokens(model, backend, selected_messages, metadata)
         if total > budget:
             raise AprilError(
                 "CONTEXT_BUDGET_EXCEEDED",
@@ -78,7 +79,9 @@ class ContextManager:
                 continue
             candidate_indexes = {*selected_indexes, index}
             candidate_messages = _messages_for_indexes(messages, candidate_indexes)
-            candidate_total = await self._count_rendered_tokens(model, backend, candidate_messages)
+            candidate_total = await self._count_rendered_tokens(
+                model, backend, candidate_messages, metadata
+            )
             if candidate_total <= budget:
                 selected_indexes.add(index)
                 total = candidate_total
@@ -92,6 +95,7 @@ class ContextManager:
                     selected_indexes=selected_indexes,
                     tool_index=index,
                     budget=budget,
+                    metadata=metadata,
                 )
                 if truncated is not None:
                     messages = truncated.messages
@@ -102,7 +106,7 @@ class ContextManager:
             removed += 1
 
         selected_messages = _messages_for_indexes(messages, selected_indexes)
-        total = await self._count_rendered_tokens(model, backend, selected_messages)
+        total = await self._count_rendered_tokens(model, backend, selected_messages, metadata)
         return ContextResult(
             messages=selected_messages,
             truncated=removed > 0 or truncated_tools > 0,
@@ -118,8 +122,9 @@ class ContextManager:
         model: ModelDefinition,
         backend: RuntimeBackend,
         messages: list[ChatMessage],
+        metadata: dict[str, object] | None = None,
     ) -> int:
-        return await backend.count_tokens(render_prompt(model, messages))
+        return await backend.count_tokens(render_prompt(model, messages, metadata=metadata))
 
     async def _fit_truncated_tool(
         self,
@@ -130,6 +135,7 @@ class ContextManager:
         selected_indexes: set[int],
         tool_index: int,
         budget: int,
+        metadata: dict[str, object] | None = None,
     ) -> ContextResult | None:
         original = messages[tool_index].content
         marker = "\n[TRUNCATED]"
@@ -145,7 +151,7 @@ class ContextManager:
                 update={"content": candidate_content}
             )
             candidate = _messages_for_indexes(candidate_all, {*selected_indexes, tool_index})
-            total = await self._count_rendered_tokens(model, backend, candidate)
+            total = await self._count_rendered_tokens(model, backend, candidate, metadata)
             if total <= budget:
                 best_messages = candidate_all
                 best_total = total

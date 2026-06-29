@@ -150,6 +150,24 @@ def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
     assert voice["push_to_talk_ready"] is False
     assert voice["wake_word_ready"] is False
     assert voice["full_voice_loop_ready"] is False
+    # The single redacted milestone enum is surfaced; with voice disabled by
+    # default in the temp home it is "disabled".
+    assert voice["voice_milestone"] in {
+        "disabled",
+        "not_configured",
+        "push_to_talk_ready",
+        "wake_word_ready",
+        "full_voice_loop_ready",
+        "live_verified",
+        "wake_live_verified",
+    }
+    assert voice["voice_milestone"] == "disabled"
+    # The embedding provider is a first-class, redacted readiness axis.
+    embeddings = response.json()["embeddings"]
+    assert embeddings["configured_provider"] in {"hashed-token", "runtime-local"}
+    assert embeddings["active_provider"] in {"hashed-token", "runtime-local"}
+    assert embeddings["reindex_command"] == "run april memory reindex"
+    assert isinstance(embeddings["reindex_required"], bool)
 
 
 def test_generated_api_token_authenticates(settings_tmp) -> None:

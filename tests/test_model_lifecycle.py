@@ -303,3 +303,151 @@ async def test_active_specialist_cannot_be_evicted(tmp_path: Path) -> None:
     lifecycle.get_state("april-coding").active_requests = 1
     with pytest.raises(ModelUnavailableError):
         await lifecycle.load_model("april-reading")
+
+
+class MetadataBackend(CountingBackend):
+    """A backend that exposes a native chat template via prompt_metadata().
+
+    Records the rendered prompt it is asked to generate/stream from so a test can
+    prove the backend metadata reached the renderer.
+    """
+
+    NATIVE_TEMPLATE = (
+        "{% for m in messages %}<<{{ m.role }}:{{ m.content }}>>{% endfor %}<<assistant>>"
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompts: list[str] = []
+
+    def prompt_metadata(self) -> dict[str, object]:
+        return {"tokenizer.chat_template": self.NATIVE_TEMPLATE}
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> GenerationResult:
+        self.prompts.append(prompt)
+        return await super().generate(
+            prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
+        )
+
+    async def stream(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ):
+        self.prompts.append(prompt)
+        yield "ok"
+
+
+def _unknown_template_registry(tmp_path: Path) -> ModelRegistry:
+    # chat_format is None and the name is not recognised, so the only way this
+    # model can render a prompt is via backend-provided native metadata.
+    return ModelRegistry.from_dict(
+        {
+            "models": {
+                "brain": {
+                    "id": "april-brain",
+                    "name": "unknown-local-model",
+                    "path": "missing.gguf",
+                    "backend": "fake",
+                    "role": "brain",
+                    "chat_format": None,
+                    "threads": 1,
+                    "context_size": 1024,
+                    "temperature": 0.0,
+                    "max_output_tokens": 64,
+                    "keep_loaded": False,
+                }
+            }
+        },
+        root=tmp_path,
+    )
+
+
+@pytest.mark.asyncio
+async def test_backend_metadata_renders_unknown_model_prompt(tmp_path: Path) -> None:
+    backend = MetadataBackend()
+    lifecycle = ModelLifecycle(
+        _unknown_template_registry(tmp_path),
+        backend_factory=lambda model: backend,
+        root_backend="fake",
+    )
+    request = ChatRequest(
+        model_id="april-brain",
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+    # Without backend metadata this model has no resolvable template; the run
+    # succeeding proves the native chat_template metadata reached the renderer.
+    await lifecycle.generate(request)
+    assert backend.prompts, "backend never received a rendered prompt"
+    assert "<<user:hello>>" in backend.prompts[-1]
+
+
+@pytest.mark.asyncio
+async def test_context_budgeting_uses_same_metadata_as_generation(tmp_path: Path) -> None:
+    from april_common.errors import ConfigError
+    from services.april_runtime.context_manager import ContextManager
+    from services.april_runtime.model_registry import ModelDefinition as _MD
+
+    backend = MetadataBackend()
+    model = _unknown_template_registry(tmp_path).get("april-brain")
+    assert isinstance(model, _MD)
+    messages = [ChatMessage(role="user", content="hello there")]
+    manager = ContextManager()
+    # Budgeting without metadata cannot render this unknown template and fails
+    # clearly — exactly as generation would.
+    with pytest.raises(ConfigError, match="Unsupported chat template"):
+        await manager.fit(
+            model=model, backend=backend, messages=messages, max_output_tokens=64
+        )
+    # With the backend's metadata, budgeting renders and succeeds, mirroring
+    # generation's metadata-aware path.
+    result = await manager.fit(
+        model=model,
+        backend=backend,
+        messages=messages,
+        max_output_tokens=64,
+        metadata=backend.prompt_metadata(),
+    )
+    assert result.input_tokens > 0
+
+
+@pytest.mark.asyncio
+async def test_template_metadata_does_not_leak_into_diagnostics(tmp_path: Path) -> None:
+    backend = MetadataBackend()
+    lifecycle = ModelLifecycle(
+        _unknown_template_registry(tmp_path),
+        backend_factory=lambda model: backend,
+        root_backend="fake",
+    )
+    request = ChatRequest(
+        model_id="april-brain",
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+    response = await lifecycle.generate(request)
+    # The raw template must never surface in user-facing diagnostics or model info.
+    import json
+
+    blob = json.dumps(response.diagnostics, default=str)
+    assert "chat_template" not in blob
+    assert "<<assistant>>" not in blob
+    info = json.dumps([model.model_dump(mode="json") for model in lifecycle.list_models()])
+    assert "chat_template" not in info

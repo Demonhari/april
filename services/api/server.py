@@ -736,9 +736,43 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             if isinstance(model, dict)
         ]
 
-    vector = _redact_health_payload(active.vector_memory.health())
+    vector_health = active.vector_memory.health()
+    vector = _redact_health_payload(vector_health)
+    # The embedding provider is a first-class readiness axis: hashed-token is the
+    # safe/offline default, runtime-local is the recommended hardened path. The
+    # active provider, whether it fell back, and whether the on-disk index matches
+    # are surfaced (booleans/enums only — never a path) so a silent mix is visible.
+    configured_embedding_provider = active.settings.memory.embedding_provider
+    active_embedding_provider = str(vector_health.get("embedding", "hashed-token"))
+    embedding_index_compatible = bool(vector_health.get("compatible", True))
+    embeddings = {
+        "configured_provider": configured_embedding_provider,
+        "active_provider": active_embedding_provider,
+        "runtime_local_requested": configured_embedding_provider == "runtime-local",
+        "fell_back_to_hashed_token": (
+            configured_embedding_provider == "runtime-local"
+            and active_embedding_provider == "hashed-token"
+        ),
+        "embedding_model_id": active.settings.memory.embedding_model_id,
+        "dimensions": vector_health.get("dimensions"),
+        "index_compatible": embedding_index_compatible,
+        "persisted_provider": vector_health.get("persisted_provider"),
+        "reindex_required": not embedding_index_compatible,
+        "reindex_command": "run april memory reindex",
+    }
+    # query_audio_devices() only *enumerates* devices; it never opens the
+    # microphone or starts a stream. Readiness stays inert by construction.
     devices = query_audio_devices()
     voice_readiness = voice_readiness_summary(active.settings, devices)
+    # Lift the offline milestone to a live rung only when a redacted live report
+    # proves it. wake_live_verified outranks live_verified.
+    live_flags = _latest_live_voice_flags(active.settings)
+    voice_milestone = str(voice_readiness.get("voice_milestone", "not_configured"))
+    if active.settings.voice.enabled:
+        if live_flags["wake_word_live_verified"]:
+            voice_milestone = "wake_live_verified"
+        elif live_flags["voice_live_verified"]:
+            voice_milestone = "live_verified"
     voice_artifacts = [
         _voice_artifact(
             active.settings, "whisper binary", active.settings.voice.whisper_binary_path
@@ -781,6 +815,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "llama_cpp_python_available": importlib.util.find_spec("llama_cpp") is not None,
             "registered": models,
         },
+        "embeddings": embeddings,
         "verification_guidance": {
             "commands": [
                 "run april verify --all-configured-models --require-real-model "
@@ -813,6 +848,10 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "push_to_talk_ready": voice_readiness["push_to_talk_ready"],
             "wake_word_ready": voice_readiness["wake_word_ready"],
             "full_voice_loop_ready": voice_readiness["full_voice_loop_ready"],
+            # Single redacted enum capturing the highest voice milestone reached:
+            # disabled / not_configured / push_to_talk_ready / wake_word_ready /
+            # full_voice_loop_ready / live_verified / wake_live_verified.
+            "voice_milestone": voice_milestone,
         },
         "security": {
             "allowed_filesystem_roots": [
@@ -981,6 +1020,35 @@ def _latest_verification_report(
     }
 
 
+def _latest_live_voice_flags(settings: AprilSettings) -> dict[str, bool]:
+    """Read the latest live voice / wake-word verification flags from disk.
+
+    Returns only two booleans (never a transcript, device, or path). Used to lift
+    the offline voice milestone to its ``live_verified`` / ``wake_live_verified``
+    rungs. Reading a report never opens the microphone.
+    """
+    voice_verified = False
+    wake_verified = False
+    voice_best: float | None = None
+    wake_best: float | None = None
+    for path in _verification_report_files(settings):
+        payload = _read_safe_report(path)
+        if payload is None:
+            continue
+        declared = str(payload.get("report_type") or "")
+        if declared == "voice_live":
+            key = _report_order_key(path, payload)
+            if voice_best is None or key > voice_best:
+                voice_best = key
+                voice_verified = bool(payload.get("voice_live_verified", False))
+        elif declared == "wake_word_live":
+            key = _report_order_key(path, payload)
+            if wake_best is None or key > wake_best:
+                wake_best = key
+                wake_verified = bool(payload.get("wake_word_live_verified", False))
+    return {"voice_live_verified": voice_verified, "wake_word_live_verified": wake_verified}
+
+
 def _verification_report_history(settings: AprilSettings) -> dict[str, Any]:
     matching: list[tuple[Path, dict[str, Any]]] = []
     for path in _verification_report_files(settings):
@@ -1074,7 +1142,7 @@ def _browser_report_summary(payload: dict[str, Any], path: Path) -> dict[str, An
         }
     level = payload.get("acceptance_level")
     backend = payload.get("runtime_backend")
-    return {
+    summary: dict[str, Any] = {
         "basename": path.name,
         "report_type": report_type,
         "generated_at": str(payload.get("generated_at") or payload.get("timestamp") or ""),
@@ -1084,6 +1152,16 @@ def _browser_report_summary(payload: dict[str, Any], path: Path) -> dict[str, An
         "services": services_summary,
         "next_actions": _safe_string_list(payload.get("next_actions")),
     }
+    if report_type == "go_live":
+        # Surface the core-vs-hardened distinction so the browser can show a
+        # working real-model core separately from the hardened go-live rung.
+        # Every value here is a boolean, a small enum, or a redacted advisory.
+        summary["core_real_model_ready"] = bool(payload.get("core_real_model_ready", False))
+        summary["real_model_core_status"] = str(payload.get("real_model_core_status") or "not_run")
+        summary["hardened_go_live_ready"] = bool(payload.get("hardened_go_live_ready", False))
+        summary["hardening_warnings"] = _safe_string_list(payload.get("hardening_warnings"))
+        summary["hardening_blockers"] = _safe_string_list(payload.get("hardening_blockers"))
+    return summary
 
 
 def _sorted_browser_items(settings: AprilSettings) -> list[tuple[Path, dict[str, Any]]]:

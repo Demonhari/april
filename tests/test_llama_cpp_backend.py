@@ -120,6 +120,37 @@ async def test_llama_backend_stream_falls_back_safely() -> None:
     assert llm.prompt_calls == ["USER: hello\nASSISTANT:"]
 
 
+def test_llama_backend_extracts_only_prompt_metadata_keys() -> None:
+    # A loaded Llama exposes a metadata mapping; only the prompt-rendering keys
+    # are retained, and they are returned by value (never the live mapping).
+    llm = FakeLlama()
+    llm.metadata = {  # type: ignore[attr-defined]
+        "tokenizer.chat_template": "{% for m in messages %}[{{ m.role }}]{% endfor %}",
+        "general.architecture": "granite",
+        "tokenizer.ggml.model": "gpt2",
+    }
+    backend = LlamaCppBackend()
+    from services.april_runtime.llama_cpp_backend import _extract_prompt_metadata
+
+    extracted = _extract_prompt_metadata(llm)
+    assert extracted == {
+        "tokenizer.chat_template": "{% for m in messages %}[{{ m.role }}]{% endfor %}"
+    }
+    assert "general.architecture" not in extracted
+    # Default backend (no loaded model) reports no metadata.
+    assert backend.prompt_metadata() == {}
+
+
+def test_llama_backend_metadata_missing_is_safe() -> None:
+    # A llama-cpp-python build without a metadata mapping must yield {}.
+    from services.april_runtime.llama_cpp_backend import _extract_prompt_metadata
+
+    class _NoMetadata:
+        pass
+
+    assert _extract_prompt_metadata(_NoMetadata()) == {}
+
+
 def test_llama_response_format_translation() -> None:
     assert llama_response_format(None) is None
     assert llama_response_format(ResponseFormat(type="text")) is None

@@ -221,7 +221,60 @@ def test_go_live_mocked_pass_returns_pass(tmp_path: Path) -> None:
     assert report.acceptance_level == "real_models"
     assert report.real_model_verified is True
     assert report.real_model_ready is True
+    # When fully hardened, both rungs are ready and there are no hardening advisories.
+    assert report.core_real_model_ready is True
+    assert report.real_model_core_status == "ready"
+    assert report.hardened_go_live_ready is True
+    assert report.hardening_warnings == []
+    assert report.hardening_blockers == []
     assert any("ready on this Mac" in action for action in report.next_actions)
+
+
+# --- core vs hardened distinction -----------------------------------------
+
+
+def test_core_ready_but_not_hardened_when_tokens_are_development(tmp_path: Path) -> None:
+    report = _build(
+        home=tmp_path,
+        readiness=_readiness(
+            warnings=["api/runtime tokens"],
+            api_token_status="default-development",
+        ),
+    )
+    # The real-model core works; only the hardening rung is held at warning.
+    assert report.final_status == "warning"
+    assert report.core_real_model_ready is True
+    assert report.real_model_core_status == "ready"
+    assert report.hardened_go_live_ready is False
+    assert any("token" in warning.lower() for warning in report.hardening_warnings)
+
+
+def test_core_ready_but_not_hardened_when_embeddings_hashed(tmp_path: Path) -> None:
+    report = _build(home=tmp_path, embedding_provider="hashed-token", embedding_model_id=None)
+    assert report.final_status == "warning"
+    assert report.core_real_model_ready is True
+    assert report.real_model_core_status == "ready"
+    assert report.hardened_go_live_ready is False
+    assert any("embedding" in warning.lower() for warning in report.hardening_warnings)
+
+
+def test_core_status_fail_when_real_model_run_fails(tmp_path: Path) -> None:
+    report = _build(
+        home=tmp_path,
+        multi_model=_multi_model(summary="fail", real_model_verified=False, checks_failed=1),
+    )
+    assert report.final_status == "fail"
+    assert report.core_real_model_ready is False
+    assert report.real_model_core_status == "fail"
+    assert report.hardened_go_live_ready is False
+
+
+def test_core_status_not_run_when_real_not_requested(tmp_path: Path) -> None:
+    report = _build(home=tmp_path, real_requested=False, multi_model=None)
+    assert report.final_status == "warning"
+    assert report.core_real_model_ready is False
+    assert report.real_model_core_status == "not_run"
+    assert report.hardened_go_live_ready is False
 
 
 # --- fail rules ------------------------------------------------------------

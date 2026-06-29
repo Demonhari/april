@@ -15,10 +15,12 @@ from services.voice.audio_player import FakeAudioPlayer, SoundDeviceAudioPlayer
 from services.voice.conversation_loop import PushToTalkLoop, normalize_transcript
 from services.voice.health import (
     microphone_access,
+    offline_voice_milestone,
     openwakeword_available,
     query_audio_devices,
     voice_doctor,
     voice_health,
+    voice_readiness_summary,
 )
 from services.voice.microphone import FakeMicrophone, SoundDeviceMicrophone
 from services.voice.speech_to_text import FakeSpeechToText
@@ -283,6 +285,53 @@ def test_voice_doctor_distinguishes_missing_openwakeword_engine_from_model(
 def test_openwakeword_available_is_a_spec_lookup() -> None:
     # Whatever the environment, the probe must return a bool and not raise.
     assert isinstance(openwakeword_available(), bool)
+
+
+def test_offline_voice_milestone_enum_escalates() -> None:
+    assert offline_voice_milestone(enabled=False, readiness={}) == "disabled"
+    assert offline_voice_milestone(enabled=True, readiness={}) == "not_configured"
+    assert (
+        offline_voice_milestone(enabled=True, readiness={"push_to_talk_ready": True})
+        == "push_to_talk_ready"
+    )
+    assert (
+        offline_voice_milestone(
+            enabled=True, readiness={"push_to_talk_ready": True, "wake_word_ready": True}
+        )
+        == "wake_word_ready"
+    )
+    assert (
+        offline_voice_milestone(
+            enabled=True,
+            readiness={
+                "push_to_talk_ready": True,
+                "wake_word_ready": True,
+                "full_voice_loop_ready": True,
+            },
+        )
+        == "full_voice_loop_ready"
+    )
+
+
+def test_voice_readiness_summary_includes_milestone(
+    settings_tmp, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("services.voice.health.openwakeword_available", lambda: True)
+    settings = _voice_settings_with_artifacts(settings_tmp, tmp_path, wake_word=True)
+    devices = {
+        "sounddevice_installed": True,
+        "input_devices": [{"name": "Mic"}],
+        "output_devices": [{"name": "Speaker"}],
+    }
+    summary = voice_readiness_summary(settings, devices)
+    assert summary["voice_milestone"] == "full_voice_loop_ready"
+
+
+def test_voice_readiness_summary_milestone_disabled_when_voice_off(
+    settings_tmp, tmp_path: Path
+) -> None:
+    summary = voice_readiness_summary(settings_tmp, {"sounddevice_installed": False})
+    assert summary["voice_milestone"] == "disabled"
 
 
 @pytest.mark.asyncio

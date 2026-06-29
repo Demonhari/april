@@ -312,6 +312,84 @@ def setup_model_set(
     }
 
 
+def setup_embedding_model(
+    *,
+    home: Path,
+    source_path: Path,
+    model_id: str = "april-embedding",
+    name: str | None = None,
+    copy_into_models: bool = False,
+    apply: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Validate and optionally register a local runtime-local embedding model.
+
+    Dry-run by default. Never downloads anything: the GGUF must already exist
+    locally. On ``apply`` this registers a ``role=embedding`` model in
+    ``configs/models.yaml`` and switches ``memory.embedding_provider`` to
+    ``runtime-local`` (with ``memory.embedding_model_id``) in
+    ``configs/april.yaml`` as one atomic, rolled-back-on-failure change. Switching
+    providers makes the existing hashed-token index incompatible, so the returned
+    ``next_commands`` always include the exact reindex command — APRIL never mixes
+    vector spaces silently.
+    """
+    root = home.expanduser().resolve()
+    source = _validate_model_source(
+        home=root, source_path=source_path, copy_into_models=copy_into_models
+    )
+    resolved_name = name or source.stem
+    models_config = _config_path(root)
+    settings_config = _settings_config_path(root)
+    plan = {
+        "model_id": model_id,
+        "name": resolved_name,
+        "role": "embedding",
+        "source_basename": source.name,
+        "copy_into_models": copy_into_models,
+        "set_provider": "runtime-local",
+    }
+
+    backups: list[tuple[Path, Path]] = []
+    imported: ModelImportResult | None = None
+    if apply:
+        for config in (models_config, settings_config):
+            backups.append((config, _timestamped_backup(config)))
+        try:
+            imported = import_model(
+                home=root,
+                role="embedding",
+                model_id=model_id,
+                name=resolved_name,
+                source_path=source_path,
+                copy_into_models=copy_into_models,
+                force=force,
+            )
+            data = _read_yaml(settings_config)
+            memory = data.setdefault("memory", {})
+            if not isinstance(memory, dict):
+                raise ConfigError("configs/april.yaml memory field must be a mapping.")
+            memory["embedding_provider"] = "runtime-local"
+            memory["embedding_model_id"] = model_id
+            _write_yaml(settings_config, data)
+            _validate_after_write(root)
+        except Exception:
+            for config, backup in backups:
+                shutil.copy2(backup, config)
+            raise
+
+    return {
+        "applied": apply,
+        "plan": plan,
+        "registered_basename": imported.path.name if imported is not None else source.name,
+        "backup_basenames": [backup.name for _config, backup in backups],
+        "next_commands": [
+            "run april memory doctor --verify-runtime-embedding",
+            "run april memory reindex",
+        ],
+        "mutating": apply,
+    }
+
+
 def setup_voice_stack(
     *,
     home: Path,

@@ -55,6 +55,11 @@ FinalStatus = Literal["pass", "warning", "fail"]
 # Go-live only ever claims the real-model rung. Live voice belongs to a later
 # ``full_wake_voice`` milestone and is intentionally out of scope here.
 GoLiveLevel = Literal["fake_sanity", "real_models"]
+# The real-model *core* is the honest "does the real GGUF path actually work"
+# rung, kept separate from the *hardened* go-live rung (dev tokens, runtime-local
+# embeddings, and other hardening advisories) so a working real-model path is
+# never hidden behind a hardening warning.
+RealModelCoreStatus = Literal["ready", "fail", "not_run"]
 
 # Exact, copy-pasteable next commands. None of these are executed here.
 _INSTALL_RUNTIME = "pip install -e '.[runtime]'"
@@ -158,6 +163,19 @@ class GoLiveReport(BaseModel):
     llama_cpp_python_available: bool
     voice_enabled: bool
     real_model_ready: bool
+    # --- core vs hardened readiness (the headline distinction) ---------------
+    # ``core_real_model_ready`` is true when the real GGUF path works end to end
+    # (backend/llama-cpp present, configured chat GGUFs present, real
+    # load/chat/stream/unload, strict brain routing with no fallback, specialist
+    # switching where applicable). It is intentionally independent of hardening.
+    core_real_model_ready: bool = False
+    real_model_core_status: RealModelCoreStatus = "not_run"
+    # ``hardened_go_live_ready`` additionally requires the hardening rung: no
+    # default/placeholder/blank tokens, runtime-local embeddings, and no other
+    # hardening blockers. Hardening advisories never hide the core result.
+    hardened_go_live_ready: bool = False
+    hardening_warnings: list[str] = Field(default_factory=list)
+    hardening_blockers: list[str] = Field(default_factory=list)
     configured_chat_models_count: int
     configured_chat_models_present_count: int
     acceptance_level: GoLiveLevel = "fake_sanity"
@@ -302,40 +320,68 @@ def _blockers(
     return blockers
 
 
-def _is_pass(
+def _core_ready(
     *,
     config_valid: bool,
+    fake: FakeVerificationSummary,
     readiness: ReadinessReport,
     chat_count: int,
     chat_present_count: int,
+    real_requested: bool,
     acceptance: GoLiveAcceptanceSummary,
     routing: GoLiveRoutingSummary,
     specialist: GoLiveSpecialistSummary,
     services: ServicesSummary,
-    embedding_runtime_local: bool,
+    blockers: list[str],
 ) -> bool:
-    """Every real-model-proof gate plus the hardening advisories must be clean.
+    """The real-model *core* gate: does the real GGUF path actually work?
 
-    Voice being disabled is intentionally NOT part of this gate — it is recorded as
-    a warning/skipped note only, never a downgrade for the first go-live milestone.
+    This is intentionally independent of hardening (dev tokens, runtime-local
+    embeddings). It is the honest answer to "real model core: ready?" so a working
+    real-model path is never downgraded by a hardening advisory. Voice being
+    disabled is never part of this gate.
     """
+    if blockers:
+        return False
     services_ok = (not services.requested) or services.startup_status in {"ok", "already_running"}
     return (
         config_valid
+        and not (fake.ran and fake.summary == "fail")
         and not readiness.runtime_is_fake
         and readiness.llama_cpp_python_available
         and chat_count > 0
         and chat_present_count == chat_count
+        and real_requested
+        and acceptance.ran
         and acceptance.summary == "pass"
         and acceptance.real_model_verified
         and routing.passed_without_fallback
         and ((not specialist.applicable) or specialist.verified)
         and services_ok
-        # Hardening advisories (dev tokens etc. surface as readiness warnings).
-        and not readiness.blockers
-        and not readiness.warnings
-        and embedding_runtime_local
     )
+
+
+def _hardening_warnings(
+    *,
+    readiness: ReadinessReport,
+    embedding_runtime_local: bool,
+) -> list[str]:
+    """Hardening advisories that hold a working real-model core at ``warning``.
+
+    These are the dev/placeholder/blank-token advisories already surfaced by
+    readiness plus the runtime-local embeddings requirement. They are never
+    allowed to mask the core result; they only gate the *hardened* rung.
+    """
+    warnings: list[str] = [redact_reason(warning) for warning in readiness.warnings]
+    if not embedding_runtime_local and _EMBED_NOTE not in warnings:
+        warnings.append(_EMBED_NOTE)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for warning in warnings:
+        if warning not in seen:
+            seen.add(warning)
+            unique.append(warning)
+    return unique
 
 
 def _warnings(
@@ -456,30 +502,52 @@ def build_go_live_report(
         embedding_runtime_local=embedding_runtime_local,
     )
 
-    if blockers:
-        final_status: FinalStatus = "fail"
-    elif _is_pass(
-        config_valid=config_valid,
-        readiness=readiness,
-        chat_count=chat_count,
-        chat_present_count=chat_present_count,
-        acceptance=acceptance,
-        routing=routing,
-        specialist=specialist,
-        services=services,
-        embedding_runtime_local=embedding_runtime_local,
-    ):
-        final_status = "pass"
-    else:
-        final_status = "warning"
-
     # A configuration that does not even load is reported with its (redacted) errors
-    # folded into the blockers so the on-disk report is self-explanatory.
+    # folded into the blockers so the on-disk report is self-explanatory. Done
+    # before status derivation so the core/hardened gates see the full blocker set.
     if not config_valid and config_errors:
         for error in config_errors:
             redacted = redact_reason(error)
             if redacted not in blockers:
                 blockers.append(redacted)
+
+    # --- core real-model readiness (independent of hardening) ----------------
+    core_real_model_ready = _core_ready(
+        config_valid=config_valid,
+        fake=fake_verification,
+        readiness=readiness,
+        chat_count=chat_count,
+        chat_present_count=chat_present_count,
+        real_requested=real_requested,
+        acceptance=acceptance,
+        routing=routing,
+        specialist=specialist,
+        services=services,
+        blockers=blockers,
+    )
+    if core_real_model_ready:
+        real_model_core_status: RealModelCoreStatus = "ready"
+    elif blockers:
+        real_model_core_status = "fail"
+    else:
+        real_model_core_status = "not_run"
+
+    # --- hardened go-live readiness (core + hardening advisories) -------------
+    hardening_warnings = _hardening_warnings(
+        readiness=readiness,
+        embedding_runtime_local=embedding_runtime_local,
+    )
+    hardening_blockers: list[str] = []
+    hardened_go_live_ready = (
+        core_real_model_ready and not hardening_warnings and not hardening_blockers
+    )
+
+    if blockers:
+        final_status: FinalStatus = "fail"
+    elif hardened_go_live_ready:
+        final_status = "pass"
+    else:
+        final_status = "warning"
 
     next_actions = _next_actions(
         final_status=final_status,
@@ -501,6 +569,11 @@ def build_go_live_report(
         llama_cpp_python_available=readiness.llama_cpp_python_available,
         voice_enabled=readiness.voice_enabled,
         real_model_ready=real_model_ready,
+        core_real_model_ready=core_real_model_ready,
+        real_model_core_status=real_model_core_status,
+        hardened_go_live_ready=hardened_go_live_ready,
+        hardening_warnings=hardening_warnings,
+        hardening_blockers=hardening_blockers,
         configured_chat_models_count=chat_count,
         configured_chat_models_present_count=chat_present_count,
         acceptance_level=acceptance.acceptance_level,

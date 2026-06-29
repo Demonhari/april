@@ -350,6 +350,10 @@
         report_type: "none",
         verification_level: "none",
         core_or_all_verified: false,
+        core_real_model_ready: false,
+        real_model_core_status: "not_run",
+        hardened_go_live_ready: false,
+        hardening_warnings: [],
         skipped_count: 0,
         threshold_failure_count: 0,
       };
@@ -370,6 +374,13 @@
       real_model_verified: report.real_model_verified === true,
       verification_level: level,
       core_or_all_verified: level === "core" || level === "all",
+      // go-live core-vs-hardened distinction: a working real-model core is shown
+      // separately from the hardened go-live rung so a hardening advisory (dev
+      // tokens, non-runtime-local embeddings) never hides the core result.
+      core_real_model_ready: report.core_real_model_ready === true,
+      real_model_core_status: statusWord(report.real_model_core_status || "not_run"),
+      hardened_go_live_ready: report.hardened_go_live_ready === true,
+      hardening_warnings: Array.isArray(report.hardening_warnings) ? report.hardening_warnings : [],
       real_models_exercised: typeof report.real_models_exercised === "number" ? report.real_models_exercised : 0,
       real_models_passed: typeof report.real_models_passed === "number" ? report.real_models_passed : 0,
       skipped_count: typeof report.skipped_count === "number"

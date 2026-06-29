@@ -275,6 +275,28 @@ def _voice_readiness(
     }
 
 
+def offline_voice_milestone(*, enabled: bool, readiness: dict[str, Any]) -> str:
+    """The highest *offline* voice milestone reached, as a single redacted enum.
+
+    This is derived purely from configuration and local artifact presence — it
+    never opens the microphone and never claims a *live* pass. The two live rungs
+    (``live_verified`` / ``wake_live_verified``) are layered on top by callers
+    that have read the redacted voice-live / wake-word-live verification reports.
+
+    Returns one of: ``disabled``, ``not_configured``, ``push_to_talk_ready``,
+    ``wake_word_ready``, ``full_voice_loop_ready``.
+    """
+    if not enabled:
+        return "disabled"
+    if readiness.get("full_voice_loop_ready"):
+        return "full_voice_loop_ready"
+    if readiness.get("wake_word_ready"):
+        return "wake_word_ready"
+    if readiness.get("push_to_talk_ready"):
+        return "push_to_talk_ready"
+    return "not_configured"
+
+
 def voice_readiness_summary(settings: AprilSettings, devices: dict[str, Any]) -> dict[str, Any]:
     """Public, redaction-safe voice-readiness verdicts for API/desktop consumers.
 
@@ -285,12 +307,18 @@ def voice_readiness_summary(settings: AprilSettings, devices: dict[str, Any]) ->
     push_to_talk_available = bool(
         devices.get("sounddevice_installed") and devices.get("input_devices")
     )
-    return _voice_readiness(
+    readiness = _voice_readiness(
         settings,
         push_to_talk_available=push_to_talk_available,
         output_devices_present=bool(devices.get("output_devices")),
         openwakeword=openwakeword_available(),
     )
+    # The offline milestone is the single source of truth for the voice rung; the
+    # live rungs are added by API callers that have read the live reports.
+    readiness["voice_milestone"] = offline_voice_milestone(
+        enabled=settings.voice.enabled, readiness=readiness
+    )
+    return readiness
 
 
 def voice_doctor(settings: AprilSettings) -> dict[str, Any]:

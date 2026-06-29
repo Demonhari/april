@@ -727,6 +727,56 @@ def test_setup_models_apply_writes_config_and_backup(tmp_path: Path, monkeypatch
     assert validate_configuration(tmp_path) == []
 
 
+def test_setup_embeddings_dry_run_writes_nothing(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    embed = tmp_path / "embed.gguf"
+    embed.write_bytes(b"gguf")
+    models_before = (tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8")
+    april_before = (tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "setup", "embeddings", "--model", str(embed)])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8") == models_before
+    assert (tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8") == april_before
+    assert "dry run" in result.output
+    # Switching providers always advertises the reindex requirement.
+    assert "run april memory reindex" in result.output
+
+
+def test_setup_embeddings_apply_switches_provider_and_reindex_hint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    embed = tmp_path / "embed.gguf"
+    embed.write_bytes(b"gguf")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app, ["april", "setup", "embeddings", "--model", str(embed), "--apply"]
+    )
+    assert result.exit_code == 0, result.output
+    models = yaml.safe_load((tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8"))
+    embedding_models = [m for m in models["models"].values() if m.get("role") == "embedding"]
+    assert embedding_models
+    assert embedding_models[0]["id"] == "april-embedding"
+    april = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
+    assert april["memory"]["embedding_provider"] == "runtime-local"
+    assert april["memory"]["embedding_model_id"] == "april-embedding"
+    assert validate_configuration(tmp_path) == []
+    assert "run april memory reindex" in result.output
+
+
+def test_memory_doctor_reports_reindex_command(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(app, ["april", "memory", "doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["reindex_command"] == "run april memory reindex"
+
+
 def test_setup_models_rejects_missing_and_non_gguf(tmp_path: Path, monkeypatch) -> None:
     _copy_configs(tmp_path)
     manager = FakeManager(tmp_path)

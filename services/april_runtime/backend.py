@@ -111,6 +111,17 @@ class RuntimeBackend(ABC):
     async def count_tokens(self, text: str) -> int:
         return len(await self.tokenize(text))
 
+    def prompt_metadata(self) -> dict[str, object]:
+        """Backend-provided metadata consulted by the prompt renderer.
+
+        Returns an empty mapping by default. Backends that can read GGUF/native
+        tokenizer metadata (currently only :class:`LlamaCppBackend`) override this
+        to expose *only* the keys the renderer needs (native chat template /
+        chat format). Raw template text is never logged, reported, or surfaced in
+        health/readiness output — it is used solely for in-process rendering.
+        """
+        return {}
+
     async def embed(self, text: str) -> list[float]:
         raise RuntimeUnavailableError("backend does not support embeddings")
 
