@@ -304,6 +304,88 @@ Useful options: `--report PATH` (write to a chosen path), `--json`,
 contain tokens, transcripts, generated text, or absolute paths. A `warning` exits
 0; only `fail` exits 1.
 
+## The go-live proof (real-model-only)
+
+`run april go-live` is the real-model-only proof that turns "the plumbing works"
+into "APRIL is actually ready on this Mac." Unlike `run april acceptance`, it can
+**never** report a fake/local sanity pass — go-live is real models or nothing.
+
+It reuses the same separately-tested primitives (offline readiness, the
+all-configured real-model verifier with `require_real_model=True`, the strict-JSON
+brain routing eval, and specialist switching) and folds them into one redacted
+`pass` / `warning` / `fail` report. It is read-only: no config mutation, no model
+download, no package install, no microphone, no wake-word listening, no TTS, and no
+external network.
+
+```bash
+# Real-Mac go-live proof, also proving a clean main-service start/stop:
+run april go-live --write-report --start-services
+
+# Read-only proof to stdout:
+run april go-live --json
+```
+
+It proves, in order: (1) fake/local plumbing works, (2) real GGUF models are
+installed, (3) real models load/chat/stream/unload, (4) the Brain produces
+strict-JSON routing with the real brain model **without fallback**, (5) specialist
+switching keeps the brain resident, and (6) APRIL is ready on this Mac.
+
+Status rules:
+
+- **PASS** only when config validates, the backend is `llama_cpp`,
+  `llama-cpp-python` is installed, every configured chat GGUF is present, real-model
+  acceptance passes with `real_model_verified`, the brain routing report exists and
+  passes **without fallback**, specialist switching is verified when more than one
+  chat model is configured, and no hardening advisory remains (development tokens,
+  non-runtime-local embeddings).
+- **WARNING** when fake plumbing is fine but real acceptance was not requested or
+  could not run, voice is disabled, tokens are still development defaults,
+  runtime-local embeddings are not configured, or the desktop is still
+  unsigned/dev-only.
+- **FAIL** when config is invalid, the backend is fake, `llama-cpp-python` is
+  missing, a required GGUF is missing, real load/chat/stream/unload fails, brain
+  routing falls back, specialist switching fails, or requested services fail to
+  start/stop cleanly.
+
+**Voice is not required for the first go-live milestone.** A disabled voice stack
+is a skipped/warning note, never a failure; live voice belongs to a later
+`full_wake_voice` milestone. Options mirror acceptance: `--start-services`,
+`--keep-services-running`, `--service-timeout`, `--write-report` / `--report PATH`,
+`--json`, `--max-output-tokens`, `--timeout`, and the performance gates
+`--min-tokens-per-second`, `--max-load-seconds`,
+`--max-first-token-latency-seconds`, `--max-rss-mb`. With `--write-report` and no
+`--report`, the redacted report lands at
+`data/verification/go-live-<timestamp>.json`. A `warning` exits 0; only `fail`
+exits 1.
+
+### End-to-end sequence (fake → real → proof → voice)
+
+Fake verification is **not** Mac readiness; the go-live proof is real-model-only;
+voice is not required for the first real-model go-live milestone.
+
+```bash
+# A. Development sanity (fake plumbing only — not Mac readiness):
+.venv/bin/python -m pytest -q -x
+APRIL_RUNTIME_BACKEND=fake .venv/bin/python -m apps.runner.main april verify --fake
+
+# B. Real model activation:
+pip install -e '.[runtime]'
+run april model download --all-core --apply --yes
+run april setup mac-activation \
+  --brain models/granite3.3-2b-q4_k_m.gguf \
+  --coding models/qwen3-1.7b-q8_0.gguf \
+  --reading models/qwen3-0.6b-q8_0.gguf \
+  --apply --run-acceptance --start-services --write-report
+
+# C. Go-live proof (real-model-only):
+run april go-live --write-report --start-services
+
+# D. Optional later voice milestone (full_wake_voice):
+run april setup voice ...
+run april voice verify-live ...
+run april voice verify-wake-live ...
+```
+
 ## The Mac activation wizard
 
 `run april setup mac-activation` is one guided local command that validates the

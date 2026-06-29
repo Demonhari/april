@@ -25,6 +25,7 @@ from april_common.time import parse_utc_iso, utc_now
 
 KNOWN_REPORT_TYPES = (
     "acceptance",
+    "go_live",
     "mac_activation",
     "voice_live",
     "wake_word_live",
@@ -37,6 +38,7 @@ ALL_REPORT_TYPES = (*KNOWN_REPORT_TYPES, "unknown")
 # classified heuristically below.
 _TYPE_ALIASES = {
     "acceptance": "acceptance",
+    "go_live": "go_live",
     "mac_activation": "mac_activation",
     "voice_live": "voice_live",
     "wake_word_live": "wake_word_live",
@@ -90,7 +92,7 @@ def classify_report(payload: dict[str, Any]) -> str:
 
 
 def _status_for(report_type: str, payload: dict[str, Any]) -> str | None:
-    if report_type in {"acceptance", "mac_activation"}:
+    if report_type in {"acceptance", "go_live", "mac_activation"}:
         value = payload.get("final_status")
     else:
         value = payload.get("summary")

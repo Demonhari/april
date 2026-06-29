@@ -363,7 +363,10 @@
       title: statusWord(latest.message || "latest verification report"),
       generated_at: statusWord(report.generated_at),
       report_type: statusWord(report.report_type),
-      summary: statusWord(report.summary),
+      // go-live reports record `final_status` (pass/warning/fail) instead of the
+      // multi-model `summary`; fall back so their status still surfaces.
+      summary: statusWord(report.summary || report.final_status),
+      final_status: statusWord(report.final_status),
       real_model_verified: report.real_model_verified === true,
       verification_level: level,
       core_or_all_verified: level === "core" || level === "all",

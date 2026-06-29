@@ -1015,6 +1015,7 @@ def _verification_report_detail(settings: AprilSettings, report_basename: str) -
 # redacted next-action commands — never tokens, transcripts, or absolute paths.
 _BROWSER_REPORT_TYPES = {
     "acceptance",
+    "go_live",
     "mac_activation",
     "voice_live",
     "wake_word_live",
@@ -1023,6 +1024,7 @@ _BROWSER_REPORT_TYPES = {
 }
 _BROWSER_TYPE_ALIASES = {
     "acceptance": "acceptance",
+    "go_live": "go_live",
     "mac_activation": "mac_activation",
     "voice_live": "voice_live",
     "wake_word_live": "wake_word_live",
@@ -1047,7 +1049,7 @@ def _browser_report_summary(payload: dict[str, Any], path: Path) -> dict[str, An
     report_type = _browser_report_type(payload)
     status = (
         payload.get("final_status")
-        if report_type in {"acceptance", "mac_activation"}
+        if report_type in {"acceptance", "go_live", "mac_activation"}
         else payload.get("summary")
     )
     services = payload.get("services")

@@ -59,15 +59,48 @@ def _activation(generated_at: str) -> dict[str, Any]:
     }
 
 
+def _go_live(generated_at: str, final_status: str = "pass") -> dict[str, Any]:
+    return {
+        "report_type": "go_live",
+        "generated_at": generated_at,
+        "final_status": final_status,
+        "acceptance_level": "real_models",
+        "runtime_backend": "llama_cpp",
+        "services": {"requested": True, "startup_status": "ok", "shutdown_status": "stopped"},
+        "next_actions": ["run april go-live --write-report --start-services"],
+    }
+
+
 # --- classification --------------------------------------------------------
 
 
 def test_classify_known_and_alias_and_unknown() -> None:
     assert classify_report({"report_type": "acceptance"}) == "acceptance"
+    assert classify_report({"report_type": "go_live"}) == "go_live"
     assert classify_report({"report_type": "soak"}) == "fake_soak"
     assert classify_report({"verification_level": "all", "models": []}) == "multi_model"
     assert classify_report({"iterations": 3, "latency_ms": {}}) == "fake_soak"
     assert classify_report({"something_else": 1}) == "unknown"
+
+
+def test_go_live_report_is_browsable(tmp_path: Path) -> None:
+    directory = tmp_path / "data" / "verification"
+    _write_report(directory, "go.json", _go_live("2026-06-29T00:00:00Z"))
+    # Listing recognizes the new type and surfaces final_status as the status.
+    listing = list_report_summaries(directory)
+    assert listing.count == 1
+    summary = listing.reports[0]
+    assert summary.report_type == "go_live"
+    assert summary.status == "pass"
+    assert summary.acceptance_level == "real_models"
+    assert summary.runtime_backend == "llama_cpp"
+    # latest / latest-of-type both find it.
+    latest = latest_report(directory)
+    assert latest is not None
+    assert latest.report_type == "go_live"
+    typed = latest_report_of_type(directory, "go_live")
+    assert typed is not None
+    assert typed.basename == "go.json"
 
 
 # --- listing / latest / show-latest ----------------------------------------

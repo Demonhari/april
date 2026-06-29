@@ -295,7 +295,8 @@ On a target Mac, run setup and verification in this order:
 6. `pip install -e '.[runtime]'`
 7. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
 8. `run april verify --workflow --real-model --report data/verification/workflow-real.json`
-9. Optional voice setup/doctor/live verification: `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`, `run april voice doctor`, then `run april voice verify-live --report data/verification/voice-live.json`.
+9. `run april go-live --write-report --start-services` — the real-model-only go-live proof (real models + strict-JSON routing without fallback + specialist switching + clean service lifecycle).
+10. Optional voice setup/doctor/live verification: `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`, `run april voice doctor`, then `run april voice verify-live --report data/verification/voice-live.json`.
 
 Blank API tokens never authenticate, even in development/test. If
 `APRIL_API_TOKEN` is empty, protected endpoints fail closed with an auth/config
@@ -425,6 +426,89 @@ the live checks and always stops the ones it started (even on failure, timeout, 
 Ctrl-C) unless `--keep-services-running`; `--fake-services` uses the fake runtime
 for plumbing only and cannot be combined with `--require-real-models`.
 
+#### Real-Mac go-live proof
+
+`run april go-live` is the **real-model-only** sibling of `run april acceptance`.
+Where acceptance can report a fake/local sanity pass, go-live exists to prove the
+real thing and make the readiness ladder explicit on this Mac:
+
+1. fake/local plumbing works,
+2. real GGUF models are installed,
+3. real models load / chat / stream / unload,
+4. the Brain produces strict-JSON routing with the **real** brain model (no
+   fallback),
+5. specialist model switching keeps the brain resident, and
+6. APRIL is actually ready on this Mac.
+
+It reuses the existing verification primitives (offline readiness, the
+all-configured real-model verifier with `require_real_model=True`, the strict-JSON
+routing eval, and specialist switching) and folds them into a single redacted
+`pass` / `warning` / `fail` report under `data/verification/go-live-<timestamp>.json`.
+
+```bash
+# Real-Mac go-live proof (also prove a clean main-service start/stop):
+run april go-live --write-report --start-services
+
+# Read-only proof, JSON to stdout:
+run april go-live --json
+```
+
+Go-live is **read-only by construction**: no config mutation, no model download,
+no package install, no microphone, no wake-word listening, no TTS, and no external
+network. It never records audio.
+
+Status rules:
+
+- **PASS** only when config validates, the backend is `llama_cpp`,
+  `llama-cpp-python` is installed, every configured chat GGUF is present, real-model
+  acceptance passes with `real_model_verified`, the brain routing report exists and
+  passes **without fallback**, specialist switching is verified when more than one
+  chat model is configured, and no hardening advisories remain (development tokens,
+  non-runtime-local embeddings).
+- **WARNING** when fake/local plumbing is fine but real acceptance was not
+  requested or could not run, voice is disabled, tokens are still development
+  defaults, runtime-local embeddings are not configured, or the desktop is still
+  unsigned/dev-only.
+- **FAIL** when config is invalid, the backend is fake, `llama-cpp-python` is
+  missing, a required GGUF is missing, real load/chat/stream/unload fails, brain
+  routing falls back during the real routing eval, specialist switching fails, or
+  requested services fail to start/stop cleanly.
+
+**Voice is not required for the first real-model go-live milestone.** A disabled
+voice stack is a skipped/warning note, never a failure — live voice belongs to a
+later `full_wake_voice` milestone (`run april setup voice`, then
+`run april voice verify-live` / `verify-wake-live`).
+
+#### Go-live sequence (fake → real → proof → voice)
+
+Fake verification is **not** Mac readiness; the go-live proof is real-model-only.
+
+```bash
+# A. Development sanity (fake plumbing only — not Mac readiness):
+.venv/bin/python -m pytest -q -x
+APRIL_RUNTIME_BACKEND=fake .venv/bin/python -m apps.runner.main april verify --fake
+
+# B. Real model activation:
+pip install -e '.[runtime]'
+run april model download --all-core --apply --yes
+run april setup mac-activation \
+  --brain models/granite3.3-2b-q4_k_m.gguf \
+  --coding models/qwen3-1.7b-q8_0.gguf \
+  --reading models/qwen3-0.6b-q8_0.gguf \
+  --apply \
+  --run-acceptance \
+  --start-services \
+  --write-report
+
+# C. Go-live proof (real-model-only):
+run april go-live --write-report --start-services
+
+# D. Optional later voice milestone (full_wake_voice):
+run april setup voice ...
+run april voice verify-live ...
+run april voice verify-wake-live ...
+```
+
 `run april setup mac-activation` is the guided local activation wizard: it
 validates the GGUF model set (and, when voice is requested, the voice tools), then
 applies config **transactionally** with `--apply` (validate-first; a failed apply
@@ -500,12 +584,13 @@ dry-run-by-default `clean --older-than-days N`):
 run april reports list
 run april reports latest
 run april reports show-latest --type acceptance
+run april reports show-latest --type go_live
 run april reports clean --older-than-days 14 --dry-run
 ```
 
 The Core API mirrors this read-only at `GET /reports`, `GET /reports/latest`, and
-`GET /reports/latest/{report_type}`, and the Desktop dashboard surfaces the latest
-acceptance/activation status.
+`GET /reports/latest/{report_type}` (now including `go_live`), and the Desktop
+dashboard surfaces the latest acceptance/activation/go-live status.
 
 See [docs/macbookpro-acceptance.md](docs/macbookpro-acceptance.md) for the full
 target-Mac acceptance walkthrough.

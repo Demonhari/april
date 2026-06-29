@@ -165,6 +165,9 @@ class ServicesSummary(BaseModel):
     mode: ServiceMode = "none"
     started_by_acceptance: bool = False
     stopped_after_acceptance: bool = False
+    # Same lifecycle, recorded for the go-live proof orchestration.
+    started_by_go_live: bool = False
+    stopped_after_go_live: bool = False
     api_reachable: bool = False
     runtime_reachable: bool = False
     # not_requested | already_running | ok | failed

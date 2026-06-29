@@ -221,6 +221,18 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
   check("verification workflow report type", workflow.report_type === "workflow");
   check("verification workflow level none", workflow.verification_level === "none");
   check("verification workflow real false", workflow.real_model_verified === false);
+  const goLive = D.verificationSummary({
+    status: "ok",
+    report: {
+      report_type: "go_live",
+      final_status: "pass",
+      real_model_verified: true,
+    },
+  });
+  check("verification go_live report type", goLive.report_type === "go_live");
+  // go-live reports record final_status, not summary; it must still surface.
+  check("verification go_live status surfaces", goLive.summary === "pass");
+  check("verification go_live final_status surfaces", goLive.final_status === "pass");
   const core = D.verificationSummary({ status: "ok", report: { verification_level: "core" } });
   const all = D.verificationSummary({ status: "ok", report: { verification_level: "all" } });
   check("verification core true", core.core_or_all_verified === true);
