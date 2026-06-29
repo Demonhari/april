@@ -50,12 +50,38 @@ _MODEL_ROLES = ("brain", "coding", "reading", "reasoning")
 _CORE_MODEL_ROLES = ("brain", "coding", "reading")
 _OPTIONAL_MODEL_ROLES = ("reasoning",)
 _VOICE_REQUIRED = ("whisper_binary", "whisper_model", "piper_binary", "piper_model")
+_VOICE_OPTIONAL = ("wake_word_model",)
+_VOICE_ALL = _VOICE_REQUIRED + _VOICE_OPTIONAL
 _MODELS_CONFIG = ("configs", "models.yaml")
 _VOICE_CONFIG = ("configs", "april.yaml")
+
+_VOICE_REQUIRED_FLAGS_HINT = "--whisper-binary, --whisper-model, --piper-binary, and --piper-model"
 
 
 class ActivationFlagError(ValueError):
     """Raised for an incompatible combination of activation flags."""
+
+
+def voice_requested_from(
+    voice_paths: dict[str, Path | None],
+    *,
+    enable_voice: bool = False,
+    acceptance_voice_live: bool = False,
+    acceptance_wake_word_live: bool = False,
+) -> bool:
+    """Voice is requested when any voice path or any voice flag is supplied.
+
+    Voice is opt-in: a model-only activation supplies no voice paths and no voice
+    flags, so voice is skipped without needing ``--skip-voice``.
+    """
+    if enable_voice or acceptance_voice_live or acceptance_wake_word_live:
+        return True
+    return any(voice_paths.get(name) is not None for name in _VOICE_ALL)
+
+
+def voice_paths_complete(voice_paths: dict[str, Path | None]) -> bool:
+    """All four required voice artifacts (whisper + piper) are present."""
+    return all(voice_paths.get(name) is not None for name in _VOICE_REQUIRED)
 
 
 def validate_activation_flags(
@@ -69,21 +95,35 @@ def validate_activation_flags(
     acceptance_wake_word_live: bool,
     start_services: bool,
     fake_services: bool,
+    voice_paths_supplied: bool = False,
+    voice_required_complete: bool = False,
 ) -> None:
-    """Reject contradictory activation flag combinations before doing any work."""
+    """Reject contradictory activation flag combinations before doing any work.
+
+    Voice is opt-in. ``voice_paths_supplied`` is true when any voice path flag was
+    given; ``voice_required_complete`` is true when all four required voice paths
+    (whisper binary/model, Piper binary/model) were given.
+    """
     if apply and dry_run:
         raise ActivationFlagError("Use either --apply or --dry-run, not both.")
-    if enable_voice and skip_voice:
-        raise ActivationFlagError("Cannot combine --enable-voice with --skip-voice.")
     live = acceptance_voice_live or acceptance_wake_word_live
+    voice_requested = voice_paths_supplied or enable_voice or live
+    # --skip-voice is an explicit "models only" override; it cannot be mixed with
+    # any voice setup or live voice acceptance request.
+    if skip_voice and voice_requested:
+        raise ActivationFlagError(
+            "Cannot combine --skip-voice with voice setup or live voice acceptance flags."
+        )
+    if enable_voice and not voice_required_complete:
+        raise ActivationFlagError(f"--enable-voice requires {_VOICE_REQUIRED_FLAGS_HINT}.")
     if live and not run_acceptance_after:
         raise ActivationFlagError(
             "--acceptance-voice-live/--acceptance-wake-word-live require --run-acceptance."
         )
-    if live and skip_voice:
-        raise ActivationFlagError("Live voice acceptance cannot be combined with --skip-voice.")
     if live and not enable_voice:
         raise ActivationFlagError("Live voice acceptance requires --enable-voice.")
+    if live and not voice_required_complete:
+        raise ActivationFlagError(f"Live voice acceptance requires {_VOICE_REQUIRED_FLAGS_HINT}.")
     # Activation acceptance is always real-model, so fake services can never satisfy it.
     if fake_services and run_acceptance_after:
         raise ActivationFlagError(
@@ -274,19 +314,20 @@ def _voice_summary(
     *,
     home: Path,
     voice_paths: dict[str, Path | None],
-    skip_voice: bool,
+    voice_effective: bool,
     apply: bool,
     enable_voice: bool,
     voice_setup: VoiceSetup,
 ) -> VoiceActivationSummary:
-    if skip_voice:
+    # Voice is opt-in: skipped unless effectively requested (and not overridden by
+    # --skip-voice). Model-only activation never touches voice config.
+    if not voice_effective:
         return VoiceActivationSummary(skipped=True)
     missing = [name for name in _VOICE_REQUIRED if voice_paths.get(name) is None]
     summary = VoiceActivationSummary(requested=True, enabled_requested=enable_voice)
     if missing:
         summary.error = (
-            "Voice activation needs --whisper-binary, --whisper-model, --piper-binary, "
-            "and --piper-model (or pass --skip-voice)."
+            f"Voice setup needs {_VOICE_REQUIRED_FLAGS_HINT} (omit all voice flags to skip voice)."
         )
         return summary
     try:
@@ -327,9 +368,11 @@ class _ConfigBackup:
     entries: dict[Path, bool] = field(default_factory=dict)
 
 
-def _config_paths_to_protect(home: Path, *, skip_voice: bool) -> list[Path]:
+def _config_paths_to_protect(home: Path, *, protect_voice: bool) -> list[Path]:
+    # Model-only activation snapshots/protects only configs/models.yaml; voice
+    # activation also protects configs/april.yaml.
     paths = [home.joinpath(*_MODELS_CONFIG)]
-    if not skip_voice:
+    if protect_voice:
         paths.append(home.joinpath(*_VOICE_CONFIG))
     return paths
 
@@ -366,13 +409,13 @@ def _apply_transaction(
     model_ids: dict[str, str | None] | None,
     allow_partial_model_set: bool,
     voice_paths: dict[str, Path | None],
-    skip_voice: bool,
+    voice_effective: bool,
     enable_voice: bool,
     model_setup: ModelSetup,
     voice_setup: VoiceSetup,
     no_rollback: bool,
 ) -> tuple[ModelsActivationSummary, VoiceActivationSummary, TransactionSummary]:
-    backup = _snapshot_config(home, _config_paths_to_protect(home, skip_voice=skip_voice))
+    backup = _snapshot_config(home, _config_paths_to_protect(home, protect_voice=voice_effective))
     transaction = TransactionSummary(
         requested=True, backup_created=True, backup_basename=backup.directory.name
     )
@@ -387,11 +430,11 @@ def _apply_transaction(
     )
     voice = VoiceActivationSummary(skipped=True)
     failure_reason = models.error
-    if not failure_reason and not skip_voice:
+    if not failure_reason and voice_effective:
         voice = _voice_summary(
             home=home,
             voice_paths=voice_paths,
-            skip_voice=False,
+            voice_effective=True,
             apply=True,
             enable_voice=enable_voice,
             voice_setup=voice_setup,
@@ -484,7 +527,7 @@ def _next_actions(
         add(
             "run april setup mac-activation ... --whisper-binary /absolute/path/whisper "
             "--whisper-model /absolute/path/model.bin --piper-binary /absolute/path/piper "
-            "--piper-model /absolute/path/voice.onnx --dry-run  (or add --skip-voice)"
+            "--piper-model /absolute/path/voice.onnx --dry-run  (or omit voice flags to skip voice)"
         )
     if transaction.rolled_back:
         add("Apply failed and was rolled back; fix the reported path and re-run with --apply.")
@@ -540,6 +583,12 @@ def run_mac_activation(
     model_setup = model_setup or setup_model_set
     voice_setup = voice_setup or setup_voice_stack
 
+    # Voice is opt-in. It is effective only when requested (via voice paths or
+    # --enable-voice) and not explicitly overridden by --skip-voice. Model-only
+    # activation therefore needs neither voice paths nor --skip-voice.
+    voice_requested = voice_requested_from(voice_paths, enable_voice=enable_voice)
+    voice_effective = voice_requested and not skip_voice
+
     # Phase 1 — validate everything up front. This never writes config.
     models = _model_summary(
         home=home,
@@ -552,7 +601,7 @@ def run_mac_activation(
     voice = _voice_summary(
         home=home,
         voice_paths=voice_paths,
-        skip_voice=skip_voice,
+        voice_effective=voice_effective,
         apply=False,
         enable_voice=enable_voice,
         voice_setup=voice_setup,
@@ -574,7 +623,7 @@ def run_mac_activation(
             model_ids=model_ids,
             allow_partial_model_set=allow_partial_model_set,
             voice_paths=voice_paths,
-            skip_voice=skip_voice,
+            voice_effective=voice_effective,
             enable_voice=enable_voice,
             model_setup=model_setup,
             voice_setup=voice_setup,

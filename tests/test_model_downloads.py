@@ -61,6 +61,21 @@ def test_dry_run_downloads_nothing(tmp_path: Path) -> None:
     assert not (tmp_path / "models").exists()
 
 
+def test_next_command_activation_omits_skip_voice(tmp_path: Path) -> None:
+    # Voice is opt-in, so the generated model-only activation must not force --skip-voice.
+    _copy_configs(tmp_path)
+
+    report = run_model_downloads(tmp_path, all_core=True)
+
+    activation = next(
+        command for command in report.next_commands if "setup mac-activation" in command
+    )
+    assert "--skip-voice" not in activation
+    assert "--apply --run-acceptance --start-services" in activation
+    # Voice must not be enabled by the generated command either.
+    assert "--enable-voice" not in activation
+
+
 def test_apply_yes_all_core_downloads_manifest_roles(tmp_path: Path) -> None:
     _copy_configs(tmp_path)
     calls: list[str] = []

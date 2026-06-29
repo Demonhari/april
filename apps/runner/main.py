@@ -35,6 +35,7 @@ from apps.runner.mac_activation import (
     default_activation_report_path,
     run_mac_activation,
     validate_activation_flags,
+    voice_paths_complete,
     write_activation_report,
 )
 from apps.runner.mac_report import ReportThresholds, write_report
@@ -1750,7 +1751,7 @@ def _print_activation(report: MacActivationReport) -> None:
             console.print(f"  {entry.role}: {entry.basename}")
     voice = report.voice
     if voice.skipped:
-        console.print("Voice: skipped (--skip-voice)")
+        console.print("Voice: skipped (voice is opt-in; no voice flags supplied)")
     elif voice.error:
         console.print(f"[red]Voice: {voice.error}[/red]")
     else:
@@ -1810,12 +1811,15 @@ def setup_mac_activation(
     piper_model: Path | None = typer.Option(None, "--piper-model"),
     wake_word_model: Path | None = typer.Option(None, "--wake-word-model"),
     skip_voice: bool = typer.Option(
-        False, "--skip-voice", help="Activate models only; skip voice."
+        False,
+        "--skip-voice",
+        help="Explicit models-only override. Voice is already opt-in; "
+        "incompatible with any voice flag.",
     ),
     enable_voice: bool = typer.Option(
         False,
         "--enable-voice",
-        help="Turn voice ON after all voice artifacts validate (with --apply).",
+        help="Turn voice ON after all required voice artifacts validate (with --apply).",
     ),
     dry_run: bool = typer.Option(False, "--dry-run"),
     apply_changes: bool = typer.Option(False, "--apply"),
@@ -1863,6 +1867,14 @@ def setup_mac_activation(
     Homebrew, or records audio. Config is written only with --apply, all paths are
     validated first, and a failed apply step is rolled back automatically.
     """
+    activation_voice_paths: dict[str, Path | None] = {
+        "whisper_binary": whisper_binary,
+        "whisper_model": whisper_model,
+        "piper_binary": piper_binary,
+        "piper_model": piper_model,
+        "wake_word_model": wake_word_model,
+    }
+    any_voice_path_supplied = any(path is not None for path in activation_voice_paths.values())
     try:
         validate_activation_flags(
             apply=apply_changes,
@@ -1874,6 +1886,8 @@ def setup_mac_activation(
             acceptance_wake_word_live=acceptance_wake_word_live,
             start_services=start_services,
             fake_services=fake_services,
+            voice_paths_supplied=any_voice_path_supplied,
+            voice_required_complete=voice_paths_complete(activation_voice_paths),
         )
     except ActivationFlagError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -1912,13 +1926,7 @@ def setup_mac_activation(
         home,
         model_paths={"brain": brain, "coding": coding, "reading": reading, "reasoning": reasoning},
         model_ids={"reasoning": reasoning_id},
-        voice_paths={
-            "whisper_binary": whisper_binary,
-            "whisper_model": whisper_model,
-            "piper_binary": piper_binary,
-            "piper_model": piper_model,
-            "wake_word_model": wake_word_model,
-        },
+        voice_paths=activation_voice_paths,
         skip_voice=skip_voice,
         apply=apply_changes,
         enable_voice=enable_voice,

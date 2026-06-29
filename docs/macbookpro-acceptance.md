@@ -79,7 +79,6 @@ run april setup mac-activation \
   --brain models/granite3.3-2b-q4_k_m.gguf \
   --coding models/qwen3-1.7b-q8_0.gguf \
   --reading models/qwen3-0.6b-q8_0.gguf \
-  --skip-voice \
   --apply \
   --run-acceptance \
   --start-services
@@ -88,6 +87,8 @@ run april verify --all-configured-models --require-real-model \
 run april acceptance --require-real-models --start-services \
   --report data/verification/mac-readiness.json
 ```
+
+Voice is opt-in, so this model-only activation needs no `--skip-voice`.
 
 `run april model download` reads only `configs/model_downloads.yaml`, is dry-run
 by default, and requires `--apply --yes` before network access starts. It writes
@@ -306,11 +307,19 @@ contain tokens, transcripts, generated text, or absolute paths. A `warning` exit
 ## The Mac activation wizard
 
 `run april setup mac-activation` is one guided local command that validates the
-intended GGUF model set and (unless `--skip-voice`) the local voice tools, writes
-config only with `--apply`, and can chain straight into acceptance. It is
+intended GGUF model set and (when voice is requested) the local voice tools,
+writes config only with `--apply`, and can chain straight into acceptance. It is
 **dry-run by default** and never downloads models, installs packages, uses
 `sudo`/Homebrew, or records audio. `--reasoning` / `--reasoning-id` are optional;
 when omitted, the reasoning agent keeps using the configured brain model.
+
+**Voice is opt-in.** A model-only activation supplies no voice flags, so voice is
+skipped and only `configs/models.yaml` is snapshotted — no `--skip-voice` is
+needed. Voice is requested only when you pass a voice path (`--whisper-binary`,
+`--whisper-model`, `--piper-binary`, `--piper-model`, `--wake-word-model`),
+`--enable-voice`, or a live voice acceptance flag. `--skip-voice` remains
+available as an explicit "models only" override but is mostly for clarity; it is
+an error to combine it with any voice flag.
 
 The wizard distinguishes partial model registration from full activation. Full
 activation requires `brain`, `coding`, and `reading`, either supplied in the
@@ -340,18 +349,22 @@ Apply is **transactional and validate-first**:
 
 ### Enabling voice
 
-The wizard configures voice paths but, by default, leaves voice **OFF** (no
-surprises). Pass `--enable-voice` to turn voice on — but only after every required
-voice artifact validates. `--enable-voice` may not be combined with `--skip-voice`.
+Voice setup requires the four required voice paths (whisper binary/model, Piper
+binary/model). The wizard configures those paths but, by default, leaves voice
+**OFF** (no surprises). Pass `--enable-voice` to turn voice on — but only after
+every required voice artifact validates. `--enable-voice` requires the complete
+required voice paths and may not be combined with `--skip-voice`. Push-to-talk
+does not require a wake-word model; wake-word listening requires a configured
+local openWakeWord ONNX model (`--wake-word-model`).
 
 ```bash
 # Models only — validate, apply, then run real-model acceptance and write a report:
+# Voice is opt-in, so no --skip-voice is needed (add it only for explicit clarity).
 # Optional: add --reasoning /absolute/path/reasoning.gguf when configured.
 run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
-  --skip-voice \
   --apply \
   --run-acceptance \
   --write-report
@@ -379,8 +392,9 @@ run april setup mac-activation \
 
 `--run-acceptance` runs **real-model** acceptance after a successful apply.
 `--acceptance-voice-live` / `--acceptance-wake-word-live` add the live voice and
-wake-word checks (both require `--run-acceptance` and `--enable-voice`, and are
-incompatible with `--skip-voice`). `--start-services` orchestrates APRIL services
+wake-word checks (both require `--run-acceptance`, `--enable-voice`, and the
+complete required voice paths, and cannot be combined with `--skip-voice`).
+`--start-services` orchestrates APRIL services
 for those live checks using the same logic as `run april acceptance`; services the
 wizard started are always stopped afterward unless `--keep-services-running`.
 `--fake-services` cannot be combined with real-model acceptance. With

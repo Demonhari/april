@@ -145,7 +145,6 @@ run april setup mac-activation \
   --brain models/granite3.3-2b-q4_k_m.gguf \
   --coding models/qwen3-1.7b-q8_0.gguf \
   --reading models/qwen3-0.6b-q8_0.gguf \
-  --skip-voice \
   --apply \
   --run-acceptance \
   --start-services
@@ -157,6 +156,9 @@ run april acceptance \
   --start-services \
   --report data/verification/mac-readiness.json
 ```
+
+Voice is opt-in, so model-only Mac activation needs no `--skip-voice`. Supply
+voice flags (and `--enable-voice`) only when you actually want to set voice up.
 
 `run april model download` is dry-run by default and only downloads entries from
 `configs/model_downloads.yaml`. Network access requires `--apply`;
@@ -424,7 +426,7 @@ Ctrl-C) unless `--keep-services-running`; `--fake-services` uses the fake runtim
 for plumbing only and cannot be combined with `--require-real-models`.
 
 `run april setup mac-activation` is the guided local activation wizard: it
-validates the GGUF model set (and, unless `--skip-voice`, the voice tools), then
+validates the GGUF model set (and, when voice is requested, the voice tools), then
 applies config **transactionally** with `--apply` (validate-first; a failed apply
 step is rolled back automatically so model and voice config can never be left
 half-written), can enable voice with `--enable-voice`, and can chain into
@@ -434,6 +436,20 @@ Full Mac activation requires the core local GGUF roles `brain`, `coding`, and
 `reading`, either supplied in the command or already configured to existing local
 GGUF files. `--reasoning` / `--reasoning-id` are optional; omit them to keep the
 reasoning agent on the brain model.
+
+**Voice is opt-in.** Model-only Mac activation needs no `--skip-voice`: with no
+voice flags, voice is skipped and only `configs/models.yaml` is touched. Voice is
+requested only when you pass a voice path (`--whisper-binary`, `--whisper-model`,
+`--piper-binary`, `--piper-model`, `--wake-word-model`), `--enable-voice`, or a
+live voice acceptance flag. Voice **setup** requires the four voice paths
+(whisper binary/model, Piper binary/model); `--enable-voice` turns voice on after
+they validate. `--skip-voice` is optional and mostly for explicit clarity — it is
+an error to combine it with any voice flag. Push-to-talk does not require a
+wake-word model; wake-word listening requires a configured local openWakeWord
+ONNX model (`--wake-word-model`). Live voice acceptance
+(`--acceptance-voice-live` / `--acceptance-wake-word-live`) requires
+`--run-acceptance`, `--enable-voice`, the complete voice paths, and live
+verification on this Mac.
 
 Partial model registration is different from full Mac activation. Supplying only
 some core roles is refused before writes by default. Add
@@ -446,12 +462,12 @@ the live voice path actually ran. Fake verification remains fake/simulated.
 
 ```bash
 # Models only — validate, apply, then run real-model acceptance:
+# Voice is opt-in, so no --skip-voice is needed (add it only for explicit clarity).
 # Optional: add --reasoning /absolute/path/reasoning.gguf when configured.
 run april setup mac-activation \
   --brain /absolute/path/brain.gguf \
   --coding /absolute/path/coding.gguf \
   --reading /absolute/path/reading.gguf \
-  --skip-voice \
   --apply \
   --run-acceptance \
   --write-report

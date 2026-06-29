@@ -254,9 +254,10 @@ def _next_commands(manifest: dict[str, ModelDownloadEntry]) -> list[str]:
     reading = manifest["reading"].target_path.as_posix()
     return [
         "run april model doctor",
+        # Voice is opt-in, so model-only activation needs no --skip-voice here.
         "run april setup mac-activation "
         f"--brain {brain} --coding {coding} --reading {reading} "
-        "--skip-voice --apply --run-acceptance --start-services",
+        "--apply --run-acceptance --start-services",
         "run april verify --all-configured-models --require-real-model "
         "--report data/verification/mac-readiness.json",
     ]

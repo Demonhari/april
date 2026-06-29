@@ -129,6 +129,8 @@ def _flags(**overrides: bool) -> dict[str, bool]:
         "acceptance_wake_word_live": False,
         "start_services": False,
         "fake_services": False,
+        "voice_paths_supplied": False,
+        "voice_required_complete": False,
     }
     base.update(overrides)
     return base
@@ -326,17 +328,50 @@ def test_activation_requires_a_model_path(tmp_path: Path) -> None:
     assert report.models.error is not None
 
 
-def test_activation_requires_voice_paths_unless_skipped(tmp_path: Path) -> None:
+def test_activation_model_only_skips_voice_by_default_without_skip_flag(tmp_path: Path) -> None:
+    # Voice is opt-in: no voice paths and no --skip-voice still succeeds, with voice skipped.
     report = run_mac_activation(
         tmp_path,
         model_paths=_mock_core_model_paths(),
         voice_paths={},
-        skip_voice=False,
         model_setup=RecordingSetup(_model_result()),
     )
+    assert report.final_status == "validated"
+    assert report.voice.skipped is True
+    assert report.voice.requested is False
+    assert report.voice.error is None
+
+
+def test_activation_partial_voice_paths_fail_clearly(tmp_path: Path) -> None:
+    # Supplying some (but not all required) voice paths requests voice and must fail clearly.
+    report = run_mac_activation(
+        tmp_path,
+        model_paths=_mock_core_model_paths(),
+        voice_paths={"whisper_binary": Path("/v/whisper")},
+        model_setup=RecordingSetup(_model_result()),
+        voice_setup=RecordingSetup(_voice_result()),
+    )
     assert report.final_status == "failed"
-    assert report.voice.error is not None
     assert report.voice.skipped is False
+    assert report.voice.requested is True
+    assert report.voice.error is not None
+    assert "--whisper-model" in report.voice.error
+
+
+def test_activation_wake_word_only_requests_voice_and_requires_required_paths(
+    tmp_path: Path,
+) -> None:
+    # A wake-word path alone requests voice but does not satisfy the required voice paths.
+    report = run_mac_activation(
+        tmp_path,
+        model_paths=_mock_core_model_paths(),
+        voice_paths={"wake_word_model": Path("/v/april.onnx")},
+        model_setup=RecordingSetup(_model_result()),
+        voice_setup=RecordingSetup(_voice_result()),
+    )
+    assert report.final_status == "failed"
+    assert report.voice.requested is True
+    assert report.voice.error is not None
 
 
 def test_activation_redacts_config_error_paths(tmp_path: Path) -> None:
@@ -594,6 +629,55 @@ def test_activation_cli_dry_run_by_default(tmp_path: Path, monkeypatch) -> None:
     assert model_setup.calls[0]["apply"] is False
 
 
+def test_activation_cli_model_only_succeeds_without_skip_voice(tmp_path: Path, monkeypatch) -> None:
+    # Voice is opt-in at the CLI too: model-only activation needs no --skip-voice.
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    model_setup = RecordingSetup(_model_result())
+    monkeypatch.setattr("apps.runner.mac_activation.setup_model_set", model_setup)
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "setup",
+            "mac-activation",
+            "--brain",
+            "/models/brain.gguf",
+            "--coding",
+            "/models/coding.gguf",
+            "--reading",
+            "/models/reading.gguf",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "VALIDATED" in result.output
+    assert "Voice: skipped" in result.output
+
+
+def test_activation_cli_skip_voice_with_voice_path_is_rejected(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "setup",
+            "mac-activation",
+            "--brain",
+            "/models/brain.gguf",
+            "--coding",
+            "/models/coding.gguf",
+            "--reading",
+            "/models/reading.gguf",
+            "--skip-voice",
+            "--whisper-binary",
+            "/v/whisper",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "Cannot combine --skip-voice" in result.output
+
+
 def test_activation_cli_writes_redacted_report_under_data_verification(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -845,6 +929,27 @@ def test_activation_no_rollback_leaves_partial_state(tmp_path: Path) -> None:
     assert (tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8") == "MUTATED_MODELS"
 
 
+def test_activation_model_only_apply_snapshots_only_models_config(tmp_path: Path) -> None:
+    # Model-only activation must protect only configs/models.yaml, never april.yaml.
+    _seed_configs(tmp_path)
+    model_setup = WritingModelSetup(tmp_path)
+    report = run_mac_activation(
+        tmp_path,
+        model_paths=_mock_core_model_paths(),
+        voice_paths={},
+        apply=True,
+        model_setup=model_setup,
+    )
+    assert report.final_status == "applied"
+    assert report.voice.skipped is True
+    assert report.transaction.backup_created is True
+    backup_dir = tmp_path / ".april_tmp" / str(report.transaction.backup_basename)
+    snapshotted = {path.name for path in backup_dir.iterdir()}
+    assert snapshotted == {"models.yaml"}
+    # Voice config is untouched by a model-only activation.
+    assert (tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8") == "ORIGINAL_VOICE"
+
+
 def test_activation_transaction_not_requested_in_dry_run(tmp_path: Path) -> None:
     report = run_mac_activation(
         tmp_path,
@@ -908,13 +1013,46 @@ def test_activation_does_not_enable_voice_without_flag(tmp_path: Path) -> None:
 
 def test_flags_enable_voice_rejects_skip_voice() -> None:
     with pytest.raises(ActivationFlagError):
-        validate_activation_flags(**_flags(enable_voice=True, skip_voice=True))
+        validate_activation_flags(
+            **_flags(enable_voice=True, skip_voice=True, voice_required_complete=True)
+        )
+
+
+def test_flags_skip_voice_rejects_voice_paths() -> None:
+    with pytest.raises(ActivationFlagError):
+        validate_activation_flags(**_flags(skip_voice=True, voice_paths_supplied=True))
+
+
+def test_flags_enable_voice_requires_required_voice_paths() -> None:
+    with pytest.raises(ActivationFlagError):
+        validate_activation_flags(
+            **_flags(enable_voice=True, voice_paths_supplied=True, voice_required_complete=False)
+        )
+
+
+def test_flags_live_requires_complete_voice_paths() -> None:
+    with pytest.raises(ActivationFlagError):
+        validate_activation_flags(
+            **_flags(
+                acceptance_voice_live=True,
+                run_acceptance_after=True,
+                enable_voice=True,
+                voice_paths_supplied=True,
+                voice_required_complete=False,
+            )
+        )
 
 
 def test_flags_live_requires_run_acceptance() -> None:
     with pytest.raises(ActivationFlagError):
         validate_activation_flags(
-            **_flags(acceptance_voice_live=True, enable_voice=True, run_acceptance_after=False)
+            **_flags(
+                acceptance_voice_live=True,
+                enable_voice=True,
+                run_acceptance_after=False,
+                voice_paths_supplied=True,
+                voice_required_complete=True,
+            )
         )
 
 
@@ -957,8 +1095,15 @@ def test_flags_full_live_combo_is_valid() -> None:
             acceptance_voice_live=True,
             acceptance_wake_word_live=True,
             start_services=True,
+            voice_paths_supplied=True,
+            voice_required_complete=True,
         )
     )
+
+
+def test_flags_model_only_is_valid_without_skip_voice() -> None:
+    # Model-only activation: no voice flags, no --skip-voice — must validate cleanly.
+    validate_activation_flags(**_flags(apply=True, run_acceptance_after=True))
 
 
 def test_activation_cli_enable_voice_rejected_with_skip_voice(tmp_path: Path, monkeypatch) -> None:
