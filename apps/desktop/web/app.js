@@ -1342,6 +1342,10 @@ screens.readiness = async function () {
       ["Input devices", D.formatInt(voice.input_device_count)],
       ["Output devices", D.formatInt(voice.output_device_count)],
       ["Push-to-talk without wake word", boolText(voice.push_to_talk_available_without_wake_word)],
+      ["openWakeWord engine", voice.openwakeword_available ? "available" : "missing"],
+      ["Push-to-talk ready", boolText(voice.push_to_talk_ready)],
+      ["Wake-word ready", boolText(voice.wake_word_ready)],
+      ["Full voice loop ready", boolText(voice.full_voice_loop_ready)],
     ]) +
     "<div class='spacer'></div><div class='kv'>" +
     esc(voice.macos_microphone_permission_guidance || "") + "</div>";

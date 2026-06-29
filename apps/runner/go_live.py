@@ -118,6 +118,8 @@ class GoLiveRoutingSummary(BaseModel):
     report_exists: bool = False
     routing_cases_total: int = 0
     routing_cases_passed: int = 0
+    routing_schema_valid_count: int = 0
+    routing_failures: int = 0
     routing_fallback_count: int = 0
     model_repair_count: int = 0
 
@@ -215,6 +217,8 @@ def _brain_routing(multi_model: MultiModelVerificationReport | None) -> GoLiveRo
         report_exists=True,
         routing_cases_total=routing.total,
         routing_cases_passed=routing.passed,
+        routing_schema_valid_count=routing.schema_valid_count,
+        routing_failures=routing.failures,
         routing_fallback_count=routing.fallback_count,
         model_repair_count=routing.model_repair_count,
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import platform
 from pathlib import Path
@@ -8,6 +9,20 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from april_common.settings import AprilSettings
+
+
+def openwakeword_available() -> bool:
+    """Whether the optional ``openwakeword`` package is importable.
+
+    Uses an :mod:`importlib` spec lookup so no import side effects run and no
+    model is loaded. This distinguishes "the wake-word *engine* is unavailable"
+    (a missing ``.[voice]`` install) from "the wake-word *model* file is missing"
+    — two different fixes the doctor must not conflate.
+    """
+    try:
+        return importlib.util.find_spec("openwakeword") is not None
+    except (ImportError, ValueError):  # pragma: no cover - defensive
+        return False
 
 
 class VoiceComponentHealth(BaseModel):
@@ -38,6 +53,28 @@ def _configured_path_health(
     if not resolved.exists():
         return VoiceComponentHealth(name=name, status="degraded", message=f"Missing: {resolved}")
     return VoiceComponentHealth(name=name, status="ok", message=str(resolved))
+
+
+def _openwakeword_health(available: bool, *, wake_word_configured: bool) -> VoiceComponentHealth:
+    """Health of the optional openWakeWord *engine* (package), separate from the
+    wake-word model file. Missing-but-unused is ``disabled`` (push-to-talk does
+    not need it); missing-while-a-model-is-configured is ``degraded`` because the
+    wake-word setup is genuinely broken."""
+    if available:
+        return VoiceComponentHealth(name="openWakeWord engine", status="ok", message="installed")
+    if wake_word_configured:
+        return VoiceComponentHealth(
+            name="openWakeWord engine",
+            status="degraded",
+            message=(
+                "not installed, but a wake-word model is configured (pip install -e '.[voice]')"
+            ),
+        )
+    return VoiceComponentHealth(
+        name="openWakeWord engine",
+        status="disabled",
+        message="not installed; wake-word listening unavailable (push-to-talk does not need it)",
+    )
 
 
 def _audio_cache_health(settings: AprilSettings) -> VoiceComponentHealth:
@@ -169,14 +206,108 @@ def microphone_access(devices: dict[str, Any]) -> dict[str, str]:
     return {"status": "ok", "message": f"{len(devices['input_devices'])} input device(s)"}
 
 
+def _path_present(settings: AprilSettings, path: Path | None) -> bool:
+    return path is not None and settings.resolve_path(path).exists()
+
+
+def _voice_readiness(
+    settings: AprilSettings,
+    *,
+    push_to_talk_available: bool,
+    output_devices_present: bool,
+    openwakeword: bool,
+) -> dict[str, Any]:
+    """Compute the three escalating voice-readiness rungs, with the *named*
+    artifacts blocking each (never paths, so this stays redaction-safe).
+
+    * ``push_to_talk_ready`` — a usable microphone plus local whisper.cpp (STT) and
+      Piper (TTS). It deliberately does **not** require a wake-word model.
+    * ``wake_word_ready`` — everything push-to-talk needs, plus the openWakeWord
+      engine and a configured wake-word model file. A wake-word model is mandatory
+      here.
+    * ``full_voice_loop_ready`` — wake-word readiness plus an output device for the
+      hands-free wake → listen → respond → speak loop.
+    """
+    whisper_ready = _path_present(settings, settings.voice.whisper_binary_path) and _path_present(
+        settings, settings.voice.whisper_model_path
+    )
+    piper_ready = _path_present(settings, settings.voice.piper_binary_path) and _path_present(
+        settings, settings.voice.piper_model_path
+    )
+    wake_model_present = _path_present(settings, settings.voice.wake_word_model_path)
+
+    ptt_missing: list[str] = []
+    if not push_to_talk_available:
+        ptt_missing.append("microphone")
+    if not _path_present(settings, settings.voice.whisper_binary_path):
+        ptt_missing.append("whisper.cpp binary")
+    if not _path_present(settings, settings.voice.whisper_model_path):
+        ptt_missing.append("whisper model")
+    if not _path_present(settings, settings.voice.piper_binary_path):
+        ptt_missing.append("piper binary")
+    if not _path_present(settings, settings.voice.piper_model_path):
+        ptt_missing.append("piper voice model")
+    push_to_talk_ready = not ptt_missing
+
+    wake_missing = list(ptt_missing)
+    if not openwakeword:
+        wake_missing.append("openWakeWord package")
+    if not wake_model_present:
+        wake_missing.append("wake-word model")
+    wake_word_ready = not wake_missing
+
+    loop_missing = list(wake_missing)
+    if not output_devices_present:
+        loop_missing.append("output device")
+    full_voice_loop_ready = not loop_missing
+
+    return {
+        "push_to_talk_ready": push_to_talk_ready,
+        "push_to_talk_blocked_by": ptt_missing,
+        "wake_word_ready": wake_word_ready,
+        "wake_word_blocked_by": wake_missing,
+        "full_voice_loop_ready": full_voice_loop_ready,
+        "full_voice_loop_blocked_by": loop_missing,
+        "whisper_ready": whisper_ready,
+        "piper_ready": piper_ready,
+        "wake_word_model_present": wake_model_present,
+        "openwakeword_available": openwakeword,
+    }
+
+
+def voice_readiness_summary(settings: AprilSettings, devices: dict[str, Any]) -> dict[str, Any]:
+    """Public, redaction-safe voice-readiness verdicts for API/desktop consumers.
+
+    Reuses the same logic the doctor uses so the CLI doctor and the Core API
+    ``/readiness`` voice block never disagree. ``devices`` is the result of
+    :func:`query_audio_devices` so the caller can avoid re-enumerating hardware.
+    """
+    push_to_talk_available = bool(
+        devices.get("sounddevice_installed") and devices.get("input_devices")
+    )
+    return _voice_readiness(
+        settings,
+        push_to_talk_available=push_to_talk_available,
+        output_devices_present=bool(devices.get("output_devices")),
+        openwakeword=openwakeword_available(),
+    )
+
+
 def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
     devices = query_audio_devices()
     mic = microphone_access(devices)
     # Push-to-talk is the always-available fallback: it needs a usable microphone
     # but no wake-word model. Wake-word listening is the only thing that requires
-    # the openWakeWord model.
+    # the openWakeWord engine and model.
     push_to_talk_available = bool(devices["sounddevice_installed"] and devices["input_devices"])
     wake_word_configured = settings.voice.wake_word_model_path is not None
+    openwakeword = openwakeword_available()
+    readiness = _voice_readiness(
+        settings,
+        push_to_talk_available=push_to_talk_available,
+        output_devices_present=bool(devices["output_devices"]),
+        openwakeword=openwakeword,
+    )
     components = [
         VoiceComponentHealth(
             name="voice enabled",
@@ -208,6 +339,7 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         _configured_path_health("whisper model", settings, settings.voice.whisper_model_path),
         _configured_path_health("piper binary", settings, settings.voice.piper_binary_path),
         _configured_path_health("piper model", settings, settings.voice.piper_model_path),
+        _openwakeword_health(openwakeword, wake_word_configured=wake_word_configured),
         _configured_path_health("wake-word model", settings, settings.voice.wake_word_model_path),
         VoiceComponentHealth(
             name="push-to-talk fallback",
@@ -230,6 +362,13 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         "microphone_access_message": mic["message"],
         "push_to_talk_available": push_to_talk_available,
         "wake_word_model_configured": wake_word_configured,
+        "openwakeword_available": openwakeword,
+        # Composite, escalating readiness verdicts. push_to_talk_ready never
+        # requires a wake-word model; wake_word_ready always does.
+        "push_to_talk_ready": readiness["push_to_talk_ready"],
+        "wake_word_ready": readiness["wake_word_ready"],
+        "full_voice_loop_ready": readiness["full_voice_loop_ready"],
+        "voice_readiness": readiness,
         "input_devices": devices["input_devices"],
         "output_devices": devices["output_devices"],
         "components": [component.model_dump() for component in components],

@@ -283,6 +283,46 @@ because another is.
 default is `llama_cpp` to match `configs/models.yaml`. Uncomment `=fake` only for
 development and the deterministic verification flows.
 
+### Verification ladder
+
+APRIL has one clearly-runged verification ladder. Each rung has an exact command,
+and a higher rung never silently inherits a lower rung's pass. **Fake/offline
+verification is not real-MacBook readiness.**
+
+| # | Rung | Exact command |
+|---|------|---------------|
+| 1 | Fake-backend developer verification | `APRIL_RUNTIME_BACKEND=fake run april verify --fake` |
+| 2 | Offline config validation | `run april config validate` · `run april readiness` |
+| 3 | Real runtime preflight | `pip install -e '.[runtime]'` then `run april readiness` (backend `llama_cpp`, GGUFs present) |
+| 4 | Real model chat/stream verification | `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json` |
+| 5 | Real specialist switching verification | same `--all-configured-models` run (verifies brain-resident specialist switching) |
+| 6 | Real coding-workflow verification | `run april verify --workflow --real-model --report data/verification/workflow-real.json` |
+| 7 | Voice push-to-talk verification | `run april voice doctor` then `run april voice verify-live --report data/verification/voice-live.json` |
+| 8 | Wake-word verification | `run april voice verify-wake-live --report data/verification/wake-live.json` (requires a configured wake-word ONNX model) |
+| 9 | Desktop verification | `run april desktop` → Readiness screen (reads only sanitized `/readiness` + redacted report endpoints) |
+| ★ | Real-Mac go-live proof (folds 1–5) | `run april go-live --write-report --start-services` |
+
+Ground rules that hold at every rung:
+
+- **GGUF model files are intentionally not committed** and never downloaded
+  automatically — you place them locally (`models/` ships empty).
+- **APRIL does not use Ollama.** April Runtime is the only local model server.
+- **llama.cpp is hidden behind April Runtime.** Only
+  `services/april_runtime/llama_cpp_backend.py` may import `llama_cpp`; agents and
+  the Core API reach models over loopback HTTP.
+- **Fake verification is not real-MacBook readiness.** A green `--fake` run proves
+  orchestration, permissions, and contracts, not real models, audio, or packaging.
+- **External actions stay disabled** unless explicitly enabled in config
+  (`permissions.external_actions_enabled`).
+
+Rungs 4–6 and ★ write redacted JSON under `data/verification/` (Git-ignored). The
+routing section of the real-model report records `total`, `passed`,
+`schema_valid_count` (valid structured decisions), `failures`, `fallback_count`,
+`model_repair_count`, and a redacted per-case `cases[]` list (fixture id +
+structural verdicts + routing method only — never prompts or generated text). In
+real-model-required mode a schema-valid *fallback* decision counts as a failure,
+so deterministic fallback can never be silently accepted as a pass.
+
 ### Exact Mac verification order
 
 On a target Mac, run setup and verification in this order:
@@ -1114,6 +1154,26 @@ configure at `voice.wake_word_model_path`; APRIL never downloads or trains a
 wake-word model. Push-to-talk works without any wake-word model, and wake-word
 mode falls back to push-to-talk when no model is configured. `run april voice
 doctor` states this explicitly.
+
+`run april voice doctor` distinguishes every voice failure mode separately so the
+fix is never ambiguous: voice disabled by config, `sounddevice` unavailable,
+microphone permission/device issue, missing whisper.cpp binary, missing whisper
+model, missing Piper binary, missing Piper voice model, the **openWakeWord engine**
+(the Python package) being unavailable as distinct from the **wake-word ONNX
+model** being missing. It then reports three escalating, redaction-safe readiness
+verdicts (also surfaced on the Desktop Readiness screen via `/readiness`):
+
+- `push_to_talk_ready` — a usable microphone plus whisper.cpp (STT) and Piper
+  (TTS). **It passes without any wake-word model.**
+- `wake_word_ready` — everything push-to-talk needs **plus** the openWakeWord
+  engine **and** a configured wake-word model file (a wake-word model is required).
+- `full_voice_loop_ready` — wake-word readiness plus an output device for the full
+  hands-free loop.
+
+Each verdict lists the *named* artifacts still blocking it (e.g. `openWakeWord
+package`, `wake-word model`) rather than any local path. APRIL never downloads or
+installs the openWakeWord engine, whisper.cpp, Piper, or any voice model — the
+doctor only tells you which command/path to configure.
 
 Shortest real wake-word path: collect Hari's positive "April" samples and
 negative/background samples outside Git, train/export an openWakeWord-compatible

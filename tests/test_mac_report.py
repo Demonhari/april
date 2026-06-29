@@ -68,6 +68,83 @@ def test_routing_report_from_results() -> None:
     assert report.accuracy == round(2 / 3, 4)
 
 
+class _EvalLike:
+    """Minimal stand-in for a BrainEvalResult with the fields the report reads."""
+
+    def __init__(
+        self,
+        case_id: str,
+        *,
+        ok: bool,
+        schema_valid: bool,
+        routing_ok: bool,
+        routing_method: str | None,
+    ) -> None:
+        self.id = case_id
+        self.ok = ok
+        self.schema_valid = schema_valid
+        self.routing_ok = routing_ok
+        self.actual = {"routing_method": routing_method}
+
+
+def test_routing_report_tracks_valid_failures_and_per_case() -> None:
+    results = [
+        _EvalLike(
+            "normal_chat", ok=True, schema_valid=True, routing_ok=True, routing_method="model"
+        ),
+        _EvalLike(
+            "repair_case",
+            ok=True,
+            schema_valid=True,
+            routing_ok=True,
+            routing_method="model_repair",
+        ),
+        _EvalLike(
+            "fallback_case",
+            ok=False,
+            schema_valid=True,
+            routing_ok=False,
+            routing_method="fallback",
+        ),
+        _EvalLike(
+            "bad_json",
+            ok=False,
+            schema_valid=False,
+            routing_ok=False,
+            routing_method=None,
+        ),
+    ]
+    report = routing_report_from_results(results)
+    assert report.total == 4
+    assert report.passed == 2
+    assert report.failures == 2
+    # Three of four decisions were structurally valid (only bad_json was not).
+    assert report.schema_valid_count == 3
+    assert report.fallback_count == 1
+    assert report.model_repair_count == 1
+    assert [case.id for case in report.cases] == [
+        "normal_chat",
+        "repair_case",
+        "fallback_case",
+        "bad_json",
+    ]
+    fallback = next(case for case in report.cases if case.id == "fallback_case")
+    assert fallback.ok is False
+    assert fallback.schema_valid is True
+    assert fallback.routing_method == "fallback"
+
+
+def test_routing_report_per_case_is_redacted() -> None:
+    # Per-case results must never carry prompt text, decision text, or paths — only
+    # the fixture id, booleans, and the routing method enum string.
+    results = [
+        _EvalLike("c1", ok=True, schema_valid=True, routing_ok=True, routing_method="model"),
+    ]
+    serialized = routing_report_from_results(results).model_dump_json()
+    for secret in ("/Users/", "Bearer ", "sk-", "ignore previous instructions"):
+        assert secret not in serialized
+
+
 def test_report_all_pass() -> None:
     report = build_mac_report(
         environment=ENV,

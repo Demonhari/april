@@ -15,6 +15,7 @@ from services.voice.audio_player import FakeAudioPlayer, SoundDeviceAudioPlayer
 from services.voice.conversation_loop import PushToTalkLoop, normalize_transcript
 from services.voice.health import (
     microphone_access,
+    openwakeword_available,
     query_audio_devices,
     voice_doctor,
     voice_health,
@@ -198,6 +199,90 @@ def test_voice_doctor_reports_missing_dependency_distinctly(settings_tmp, monkey
     assert report["microphone_access"] == "missing_dependency"
     assert report["push_to_talk_available"] is False
     assert report["sounddevice_import_ok"] is False
+
+
+def _stub_mic_and_speaker(monkeypatch) -> None:
+    fake_sounddevice = types.SimpleNamespace(
+        query_devices=lambda: [
+            {"name": "Mic", "max_input_channels": 1, "max_output_channels": 0},
+            {"name": "Speaker", "max_input_channels": 0, "max_output_channels": 2},
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+
+
+def _voice_settings_with_artifacts(settings_tmp, tmp_path: Path, *, wake_word: bool):
+    """A settings copy whose whisper/piper (and optionally wake-word) artifacts all
+    exist on disk, so the doctor's readiness rungs evaluate against real files."""
+    artifacts = tmp_path / "voice_artifacts"
+    artifacts.mkdir(exist_ok=True)
+
+    def make(name: str) -> Path:
+        path = artifacts / name
+        path.write_bytes(b"stub")
+        return path
+
+    update = {
+        "enabled": True,
+        "whisper_binary_path": make("whisper"),
+        "whisper_model_path": make("ggml-base.en.bin"),
+        "piper_binary_path": make("piper"),
+        "piper_model_path": make("voice.onnx"),
+    }
+    if wake_word:
+        update["wake_word_model_path"] = make("april.onnx")
+    return settings_tmp.model_copy(update={"voice": settings_tmp.voice.model_copy(update=update)})
+
+
+def test_voice_doctor_push_to_talk_ready_without_wake_word_model(
+    settings_tmp, tmp_path: Path, monkeypatch
+) -> None:
+    _stub_mic_and_speaker(monkeypatch)
+    settings = _voice_settings_with_artifacts(settings_tmp, tmp_path, wake_word=False)
+    report = voice_doctor(settings)
+    # Push-to-talk is ready with mic + whisper + piper, even with no wake-word model.
+    assert report["push_to_talk_ready"] is True
+    # Wake-word readiness must require a configured wake-word model.
+    assert report["wake_word_ready"] is False
+    assert "wake-word model" in report["voice_readiness"]["wake_word_blocked_by"]
+    assert report["full_voice_loop_ready"] is False
+
+
+def test_voice_doctor_wake_word_ready_with_engine_and_model(
+    settings_tmp, tmp_path: Path, monkeypatch
+) -> None:
+    _stub_mic_and_speaker(monkeypatch)
+    monkeypatch.setattr("services.voice.health.openwakeword_available", lambda: True)
+    settings = _voice_settings_with_artifacts(settings_tmp, tmp_path, wake_word=True)
+    report = voice_doctor(settings)
+    assert report["push_to_talk_ready"] is True
+    assert report["wake_word_ready"] is True
+    assert report["full_voice_loop_ready"] is True
+    assert report["voice_readiness"]["wake_word_blocked_by"] == []
+
+
+def test_voice_doctor_distinguishes_missing_openwakeword_engine_from_model(
+    settings_tmp, tmp_path: Path, monkeypatch
+) -> None:
+    _stub_mic_and_speaker(monkeypatch)
+    # Engine missing but a wake-word model IS configured: wake-word setup is broken
+    # by the missing package, not the model.
+    monkeypatch.setattr("services.voice.health.openwakeword_available", lambda: False)
+    settings = _voice_settings_with_artifacts(settings_tmp, tmp_path, wake_word=True)
+    report = voice_doctor(settings)
+    assert report["openwakeword_available"] is False
+    assert report["wake_word_ready"] is False
+    assert "openWakeWord package" in report["voice_readiness"]["wake_word_blocked_by"]
+    assert "wake-word model" not in report["voice_readiness"]["wake_word_blocked_by"]
+    engine = next(c for c in report["components"] if c["name"] == "openWakeWord engine")
+    assert engine["status"] == "degraded"
+    # Push-to-talk is unaffected by a missing wake-word engine.
+    assert report["push_to_talk_ready"] is True
+
+
+def test_openwakeword_available_is_a_spec_lookup() -> None:
+    # Whatever the environment, the probe must return a bool and not raise.
+    assert isinstance(openwakeword_available(), bool)
 
 
 @pytest.mark.asyncio

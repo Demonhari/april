@@ -46,7 +46,12 @@ from services.api.schemas import (
 from services.april_runtime.schemas import LoadModelRequest
 from services.memory.writer import MemoryWriter
 from services.scheduler import compose_briefing, compute_repo_activity
-from services.voice.health import microphone_access, query_audio_devices, voice_health
+from services.voice.health import (
+    microphone_access,
+    query_audio_devices,
+    voice_health,
+    voice_readiness_summary,
+)
 
 _DESKTOP_WEB_DIR = Path(__file__).resolve().parents[2] / "apps" / "desktop" / "web"
 
@@ -733,6 +738,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
 
     vector = _redact_health_payload(active.vector_memory.health())
     devices = query_audio_devices()
+    voice_readiness = voice_readiness_summary(active.settings, devices)
     voice_artifacts = [
         _voice_artifact(
             active.settings, "whisper binary", active.settings.voice.whisper_binary_path
@@ -803,6 +809,10 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             ),
             "artifacts": voice_artifacts,
             "push_to_talk_available_without_wake_word": True,
+            "openwakeword_available": voice_readiness["openwakeword_available"],
+            "push_to_talk_ready": voice_readiness["push_to_talk_ready"],
+            "wake_word_ready": voice_readiness["wake_word_ready"],
+            "full_voice_loop_ready": voice_readiness["full_voice_loop_ready"],
         },
         "security": {
             "allowed_filesystem_roots": [

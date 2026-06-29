@@ -116,6 +116,42 @@ def test_all_configured_routing_report_uses_real_mode() -> None:
     assert report.passed == 1
     assert report.fallback_count == 1
     assert report.accuracy == 0.5
+    # Both decisions are structurally valid (the fallback one still parses), and the
+    # single non-passing case is counted under failures with a per-case breakdown.
+    assert report.schema_valid_count == 2
+    assert report.failures == 1
+    assert {case.id for case in report.cases} == {"pass", "fail"}
+    failing = next(case for case in report.cases if case.id == "fail")
+    assert failing.ok is False
+    assert failing.routing_method == "fallback"
+
+
+def test_real_routing_report_counts_schema_invalid_separately() -> None:
+    # A malformed decision is not a valid structured decision; it must lower the
+    # schema_valid_count and show up as a failing per-case entry.
+    cases = [
+        BrainEvalCase(
+            id="ok",
+            message="hello",
+            expected_intent="normal_conversation",
+            expected_agent="general_agent",
+        ),
+        BrainEvalCase(
+            id="bad",
+            message="hello",
+            expected_intent="normal_conversation",
+            expected_agent="general_agent",
+        ),
+    ]
+    decisions = [_matching_decision(cases[0], routing_method="model"), "not json"]
+    report = real_routing_report(cases, decisions)
+    assert report.total == 2
+    assert report.passed == 1
+    assert report.failures == 1
+    assert report.schema_valid_count == 1
+    bad = next(case for case in report.cases if case.id == "bad")
+    assert bad.schema_valid is False
+    assert bad.ok is False
 
 
 def test_real_routing_report_missing_decision_counts_as_failure() -> None:

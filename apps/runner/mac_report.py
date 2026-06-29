@@ -88,15 +88,42 @@ class RealModelReport(BaseModel):
     process_peak_rss_bytes: int | None = None
 
 
+class RoutingCaseResult(BaseModel):
+    """Per-case routing outcome, redacted by construction.
+
+    Only the stable fixture ``id``, the structural verdicts, and the routing
+    method are recorded — never the prompt, the generated decision text, or any
+    path. This lets the report show *which* case fell back or failed without
+    leaking model output.
+    """
+
+    id: str
+    # Whether the decision parsed as a valid Brain decision (structurally valid),
+    # independent of whether routing matched the expected agent/intent.
+    schema_valid: bool = True
+    routing_ok: bool = True
+    ok: bool = False
+    routing_method: str | None = None
+
+
 class RoutingReport(BaseModel):
     total: int = 0
     passed: int = 0
     accuracy: float = 0.0
+    # Number of cases whose decision parsed as a valid structured Brain decision,
+    # independent of whether routing matched the expectation. In real-model-required
+    # mode this is the "valid structured decisions" count.
+    schema_valid_count: int = 0
+    # Number of cases that did not pass (total - passed). Explicit so the on-disk
+    # report is self-describing rather than requiring the reader to subtract.
+    failures: int = 0
     # Counts of the routing method the model actually used. fallback_count > 0 in a
     # real-model run means the model JSON was unusable for that many cases. Default
     # 0 keeps the report shape backward compatible.
     fallback_count: int = 0
     model_repair_count: int = 0
+    # Per-case redacted outcomes (id + structural verdicts + routing method only).
+    cases: list[RoutingCaseResult] = Field(default_factory=list)
 
 
 class SkippedCheck(BaseModel):
@@ -153,16 +180,30 @@ def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
     total = len(results)
     passed = sum(1 for result in results if getattr(result, "ok", False))
     accuracy = round(passed / total, 4) if total else 0.0
+    schema_valid_count = sum(1 for result in results if getattr(result, "schema_valid", True))
     fallback_count = sum(1 for result in results if _routing_method_of(result) == "fallback")
     model_repair_count = sum(
         1 for result in results if _routing_method_of(result) == "model_repair"
     )
+    cases = [
+        RoutingCaseResult(
+            id=str(getattr(result, "id", "") or ""),
+            schema_valid=bool(getattr(result, "schema_valid", True)),
+            routing_ok=bool(getattr(result, "routing_ok", getattr(result, "ok", False))),
+            ok=bool(getattr(result, "ok", False)),
+            routing_method=_routing_method_of(result),
+        )
+        for result in results
+    ]
     return RoutingReport(
         total=total,
         passed=passed,
         accuracy=accuracy,
+        schema_valid_count=schema_valid_count,
+        failures=total - passed,
         fallback_count=fallback_count,
         model_repair_count=model_repair_count,
+        cases=cases,
     )
 
 

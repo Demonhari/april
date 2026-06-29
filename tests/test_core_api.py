@@ -129,6 +129,29 @@ def test_local_dev_token_authenticates_in_test(settings_tmp) -> None:
     assert response.status_code == 200
 
 
+def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.get("/readiness", headers=auth(settings_tmp))
+    assert response.status_code == 200
+    voice = response.json()["voice"]
+    # The composite readiness verdicts are surfaced and are honest booleans.
+    for key in (
+        "openwakeword_available",
+        "push_to_talk_ready",
+        "wake_word_ready",
+        "full_voice_loop_ready",
+    ):
+        assert isinstance(voice[key], bool)
+    # With no whisper/piper/wake-word artifacts configured in the temp home, none of
+    # the readiness rungs can be satisfied.
+    assert voice["push_to_talk_ready"] is False
+    assert voice["wake_word_ready"] is False
+    assert voice["full_voice_loop_ready"] is False
+
+
 def test_generated_api_token_authenticates(settings_tmp) -> None:
     import anyio
 

@@ -137,6 +137,25 @@ def run_target_mac_validation(
     return validator.run()
 
 
+def _infer_chat_format_from_basename(basename: str) -> str:
+    """Best-effort chat-format family from a GGUF *basename*, defaulting to the
+    always-supported ``generic`` template.
+
+    Used only by the standalone single-file verifier/benchmark, which fabricate a
+    model entry with no operator-set ``chat_format``. The runtime's resolver only
+    infers from ``model.name`` (here a fixed sentinel), so without this it would
+    raise "Unsupported chat template" for every supplied model. ``generic`` always
+    produces a usable prompt, so an arbitrary model still gets a structural
+    load/chat/stream/unload smoke; ``granite``/``qwen`` are used when recognised.
+    """
+    normalized = basename.casefold()
+    if "granite" in normalized:
+        return "granite"
+    if "qwen" in normalized:
+        return "qwen"
+    return "generic"
+
+
 @dataclass(slots=True)
 class ModelPlanEntry:
     """One configured model and whether the multi-model verifier can exercise it.
@@ -833,10 +852,19 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
     def _prepare(self) -> None:
         self.verify_home.mkdir(parents=True)
         shutil.copytree(self.repo_home / "configs", self.verify_home / "configs")
+        # A standalone single-file verify/benchmark fabricates this model entry, so
+        # there is no operator-configured chat_format to fall back on. Infer the
+        # family from the GGUF *basename* (the only signal available) and default to
+        # the always-supported "generic" template so an arbitrary model can still be
+        # chatted/streamed for a structural load/chat/stream/unload smoke. Without
+        # this the resolver only inspects model.name ("real-smoke") and raises
+        # "Unsupported chat template", failing chat for every supplied model.
+        chat_format = _infer_chat_format_from_basename(self.model_path.name)
         model_entry = {
             "name": "real-smoke",
             "path": str(self.model_path),
             "backend": "llama_cpp",
+            "chat_format": chat_format,
             "threads": 2,
             "context_size": 1024,
             "temperature": 0.0,

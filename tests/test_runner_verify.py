@@ -63,6 +63,32 @@ def test_all_configured_specialist_smoke_schema_validators() -> None:
     assert "summarize" in reading_prompt.lower()
 
 
+def test_infer_chat_format_from_basename() -> None:
+    from apps.runner.verify import _infer_chat_format_from_basename
+
+    assert _infer_chat_format_from_basename("granite3.3-2b-q4_k_m.gguf") == "granite"
+    assert _infer_chat_format_from_basename("qwen3-1.7b-q8_0.gguf") == "qwen"
+    # An unrecognised family falls back to the always-supported generic template,
+    # so an arbitrary GGUF can still be chatted/streamed for a structural smoke
+    # instead of raising "Unsupported chat template".
+    assert _infer_chat_format_from_basename("some-random-model.gguf") == "generic"
+
+
+def test_standalone_verifier_sets_chat_format_for_fabricated_model(tmp_path: Path) -> None:
+    # The standalone single-file verifier fabricates a model entry with no
+    # operator chat_format; it must inject one from the basename so chat does not
+    # fail with "Unsupported chat template" for every supplied model.
+    repo_home = Path.cwd()
+    model_path = tmp_path / "granite-test-q4_k_m.gguf"
+    model_path.write_bytes(b"GGUF stub")
+    verifier = RealModelVerifier(home=repo_home, model_path=model_path)
+    verifier._prepare()
+    written = yaml.safe_load((verifier.verify_home / "configs" / "models.yaml").read_text())
+    for role in ("brain", "coding", "reading"):
+        assert written["models"][role]["chat_format"] == "granite"
+    shutil.rmtree(verifier.temp, ignore_errors=True)
+
+
 def test_fake_brain_routing_passes_without_models_or_voice() -> None:
     # The deterministic fake/core verification path (brain routing eval) proves
     # routing succeeds without any GGUF model file or voice artifact present. The

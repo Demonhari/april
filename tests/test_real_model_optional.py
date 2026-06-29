@@ -19,6 +19,11 @@ async def test_optional_real_gguf_load_generate_stream_unload(tmp_path: Path) ->
     gguf = Path(model_path).expanduser().resolve()
     if not gguf.exists():
         pytest.skip(f"APRIL_TEST_GGUF_PATH does not exist: {gguf}")
+    # A real models.yaml always carries a chat_format; infer one from the GGUF
+    # basename (granite/qwen, else generic) so this fixture mirrors production and
+    # works for any supplied model instead of raising "Unsupported chat template".
+    from apps.runner.verify import _infer_chat_format_from_basename
+
     config_path = tmp_path / "models.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -30,6 +35,7 @@ async def test_optional_real_gguf_load_generate_stream_unload(tmp_path: Path) ->
                         "path": str(gguf),
                         "backend": "llama_cpp",
                         "role": "brain",
+                        "chat_format": _infer_chat_format_from_basename(gguf.name),
                         "threads": 2,
                         "context_size": 1024,
                         "temperature": 0.0,
