@@ -443,6 +443,123 @@
     };
   }
 
+  // Compact, read-only operator console derived entirely from the sanitized
+  // /readiness payload (core, embeddings, voice, security, per-type report
+  // freshness). Emits status enums and a single next command — never a token,
+  // prompt, transcript, or absolute path.
+  function operatorConsole(readiness) {
+    readiness = readiness || {};
+    var core = readiness.core || {};
+    var reports = readiness.reports || {};
+    var embeddings = readiness.embeddings || {};
+    var voice = readiness.voice || {};
+    var security = readiness.security || {};
+
+    function reportState(entry) {
+      if (!entry) return "not_run";
+      if (entry.stale === true) return "stale";
+      var s = String(entry.status || "").toLowerCase();
+      if (s === "fail" || s === "failed") return "fail";
+      if (s === "pass") return "ready";
+      return "warning";
+    }
+
+    var runtimeSimulated =
+      core.runtime_simulated === true ||
+      (core.runtime_backend && core.runtime_backend !== "llama_cpp");
+
+    var coreReal = reportState(reports.multi_model);
+    if (runtimeSimulated) coreReal = "fail";
+    var hardened = reportState(reports.go_live);
+    var workflow = reportState(reports.workflow);
+
+    var provider = embeddings.active_provider || embeddings.configured_provider || "hashed-token";
+    var embValue = provider;
+    var embState = provider === "runtime-local" ? "ready" : "warning";
+    if (embeddings.fell_back_to_hashed_token) {
+      embValue = "fallback (hashed-token)";
+      embState = "warning";
+    }
+    if (embeddings.reindex_required) {
+      embValue = embValue + " · reindex-required";
+      embState = "warning";
+    }
+
+    var milestone = voice.voice_milestone || "disabled";
+    var voiceState =
+      milestone === "disabled" ||
+      milestone === "full_voice_loop_ready" ||
+      milestone === "live_verified" ||
+      milestone === "wake_live_verified"
+        ? "ready"
+        : "warning";
+
+    var apiTok = (security.api_token && security.api_token.status) || "missing";
+    var rtTok = (security.runtime_token && security.runtime_token.status) || "missing";
+    var tokens = "hardened";
+    var tokenState = "ready";
+    if (apiTok !== "configured" || rtTok !== "configured") {
+      tokens = apiTok === "missing" || rtTok === "missing" ? "missing" : "development";
+      tokenState = "warning";
+    }
+
+    var runtime = core.runtime_backend || "unavailable";
+    var runtimeState = "ready";
+    if (runtimeSimulated) {
+      runtime = "fake";
+      runtimeState = "warning";
+    }
+    if (core.runtime_health && core.runtime_health !== "ok") {
+      runtime = "unavailable";
+      runtimeState = "fail";
+    }
+
+    var lastReport = null;
+    Object.keys(reports).forEach(function (key) {
+      var entry = reports[key];
+      if (entry && typeof entry.age_seconds === "number") {
+        if (!lastReport || entry.age_seconds < lastReport.age_seconds) {
+          lastReport = entry;
+        }
+      }
+    });
+    var lastReportValue = lastReport
+      ? (lastReport.basename || lastReport.report_type || "report") +
+        " · " +
+        (lastReport.age_human || "unknown") +
+        (lastReport.stale ? " · stale" : "")
+      : "no reports yet";
+
+    function nextCommand() {
+      if (coreReal === "fail" || coreReal === "not_run" || coreReal === "stale") {
+        return "run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json";
+      }
+      if (workflow === "fail" || workflow === "not_run" || workflow === "stale") {
+        return "run april verify --workflow --real-model --report data/verification/workflow-real.json";
+      }
+      if (tokenState !== "ready") return "run april setup tokens";
+      if (embState !== "ready") {
+        return "run april setup embeddings --model /absolute/path/to/embedding.gguf --id april-embedding --apply";
+      }
+      if (hardened !== "ready") return "run april go-live --write-report --start-services";
+      return "run april doctor --daily-driver";
+    }
+
+    return {
+      rows: [
+        { label: "Core real model", value: coreReal, state: coreReal },
+        { label: "Hardened go-live", value: hardened, state: hardened },
+        { label: "Workflow security", value: workflow, state: workflow },
+        { label: "Memory embeddings", value: embValue, state: embState },
+        { label: "Voice milestone", value: milestone, state: voiceState },
+        { label: "Tokens", value: tokens, state: tokenState },
+        { label: "Runtime", value: runtime, state: runtimeState },
+        { label: "Last report", value: lastReportValue, state: lastReport && lastReport.stale ? "warning" : "ready" },
+      ],
+      nextCommand: nextCommand(),
+    };
+  }
+
   root.AprilDashboard = {
     UNKNOWN: UNKNOWN,
     UNAVAILABLE: UNAVAILABLE,
@@ -474,6 +591,7 @@
     voiceLiveVerified: voiceLiveVerified,
     voiceLiveWarning: voiceLiveWarning,
     workflowStatus: workflowStatus,
+    operatorConsole: operatorConsole,
   };
 
   if (typeof module !== "undefined" && module.exports) {

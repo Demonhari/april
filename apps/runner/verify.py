@@ -379,6 +379,8 @@ class WorkflowVerificationReport(BaseModel):
     schema_version: int = 1
     report_type: Literal["workflow"] = "workflow"
     generated_at: str
+    # Redacted structural config fingerprint at generation time (staleness check).
+    config_fingerprint: str | None = None
     summary: str = "degraded"
     real_model_verified: bool = False
     real_model_exercised: bool = False
@@ -395,6 +397,7 @@ def build_workflow_report(
     real_model_requested: bool,
     timeout_seconds: float | None = None,
     max_output_tokens: int | None = None,
+    config_fingerprint: str | None = None,
 ) -> WorkflowVerificationReport:
     failed = [check for check in checks if not check.ok]
     real_model_exercised = real_model_requested and any(
@@ -412,6 +415,7 @@ def build_workflow_report(
     ]
     return WorkflowVerificationReport(
         generated_at=environment_snapshot().generated_at,
+        config_fingerprint=config_fingerprint,
         summary="pass" if not failed else "fail",
         real_model_verified=real_model_verified,
         real_model_exercised=real_model_exercised,
@@ -2844,7 +2848,9 @@ class AllConfiguredModelsVerifier(
         except ConfigError:
             return "unknown"
 
-    def build_report(self) -> MultiModelVerificationReport:
+    def build_report(
+        self, *, config_fingerprint: str | None = None
+    ) -> MultiModelVerificationReport:
         return build_multi_model_report(
             environment=environment_snapshot(),
             runtime_backend=self._report_backend(),
@@ -2853,6 +2859,7 @@ class AllConfiguredModelsVerifier(
             thresholds=self.thresholds,
             require_real_model=self.require_real_model,
             runtime_error=self.runtime_error,
+            config_fingerprint=config_fingerprint,
         )
 
 

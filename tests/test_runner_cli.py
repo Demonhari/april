@@ -689,6 +689,112 @@ def test_readiness_cli_human_and_json_are_offline_and_redacted(tmp_path: Path, m
     assert "local-dev-token" not in structured.output
 
 
+def test_daily_driver_doctor_cli_human_and_json(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    runner = CliRunner()
+    human = runner.invoke(app, ["april", "doctor", "--daily-driver"])
+    # No GGUFs in the temp home, so this exits non-zero (core blocker), but it must
+    # still render the headline rollups and never crash.
+    assert "daily-driver doctor" in human.output.lower()
+    assert "Core real model:" in human.output
+    assert "Hardened go-live:" in human.output
+
+    structured = runner.invoke(app, ["april", "doctor", "--daily-driver", "--json"])
+    payload = json.loads(structured.output)
+    assert payload["report_type"] == "daily_driver"
+    assert "config_fingerprint" in payload
+    assert {"core_real_model", "workflow_security", "hardened_go_live", "overall"} <= set(payload)
+    assert len(payload["checks"]) == 14
+    # Offline + redacted.
+    assert str(tmp_path) not in structured.output
+    assert "local-dev-token" not in structured.output
+
+
+def test_daily_driver_doctor_does_not_run_heavy_checks_by_default(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("daily-driver must not run real verification by default")
+
+    monkeypatch.setattr("apps.runner.main.run_all_configured_models_verification", _forbidden)
+    monkeypatch.setattr("apps.runner.main.run_workflow_verification", _forbidden)
+    result = CliRunner().invoke(app, ["april", "doctor", "--daily-driver", "--json"])
+    payload = json.loads(result.output)
+    assert payload["report_type"] == "daily_driver"
+
+
+def test_setup_checklist_cli_is_read_only(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    before = sorted(p.name for p in (tmp_path / "configs").iterdir())
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    runner = CliRunner()
+    human = runner.invoke(app, ["april", "setup", "checklist"])
+    assert human.exit_code == 0, human.output
+    assert "setup checklist" in human.output.lower()
+    structured = runner.invoke(app, ["april", "setup", "checklist", "--json"])
+    payload = json.loads(structured.output)
+    assert payload["report_type"] == "setup_checklist"
+    assert len(payload["steps"]) == 11
+    # Strictly read-only: configs are unchanged and no token leaks.
+    assert sorted(p.name for p in (tmp_path / "configs").iterdir()) == before
+    assert "local-dev-token" not in structured.output
+
+
+def test_start_preflight_does_not_start_when_preflight_fails(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    from apps.runner.preflight import PreflightCheck, PreflightReport
+
+    failed = PreflightReport(
+        fake=False,
+        ok=False,
+        checks=[PreflightCheck(name="model files present", status="fail", detail="missing")],
+    )
+    monkeypatch.setattr("apps.runner.main.build_preflight_report", lambda home, **kw: failed)
+
+    def _forbidden(_fake: bool):
+        raise AssertionError("services must not start when preflight fails")
+
+    monkeypatch.setattr("apps.runner.main._ensure_services", _forbidden)
+    result = CliRunner().invoke(app, ["april", "start", "--preflight"])
+    assert result.exit_code == 1
+    assert "Preflight failed" in result.output
+
+
+def test_start_preflight_starts_when_preflight_passes(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    from apps.runner.preflight import PreflightCheck, PreflightReport
+
+    ok_report = PreflightReport(
+        fake=True,
+        ok=True,
+        checks=[PreflightCheck(name="config valid", status="pass", detail="ok")],
+    )
+    monkeypatch.setattr("apps.runner.main.build_preflight_report", lambda home, **kw: ok_report)
+    started: dict[str, bool] = {"called": False}
+
+    def _fake_ensure(fake: bool):
+        started["called"] = True
+        return manager.status()
+
+    monkeypatch.setattr("apps.runner.main._ensure_services", _fake_ensure)
+    result = CliRunner().invoke(app, ["april", "start", "--preflight", "--fake"])
+    assert result.exit_code == 0, result.output
+    assert started["called"] is True
+
+
 def test_setup_models_dry_run_writes_nothing_and_prints_basenames(
     tmp_path: Path, monkeypatch
 ) -> None:

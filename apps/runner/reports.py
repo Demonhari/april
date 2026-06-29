@@ -30,6 +30,7 @@ KNOWN_REPORT_TYPES = (
     "voice_live",
     "wake_word_live",
     "multi_model",
+    "workflow",
     "fake_soak",
 )
 ALL_REPORT_TYPES = (*KNOWN_REPORT_TYPES, "unknown")
@@ -43,6 +44,7 @@ _TYPE_ALIASES = {
     "voice_live": "voice_live",
     "wake_word_live": "wake_word_live",
     "multi_model": "multi_model",
+    "workflow": "workflow",
     "soak": "fake_soak",
     "fake_soak": "fake_soak",
 }

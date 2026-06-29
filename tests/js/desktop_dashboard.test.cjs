@@ -322,6 +322,75 @@ check("permission ladder 0..5", D.PERMISSION_LEVELS.join(",") === "0,1,2,3,4,5")
   );
 }
 
+// --- operator console -------------------------------------------------------
+{
+  const empty = D.operatorConsole({});
+  check(
+    "operator console reports not_run with no data",
+    empty.rows.find((r) => r.label === "Core real model").value === "not_run",
+  );
+  check(
+    "operator console suggests real verification first",
+    empty.nextCommand.indexOf("verify --all-configured-models") !== -1,
+  );
+
+  const ready = D.operatorConsole({
+    core: { runtime_backend: "llama_cpp", runtime_simulated: false, runtime_health: "ok" },
+    reports: {
+      multi_model: { status: "pass", stale: false, age_human: "1h", age_seconds: 3600 },
+      go_live: { status: "pass", stale: false, age_human: "2h", age_seconds: 7200 },
+      workflow: { status: "pass", stale: false, age_human: "3h", age_seconds: 10800 },
+    },
+    embeddings: { active_provider: "runtime-local", reindex_required: false },
+    voice: { voice_milestone: "disabled" },
+    security: { api_token: { status: "configured" }, runtime_token: { status: "configured" } },
+  });
+  check(
+    "operator console core ready when real report passes",
+    ready.rows.find((r) => r.label === "Core real model").state === "ready",
+  );
+  check(
+    "operator console hardened ready when go-live passes",
+    ready.rows.find((r) => r.label === "Hardened go-live").state === "ready",
+  );
+  check(
+    "operator console tokens hardened",
+    ready.rows.find((r) => r.label === "Tokens").value === "hardened",
+  );
+
+  const fake = D.operatorConsole({
+    core: { runtime_backend: "fake", runtime_simulated: true, runtime_health: "ok" },
+    reports: { multi_model: { status: "pass", stale: false } },
+  });
+  check(
+    "operator console core fails on simulated runtime",
+    fake.rows.find((r) => r.label === "Core real model").value === "fail",
+  );
+
+  const stale = D.operatorConsole({
+    core: { runtime_backend: "llama_cpp" },
+    reports: { multi_model: { status: "pass", stale: true, stale_reason: "older than 7 days" } },
+  });
+  check(
+    "operator console surfaces stale real report",
+    stale.rows.find((r) => r.label === "Core real model").value === "stale",
+  );
+
+  const fallback = D.operatorConsole({
+    core: { runtime_backend: "llama_cpp" },
+    reports: {},
+    embeddings: {
+      configured_provider: "runtime-local",
+      active_provider: "hashed-token",
+      fell_back_to_hashed_token: true,
+    },
+  });
+  check(
+    "operator console flags embedding fallback",
+    fallback.rows.find((r) => r.label === "Memory embeddings").value.indexOf("fallback") !== -1,
+  );
+}
+
 if (failures > 0) {
   console.error(failures + " desktop dashboard checks failed");
   process.exit(1);

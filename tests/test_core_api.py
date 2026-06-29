@@ -168,6 +168,11 @@ def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
     assert embeddings["active_provider"] in {"hashed-token", "runtime-local"}
     assert embeddings["reindex_command"] == "run april memory reindex"
     assert isinstance(embeddings["reindex_required"], bool)
+    # Readiness exposes a redacted local config fingerprint + per-type report
+    # freshness so the operator console / daily-driver doctor can flag staleness.
+    body = response.json()
+    assert "config_fingerprint" in body
+    assert isinstance(body["reports"], dict)
 
 
 def test_generated_api_token_authenticates(settings_tmp) -> None:

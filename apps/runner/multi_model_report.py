@@ -135,6 +135,8 @@ class MultiModelVerificationReport(BaseModel):
     # Discriminator so the report viewer can classify this file without guessing.
     report_type: Literal["multi_model"] = "multi_model"
     generated_at: str
+    # Redacted structural config fingerprint at generation time (staleness check).
+    config_fingerprint: str | None = None
     os: str
     cpu_architecture: str
     python_version: str
@@ -295,6 +297,7 @@ def build_multi_model_report(
     thresholds: ReportThresholds | None = None,
     require_real_model: bool = False,
     runtime_error: bool = False,
+    config_fingerprint: str | None = None,
 ) -> MultiModelVerificationReport:
     """Assemble a redacted multi-model acceptance report from per-model results.
 
@@ -380,6 +383,7 @@ def build_multi_model_report(
 
     return MultiModelVerificationReport(
         generated_at=environment.generated_at,
+        config_fingerprint=config_fingerprint,
         os=environment.os,
         cpu_architecture=environment.cpu_architecture,
         python_version=environment.python_version,

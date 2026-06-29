@@ -1287,6 +1287,30 @@ screens.readiness = async function () {
   const security = readiness.security || {};
   const guidance = readiness.verification_guidance || {};
 
+  // Compact, read-only operator console up top: the daily-driver status at a
+  // glance. Read-only — it never starts models, opens the mic, or shows secrets.
+  const consoleData = D.operatorConsole(readiness);
+  const consoleTone = {
+    ready: "ok",
+    warning: "warn",
+    fail: "warn",
+    stale: "warn",
+    not_run: "",
+  };
+  let consoleHtml =
+    "<div class='panel-title'>Operator console</div><div class='row'>";
+  consoleData.rows.forEach((entry) => {
+    consoleHtml +=
+      "<span class='kv'><strong>" + esc(entry.label) + ":</strong> " +
+      pill(esc(String(entry.value)), consoleTone[entry.state] || "") + "</span> ";
+  });
+  consoleHtml += "</div>";
+  if (consoleData.nextCommand) {
+    consoleHtml += "<div class='spacer'></div><div class='kv'>Next command:</div>" +
+      commandBlock(consoleData.nextCommand);
+  }
+  screenEl.appendChild(card(consoleHtml));
+
   screenEl.appendChild(card(
     "<div class='panel-title'>Core readiness</div>" +
     kvRows([

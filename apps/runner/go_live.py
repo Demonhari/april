@@ -158,6 +158,10 @@ class GoLiveReport(BaseModel):
     schema_version: int = 1
     report_type: Literal["go_live"] = "go_live"
     generated_at: str
+    # Redacted structural config fingerprint at generation time; lets readiness
+    # mark this report stale when the configuration later changes. ``None`` for
+    # reports generated before fingerprinting existed (timestamp-only freshness).
+    config_fingerprint: str | None = None
     # --- flat summary fields (also surfaced by the reports browser) ----------
     runtime_backend: str
     llama_cpp_python_available: bool
@@ -463,6 +467,7 @@ def build_go_live_report(
     embedding_provider: str,
     embedding_model_id: str | None,
     services: ServicesSummary | None = None,
+    config_fingerprint: str | None = None,
 ) -> GoLiveReport:
     """Fold APRIL's real-model verification primitives into one redacted go-live
     proof report. Pure over its inputs so it is unit-testable with mocked sub-reports.
@@ -565,6 +570,7 @@ def build_go_live_report(
 
     return GoLiveReport(
         generated_at=utc_now_iso(),
+        config_fingerprint=config_fingerprint,
         runtime_backend=readiness.runtime_backend,
         llama_cpp_python_available=readiness.llama_cpp_python_available,
         voice_enabled=readiness.voice_enabled,

@@ -372,9 +372,86 @@ structural verdicts + routing method only — never prompts or generated text). 
 real-model-required mode a schema-valid *fallback* decision counts as a failure,
 so deterministic fallback can never be silently accepted as a pass.
 
+### Daily-driver operation
+
+Once APRIL is set up, the **normal command to run before relying on it** is the
+daily-driver doctor — one read-only summary that folds config validation, offline
+readiness, report freshness, the config fingerprint, the embedding/memory doctor
+signals, and the voice milestone into three headline rollups plus exact next
+commands:
+
+```bash
+run april doctor --daily-driver          # human table
+run april doctor --daily-driver --json   # machine-readable, redacted
+```
+
+It never opens the microphone, never mutates config, and never loads a model
+(real verification stays opt-in via `--run-real-checks`, which runs the existing
+verifiers *first* and then summarizes). Example:
+
+```
+APRIL daily-driver doctor — warning
+
+Core real model: ready
+Workflow security: not_run
+Hardened go-live: warning
+Reason: development tokens, hashed-token embeddings
+
+Next commands:
+  run april setup tokens
+  run april setup embeddings --model /absolute/path/to/embedding.gguf --id april-embedding --apply
+  run april memory reindex
+  run april verify --workflow --real-model --report data/verification/workflow-real.json
+```
+
+Supporting commands:
+
+- **`run april setup checklist`** — read-only first-run onboarding checklist that
+  prints the recommended order (install → tokens → models → validate → verify →
+  go-live → embeddings → reindex → optional voice → optional desktop) and marks
+  each step `done` / `warning` / `blocker` / `next`. It detects state only; it
+  never installs, downloads, or mutates anything.
+- **`run april start --preflight`** (add `--fake` for development) — runs a safe
+  startup preflight (config valid, tokens hardened in production, backend not fake
+  unless `--fake`, model files present, writable db/index/log/report paths, ports
+  available, no stale locks) and **refuses to start services unless preflight
+  passes**. Preflight itself starts nothing and loads no model.
+
+**Reports can become stale.** Each newly generated real-model / workflow /
+go-live report embeds a *redacted, local* config fingerprint (Item below). A
+report is stale when it is older than its per-type TTL (real-model / workflow /
+go-live: 7 days; voice-live / wake-live: 30 days) **or** when its embedded
+fingerprint no longer matches the current configuration — so APRIL can say
+"latest real-model report is stale because config changed after it was
+generated." No Git is required; if no fingerprint is available, freshness falls
+back to timestamps only. Freshness is surfaced in the daily-driver doctor, the
+Core API `/readiness` `reports` block, and the Desktop operator console.
+
+**Config fingerprinting is redacted and local.** The fingerprint
+(`april_common/config_fingerprint.py`) is a short digest over *structural*
+config only — model ids/roles/backends/basenames/chat-format presence, the
+runtime backend, the embedding provider/model id, whether voice is enabled and
+which voice artifact slots are configured, and the structural permission policy.
+It never contains tokens, absolute paths, the local username, environment
+variables, raw GGUF metadata, prompts, transcripts, or patch contents. Rotating a
+secret token does not change it; changing a model or provider does.
+
+**Desktop stays read-only.** The Desktop Readiness screen opens with a compact
+*operator console* (core real model, hardened go-live, workflow security, memory
+embeddings, voice milestone, tokens, runtime, last report age, and the next
+command). It reads only the sanitized `/readiness` and redacted report endpoints —
+it never starts a model, opens the microphone, or shows a secret or absolute
+path. Mutations still require the explicit approval flows.
+
+**Voice is optional and should be verified after the core is stable.** It is not
+part of the first real-model go-live milestone; configure and live-verify it
+(`run april voice doctor`, `run april voice verify-live`) once the real-model core
+and hardened go-live are green.
+
 ### Exact Mac verification order
 
-On a target Mac, run setup and verification in this order:
+On a target Mac, run setup and verification in this order (or run
+`run april setup checklist` at any time to see which of these are already done):
 
 1. `run april readiness`
 2. `run april setup bootstrap`
@@ -387,6 +464,10 @@ On a target Mac, run setup and verification in this order:
 9. `run april go-live --write-report --start-services` — the real-model-only go-live proof (real models + strict-JSON routing without fallback + specialist switching + clean service lifecycle). It reports **`real_model_core_status`** separately from **`hardened_go_live_ready`**, so a working real-model core is never hidden behind a hardening warning (dev tokens, non-runtime-local embeddings).
 10. Hardened memory (recommended): `run april memory doctor`, then `run april setup embeddings --model /absolute/path/to/embedding.gguf --id april-embedding --apply`, then `run april memory reindex`. Switching providers changes the vector space, so the reindex is required.
 11. Optional voice (not part of the first real-model go-live milestone) setup/doctor/live verification: `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`, `run april voice doctor`, then `run april voice verify-live --report data/verification/voice-live.json`. The Core API `/readiness` reports a single redacted `voice_milestone` (`disabled` → `not_configured` → `push_to_talk_ready` → `wake_word_ready` → `full_voice_loop_ready` → `live_verified` → `wake_live_verified`).
+
+Thereafter, `run april doctor --daily-driver` is the one command to run before
+relying on APRIL each day, and `run april start --preflight` is the safe way to
+bring services up.
 
 Blank API tokens never authenticate, even in development/test. If
 `APRIL_API_TOKEN` is empty, protected endpoints fail closed with an auth/config
@@ -1019,6 +1100,13 @@ runtime is always badged and never implies a verified real model. All glow/orbit
 motion is disabled under `prefers-reduced-motion`, and no authenticated request
 runs before the token is acquired. Every prior screen remains reachable as a
 detail screen.
+
+The **Readiness** screen opens with a compact, read-only *operator console*:
+core real model, hardened go-live, workflow security, memory embeddings, voice
+milestone, tokens, runtime, the age of the most recent report (with a stale flag),
+and the single next command. It is built entirely from the sanitized `/readiness`
+payload (statuses, basenames, ages, and redacted reasons only) and never starts a
+model, opens the microphone, or shows a secret or absolute path.
 
 ```bash
 run april desktop          # ensure services, open the browser to the UI

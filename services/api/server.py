@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 
+from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.errors import (
     AprilError,
     PermissionDeniedError,
@@ -23,6 +24,7 @@ from april_common.errors import (
     error_payload,
 )
 from april_common.path_security import PathPolicy, normalize_existing_path
+from april_common.report_freshness import freshness_from_payload
 from april_common.settings import (
     INSECURE_API_TOKENS,
     INSECURE_RUNTIME_TOKENS,
@@ -816,6 +818,10 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "registered": models,
         },
         "embeddings": embeddings,
+        # Redacted local config digest + per-type report freshness, so the Desktop
+        # operator console and `doctor --daily-driver` can flag stale reports.
+        "config_fingerprint": config_fingerprint_digest(active.settings.home),
+        "reports": _reports_freshness(active.settings),
         "verification_guidance": {
             "commands": [
                 "run april verify --all-configured-models --require-real-model "
@@ -1020,6 +1026,48 @@ def _latest_verification_report(
     }
 
 
+def _reports_freshness(settings: AprilSettings) -> dict[str, Any]:
+    """Per-type freshness for the latest report of each kind (redacted).
+
+    Returns only basenames, statuses, ages, and stale booleans/reasons — never a
+    token, prompt, transcript, patch, or absolute path. Staleness combines a
+    per-type age TTL with the redacted config fingerprint embedded in each report.
+    """
+    current_fingerprint = config_fingerprint_digest(settings.home)
+    latest: dict[str, tuple[float, Path, dict[str, Any]]] = {}
+    for path in _verification_report_files(settings):
+        payload = _read_safe_report(path)
+        if payload is None:
+            continue
+        report_type = _browser_report_type(payload)
+        if report_type == "unknown":
+            continue
+        key = _report_order_key(path, payload)
+        if report_type not in latest or key > latest[report_type][0]:
+            latest[report_type] = (key, path, payload)
+    out: dict[str, Any] = {}
+    for report_type, (_key, path, payload) in latest.items():
+        fresh = freshness_from_payload(
+            payload,
+            report_type=report_type,
+            current_fingerprint=current_fingerprint,
+            basename=path.name,
+        )
+        status = payload.get("final_status") or payload.get("summary")
+        out[report_type] = {
+            "basename": path.name,
+            "report_type": report_type,
+            "status": str(status) if status is not None else None,
+            "generated_at": fresh.generated_at,
+            "age_seconds": fresh.age_seconds,
+            "age_human": fresh.age_human,
+            "stale": fresh.stale,
+            "stale_reason": fresh.stale_reason,
+            "config_fingerprint_matches": fresh.config_fingerprint_matches,
+        }
+    return out
+
+
 def _latest_live_voice_flags(settings: AprilSettings) -> dict[str, bool]:
     """Read the latest live voice / wake-word verification flags from disk.
 
@@ -1098,6 +1146,7 @@ _BROWSER_REPORT_TYPES = {
     "voice_live",
     "wake_word_live",
     "multi_model",
+    "workflow",
     "fake_soak",
 }
 _BROWSER_TYPE_ALIASES = {
@@ -1107,6 +1156,7 @@ _BROWSER_TYPE_ALIASES = {
     "voice_live": "voice_live",
     "wake_word_live": "wake_word_live",
     "multi_model": "multi_model",
+    "workflow": "workflow",
     "soak": "fake_soak",
     "fake_soak": "fake_soak",
 }

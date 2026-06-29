@@ -28,6 +28,7 @@ from apps.runner.acceptance import (
     write_acceptance_report,
 )
 from apps.runner.bootstrap import bootstrap as run_bootstrap
+from apps.runner.daily_driver import DailyDriverReport, build_daily_driver_report
 from apps.runner.evals import run_fake_brain_eval, run_real_brain_eval
 from apps.runner.go_live import (
     GoLiveReport,
@@ -67,6 +68,7 @@ from apps.runner.multi_model_report import (
     MultiModelVerificationReport,
     write_multi_model_report,
 )
+from apps.runner.preflight import PreflightReport, build_preflight_report
 from apps.runner.readiness import ReadinessReport, build_readiness_report
 from apps.runner.reports import (
     CleanResult,
@@ -80,6 +82,7 @@ from apps.runner.reports import (
     summarize_path,
 )
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
+from apps.runner.setup_checklist import SetupChecklist, build_setup_checklist
 from apps.runner.soak import run_fake_soak, write_soak_report
 from apps.runner.verify import (
     BenchmarkResult,
@@ -95,6 +98,7 @@ from apps.runner.verify import (
 )
 from apps.runner.voice_live import VoiceLiveReport, run_voice_live_verification
 from apps.runner.wake_live import WakeWordLiveReport, run_wake_word_live_verification
+from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.config_validation import validate_configuration
 from april_common.effective_config import load_agents_file, load_permissions_file, load_tools_file
 from april_common.errors import ConfigError
@@ -521,13 +525,141 @@ def status(json_output: bool = typer.Option(False, "--json")) -> None:
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    daily_driver: bool = typer.Option(
+        False, "--daily-driver", help="Summarize daily-driver readiness instead of the launcher."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+    run_real_checks: bool = typer.Option(
+        False,
+        "--run-real-checks",
+        help="Run real model + workflow verification first (loads models; opt-in).",
+    ),
+) -> None:
+    if daily_driver:
+        _daily_driver(json_output=json_output, run_real_checks=run_real_checks)
+        return
     _doctor()
 
 
 @april_app.command("doctor")
-def april_doctor() -> None:
+def april_doctor(
+    daily_driver: bool = typer.Option(
+        False, "--daily-driver", help="Summarize daily-driver readiness instead of the launcher."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+    run_real_checks: bool = typer.Option(
+        False,
+        "--run-real-checks",
+        help="Run real model + workflow verification first (loads models; opt-in).",
+    ),
+) -> None:
+    if daily_driver:
+        _daily_driver(json_output=json_output, run_real_checks=run_real_checks)
+        return
     _doctor()
+
+
+_DAILY_STATUS_STYLE = {
+    "ready": "[green]ready[/green]",
+    "warning": "[yellow]warning[/yellow]",
+    "blocker": "[red]blocker[/red]",
+    "not_run": "[dim]not_run[/dim]",
+}
+
+
+def _daily_driver(*, json_output: bool, run_real_checks: bool) -> None:
+    home = _manager().home
+    if run_real_checks:
+        _run_real_daily_checks(home)
+    report = build_daily_driver_report(home)
+    if json_output:
+        console.print_json(data=report.model_dump())
+    else:
+        _print_daily_driver(report)
+    if report.overall == "blocker":
+        raise typer.Exit(1)
+
+
+def _run_real_daily_checks(home: Path) -> None:
+    """Opt-in heavy path: run real-model + workflow verification, writing reports.
+
+    Skips cleanly (with a printed note) when the local prerequisites — a non-fake
+    backend with llama-cpp-python and configured GGUFs present — are not met, so
+    `--run-real-checks` never blocks on a machine that cannot support real models.
+    """
+    readiness = build_readiness_report(home)
+    chat_models = [
+        model
+        for model in readiness.models
+        if model.backend == "llama_cpp" and model.role != "embedding"
+    ]
+    blocked = (
+        readiness.runtime_is_fake
+        or not readiness.llama_cpp_python_available
+        or not chat_models
+        or any(not model.path_exists for model in chat_models)
+    )
+    if blocked:
+        console.print(
+            "[yellow]--run-real-checks skipped: real model prerequisites are not met "
+            "(backend/llama-cpp/GGUFs). Summarizing existing reports only.[/yellow]"
+        )
+        return
+    reports_dir = home / "data" / "verification"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    fingerprint = config_fingerprint_digest(home)
+    console.print("[bold]Running real model verification (this loads models)…[/bold]")
+    previous = os.environ.get("APRIL_VERIFY_ROUTING_EVALS")
+    os.environ["APRIL_VERIFY_ROUTING_EVALS"] = "1"
+    try:
+        verifier = run_all_configured_models_verification(home, require_real_model=True)
+        write_multi_model_report(
+            verifier.build_report(config_fingerprint=fingerprint),
+            reports_dir / "mac-readiness.json",
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("APRIL_VERIFY_ROUTING_EVALS", None)
+        else:
+            os.environ["APRIL_VERIFY_ROUTING_EVALS"] = previous
+    console.print("[bold]Running real workflow verification…[/bold]")
+    checks = run_workflow_verification(home, real_model=True)
+    write_workflow_report(
+        build_workflow_report(checks, real_model_requested=True, config_fingerprint=fingerprint),
+        reports_dir / "workflow-real.json",
+    )
+
+
+def _print_daily_driver(report: DailyDriverReport) -> None:
+    overall = _DAILY_STATUS_STYLE.get(report.overall, report.overall)
+    console.print(f"APRIL daily-driver doctor — {overall}")
+    console.print("")
+    core = _DAILY_STATUS_STYLE.get(report.core_real_model, report.core_real_model)
+    console.print(f"Core real model: {core}")
+    console.print(
+        "Workflow security: "
+        f"{_DAILY_STATUS_STYLE.get(report.workflow_security, report.workflow_security)}"
+    )
+    hardened = _DAILY_STATUS_STYLE.get(report.hardened_go_live, report.hardened_go_live)
+    console.print(f"Hardened go-live: {hardened}")
+    if report.hardened_reason:
+        console.print(f"Reason: {report.hardened_reason}", markup=False)
+    table = Table(title="Daily-driver checks")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for check in report.checks:
+        table.add_row(
+            check.name,
+            _DAILY_STATUS_STYLE.get(check.status, check.status),
+            check.detail,
+        )
+    console.print(table)
+    if report.next_commands:
+        console.print("[bold]Next commands:[/bold]")
+        for command in report.next_commands:
+            console.print(f"  {command}", markup=False)
 
 
 @april_app.command("readiness")
@@ -1622,6 +1754,50 @@ def profile_delete() -> None:
     console.print(f"Deleted local profile: {deleted}")
 
 
+_CHECKLIST_STATUS_STYLE = {
+    "done": "[green]done[/green]",
+    "warning": "[yellow]warning[/yellow]",
+    "blocker": "[red]blocker[/red]",
+    "next": "[cyan]next[/cyan]",
+}
+
+
+def _print_setup_checklist(checklist: SetupChecklist) -> None:
+    console.print("APRIL first-run setup checklist (read-only)")
+    table = Table(title="Setup steps")
+    table.add_column("#")
+    table.add_column("Step")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for step in checklist.steps:
+        table.add_row(
+            str(step.number),
+            step.title,
+            _CHECKLIST_STATUS_STYLE.get(step.status, step.status),
+            step.detail,
+        )
+    console.print(table)
+    if checklist.next_command:
+        console.print("[bold]Next command:[/bold]")
+        console.print(f"  {checklist.next_command}", markup=False)
+    else:
+        console.print("[green]All recommended setup steps are complete.[/green]")
+
+
+@setup_app.command("checklist")
+def setup_checklist(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Show the recommended setup order and what is already done (read-only).
+
+    Never installs, downloads, mutates config, starts a service, loads a model, or
+    opens the microphone — it only detects state and prints the next command.
+    """
+    checklist = build_setup_checklist(_manager().home)
+    if json_output:
+        console.print_json(data=checklist.model_dump())
+        return
+    _print_setup_checklist(checklist)
+
+
 @setup_app.command("models")
 def setup_models(
     brain: Path | None = typer.Option(None, "--brain", help="Local brain GGUF path."),
@@ -2228,7 +2404,9 @@ def verify(
         else:
             _print_verification_table("APRIL All-Configured-Model Verification", checks)
         if report is not None:
-            multi_report = verifier.build_report()
+            multi_report = verifier.build_report(
+                config_fingerprint=config_fingerprint_digest(_manager().home)
+            )
             written = write_multi_model_report(multi_report, report)
             console.print(
                 f"[green]Wrote multi-model verification report to {written}[/green] "
@@ -2279,6 +2457,7 @@ def verify(
                 real_model_requested=real_model,
                 timeout_seconds=timeout,
                 max_output_tokens=max_output_tokens,
+                config_fingerprint=config_fingerprint_digest(_manager().home),
             )
             written = write_workflow_report(workflow_report, report)
             console.print(
@@ -2746,6 +2925,7 @@ def _collect_go_live_report(
         embedding_provider=embedding_provider,
         embedding_model_id=embedding_model_id,
         services=services,
+        config_fingerprint=config_fingerprint_digest(home),
     )
 
 
@@ -2989,6 +3169,63 @@ def go_live(
 
     if report_obj.final_status == "fail":
         raise typer.Exit(1)
+
+
+_PREFLIGHT_STATUS_STYLE = {
+    "pass": "[green]pass[/green]",
+    "warning": "[yellow]warning[/yellow]",
+    "fail": "[red]fail[/red]",
+}
+
+
+def _print_preflight(report: PreflightReport) -> None:
+    verdict = "[green]ready[/green]" if report.ok else "[red]blocked[/red]"
+    console.print(
+        f"APRIL startup preflight — {verdict} "
+        f"(env={report.environment}, fake={str(report.fake).lower()})"
+    )
+    table = Table(title="Startup preflight")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for check in report.checks:
+        table.add_row(
+            check.name,
+            _PREFLIGHT_STATUS_STYLE.get(check.status, check.status),
+            check.detail,
+        )
+    console.print(table)
+
+
+@april_app.command()
+def start(
+    ctx: typer.Context,
+    preflight: bool = typer.Option(
+        False, "--preflight", help="Run startup preflight and refuse to start unless it passes."
+    ),
+    fake: bool = typer.Option(False, "--fake", help="Allow/start with the fake runtime backend."),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Start APRIL's services, optionally gated by a safe startup preflight.
+
+    With ``--preflight`` the services are started only when every preflight check
+    passes; preflight never starts a service, loads a model, or opens the mic.
+    """
+    use_fake = _effective_fake(ctx, fake)
+    if preflight:
+        report = build_preflight_report(_manager().home, fake=use_fake)
+        if json_output:
+            console.print_json(data=report.model_dump())
+        else:
+            _print_preflight(report)
+        if not report.ok:
+            if not json_output:
+                console.print(
+                    "[red]Preflight failed; services were not started.[/red] "
+                    f"Blockers: {', '.join(report.failures)}"
+                )
+            raise typer.Exit(1)
+    _print_status(_ensure_services(use_fake))
 
 
 @april_app.command()
