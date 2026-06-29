@@ -73,7 +73,9 @@ def test_daily_driver_redacted_and_schema(tmp_path: Path) -> None:
         assert expected in names
 
 
-def test_core_ready_with_fresh_matching_real_report(tmp_path: Path) -> None:
+def test_core_ready_with_fresh_matching_real_report(
+    tmp_path: Path, llama_cpp_available: None
+) -> None:
     home = _ready_home(tmp_path)
     fingerprint = config_fingerprint_digest(home)
     _write_report(
@@ -93,7 +95,7 @@ def test_core_ready_with_fresh_matching_real_report(tmp_path: Path) -> None:
     assert report.core_real_model == "ready"
 
 
-def test_core_not_run_without_real_report(tmp_path: Path) -> None:
+def test_core_not_run_without_real_report(tmp_path: Path, llama_cpp_available: None) -> None:
     home = _ready_home(tmp_path)
     report = build_daily_driver_report(home)
     assert report.core_real_model == "not_run"
@@ -101,7 +103,7 @@ def test_core_not_run_without_real_report(tmp_path: Path) -> None:
     assert real_check.status == "not_run"
 
 
-def test_core_blocker_when_real_report_failed(tmp_path: Path) -> None:
+def test_core_blocker_when_real_report_failed(tmp_path: Path, llama_cpp_available: None) -> None:
     home = _ready_home(tmp_path)
     _write_report(
         home,
@@ -118,7 +120,20 @@ def test_core_blocker_when_real_report_failed(tmp_path: Path) -> None:
     assert report.core_real_model == "blocker"
 
 
-def test_stale_report_marks_warning_by_age(tmp_path: Path) -> None:
+def test_core_blocker_when_gguf_missing(tmp_path: Path, llama_cpp_available: None) -> None:
+    # Runtime extra present, but no configured GGUF files exist on disk: the core
+    # real-model path is still blocked on the missing model files.
+    home = tmp_path / "home"
+    home.mkdir()
+    _copy_configs(home)  # no _create_gguf_files → files absent
+    report = build_daily_driver_report(home)
+    assert report.core_real_model == "blocker"
+    gguf_check = next(c for c in report.checks if c.name == "configured GGUF presence")
+    assert gguf_check.status == "blocker"
+    assert gguf_check.next_command == "run april setup models"
+
+
+def test_stale_report_marks_warning_by_age(tmp_path: Path, llama_cpp_available: None) -> None:
     home = _ready_home(tmp_path)
     _write_report(
         home,
@@ -138,7 +153,7 @@ def test_stale_report_marks_warning_by_age(tmp_path: Path) -> None:
     assert "stale" in real_check.detail
 
 
-def test_fingerprint_mismatch_marks_report_stale(tmp_path: Path) -> None:
+def test_fingerprint_mismatch_marks_report_stale(tmp_path: Path, llama_cpp_available: None) -> None:
     home = _ready_home(tmp_path)
     _write_report(
         home,

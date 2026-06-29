@@ -415,9 +415,7 @@ async def test_context_budgeting_uses_same_metadata_as_generation(tmp_path: Path
     # Budgeting without metadata cannot render this unknown template and fails
     # clearly — exactly as generation would.
     with pytest.raises(ConfigError, match="Unsupported chat template"):
-        await manager.fit(
-            model=model, backend=backend, messages=messages, max_output_tokens=64
-        )
+        await manager.fit(model=model, backend=backend, messages=messages, max_output_tokens=64)
     # With the backend's metadata, budgeting renders and succeeds, mirroring
     # generation's metadata-aware path.
     result = await manager.fit(

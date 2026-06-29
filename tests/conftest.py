@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -49,6 +50,38 @@ def _close_tracked_databases(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                     await db.close()
 
             anyio.run(_close_all)
+
+
+def _pin_llama_cpp(monkeypatch: pytest.MonkeyPatch, *, available: bool) -> None:
+    """Pin ``importlib.util.find_spec('llama_cpp')`` to a fixed result.
+
+    Readiness/daily-driver/checklist builders probe the optional ``[runtime]``
+    extra purely through ``importlib.util.find_spec('llama_cpp')``. Tests about
+    report freshness, checklist order, or model-file presence must not depend on
+    whether the *host* happens to have installed that extra, so they pin the probe
+    and delegate every other module name to the genuine resolver.
+    """
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, package: str | None = None) -> object | None:
+        if name == "llama_cpp":
+            # find_spec only needs to be non-None/None here; callers check identity.
+            return object() if available else None
+        return real_find_spec(name, package)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+
+@pytest.fixture
+def llama_cpp_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report the optional ``[runtime]`` extra as installed for this test."""
+    _pin_llama_cpp(monkeypatch, available=True)
+
+
+@pytest.fixture
+def llama_cpp_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report a clean dev install with the ``[runtime]`` extra absent."""
+    _pin_llama_cpp(monkeypatch, available=False)
 
 
 @pytest.fixture

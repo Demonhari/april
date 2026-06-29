@@ -40,7 +40,7 @@ def _write_report(home: Path, basename: str, payload: dict) -> None:
     (reports / basename).write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_checklist_has_expected_ordered_steps(tmp_path: Path) -> None:
+def test_checklist_has_expected_ordered_steps(tmp_path: Path, llama_cpp_available: None) -> None:
     home = _ready_home(tmp_path)
     checklist = build_setup_checklist(home)
     titles = [step.title for step in checklist.steps]
@@ -60,7 +60,7 @@ def test_checklist_is_redacted(tmp_path: Path) -> None:
     assert "local-dev-token" not in blob
 
 
-def test_checklist_marks_done_and_next(tmp_path: Path) -> None:
+def test_checklist_marks_done_and_next(tmp_path: Path, llama_cpp_available: None) -> None:
     home = _ready_home(tmp_path)
     checklist = build_setup_checklist(home)
     by_title = {step.title: step for step in checklist.steps}
@@ -73,18 +73,23 @@ def test_checklist_marks_done_and_next(tmp_path: Path) -> None:
     assert checklist.next_command is not None
 
 
-def test_checklist_blocker_when_models_missing(tmp_path: Path) -> None:
+def test_checklist_blocker_when_models_missing(tmp_path: Path, llama_cpp_available: None) -> None:
+    # With the runtime extra present, the first hard blocker on a fresh checkout is
+    # the missing model files — not install-dependencies.
     home = tmp_path / "home"
     home.mkdir()
     _copy_configs(home)  # no GGUF files
     checklist = build_setup_checklist(home)
     by_title = {step.title: step for step in checklist.steps}
+    assert by_title["install dependencies"].status == "done"
     assert by_title["setup models"].status == "blocker"
     # A blocker is surfaced as the headline next command.
     assert checklist.next_command == by_title["setup models"].command
 
 
-def test_checklist_all_done_when_fresh_reports_present(tmp_path: Path) -> None:
+def test_checklist_all_done_when_fresh_reports_present(
+    tmp_path: Path, llama_cpp_available: None
+) -> None:
     home = _ready_home(tmp_path)
     fingerprint = config_fingerprint_digest(home)
     generated = (utc_now() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
