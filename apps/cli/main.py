@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import uuid
 from collections.abc import Coroutine
 from pathlib import Path
@@ -57,9 +58,127 @@ def run(coro: Coroutine[Any, Any, Any]) -> Any:
         raise typer.Exit(1) from exc
 
 
+def _maybe_autostart_daemon() -> None:
+    """Best-effort apriald autostart before attach/one-shot, when configured."""
+    settings = get_settings()
+    if not settings.daemon.autostart_on_cli:
+        return
+    try:
+        from apps.daemon.apriald import autostart_if_needed
+    except ImportError:
+        return
+    try:
+        autostart_if_needed(settings)
+    except Exception:
+        # Autostart is a convenience; attach/one-shot still report a clear
+        # offline error if the API stays unreachable.
+        return
+
+
+def _print_chat_result(result: dict[str, Any]) -> None:
+    console.print(result["final_message"])
+    if result.get("pending_approval"):
+        console.print("[yellow]Approval required:[/yellow]")
+        print_jsonish(result["pending_approval"])
+
+
+def attach() -> None:
+    """Bare `april`: join (or start) the current session and talk."""
+    _maybe_autostart_daemon()
+    data = run(client().post("/sessions", {"source": "terminal"}))
+    conversation_id = data.get("conversation_id")
+    joined = "existing" if data.get("joined_existing") else "new"
+    console.print(f"Attached to {joined} APRIL session. Type /quit to exit.")
+    while True:
+        message = Prompt.ask("you")
+        if message.strip() in {"/quit", "/exit"}:
+            return
+        if not message.strip():
+            continue
+        response = run(
+            client().post("/chat", {"message": message, "conversation_id": conversation_id})
+        )
+        _print_chat_result(response["result"])
+
+
+def one_shot(message: str) -> None:
+    """`april <message>`: one terminal wake carrying a single command."""
+    _maybe_autostart_daemon()
+    data = run(client().post("/wake", {"source": "terminal", "text": message}))
+    result = data.get("result")
+    if result is not None:
+        _print_chat_result(result)
+    else:
+        print_jsonish(data)
+
+
+@app.callback(invoke_without_command=True)
+def _root(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        attach()
+
+
+def known_command_names() -> set[str]:
+    """Names Typer can dispatch: used to tell subcommands from one-shot text."""
+    import typer.main as typer_main
+
+    command = typer_main.get_command(app)
+    return set(getattr(command, "commands", {}).keys())
+
+
+def main() -> None:
+    """Entry point: bare attach, known subcommands, or one-shot message."""
+    argv = sys.argv[1:]
+    if argv and not argv[0].startswith("-") and argv[0] not in known_command_names():
+        message = " ".join(argv).strip()
+        if message:
+            one_shot(message)
+            return
+    app()
+
+
 @app.command()
 def health() -> None:
     data = run(client().get("/health", auth=False))
+    print_jsonish(data)
+
+
+@app.command()
+def mute(
+    off: bool = typer.Option(False, "--off", help="Release the hard mute."),
+) -> None:
+    """Hard-mute the Sentinel: the microphone stream is fully released."""
+    from services.wake.sentinel import MuteSwitch
+
+    switch = MuteSwitch(get_settings().mute_flag_path)
+    if off:
+        switch.unmute()
+        console.print("Voice unmuted. The Sentinel may reopen the microphone.")
+    else:
+        switch.mute()
+        console.print("Voice hard-muted. The Sentinel releases the microphone.")
+
+
+@app.command()
+def sessions() -> None:
+    """List recent wake/conversation sessions."""
+    data = run(client().get("/sessions"))
+    print_jsonish(data)
+
+
+@app.command()
+def good() -> None:
+    """Mark the last answer in the active session as good."""
+    data = run(client().post("/feedback", {"rating": "good"}))
+    print_jsonish(data)
+
+
+@app.command()
+def bad(
+    reason: str = typer.Argument(None, help="Optional short reason."),
+) -> None:
+    """Mark the last answer in the active session as bad."""
+    data = run(client().post("/feedback", {"rating": "bad", "reason": reason}))
     print_jsonish(data)
 
 
@@ -390,6 +509,47 @@ def voice_test_tts(text: str) -> None:
     print_jsonish({"synthesized": True, "path": str(synthesized), "retained": retained})
 
 
+@voice_app.command("enroll")
+def voice_enroll(
+    samples: int = typer.Option(3, "--samples", min=1, max=10),
+    seconds: float = typer.Option(3.0, "--seconds", min=1.0, max=15.0),
+) -> None:
+    """Record local speaker enrollment samples under data/voice_profiles/.
+
+    Samples are stored only on this Mac for a future speaker gate. The gate
+    itself stays `wake.speaker_gate: off` until a local verifier model exists;
+    enrollment never changes wake behaviour by itself.
+    """
+    from april_common.errors import RuntimeUnavailableError
+    from services.voice.microphone import SoundDeviceMicrophone
+
+    settings = get_settings()
+    profile_dir = settings.resolve_path(Path("data/voice_profiles"))
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    microphone = SoundDeviceMicrophone(
+        device=settings.voice.input_device,
+        max_seconds=seconds,
+    )
+    recorded: list[str] = []
+    for index in range(1, samples + 1):
+        console.print(f"Sample {index}/{samples}: say the wake phrase. Recording {seconds:.0f}s...")
+        output_path = profile_dir / f"enroll-{index:02d}.wav"
+        try:
+            run(microphone.record_push_to_talk(output_path))
+        except (RuntimeUnavailableError, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        recorded.append(output_path.name)
+    print_jsonish(
+        {
+            "enrolled_samples": recorded,
+            "profile_dir": str(profile_dir),
+            "speaker_gate": settings.wake.speaker_gate,
+            "note": "speaker_gate stays off until a local verifier is configured",
+        }
+    )
+
+
 @voice_app.command("listen")
 def voice_listen() -> None:
     from services.voice.conversation_loop import WakeWordConversationLoop
@@ -404,4 +564,4 @@ def voice_listen() -> None:
 
 
 if __name__ == "__main__":
-    app()
+    main()

@@ -62,6 +62,30 @@ class MemoryCreateRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class WakeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["voice", "terminal", "desktop", "hotkey", "socket"]
+    score: float | None = Field(default=None, ge=0.0, le=1.0)
+    text: str | None = Field(default=None, min_length=1, max_length=50_000)
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class SessionAttachRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["voice", "terminal", "desktop", "hotkey", "socket"] = "terminal"
+
+
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rating: Literal["good", "bad"]
+    reason: str | None = Field(default=None, max_length=2_000)
+    conversation_id: str | None = None
+    agent_run_id: str | None = None
+
+
 class ProjectCreateRequest(BaseModel):
     path: str
     name: str | None = None

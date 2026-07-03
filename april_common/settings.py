@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from april_common.errors import ConfigError
 
@@ -106,6 +106,115 @@ class VoiceSettings(BaseModel):
     piper_binary_path: Path | None = None
     piper_model_path: Path | None = None
     wake_word_model_path: Path | None = None
+    # v2: the Sentinel supports several wake models at once. The legacy singular
+    # wake_word_model_path stays honoured; effective_wake_word_model_paths merges
+    # both without duplicates so old configs keep working unchanged.
+    wake_word_model_paths: list[Path] = Field(default_factory=list)
+
+    @property
+    def effective_wake_word_model_paths(self) -> list[Path]:
+        merged: list[Path] = []
+        for candidate in [self.wake_word_model_path, *self.wake_word_model_paths]:
+            if candidate is not None and candidate not in merged:
+                merged.append(candidate)
+        return merged
+
+
+class WakeSettings(BaseModel):
+    """Always-on wake (Sentinel) policy. OFF by default; entirely local."""
+
+    enabled: bool = False
+    # Two-stage wake: a cheap openWakeWord score above candidate_threshold makes
+    # a candidate; accept_threshold accepts outright, otherwise STT confirms.
+    candidate_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
+    accept_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
+    confirm_with_stt: bool = True
+    ring_buffer_seconds: float = Field(default=10.0, gt=0.0, le=120.0)
+    follow_up_seconds: float = Field(default=8.0, ge=0.0, le=120.0)
+    strict_address: bool = False
+    speaker_gate: str = "off"
+
+    @field_validator("speaker_gate", mode="before")
+    @classmethod
+    def coerce_speaker_gate(cls, value: object) -> object:
+        # YAML 1.1 parses an unquoted `off` as boolean False; accept it as "off".
+        if value is False:
+            return "off"
+        return value
+
+    @field_validator("speaker_gate")
+    @classmethod
+    def validate_speaker_gate(cls, value: str) -> str:
+        if value not in {"off"}:
+            raise ValueError("speaker_gate currently supports only: off")
+        return value
+
+    @model_validator(mode="after")
+    def thresholds_are_ordered(self) -> WakeSettings:
+        if self.accept_threshold < self.candidate_threshold:
+            raise ValueError("wake.accept_threshold must be >= wake.candidate_threshold")
+        return self
+
+
+class SessionSettings(BaseModel):
+    """Cross-surface conversation continuity for wake events."""
+
+    continuity_minutes: float = Field(default=10.0, ge=0.0, le=24 * 60.0)
+
+
+class DaemonSettings(BaseModel):
+    """apriald supervisor behaviour."""
+
+    autostart_on_cli: bool = True
+
+
+class GovernorSettings(BaseModel):
+    """Resource Governor budgets consulted by Sentinel/Dreamer/prewarm."""
+
+    max_resident_gb: float = Field(default=12.0, gt=0.0)
+    dreamer_nice: int = Field(default=10, ge=0, le=20)
+
+
+class EvolutionSettings(BaseModel):
+    """Nightly Dreamer self-evolution. OFF by default; writes are fenced."""
+
+    enabled: bool = False
+    window: str = "02:30-06:00"
+    require_ac_power: bool = True
+    max_minutes: int = Field(default=90, ge=1, le=24 * 60)
+    daily_memory_cap: int = Field(default=30, ge=0)
+    prompt_overlay_max_chars: int = Field(default=1200, ge=0, le=20_000)
+    user_model_autoapply: str = "safe_sections_only"
+
+    @field_validator("window")
+    @classmethod
+    def validate_window(cls, value: str) -> str:
+        start, separator, end = value.partition("-")
+        if not separator:
+            raise ValueError("evolution.window must be HH:MM-HH:MM")
+        for part in (start, end):
+            hours, _, minutes = part.strip().partition(":")
+            try:
+                hour, minute = int(hours), int(minutes)
+            except ValueError as exc:
+                raise ValueError("evolution.window must be HH:MM-HH:MM") from exc
+            if not (0 <= hour < 24 and 0 <= minute < 60):
+                raise ValueError("evolution.window times must be within 00:00-23:59")
+        return value
+
+    @field_validator("user_model_autoapply")
+    @classmethod
+    def validate_autoapply(cls, value: str) -> str:
+        if value not in {"off", "safe_sections_only"}:
+            raise ValueError("user_model_autoapply must be off or safe_sections_only")
+        return value
+
+
+class DeepModeSettings(BaseModel):
+    """Budgets for the intelligence ladder's deep/council rungs."""
+
+    max_seconds: float = Field(default=45.0, gt=0.0, le=600.0)
+    council_n: int = Field(default=3, ge=2, le=5)
 
 
 class SchedulerSettings(BaseModel):
@@ -147,6 +256,12 @@ class AprilSettings(BaseModel):
     brain: BrainSettings = Field(default_factory=BrainSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
+    wake: WakeSettings = Field(default_factory=WakeSettings)
+    session: SessionSettings = Field(default_factory=SessionSettings)
+    daemon: DaemonSettings = Field(default_factory=DaemonSettings)
+    governor: GovernorSettings = Field(default_factory=GovernorSettings)
+    evolution: EvolutionSettings = Field(default_factory=EvolutionSettings)
+    deep_mode: DeepModeSettings = Field(default_factory=DeepModeSettings)
 
     @field_validator("home")
     @classmethod
@@ -186,6 +301,22 @@ class AprilSettings(BaseModel):
     @property
     def allowed_roots(self) -> list[Path]:
         return [self.resolve_path(path) for path in self.paths.allowed_filesystem_roots]
+
+    @property
+    def wake_socket_path(self) -> Path:
+        return self.resolve_path(Path("data/wake.sock"))
+
+    @property
+    def mute_flag_path(self) -> Path:
+        return self.resolve_path(Path("data/voice.mute"))
+
+    @property
+    def evolution_path(self) -> Path:
+        return self.resolve_path(Path("data/evolution"))
+
+    @property
+    def playbooks_path(self) -> Path:
+        return self.resolve_path(Path("data/playbooks"))
 
 
 ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
@@ -231,6 +362,27 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_PIPER_BINARY_PATH": ("voice", "piper_binary_path"),
     "APRIL_PIPER_MODEL_PATH": ("voice", "piper_model_path"),
     "APRIL_WAKE_WORD_MODEL_PATH": ("voice", "wake_word_model_path"),
+    "APRIL_WAKE_WORD_MODEL_PATHS": ("voice", "wake_word_model_paths"),
+    "APRIL_WAKE_ENABLED": ("wake", "enabled"),
+    "APRIL_WAKE_CANDIDATE_THRESHOLD": ("wake", "candidate_threshold"),
+    "APRIL_WAKE_ACCEPT_THRESHOLD": ("wake", "accept_threshold"),
+    "APRIL_WAKE_CONFIRM_WITH_STT": ("wake", "confirm_with_stt"),
+    "APRIL_WAKE_RING_BUFFER_SECONDS": ("wake", "ring_buffer_seconds"),
+    "APRIL_WAKE_FOLLOW_UP_SECONDS": ("wake", "follow_up_seconds"),
+    "APRIL_WAKE_STRICT_ADDRESS": ("wake", "strict_address"),
+    "APRIL_WAKE_SPEAKER_GATE": ("wake", "speaker_gate"),
+    "APRIL_SESSION_CONTINUITY_MINUTES": ("session", "continuity_minutes"),
+    "APRIL_DAEMON_AUTOSTART_ON_CLI": ("daemon", "autostart_on_cli"),
+    "APRIL_GOVERNOR_MAX_RESIDENT_GB": ("governor", "max_resident_gb"),
+    "APRIL_GOVERNOR_DREAMER_NICE": ("governor", "dreamer_nice"),
+    "APRIL_EVOLUTION_ENABLED": ("evolution", "enabled"),
+    "APRIL_EVOLUTION_WINDOW": ("evolution", "window"),
+    "APRIL_EVOLUTION_REQUIRE_AC_POWER": ("evolution", "require_ac_power"),
+    "APRIL_EVOLUTION_MAX_MINUTES": ("evolution", "max_minutes"),
+    "APRIL_EVOLUTION_DAILY_MEMORY_CAP": ("evolution", "daily_memory_cap"),
+    "APRIL_EVOLUTION_PROMPT_OVERLAY_MAX_CHARS": ("evolution", "prompt_overlay_max_chars"),
+    "APRIL_DEEP_MODE_MAX_SECONDS": ("deep_mode", "max_seconds"),
+    "APRIL_DEEP_MODE_COUNCIL_N": ("deep_mode", "council_n"),
     "APRIL_SCHEDULER_ENABLED": ("scheduler", "enabled"),
     "APRIL_SCHEDULER_POLL_INTERVAL_SECONDS": ("scheduler", "poll_interval_seconds"),
     "APRIL_SCHEDULER_NOTIFICATION_SINK": ("scheduler", "notification_sink"),
@@ -369,7 +521,7 @@ def load_settings(config_path: Path | None = None, *, root: Path | None = None) 
         if not raw.strip() and env_name in _OPTIONAL_BLANK_IS_NONE:
             # Explicit blank for an optional setting means "unset", not Path(".").
             value: Any = None
-        elif env_name == "APRIL_ALLOWED_FILESYSTEM_ROOTS":
+        elif env_name in {"APRIL_ALLOWED_FILESYSTEM_ROOTS", "APRIL_WAKE_WORD_MODEL_PATHS"}:
             value = [part.strip() for part in raw.split(",") if part.strip()]
         else:
             value = _parse_env_value(raw)

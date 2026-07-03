@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 async def run_migrations(database: Database) -> None:
@@ -35,7 +35,13 @@ async def run_migrations(database: Database) -> None:
             kind TEXT NOT NULL,
             content TEXT NOT NULL,
             reason TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0.7,
+            source TEXT NOT NULL DEFAULT 'user',
+            last_used_at TEXT,
+            use_count INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT,
+            superseded_by TEXT REFERENCES memories(id)
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -186,6 +192,95 @@ async def run_migrations(database: Database) -> None:
             resumed_at TEXT,
             completed_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+            source TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            last_activity_at TEXT NOT NULL,
+            closed_at TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS wake_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+            source TEXT NOT NULL,
+            score REAL,
+            accepted INTEGER NOT NULL DEFAULT 1,
+            reason TEXT,
+            transcript_present INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS feedback_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+            conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+            agent_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
+            rating TEXT NOT NULL,
+            reason TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS playbooks (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'candidate',
+            trigger_examples_json TEXT NOT NULL DEFAULT '[]',
+            steps_json TEXT NOT NULL DEFAULT '[]',
+            required_permission_level INTEGER NOT NULL DEFAULT 1,
+            stats_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS playbook_runs (
+            id TEXT PRIMARY KEY,
+            playbook_id TEXT NOT NULL REFERENCES playbooks(id) ON DELETE CASCADE,
+            conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+            status TEXT NOT NULL,
+            steps_completed INTEGER NOT NULL DEFAULT 0,
+            detail TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS evolution_runs (
+            id TEXT PRIMARY KEY,
+            date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            phases_json TEXT NOT NULL DEFAULT '{}',
+            report_path TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_versions (
+            id TEXT PRIMARY KEY,
+            agent TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            overlay_path TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 0,
+            eval_score REAL,
+            baseline_score REAL,
+            created_at TEXT NOT NULL,
+            UNIQUE(agent, version)
+        );
+
+        CREATE TABLE IF NOT EXISTS model_adapters (
+            id TEXT PRIMARY KEY,
+            model_id TEXT NOT NULL,
+            adapter_path TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'inactive',
+            eval_score REAL,
+            baseline_score REAL,
+            created_at TEXT NOT NULL,
+            activated_at TEXT
+        );
         """
     )
     columns = await conn.execute("PRAGMA table_info(approvals)")
@@ -245,6 +340,19 @@ async def run_migrations(database: Database) -> None:
     for column, definition in user_column_defs.items():
         if column not in user_columns:
             await conn.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+    columns = await conn.execute("PRAGMA table_info(memories)")
+    memory_columns = {row[1] for row in await columns.fetchall()}
+    memory_column_defs = {
+        "confidence": "REAL NOT NULL DEFAULT 0.7",
+        "source": "TEXT NOT NULL DEFAULT 'user'",
+        "last_used_at": "TEXT",
+        "use_count": "INTEGER NOT NULL DEFAULT 0",
+        "expires_at": "TEXT",
+        "superseded_by": "TEXT REFERENCES memories(id)",
+    }
+    for column, definition in memory_column_defs.items():
+        if column not in memory_columns:
+            await conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {definition}")
     columns = await conn.execute("PRAGMA table_info(repo_indexes)")
     repo_index_columns = {row[1] for row in await columns.fetchall()}
     repo_index_column_defs = {

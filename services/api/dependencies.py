@@ -25,6 +25,7 @@ from services.permissions.approvals import ApprovalStore
 from services.permissions.engine import PermissionEngine
 from services.permissions.tool_execution import ToolExecutionService
 from services.scheduler import SchedulerService, notification_sink_from_settings
+from services.wake.session_manager import SessionManager
 from skills.registry import ToolRegistry, default_registry
 
 
@@ -43,6 +44,15 @@ class ApiContainer:
     agent_registry: AgentRegistry
     orchestrator: AprilOrchestrator
     scheduler: SchedulerService | None = None
+    session_manager: SessionManager | None = None
+
+    def require_session_manager(self) -> SessionManager:
+        if self.session_manager is None:
+            self.session_manager = SessionManager(
+                self.memory,
+                continuity_minutes=self.settings.session.continuity_minutes,
+            )
+        return self.session_manager
 
     async def aclose(self) -> None:
         """Release every owned resource. Safe to call more than once."""
@@ -135,6 +145,10 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         audit=audit,
         sink=sink,
     )
+    session_manager = SessionManager(
+        memory,
+        continuity_minutes=active_settings.session.continuity_minutes,
+    )
     return ApiContainer(
         settings=active_settings,
         database=database,
@@ -149,4 +163,5 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         agent_registry=agent_registry,
         orchestrator=orchestrator,
         scheduler=scheduler,
+        session_manager=session_manager,
     )

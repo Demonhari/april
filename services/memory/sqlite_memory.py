@@ -10,11 +10,14 @@ from services.brain.planner import TaskPlan, TaskStep
 from services.memory.database import Database
 from services.memory.schemas import (
     Conversation,
+    FeedbackEventRecord,
     MemoryRecord,
     Message,
     Project,
     ReminderRecord,
+    SessionRecord,
     SuspendedAgentRun,
+    WakeEventRecord,
 )
 
 
@@ -650,6 +653,201 @@ class SqliteMemory:
             suspended_status="failed",
             run_status="failed",
         )
+
+    async def create_session(
+        self,
+        *,
+        source: str,
+        conversation_id: str | None,
+        started_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SessionRecord:
+        session_id = str(uuid.uuid4())
+        now = started_at or utc_now_iso()
+        await self.database.execute(
+            """
+            INSERT INTO sessions(
+                id, conversation_id, source, started_at, last_activity_at, metadata_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, conversation_id, source, now, now, json.dumps(metadata or {})),
+        )
+        return SessionRecord(
+            id=session_id,
+            conversation_id=conversation_id,
+            source=source,
+            started_at=now,
+            last_activity_at=now,
+        )
+
+    async def get_session(self, session_id: str) -> SessionRecord | None:
+        row = await self.database.fetchone("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        if row is None:
+            return None
+        return self._session_from_row(row)
+
+    async def latest_open_session(self) -> SessionRecord | None:
+        row = await self.database.fetchone(
+            """
+            SELECT * FROM sessions
+            WHERE closed_at IS NULL
+            ORDER BY last_activity_at DESC
+            LIMIT 1
+            """
+        )
+        if row is None:
+            return None
+        return self._session_from_row(row)
+
+    async def touch_session(self, session_id: str, *, at: str | None = None) -> None:
+        await self.database.execute(
+            "UPDATE sessions SET last_activity_at = ? WHERE id = ?",
+            (at or utc_now_iso(), session_id),
+        )
+
+    async def close_session(self, session_id: str, *, at: str | None = None) -> bool:
+        cursor = await self.database.execute(
+            "UPDATE sessions SET closed_at = ? WHERE id = ? AND closed_at IS NULL",
+            (at or utc_now_iso(), session_id),
+        )
+        return cursor.rowcount > 0
+
+    async def list_sessions(self, *, limit: int = 50) -> list[SessionRecord]:
+        rows = await self.database.fetchall(
+            "SELECT * FROM sessions ORDER BY last_activity_at DESC LIMIT ?",
+            (max(1, min(limit, 500)),),
+        )
+        return [self._session_from_row(row) for row in rows]
+
+    async def record_wake_event(
+        self,
+        *,
+        session_id: str | None,
+        source: str,
+        score: float | None = None,
+        accepted: bool = True,
+        reason: str | None = None,
+        transcript_present: bool = False,
+    ) -> WakeEventRecord:
+        event_id = str(uuid.uuid4())
+        created_at = utc_now_iso()
+        await self.database.execute(
+            """
+            INSERT INTO wake_events(
+                id, session_id, source, score, accepted, reason,
+                transcript_present, created_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                session_id,
+                source,
+                score,
+                1 if accepted else 0,
+                reason,
+                1 if transcript_present else 0,
+                created_at,
+            ),
+        )
+        return WakeEventRecord(
+            id=event_id,
+            session_id=session_id,
+            source=source,
+            score=score,
+            accepted=accepted,
+            reason=reason,
+            transcript_present=transcript_present,
+            created_at=created_at,
+        )
+
+    async def list_wake_events(
+        self, *, session_id: str | None = None, limit: int = 100
+    ) -> list[WakeEventRecord]:
+        capped = max(1, min(limit, 500))
+        if session_id is None:
+            rows = await self.database.fetchall(
+                "SELECT * FROM wake_events ORDER BY created_at DESC LIMIT ?",
+                (capped,),
+            )
+        else:
+            rows = await self.database.fetchall(
+                """
+                SELECT * FROM wake_events
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (session_id, capped),
+            )
+        return [WakeEventRecord.model_validate(dict(row)) for row in rows]
+
+    async def record_feedback_event(
+        self,
+        *,
+        rating: str,
+        reason: str | None = None,
+        session_id: str | None = None,
+        conversation_id: str | None = None,
+        agent_run_id: str | None = None,
+    ) -> FeedbackEventRecord:
+        event_id = str(uuid.uuid4())
+        created_at = utc_now_iso()
+        await self.database.execute(
+            """
+            INSERT INTO feedback_events(
+                id, session_id, conversation_id, agent_run_id, rating, reason, created_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (event_id, session_id, conversation_id, agent_run_id, rating, reason, created_at),
+        )
+        return FeedbackEventRecord(
+            id=event_id,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            agent_run_id=agent_run_id,
+            rating=rating,  # type: ignore[arg-type]
+            reason=reason,
+            created_at=created_at,
+        )
+
+    async def list_feedback_events(self, *, limit: int = 100) -> list[FeedbackEventRecord]:
+        rows = await self.database.fetchall(
+            "SELECT * FROM feedback_events ORDER BY created_at DESC LIMIT ?",
+            (max(1, min(limit, 500)),),
+        )
+        return [FeedbackEventRecord.model_validate(dict(row)) for row in rows]
+
+    async def latest_agent_run_id(self, *, conversation_id: str | None = None) -> str | None:
+        if conversation_id is None:
+            row = await self.database.fetchone(
+                "SELECT id FROM agent_runs ORDER BY created_at DESC LIMIT 1"
+            )
+        else:
+            row = await self.database.fetchone(
+                """
+                SELECT id FROM agent_runs
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (conversation_id,),
+            )
+        if row is None:
+            return None
+        return str(row["id"])
+
+    def _session_from_row(self, row: Any) -> SessionRecord:
+        data = dict(row)
+        raw_metadata = data.pop("metadata_json", None) or "{}"
+        try:
+            metadata = json.loads(raw_metadata)
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return SessionRecord.model_validate(data)
 
     async def record_tool_call(
         self,

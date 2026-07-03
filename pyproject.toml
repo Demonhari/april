@@ -41,7 +41,7 @@ dev = [
 ]
 
 [project.scripts]
-april = "apps.cli.main:app"
+april = "apps.cli.main:main"
 april-api = "services.api.server:main"
 april-runtime = "services.april_runtime.server:main"
 run = "apps.runner.main:app"

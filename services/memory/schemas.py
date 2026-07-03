@@ -12,12 +12,63 @@ class Project(BaseModel):
     created_at: str
 
 
+MEMORY_KINDS: tuple[str, ...] = (
+    "fact",
+    "preference",
+    "correction",
+    "project_state",
+    "skill_note",
+    "relationship",
+    "open_loop",
+    # Legacy v1 kinds kept readable so existing rows stay valid.
+    "project",
+    "note",
+)
+
+
 class MemoryRecord(BaseModel):
     id: str
     content: str
     kind: str
     project_id: str | None = None
     reason: str
+    created_at: str
+    confidence: float = 0.7
+    source: str = "user"
+    last_used_at: str | None = None
+    use_count: int = 0
+    expires_at: str | None = None
+    superseded_by: str | None = None
+
+
+class SessionRecord(BaseModel):
+    id: str
+    conversation_id: str | None = None
+    source: str
+    started_at: str
+    last_activity_at: str
+    closed_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WakeEventRecord(BaseModel):
+    id: str
+    session_id: str | None = None
+    source: str
+    score: float | None = None
+    accepted: bool = True
+    reason: str | None = None
+    transcript_present: bool = False
+    created_at: str
+
+
+class FeedbackEventRecord(BaseModel):
+    id: str
+    session_id: str | None = None
+    conversation_id: str | None = None
+    agent_run_id: str | None = None
+    rating: Literal["good", "bad"]
+    reason: str | None = None
     created_at: str
 
 

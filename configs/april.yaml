@@ -51,6 +51,55 @@ voice:
   piper_binary_path: null
   piper_model_path: null
   wake_word_model_path: null
+  # v2: the Sentinel can watch several wake models at once. The singular
+  # wake_word_model_path above stays supported; entries here are additive.
+  wake_word_model_paths: []
+
+# Always-on wake (Sentinel). OFF by default. Two-stage detection: an
+# openWakeWord score >= candidate_threshold makes a candidate; >= accept_threshold
+# accepts outright, otherwise local STT confirms from the ring buffer. The
+# Sentinel is the only process that opens the microphone.
+wake:
+  enabled: false
+  candidate_threshold: 0.35
+  accept_threshold: 0.70
+  confirm_with_stt: true
+  ring_buffer_seconds: 10
+  follow_up_seconds: 8
+  strict_address: false
+  # Quoted so YAML keeps it a string ("off" is the only supported value today).
+  speaker_gate: "off"
+
+# Cross-surface session continuity: a wake (voice/terminal/desktop/hotkey/socket)
+# within continuity_minutes of the last activity joins the existing conversation.
+session:
+  continuity_minutes: 10
+
+# apriald supervisor (installed as a user LaunchAgent; never sudo).
+daemon:
+  autostart_on_cli: true
+
+# Resource Governor budgets. Consulted by Sentinel/Dreamer/model prewarm.
+governor:
+  max_resident_gb: 12
+  dreamer_nice: 10
+
+# Nightly Dreamer self-evolution. OFF by default. All writes are fenced to
+# data/evolution/, data/playbooks/, and explicitly allowed DB tables; deleting
+# data/evolution restores stock behaviour.
+evolution:
+  enabled: false
+  window: "02:30-06:00"
+  require_ac_power: true
+  max_minutes: 90
+  daily_memory_cap: 30
+  prompt_overlay_max_chars: 1200
+  user_model_autoapply: safe_sections_only
+
+# Budgets for /chat deep and council modes (intelligence ladder R3/R4).
+deep_mode:
+  max_seconds: 45
+  council_n: 3
 
 # Proactive scheduler. OFF by default: with these safe defaults APRIL never fires
 # reminders or daily briefings on its own. The background loop only starts when

@@ -39,15 +39,20 @@ from services.api.schemas import (
     ChatRequest,
     ChatResponse,
     DocumentCreateRequest,
+    FeedbackRequest,
     MemoryCreateRequest,
     ProjectCreateRequest,
     ReminderCreateRequest,
+    SessionAttachRequest,
     ToolApprovalAction,
     ToolRequestEnvelope,
+    WakeRequest,
 )
 from services.april_runtime.schemas import LoadModelRequest
 from services.memory.writer import MemoryWriter
 from services.scheduler import compose_briefing, compute_repo_activity
+from services.wake.schemas import WakeEvent
+from services.wake.wake_bus import WakeBus
 from services.voice.health import (
     microphone_access,
     query_audio_devices,
@@ -137,12 +142,26 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         if scheduler is not None:
             # start() is a no-op unless scheduler.enabled, so this is safe in tests.
             await scheduler.start()
+        active: ApiContainer = app.state.container
+        wake_bus: WakeBus | None = None
+        if active.settings.wake.enabled:
+            # Local wake bus: owner-only Unix socket for hotkey/desktop wakes.
+            async def bus_handler(event: WakeEvent) -> dict[str, Any]:
+                return await _handle_wake_event(active, event, request_id=str(uuid.uuid4()))
+
+            wake_bus = WakeBus(active.settings.wake_socket_path, bus_handler)
+            await wake_bus.start()
+        app.state.wake_bus = wake_bus
         yield
+        if app.state.wake_bus is not None:
+            await app.state.wake_bus.stop()
+            app.state.wake_bus = None
         if app.state.container is not None:
             await app.state.container.aclose()
 
     app = FastAPI(title="APRIL Core API", version="0.1.0", lifespan=lifespan)
     app.state.container = container
+    app.state.wake_bus = None
     initial_settings = container.settings if container is not None else get_settings()
     if initial_settings.api.cors_enabled:
         app.add_middleware(
@@ -373,6 +392,39 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         )
         return ChatResponse(request_id=request_id, result=result)
 
+    @app.post("/wake")
+    async def wake(
+        request: WakeRequest,
+        active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
+    ) -> object:
+        request_id = x_request_id or str(uuid.uuid4())
+        event = WakeEvent(
+            source=request.source,
+            score=request.score,
+            text=request.text,
+            reason=request.reason,
+        )
+        return await _handle_wake_event(active, event, request_id=request_id)
+
+    @app.get("/sessions")
+    async def sessions(
+        limit: int = 50,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        records = await active.memory.list_sessions(limit=limit)
+        return {"sessions": [record.model_dump() for record in records]}
+
+    @app.post("/sessions")
+    async def session_attach(
+        request: SessionAttachRequest,
+        active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
+    ) -> object:
+        request_id = x_request_id or str(uuid.uuid4())
+        event = WakeEvent(source=request.source, reason="session_attach")
+        return await _handle_wake_event(active, event, request_id=request_id)
+
     @app.post("/agents/run")
     async def agents_run(
         request: AgentRunRequest,
@@ -543,6 +595,45 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             "dimensions": active.vector_memory.embedding.dimensions,
         }
 
+    @app.post("/feedback")
+    async def feedback(
+        request: FeedbackRequest,
+        active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
+    ) -> object:
+        request_id = x_request_id or str(uuid.uuid4())
+        conversation_id = request.conversation_id
+        session_id: str | None = None
+        if conversation_id is None:
+            # Bind to the active session's conversation when one exists.
+            session = await active.memory.latest_open_session()
+            if session is not None:
+                session_id = session.id
+                conversation_id = session.conversation_id
+        agent_run_id = request.agent_run_id
+        if agent_run_id is None:
+            agent_run_id = await active.memory.latest_agent_run_id(
+                conversation_id=conversation_id
+            )
+        record = await active.memory.record_feedback_event(
+            rating=request.rating,
+            reason=request.reason,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            agent_run_id=agent_run_id,
+        )
+        active.approvals.audit.write(
+            {
+                "event_type": "feedback_recorded",
+                "request_id": request_id,
+                "actor": "local-user",
+                "rating": record.rating,
+                "reason_length": len(record.reason or ""),
+                "agent_run_bound": record.agent_run_id is not None,
+            }
+        )
+        return {"feedback": record.model_dump()}
+
     @app.get("/reminders")
     async def reminders(active: ApiContainer = Depends(authorized)) -> object:
         return {
@@ -693,6 +784,45 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         )
 
     return app
+
+
+async def _handle_wake_event(
+    active: ApiContainer, event: WakeEvent, *, request_id: str
+) -> dict[str, Any]:
+    """Converge one wake event: resolve the session, then route optional text.
+
+    ``event.text`` (typed or STT-confirmed command) is executed as a normal chat
+    turn inside the session's conversation — through the standard orchestrator,
+    Brain routing, and permission engine. Wake events never bypass anything.
+    """
+    session_manager = active.require_session_manager()
+    resolution = await session_manager.handle_wake(event)
+    active.approvals.audit.write(
+        {
+            "event_type": "wake_event",
+            "request_id": request_id,
+            "actor": "local-user",
+            "source": event.source,
+            "session_id": resolution.session_id,
+            "joined_existing": resolution.joined_existing,
+            "score": event.score,
+            "reason": event.reason,
+            "transcript_present": bool(event.text),
+        }
+    )
+    payload: dict[str, Any] = {
+        "request_id": request_id,
+        **resolution.model_dump(),
+    }
+    if event.text:
+        result = await active.orchestrator.chat(
+            event.text,
+            conversation_id=resolution.conversation_id,
+            request_id=request_id,
+        )
+        await session_manager.touch(resolution.session_id)
+        payload["result"] = result.model_dump()
+    return payload
 
 
 def _redact_health_payload(value: Any) -> Any:

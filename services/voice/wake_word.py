@@ -70,26 +70,46 @@ class OpenWakeWordDetector(WakeWordDetector):
             model_reset()
 
     def detect(self, frame: bytes) -> bool:
+        detected = False
+        for window in self._aggregate_windows(frame):
+            if self._predict_window(self._load(), window):
+                detected = True
+        return detected
+
+    def score(self, frame: bytes) -> float:
+        """Return the maximum raw wake score for this frame's windows.
+
+        Unlike ``detect`` this applies no threshold and no cooldown: the v2
+        Sentinel owns candidate/accept thresholds and its own cooldown, so it
+        needs the raw model confidence. Frames smaller than an 80 ms window
+        aggregate across calls and yield 0.0 until a full window is available.
+        """
+        best = 0.0
+        for window in self._aggregate_windows(frame):
+            prediction = self._load().predict(window)  # type: ignore[attr-defined]
+            if isinstance(prediction, dict):
+                for value in prediction.values():
+                    best = max(best, float(value))
+        return best
+
+    def _aggregate_windows(self, frame: bytes) -> list[np.ndarray]:
         if len(frame) % 2 != 0:
             raise RuntimeUnavailableError("Wake-word frames must be 16-bit PCM.")
         if self.channels != 1 or self.sample_rate != WAKE_WORD_SAMPLE_RATE:
             raise RuntimeUnavailableError(
                 "Wake word requires mono, 16 kHz, 16-bit signed PCM audio."
             )
-        model = self._load()
         # Raw microphone bytes are converted to int16 samples; the openWakeWord
         # model is only ever called with a numpy int16 array, never raw bytes.
         samples = np.frombuffer(frame, dtype=np.int16)
         if samples.size:
             self._buffer = np.concatenate((self._buffer, samples))
-        detected = False
+        windows: list[np.ndarray] = []
         # Emit one prediction per fully aggregated 80 ms window.
         while self._buffer.size >= self.frame_samples:
-            window = self._buffer[: self.frame_samples]
+            windows.append(self._buffer[: self.frame_samples])
             self._buffer = self._buffer[self.frame_samples :]
-            if self._predict_window(model, window):
-                detected = True
-        return detected
+        return windows
 
     def _predict_window(self, model: object, window: np.ndarray) -> bool:
         # Debounce: a single utterance must not re-trigger during the cooldown.
