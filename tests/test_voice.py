@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from april_common.errors import RuntimeUnavailableError
-from services.voice.audio_player import FakeAudioPlayer, SoundDeviceAudioPlayer
+from services.voice.audio_player import AudioPlayer, FakeAudioPlayer, SoundDeviceAudioPlayer
 from services.voice.conversation_loop import PushToTalkLoop, normalize_transcript
 from services.voice.health import (
     microphone_access,
@@ -465,12 +465,46 @@ async def test_sounddevice_microphone_rejects_unsafe_duration(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_base_audio_player_does_not_silently_pass(tmp_path: Path) -> None:
+    player = AudioPlayer()
+    with pytest.raises(RuntimeUnavailableError, match="concrete AudioPlayer"):
+        await player.play(tmp_path / "output.wav")
+
+
+@pytest.mark.asyncio
+async def test_fake_audio_player_remains_harmless_for_tests(tmp_path: Path) -> None:
+    await FakeAudioPlayer().play(tmp_path / "missing-ok.wav")
+
+
+@pytest.mark.asyncio
 async def test_sounddevice_player_rejects_invalid_wav(tmp_path: Path) -> None:
     invalid = tmp_path / "invalid.wav"
     invalid.write_bytes(b"not a wav")
     player = SoundDeviceAudioPlayer()
     with pytest.raises(RuntimeUnavailableError, match="valid WAV"):
         await player.play(invalid)
+
+
+@pytest.mark.asyncio
+async def test_sounddevice_player_reports_missing_dependency(tmp_path: Path, monkeypatch) -> None:
+    audio = tmp_path / "valid.wav"
+    with wave.open(str(audio), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16_000)
+        wav.writeframes((np.ones(160, dtype=np.int16) * 100).tobytes())
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args, **kwargs):
+        if name == "sounddevice":
+            raise ImportError("No module named 'sounddevice'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    player = SoundDeviceAudioPlayer()
+    with pytest.raises(RuntimeUnavailableError, match="sounddevice is not installed"):
+        await player.play(audio)
 
 
 def test_openwakeword_requires_configured_existing_model(tmp_path: Path) -> None:

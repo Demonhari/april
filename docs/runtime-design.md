@@ -46,6 +46,9 @@ opens.
 configured local GGUF model that is present and readable. The Brain does not
 count as passing unless load, chat, stream, unload, structured Brain JSON,
 routing eval execution, and `--min-routing-accuracy` (default `0.90`) all pass.
+If a strict JSON request falls back from chat/structured response formatting to
+prompt completion, Runtime reports `diagnostics.structured_output_fallback: true`
+and real verification blocks that Brain route.
 Specialists do not count as passing unless load, chat, stream, role smoke, and
 unload pass. Coding and system-action role smokes validate small JSON schemas;
 all report output remains redacted to booleans and smoke kind only. Missing

@@ -9,7 +9,7 @@ from april_common.errors import ModelUnavailableError
 from services.april_runtime.backend import BackendHealth, GenerationResult, RuntimeBackend
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
-from services.april_runtime.schemas import ChatMessage, ChatRequest
+from services.april_runtime.schemas import ChatMessage, ChatRequest, ResponseFormat
 
 
 class CountingBackend(RuntimeBackend):
@@ -85,6 +85,38 @@ class OptionCaptureBackend(CountingBackend):
         self.last_top_p = top_p
         self.last_stop = stop
         return await super().generate(
+            prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
+        )
+
+
+class StructuredFallbackBackend(CountingBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_prompt_path = "fallback_prompt"
+        self.last_structured_output_fallback = False
+        self.last_structured_output_fallback_reason: str | None = None
+
+    async def generate_messages(
+        self,
+        prompt: str,
+        *,
+        messages: list[ChatMessage],
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+        response_format: ResponseFormat | None = None,
+    ) -> GenerationResult:
+        del messages, response_format
+        self.last_structured_output_fallback = True
+        self.last_structured_output_fallback_reason = "structured_output_unsupported"
+        return await self.generate(
             prompt,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
@@ -449,3 +481,27 @@ async def test_template_metadata_does_not_leak_into_diagnostics(tmp_path: Path) 
     assert "<<assistant>>" not in blob
     info = json.dumps([model.model_dump(mode="json") for model in lifecycle.list_models()])
     assert "chat_template" not in info
+
+
+@pytest.mark.asyncio
+async def test_structured_output_prompt_fallback_is_reported(tmp_path: Path) -> None:
+    backend = StructuredFallbackBackend()
+    lifecycle = ModelLifecycle(
+        registry(tmp_path),
+        backend_factory=lambda model: backend,
+        root_backend="fake",
+    )
+    response = await lifecycle.generate(
+        ChatRequest(
+            model_id="april-brain",
+            messages=[ChatMessage(role="user", content="hello")],
+            response_format=ResponseFormat(type="json_object"),
+        )
+    )
+
+    assert response.diagnostics["prompt_path"] == "fallback_prompt"
+    assert response.diagnostics["structured_output_fallback"] is True
+    assert (
+        response.diagnostics["structured_output_fallback_reason"] == "structured_output_unsupported"
+    )
+    assert any("Structured output used prompt fallback" in item for item in response.warnings)

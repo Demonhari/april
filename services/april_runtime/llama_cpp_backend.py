@@ -29,6 +29,22 @@ def llama_response_format(response_format: ResponseFormat | None) -> dict[str, A
     return payload
 
 
+def llama_chat_format(chat_format: str | None) -> str | None:
+    """Return a llama-cpp-python chat handler name for APRIL's prompt family.
+
+    APRIL's ``chat_format`` is primarily a prompt-rendering family understood by
+    :mod:`services.april_runtime.prompt_templates`. llama-cpp-python has its own
+    narrower set of built-in chat handlers; passing an APRIL-only family such as
+    ``granite`` makes real strict chat fail at runtime. Only pass through handler
+    names that are known to be native llama-cpp-python handlers. Other APRIL
+    formats still render through APRIL templates and may use GGUF native chat
+    template metadata inside llama-cpp-python.
+    """
+    if chat_format == "qwen":
+        return "qwen"
+    return None
+
+
 class LlamaCppBackend(RuntimeBackend):
     supports_concurrent_generation = False
 
@@ -36,6 +52,8 @@ class LlamaCppBackend(RuntimeBackend):
         self._llm: Any | None = None
         self._model: ModelDefinition | None = None
         self.last_prompt_path: str | None = None
+        self.last_structured_output_fallback = False
+        self.last_structured_output_fallback_reason: str | None = None
         # Only the prompt-rendering keys the renderer consults are retained, never
         # the raw template for logging/reporting. Populated after a successful load.
         self._prompt_metadata: dict[str, object] = {}
@@ -67,7 +85,7 @@ class LlamaCppBackend(RuntimeBackend):
             "n_ubatch": model.n_ubatch,
             "use_mmap": model.use_mmap,
             "use_mlock": model.use_mlock,
-            "chat_format": model.chat_format,
+            "chat_format": llama_chat_format(model.chat_format),
         }
         kwargs.update({key: value for key, value in optional_values.items() if value is not None})
         if model.role == "embedding":
@@ -92,6 +110,27 @@ class LlamaCppBackend(RuntimeBackend):
         await asyncio.sleep(0)
 
     async def generate(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> GenerationResult:
+        self._reset_generation_diagnostics()
+        self.last_prompt_path = "prompt_completion"
+        return await self._generate_prompt_completion(
+            prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
+        )
+
+    async def _generate_prompt_completion(
         self,
         prompt: str,
         *,
@@ -138,12 +177,16 @@ class LlamaCppBackend(RuntimeBackend):
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
     ) -> GenerationResult:
+        self._reset_generation_diagnostics()
         if self._llm is None:
             raise RuntimeUnavailableError("Model is not loaded.")
         chat_completion = getattr(self._llm, "create_chat_completion", None)
         if not callable(chat_completion):
-            self.last_prompt_path = "fallback_prompt"
-            return await self.generate(
+            self._mark_prompt_fallback(
+                response_format=response_format,
+                reason="chat_completion_unavailable",
+            )
+            return await self._generate_prompt_completion(
                 prompt,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
@@ -173,11 +216,18 @@ class LlamaCppBackend(RuntimeBackend):
 
         try:
             output = await asyncio.to_thread(run)
-        except Exception:
+        except Exception as exc:
+            if format_kwarg is not None and not _is_structured_fallback_exception(exc):
+                raise
             # A backend/model that cannot honour response_format (or chat at all)
-            # degrades to prompt completion plus downstream validation.
-            self.last_prompt_path = "fallback_prompt"
-            return await self.generate(
+            # degrades to prompt completion plus downstream validation. Strict
+            # callers see this through diagnostics so verification cannot mistake
+            # prompt fallback for native structured/chat support.
+            self._mark_prompt_fallback(
+                response_format=response_format,
+                reason=_fallback_reason(exc, response_format=response_format),
+            )
+            return await self._generate_prompt_completion(
                 prompt,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
@@ -185,10 +235,32 @@ class LlamaCppBackend(RuntimeBackend):
                 stop=stop,
                 seed=seed,
             )
-        self.last_prompt_path = "chat_template"
+        self._mark_chat_success()
         return await self._chat_generation_result(output, prompt)
 
     async def stream(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> AsyncIterator[str]:
+        self._reset_generation_diagnostics()
+        self.last_prompt_path = "prompt_completion"
+        async for token in self._stream_prompt_completion(
+            prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            stop=stop,
+            seed=seed,
+        ):
+            yield token
+
+    async def _stream_prompt_completion(
         self,
         prompt: str,
         *,
@@ -234,12 +306,16 @@ class LlamaCppBackend(RuntimeBackend):
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
     ) -> AsyncIterator[str]:
+        self._reset_generation_diagnostics()
         if self._llm is None:
             raise RuntimeUnavailableError("Model is not loaded.")
         chat_completion = getattr(self._llm, "create_chat_completion", None)
         if not callable(chat_completion):
-            self.last_prompt_path = "fallback_prompt"
-            async for token in self.stream(
+            self._mark_prompt_fallback(
+                response_format=response_format,
+                reason="chat_completion_unavailable",
+            )
+            async for token in self._stream_prompt_completion(
                 prompt,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
@@ -276,13 +352,19 @@ class LlamaCppBackend(RuntimeBackend):
                     text = self._chat_stream_text(chunk)
                     if text:
                         emitted = True
-                        self.last_prompt_path = "chat_template"
+                        self._mark_chat_success()
                         yield text
-            except Exception:
+            except Exception as exc:
                 # If nothing was emitted yet, degrade to prompt completion; once
                 # tokens are flowing a mid-stream failure is surfaced to the caller.
                 if emitted:
                     raise
+                if format_kwarg is not None and not _is_structured_fallback_exception(exc):
+                    raise
+                self._mark_prompt_fallback(
+                    response_format=response_format,
+                    reason=_fallback_reason(exc, response_format=response_format),
+                )
                 prompt_kwargs = self._completion_kwargs(
                     max_output_tokens=max_output_tokens,
                     temperature=temperature,
@@ -297,7 +379,6 @@ class LlamaCppBackend(RuntimeBackend):
                         return
                     text = chunk["choices"][0].get("text", "")
                     if text:
-                        self.last_prompt_path = "fallback_prompt"
                         yield str(text)
 
         async for token in pump_token_stream(make_iterator):
@@ -341,6 +422,22 @@ class LlamaCppBackend(RuntimeBackend):
         if self._llm is None:
             return BackendHealth(ok=False, message="not loaded")
         return BackendHealth(ok=True, message="loaded")
+
+    def _reset_generation_diagnostics(self) -> None:
+        self.last_prompt_path = None
+        self.last_structured_output_fallback = False
+        self.last_structured_output_fallback_reason = None
+
+    def _mark_chat_success(self) -> None:
+        self.last_prompt_path = "chat_template"
+        self.last_structured_output_fallback = False
+        self.last_structured_output_fallback_reason = None
+
+    def _mark_prompt_fallback(self, *, response_format: ResponseFormat | None, reason: str) -> None:
+        self.last_prompt_path = "fallback_prompt"
+        if _strict_response_format(response_format):
+            self.last_structured_output_fallback = True
+            self.last_structured_output_fallback_reason = reason
 
     def _completion_kwargs(
         self,
@@ -412,6 +509,34 @@ def _extract_prompt_metadata(llm: Any) -> dict[str, object]:
             if isinstance(value, str) and value.strip():
                 metadata[key] = value
     return metadata
+
+
+def _strict_response_format(response_format: ResponseFormat | None) -> bool:
+    return response_format is not None and response_format.type == "json_object"
+
+
+def _is_structured_fallback_exception(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    fallback_markers = (
+        "response_format",
+        "chat unsupported",
+        "chat completion unsupported",
+        "create_chat_completion",
+        "not supported",
+        "unsupported",
+        "unexpected keyword",
+        "unknown argument",
+        "invalid keyword",
+    )
+    return any(marker in message for marker in fallback_markers)
+
+
+def _fallback_reason(exc: Exception, *, response_format: ResponseFormat | None) -> str:
+    if not _strict_response_format(response_format):
+        return "chat_completion_error"
+    if _is_structured_fallback_exception(exc):
+        return "structured_output_unsupported"
+    return "structured_output_error"
 
 
 def _flatten_embedding(raw: Any) -> list[float]:

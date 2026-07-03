@@ -934,6 +934,34 @@ def test_all_configured_routing_report_counts_missing_decisions(
     assert report.passed == 0
 
 
+def test_all_configured_brain_structured_json_rejects_prompt_fallback(
+    monkeypatch,
+) -> None:
+    verifier = object.__new__(AllConfiguredModelsVerifier)
+    verifier.timeout = 1.0
+    verifier.max_output_tokens = 32
+
+    def fake_post_runtime(path: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        assert path == "/runtime/chat"
+        assert payload["response_format"] == {"type": "json_object"}
+        assert timeout == 1.0
+        return {
+            "content": '{"status":"ok"}',
+            "diagnostics": {
+                "prompt_path": "fallback_prompt",
+                "structured_output_fallback": True,
+                "structured_output_fallback_reason": "structured_output_unsupported",
+            },
+        }
+
+    monkeypatch.setattr(verifier, "_post_runtime", fake_post_runtime)
+    assert verifier._brain_structured_json("april-brain") is False
+    ok, fallback, detail = verifier._brain_structured_json_status("april-brain")
+    assert ok is False
+    assert fallback is True
+    assert detail == "structured-output prompt fallback: structured_output_unsupported"
+
+
 def test_real_workflow_specialist_agent_request(tmp_path: Path, monkeypatch) -> None:
     ports = iter([19511, 19512])
     monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))

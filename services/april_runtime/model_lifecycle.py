@@ -276,8 +276,20 @@ class ModelLifecycle:
             total_tokens=result.input_tokens + result.output_tokens,
         )
         warnings = ["Context was truncated."] if context.truncated else []
+        structured_fallback = bool(getattr(state.backend, "last_structured_output_fallback", False))
+        if structured_fallback:
+            warnings.append(
+                "Structured output used prompt fallback; native chat/structured support "
+                "was not verified for this request."
+            )
         diagnostics = {
             "prompt_path": getattr(state.backend, "last_prompt_path", None),
+            "structured_output_fallback": structured_fallback,
+            "structured_output_fallback_reason": getattr(
+                state.backend,
+                "last_structured_output_fallback_reason",
+                None,
+            ),
             "context_size_used": state.model.context_size,
             "context_budget": context.metadata(),
         }
@@ -395,6 +407,14 @@ class ModelLifecycle:
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
                 "prompt_path": getattr(state.backend, "last_prompt_path", None),
+                "structured_output_fallback": bool(
+                    getattr(state.backend, "last_structured_output_fallback", False)
+                ),
+                "structured_output_fallback_reason": getattr(
+                    state.backend,
+                    "last_structured_output_fallback_reason",
+                    None,
+                ),
                 "context_size_used": state.model.context_size,
                 "context_budget": context.metadata(),
             },

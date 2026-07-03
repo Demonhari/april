@@ -11,7 +11,9 @@ from april_common.errors import RuntimeUnavailableError
 
 class AudioPlayer:
     async def play(self, audio_path: Path) -> None:
-        return None
+        raise RuntimeUnavailableError(
+            "Real audio playback requires a concrete AudioPlayer implementation."
+        )
 
 
 class SoundDeviceAudioPlayer(AudioPlayer):

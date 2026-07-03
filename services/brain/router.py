@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from agents.schemas import AGENT_NAMES
-from april_common.errors import AprilError
+from april_common.errors import AprilError, RuntimeUnavailableError
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage
 from services.brain.fallback_router import FallbackRouter
@@ -117,6 +117,8 @@ class BrainRouter:
                 response_format=BRAIN_DECISION_RESPONSE_FORMAT,
                 request_id=request_id,
             )
+            if response.diagnostics.get("structured_output_fallback") is True:
+                return self.fallback.route(routing_input)
 
             async def repair(_: str) -> str:
                 repaired = await self.runtime_client.chat(
@@ -133,6 +135,10 @@ class BrainRouter:
                     response_format=BRAIN_DECISION_RESPONSE_FORMAT,
                     request_id=request_id,
                 )
+                if repaired.diagnostics.get("structured_output_fallback") is True:
+                    raise RuntimeUnavailableError(
+                        "Brain JSON repair used structured-output prompt fallback."
+                    )
                 return repaired.content
 
             return await parse_with_repair(response.content, repair)

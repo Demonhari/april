@@ -266,6 +266,23 @@ def test_brain_structured_json_false_fails() -> None:
     assert any("structured Brain JSON" in failure for failure in report.check_failures)
 
 
+def test_brain_structured_json_prompt_fallback_is_specific_failure() -> None:
+    brain = _brain_pass()
+    brain.structured_brain_json_success = False
+    brain.structured_brain_json_fallback = True
+    brain.failure_detail = "structured-output prompt fallback: structured_output_unsupported"
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[brain],
+        specialist_switch=_all_switch_ok(),
+    )
+    assert report.summary == "fail"
+    assert any(
+        "structured Brain JSON used prompt fallback" in item for item in report.check_failures
+    )
+
+
 def test_routing_below_threshold_fails_and_is_reported() -> None:
     brain = _brain_pass()
     brain.routing = RoutingReport(total=10, passed=8, accuracy=0.8)

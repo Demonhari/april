@@ -143,6 +143,11 @@ outputs are not stored in the report; only `smoke_kind`, `smoke_success`, and
 `--max-rss-mb`, `--min-tokens-per-second`, `--max-load-seconds`, and
 `--max-first-token-latency-seconds`.
 
+Strict Brain JSON routing must use real chat/structured backend support. If
+llama.cpp falls back to prompt completion for a requested JSON response, Runtime
+sets `diagnostics.structured_output_fallback: true`; real-model verification
+treats that as a blocker rather than a valid strict-routing pass.
+
 Multi-model reports keep the compatibility field `real_model_verified` ("at
 least one real model passed") and add clearer levels:
 

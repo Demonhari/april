@@ -2,14 +2,25 @@ from __future__ import annotations
 
 import pytest
 
-from services.april_runtime.llama_cpp_backend import LlamaCppBackend, llama_response_format
+from services.april_runtime.llama_cpp_backend import (
+    LlamaCppBackend,
+    llama_chat_format,
+    llama_response_format,
+)
 from services.april_runtime.schemas import ChatMessage, ResponseFormat
 
 
 class FakeLlama:
-    def __init__(self, *, fail_chat: bool = False, reject_response_format: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_chat: bool = False,
+        reject_response_format: bool = False,
+        chat_error: str = "chat unsupported",
+    ) -> None:
         self.fail_chat = fail_chat
         self.reject_response_format = reject_response_format
+        self.chat_error = chat_error
         self.chat_calls: list[dict[str, object]] = []
         self.prompt_calls: list[str] = []
 
@@ -19,7 +30,7 @@ class FakeLlama:
             # Mimics an older llama build that does not accept the argument.
             raise TypeError("response_format is not supported by this build")
         if self.fail_chat:
-            raise RuntimeError("chat unsupported")
+            raise RuntimeError(self.chat_error)
         if kwargs.get("stream"):
             return iter(
                 [
@@ -68,6 +79,8 @@ async def test_llama_backend_prefers_chat_completion() -> None:
     assert result.output_tokens == 2
     assert llm.chat_calls
     assert not llm.prompt_calls
+    assert backend.last_prompt_path == "chat_template"
+    assert backend.last_structured_output_fallback is False
 
 
 @pytest.mark.asyncio
@@ -84,6 +97,8 @@ async def test_llama_backend_falls_back_to_prompt_completion() -> None:
     assert llm.prompt_calls == ["USER: hello\nASSISTANT:"]
     assert result.input_tokens > 0
     assert result.output_tokens > 0
+    assert backend.last_prompt_path == "fallback_prompt"
+    assert backend.last_structured_output_fallback is False
 
 
 @pytest.mark.asyncio
@@ -162,6 +177,13 @@ def test_llama_response_format_translation() -> None:
     }
 
 
+def test_llama_chat_format_passes_only_native_handlers() -> None:
+    assert llama_chat_format("qwen") == "qwen"
+    assert llama_chat_format("granite") is None
+    assert llama_chat_format("generic") is None
+    assert llama_chat_format(None) is None
+
+
 @pytest.mark.asyncio
 async def test_llama_passes_response_format_to_chat_completion() -> None:
     llm = FakeLlama()
@@ -201,7 +223,8 @@ async def test_llama_streams_with_response_format() -> None:
 @pytest.mark.asyncio
 async def test_llama_degrades_when_response_format_unsupported() -> None:
     # An older backend rejects response_format; generation must still succeed by
-    # degrading to prompt completion rather than crashing.
+    # degrading to prompt completion rather than crashing, but the strict
+    # structured fallback must be visible to verification.
     llm = FakeLlama(reject_response_format=True)
     backend = backend_with(llm)
     result = await backend.generate_messages(
@@ -213,3 +236,36 @@ async def test_llama_degrades_when_response_format_unsupported() -> None:
     )
     assert result.text == "fallback response"
     assert llm.prompt_calls == ["USER: hello\nASSISTANT:"]
+    assert backend.last_prompt_path == "fallback_prompt"
+    assert backend.last_structured_output_fallback is True
+    assert backend.last_structured_output_fallback_reason == "structured_output_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_llama_strict_response_format_does_not_swallow_unrelated_errors() -> None:
+    llm = FakeLlama(fail_chat=True, chat_error="metal backend exploded")
+    backend = backend_with(llm)
+    with pytest.raises(RuntimeError, match="metal backend exploded"):
+        await backend.generate_messages(
+            "USER: hello\nASSISTANT:",
+            messages=[ChatMessage(role="user", content="hello")],
+            temperature=0.0,
+            max_output_tokens=8,
+            response_format=ResponseFormat(type="json_object"),
+        )
+    assert llm.prompt_calls == []
+
+
+@pytest.mark.asyncio
+async def test_llama_non_strict_chat_error_still_degrades_to_prompt_completion() -> None:
+    llm = FakeLlama(fail_chat=True, chat_error="metal backend exploded")
+    backend = backend_with(llm)
+    result = await backend.generate_messages(
+        "USER: hello\nASSISTANT:",
+        messages=[ChatMessage(role="user", content="hello")],
+        temperature=0.0,
+        max_output_tokens=8,
+    )
+    assert result.text == "fallback response"
+    assert llm.prompt_calls == ["USER: hello\nASSISTANT:"]
+    assert backend.last_structured_output_fallback is False

@@ -2606,16 +2606,24 @@ class AllConfiguredModelsVerifier(
             result.tokens_per_second = tps
             result.output_token_count = output_tokens or stream_tokens
             if model.role == "brain":
-                result.structured_brain_json_success = self._brain_structured_json(model.id)
+                (
+                    result.structured_brain_json_success,
+                    result.structured_brain_json_fallback,
+                    structured_detail,
+                ) = self._brain_structured_json_status(model.id)
+                if structured_detail:
+                    result.failure_detail = structured_detail
                 if os.environ.get("APRIL_VERIFY_ROUTING_EVALS") == "1":
                     try:
                         result.routing = self._routing_report()
                     except Exception:
                         result.routing = None
-        except Exception:
+        except Exception as exc:
             # Leave the unset booleans False; structural_ok stays False so the
             # model is reported as failed, never silently passed.
-            pass
+            result.failure_detail = redact_reason(str(exc))[:240]
+            if model.role == "brain" and result.structured_brain_json_success is None:
+                result.structured_brain_json_success = False
         finally:
             try:
                 unloaded = self._post_runtime(
@@ -2759,6 +2767,10 @@ class AllConfiguredModelsVerifier(
         return payload if isinstance(payload, dict) else {}
 
     def _brain_structured_json(self, model_id: str) -> bool:
+        ok, _fallback, _detail = self._brain_structured_json_status(model_id)
+        return ok
+
+    def _brain_structured_json_status(self, model_id: str) -> tuple[bool, bool, str | None]:
         data = self._post_runtime(
             "/runtime/chat",
             {
@@ -2772,9 +2784,19 @@ class AllConfiguredModelsVerifier(
             },
             timeout=self.timeout,
         )
-        return any(
+        diagnostics = data.get("diagnostics") if isinstance(data, dict) else {}
+        if isinstance(diagnostics, dict) and diagnostics.get("structured_output_fallback") is True:
+            reason = diagnostics.get("structured_output_fallback_reason")
+            detail = (
+                f"structured-output prompt fallback: {reason}"
+                if isinstance(reason, str) and reason
+                else "structured-output prompt fallback"
+            )
+            return False, True, detail
+        ok = any(
             "status" in parsed for parsed in _json_object_candidates(str(data.get("content", "")))
         )
+        return ok, False, None if ok else "response did not contain required status key"
 
     def _routing_report(self) -> RoutingReport:
         from apps.runner.evals import load_brain_eval_cases, real_routing_report

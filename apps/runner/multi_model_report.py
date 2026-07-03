@@ -54,8 +54,10 @@ class PerModelResult(BaseModel):
     unload_success: bool = False
     process_rss_bytes: int | None = None
     process_peak_rss_bytes: int | None = None
+    failure_detail: str | None = None
     # Brain-only structured checks (None for specialists).
     structured_brain_json_success: bool | None = None
+    structured_brain_json_fallback: bool | None = None
     routing: RoutingReport | None = None
     # Specialist-only role-appropriate smoke prompt (None for the brain).
     smoke_success: bool | None = None
@@ -91,11 +93,21 @@ class PerModelResult(BaseModel):
 
         if self.role == "brain":
             if self.structured_brain_json_success is not True:
-                failures.append(f"{label}: structured Brain JSON check failed")
+                if self.structured_brain_json_fallback is True:
+                    failures.append(f"{label}: structured Brain JSON used prompt fallback")
+                elif self.failure_detail:
+                    failures.append(
+                        f"{label}: structured Brain JSON check failed "
+                        f"({redact_reason(self.failure_detail)})"
+                    )
+                else:
+                    failures.append(f"{label}: structured Brain JSON check failed")
         elif self.smoke_success is not True:
             failures.append(f"{label}: specialist role smoke check failed")
         elif self.smoke_schema_valid is False:
             failures.append(f"{label}: specialist role smoke schema check failed")
+        if self.role != "brain" and self.failure_detail:
+            failures.append(f"{label}: {redact_reason(self.failure_detail)}")
         return failures
 
     def acceptance_ok(self, thresholds: ReportThresholds) -> bool:
