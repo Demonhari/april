@@ -452,6 +452,7 @@ class FallbackRouter:
             intent=intent,
             agent=agent,
             model_id=model_id,
+            confidence=0.45,
             tools_needed=tools,
             planned_tool_calls=planned_tool_calls or [],
             memory_queries=[],

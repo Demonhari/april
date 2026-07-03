@@ -20,26 +20,31 @@ _ROUTER_EXAMPLES = "\n".join(
     [
         # 1. Read-only repository diagnosis
         '{"intent":"coding_repo_analysis","agent":"coding_agent","model_id":"april-coding",'
+        '"confidence":0.86,'
         '"tools_needed":["search_files","read_file"],"permission_level":1,'
         '"risk_level":"read_only","needs_confirmation":false,'
         '"decision_summary":"Investigate the repository read-only."}',
         # 2. Patch / code modification request
         '{"intent":"code_modification","agent":"coding_agent","model_id":"april-coding",'
+        '"confidence":0.82,'
         '"tools_needed":["patch_generator","patch_applier"],"permission_level":3,'
         '"risk_level":"code_write","needs_confirmation":true,'
         '"decision_summary":"Propose then apply a patch after approval."}',
         # 3. General daily planning using memory
         '{"intent":"planning","agent":"general_agent","model_id":"april-brain",'
+        '"confidence":0.74,'
         '"memory_queries":["user schedule and priorities"],"permission_level":0,'
         '"risk_level":"none","needs_confirmation":false,'
         '"decision_summary":"Plan the day using local memory."}',
         # 4. Local system cleanup requiring confirmation
         '{"intent":"log_cleanup","agent":"system_action_agent","model_id":"april-brain",'
+        '"confidence":0.88,'
         '"tools_needed":["plan_log_cleanup"],"permission_level":4,'
         '"risk_level":"system_action","needs_confirmation":true,'
         '"decision_summary":"Plan log cleanup; applying needs approval."}',
         # 5. Unsupported external action
         '{"intent":"external_action","agent":"system_action_agent","model_id":"april-brain",'
+        '"confidence":0.9,'
         '"permission_level":5,"risk_level":"external_action","needs_confirmation":true,'
         '"decision_summary":"External actions are disabled by policy."}',
     ]
@@ -50,7 +55,8 @@ ROUTER_SYSTEM_PROMPT = (
     "Return exactly one compact JSON object. No markdown, no prose, no chain-of-thought.\n"
     "Required keys: intent, agent, model_id, permission_level, risk_level, "
     "needs_confirmation, decision_summary.\n"
-    "Optional array keys: tools_needed, planned_tool_calls, memory_queries, task_steps.\n"
+    "Optional keys: confidence (0.0-1.0), tools_needed, planned_tool_calls, "
+    "memory_queries, task_steps.\n"
     "Allowed agents (use exactly one): " + _ALLOWED_AGENTS + ".\n"
     "Allowed risk_level: none, read_only, safe_write, code_write, system_action, "
     "external_action.\n"

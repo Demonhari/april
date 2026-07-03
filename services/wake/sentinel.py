@@ -4,15 +4,17 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Literal, Protocol
 
 from april_common.settings import AprilSettings
 from services.voice.audio_player import AudioPlayer
-from services.voice.microphone import Microphone, aclose_frame_source
+from services.voice.microphone import Microphone, aclose_frame_source, write_pcm_wav
+from services.voice.speech_to_text import SpeechToText
 from services.voice.vad import VoiceActivityDetector
-from services.wake.confirmer import SttConfirmer
+from services.wake.confirmer import SttConfirmer, strip_vocative
 from services.wake.ring_buffer import AudioRingBuffer
 from services.wake.schemas import WakeEvent
 
@@ -67,9 +69,12 @@ class Sentinel:
         scorers: Sequence[WakeScorer],
         deliver: WakeDelivery,
         confirmer: SttConfirmer | None = None,
+        transcriber: SpeechToText | None = None,
         player: AudioPlayer | None = None,
         vad: VoiceActivityDetector | None = None,
         mute: MuteSwitch | None = None,
+        wake_word: str = "april",
+        sample_rate: int = 16_000,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         barge_in_mode: Literal["stop", "duck"] = "stop",
@@ -80,7 +85,10 @@ class Sentinel:
         self.scorers = list(scorers)
         self.deliver = deliver
         self.confirmer = confirmer
+        self.transcriber = transcriber
         self.player = player
+        self.wake_word = wake_word
+        self.sample_rate = sample_rate
         self.vad = vad or VoiceActivityDetector(
             energy_threshold=settings.voice.vad_energy_threshold,
             required_frames=settings.voice.vad_required_frames,
@@ -125,19 +133,24 @@ class Sentinel:
             async for frame in frame_source:
                 if self._stopped or self.mute.is_muted():
                     break
-                await self._handle_frame(frame)
+                await self._handle_frame(frame, frame_source)
         finally:
             # Every exit path (mute, stop, exhaustion, error) releases the mic.
             await aclose_frame_source(frame_source)
 
-    async def _handle_frame(self, frame: bytes) -> None:
+    async def _handle_frame(self, frame: bytes, frame_source: AsyncIterator[bytes]) -> None:
         self.ring_buffer.append(frame)
         now = self.clock()
-        if self._follow_up_window_open(now):
-            if self.vad.is_speech(frame):
-                self._follow_up_until = None
-                await self._accept(score=None, reason="follow_up", text=None)
-                return
+        if self._follow_up_window_open(now) and self.vad.is_speech(frame):
+            self._follow_up_until = None
+            await self._accept(
+                score=None,
+                reason="follow_up",
+                text=None,
+                frame_source=frame_source,
+                speech_seen=True,
+            )
+            return
         if self._in_cooldown(now):
             return
         score = 0.0
@@ -148,7 +161,12 @@ class Sentinel:
             return
         if not wake.confirm_with_stt:
             if score >= wake.accept_threshold:
-                await self._accept(score=score, reason="accepted_by_score", text=None)
+                await self._accept(
+                    score=score,
+                    reason="accepted_by_score",
+                    text=None,
+                    frame_source=frame_source,
+                )
             else:
                 self._reject(score, "below accept threshold without STT confirmation")
             return
@@ -156,7 +174,12 @@ class Sentinel:
             # Confirmation is required but unavailable: only a high-confidence
             # score may wake, so a marginal candidate can never slip through.
             if score >= wake.accept_threshold:
-                await self._accept(score=score, reason="accepted_by_score", text=None)
+                await self._accept(
+                    score=score,
+                    reason="accepted_by_score",
+                    text=None,
+                    frame_source=frame_source,
+                )
             else:
                 self._reject(score, "no STT confirmer available")
             return
@@ -166,6 +189,7 @@ class Sentinel:
                 score=score,
                 reason="stt_confirmed",
                 text=confirmation.command or None,
+                frame_source=frame_source,
             )
         else:
             self._reject(score, confirmation.reason)
@@ -184,7 +208,23 @@ class Sentinel:
             return False
         return now < self._cooldown_until
 
-    async def _accept(self, *, score: float | None, reason: str, text: str | None) -> None:
+    async def _accept(
+        self,
+        *,
+        score: float | None,
+        reason: str,
+        text: str | None,
+        frame_source: AsyncIterator[bytes],
+        speech_seen: bool = False,
+    ) -> None:
+        pre_roll = self.ring_buffer.snapshot()
+        if self.transcriber is not None:
+            text = await self._transcribe_full_utterance(
+                pre_roll,
+                frame_source,
+                fallback_text=text,
+                speech_seen=speech_seen,
+            )
         self._cooldown_until = self.clock() + self.settings.voice.wake_word_cooldown_seconds
         self.ring_buffer.clear()
         self.vad.reset()
@@ -204,6 +244,61 @@ class Sentinel:
             await self.deliver(event)
         except Exception as exc:  # delivery failure must not kill the mic loop
             logger.warning("Wake delivery failed: %s", exc)
+
+    async def _transcribe_full_utterance(
+        self,
+        pre_roll: Sequence[bytes],
+        frame_source: AsyncIterator[bytes],
+        *,
+        fallback_text: str | None,
+        speech_seen: bool,
+    ) -> str | None:
+        transcriber = self.transcriber
+        if transcriber is None:
+            return fallback_text
+        frames = list(pre_roll)
+        frames.extend(
+            await self._capture_post_wake_frames(frame_source, speech_seen=speech_seen)
+        )
+        if not frames:
+            return fallback_text
+        capture_path = self.settings.audio_cache_path / f"wake-utterance-{uuid.uuid4()}.wav"
+        write_pcm_wav(capture_path, frames, sample_rate=self.sample_rate)
+        try:
+            transcript = await transcriber.transcribe(capture_path)
+        except Exception as exc:
+            logger.warning("Full wake utterance transcription failed: %s", exc)
+            return fallback_text
+        finally:
+            if not self.settings.voice.retain_debug_audio:
+                capture_path.unlink(missing_ok=True)
+        cleaned = strip_vocative(transcript, wake_word=self.wake_word)
+        return cleaned or fallback_text
+
+    async def _capture_post_wake_frames(
+        self, frame_source: AsyncIterator[bytes], *, speech_seen: bool
+    ) -> list[bytes]:
+        vad = VoiceActivityDetector(
+            energy_threshold=self.settings.voice.vad_energy_threshold,
+            required_frames=self.settings.voice.vad_required_frames,
+        )
+        frames: list[bytes] = []
+        silence_frames = 0
+        deadline = self.clock() + self.settings.voice.utterance_max_seconds
+        async for frame in frame_source:
+            if self._stopped or self.mute.is_muted():
+                break
+            frames.append(frame)
+            if vad.is_speech(frame):
+                speech_seen = True
+                silence_frames = 0
+            elif speech_seen:
+                silence_frames += 1
+                if silence_frames >= self.settings.voice.vad_required_frames:
+                    break
+            if self.clock() >= deadline:
+                break
+        return frames
 
     def _reject(self, score: float, reason: str) -> None:
         self.rejected_candidates += 1
@@ -264,13 +359,19 @@ async def run_sentinel(settings: AprilSettings) -> None:
     scorers = build_scorers(settings)
     if not scorers:
         raise RuntimeUnavailableError("Sentinel requires at least one wake-word model path.")
+    stt: WhisperCppSpeechToText | None = None
+    if settings.voice.whisper_binary_path is None or settings.voice.whisper_model_path is None:
+        raise RuntimeUnavailableError(
+            "Sentinel full utterance capture requires whisper.cpp binary and model paths."
+        )
+    stt = WhisperCppSpeechToText(
+        settings.voice.whisper_binary_path,
+        settings.voice.whisper_model_path,
+    )
     confirmer: SttConfirmer | None = None
     if settings.wake.confirm_with_stt:
         confirmer = SttConfirmer(
-            WhisperCppSpeechToText(
-                settings.voice.whisper_binary_path,
-                settings.voice.whisper_model_path,
-            ),
+            stt,
             audio_cache_path=settings.audio_cache_path,
             strict_address=settings.wake.strict_address,
             retain_debug_audio=settings.voice.retain_debug_audio,
@@ -284,7 +385,18 @@ async def run_sentinel(settings: AprilSettings) -> None:
             token=settings.api.token,
         ),
         confirmer=confirmer,
+        transcriber=stt,
         player=SoundDeviceAudioPlayer(device=settings.voice.output_device),
     )
     with contextlib.suppress(KeyboardInterrupt):
         await sentinel.run()
+
+
+def main() -> None:
+    from april_common.settings import get_settings
+
+    asyncio.run(run_sentinel(get_settings()))
+
+
+if __name__ == "__main__":
+    main()

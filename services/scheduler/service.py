@@ -5,6 +5,7 @@ from datetime import UTC, datetime, time, timedelta, tzinfo
 
 from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
+from services.evolution.dreamer import DreamerService, latest_report
 from services.memory.sqlite_memory import SqliteMemory
 from services.scheduler.briefing import compose_briefing
 from services.scheduler.clock import Clock, SystemClock
@@ -30,6 +31,7 @@ class SchedulerService:
         sink: NotificationSink,
         clock: Clock | None = None,
         local_tz: tzinfo | None = None,
+        dreamer: DreamerService | None = None,
     ) -> None:
         self.settings = settings
         self.memory = memory
@@ -38,8 +40,10 @@ class SchedulerService:
         self.clock = clock or SystemClock()
         self._local_tz_override = local_tz
         self._task: asyncio.Task[None] | None = None
+        self.dreamer = dreamer
         self._fired_reminders = 0
         self._fired_briefings = 0
+        self._fired_dreamer_runs = 0
 
     @property
     def running(self) -> bool:
@@ -52,6 +56,10 @@ class SchedulerService:
     @property
     def fired_briefing_count(self) -> int:
         return self._fired_briefings
+
+    @property
+    def fired_dreamer_count(self) -> int:
+        return self._fired_dreamer_runs
 
     def _local_tz(self) -> tzinfo:
         if self._local_tz_override is not None:
@@ -101,6 +109,10 @@ class SchedulerService:
             await self._maybe_fire_briefing()
         except Exception as exc:
             self.audit.write({"event": "scheduler.briefing_error", "error": str(exc)})
+        try:
+            await self._maybe_run_dreamer()
+        except Exception as exc:
+            self.audit.write({"event": "scheduler.dreamer_error", "error": str(exc)})
 
     async def _fire_due_reminders(self) -> None:
         now_iso = self._now_iso()
@@ -148,11 +160,19 @@ class SchedulerService:
             now_iso=self._iso(now),
             until_iso=self._iso(now + timedelta(hours=24)),
             repo_activity=repo_activity,
+            evolution_report=latest_report(self.settings),
         )
         await self.sink.emit(notification)
         await self.memory.set_scheduler_state(_LAST_BRIEFING_KEY, today_str)
         self.audit.write({"event": "scheduler.briefing_fired", "date": today_str})
         self._fired_briefings += 1
+
+    async def _maybe_run_dreamer(self) -> None:
+        if self.dreamer is None:
+            return
+        result = await self.dreamer.run_once(self.clock.now())
+        if result.status == "completed":
+            self._fired_dreamer_runs += 1
 
     def _briefing_time(self) -> time:
         hours, _, minutes = self.settings.scheduler.briefing_time.partition(":")

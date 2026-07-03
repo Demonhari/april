@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import tempfile
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,7 +13,7 @@ import pytest
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
-from services.voice.speech_to_text import FakeSpeechToText
+from services.voice.speech_to_text import FakeSpeechToText, SpeechToText
 from services.wake.confirmer import SttConfirmer, is_addressed, strip_vocative
 from services.wake.fakes import (
     FakeFrameMicrophone,
@@ -28,6 +30,22 @@ from services.wake.wake_bus import WakeBus, send_wake_event
 
 FRAME = b"\x00\x01" * 160  # quiet 16-bit PCM frame
 LOUD_FRAME = b"\x00\x40" * 160  # loud frame the VAD counts as speech
+
+
+class RecordingSpeechToText(SpeechToText):
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.payloads: list[bytes] = []
+        self.paths: list[Path] = []
+
+    async def transcribe(self, audio_path: Path) -> str:
+        self.paths.append(audio_path)
+        self.payloads.append(audio_path.read_bytes())
+        return self.text
+
+
+def _short_socket_path() -> Path:
+    return Path(tempfile.gettempdir()).resolve() / f"aw-{os.getpid()}-{uuid.uuid4().hex[:8]}.sock"
 
 
 async def _memory(settings_tmp) -> tuple[Database, SqliteMemory]:
@@ -147,7 +165,7 @@ async def test_wake_bus_socket_permissions_and_delivery(settings_tmp) -> None:
         received.append(event)
         return {"session_id": "session-1"}
 
-    socket_path = settings_tmp.wake_socket_path
+    socket_path = _short_socket_path()
     bus = WakeBus(socket_path, handler)
     await bus.start()
     try:
@@ -169,12 +187,11 @@ async def test_wake_bus_rejects_invalid_payloads(settings_tmp) -> None:
     async def handler(event: WakeEvent) -> dict[str, object]:
         raise AssertionError("handler must not run for invalid payloads")
 
-    bus = WakeBus(settings_tmp.wake_socket_path, handler)
+    socket_path = _short_socket_path()
+    bus = WakeBus(socket_path, handler)
     await bus.start()
     try:
-        reader, writer = await asyncio.open_unix_connection(
-            path=str(settings_tmp.wake_socket_path)
-        )
+        reader, writer = await asyncio.open_unix_connection(path=str(socket_path))
         writer.write(b'{"source": "not-a-surface"}\n')
         await writer.drain()
         raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
@@ -186,11 +203,14 @@ async def test_wake_bus_rejects_invalid_payloads(settings_tmp) -> None:
 
 
 async def test_wake_bus_refuses_non_socket_path(settings_tmp) -> None:
-    settings_tmp.wake_socket_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_tmp.wake_socket_path.write_text("not a socket", encoding="utf-8")
-    bus = WakeBus(settings_tmp.wake_socket_path, lambda event: None)  # type: ignore[arg-type]
-    with pytest.raises(RuntimeError, match="not a socket"):
-        await bus.start()
+    socket_path = _short_socket_path()
+    socket_path.write_text("not a socket", encoding="utf-8")
+    try:
+        bus = WakeBus(socket_path, lambda event: None)  # type: ignore[arg-type]
+        with pytest.raises(RuntimeError, match="not a socket"):
+            await bus.start()
+    finally:
+        socket_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +248,10 @@ async def test_session_continuity_join_and_new(settings_tmp) -> None:
         # The stale session was closed; only the new one stays open.
         stale = await memory.get_session(first.session_id)
         fresh = await memory.get_session(third.session_id)
-        assert stale is not None and stale.closed_at is not None
-        assert fresh is not None and fresh.closed_at is None
+        assert stale is not None
+        assert stale.closed_at is not None
+        assert fresh is not None
+        assert fresh.closed_at is None
 
         events = await memory.list_wake_events()
         assert len(events) == 3
@@ -255,6 +277,36 @@ async def test_wake_event_persists_flags_not_transcripts(settings_tmp) -> None:
         row = await database.fetchone("SELECT * FROM wake_events")
         assert "restart the runtime" not in "".join(str(value) for value in dict(row).values())
     finally:
+        await database.close()
+
+
+async def test_socket_wake_joins_existing_voice_session(settings_tmp) -> None:
+    database, memory = await _memory(settings_tmp)
+    socket_path = _short_socket_path()
+    try:
+        manager = SessionManager(memory, continuity_minutes=10)
+        first = await manager.handle_wake(WakeEvent(source="voice", score=0.8))
+
+        async def handler(event: WakeEvent) -> dict[str, object]:
+            resolution = await manager.handle_wake(event)
+            return resolution.model_dump()
+
+        bus = WakeBus(socket_path, handler)
+        await bus.start()
+        try:
+            reply = await send_wake_event(
+                socket_path, WakeEvent(source="socket", text="continue", reason="terminal")
+            )
+        finally:
+            await bus.stop()
+        assert reply["ok"] is True
+        result = reply["result"]
+        assert isinstance(result, dict)
+        assert result["joined_existing"] is True
+        assert result["session_id"] == first.session_id
+        assert result["conversation_id"] == first.conversation_id
+    finally:
+        socket_path.unlink(missing_ok=True)
         await database.close()
 
 
@@ -295,6 +347,89 @@ async def test_sentinel_stt_confirmation_accepts_and_strips_vocative(settings_tm
     event = delivery.events[0]
     assert event.reason == "stt_confirmed"
     assert event.text == "restart the runtime"
+
+
+async def test_sentinel_full_utterance_capture_preserves_pre_roll(settings_tmp) -> None:
+    tuned = settings_tmp.model_copy(
+        update={
+            "wake": settings_tmp.wake.model_copy(
+                update={"enabled": True, "confirm_with_stt": True}
+            ),
+            "voice": settings_tmp.voice.model_copy(
+                update={"vad_required_frames": 2, "vad_energy_threshold": 0.01}
+            ),
+        }
+    )
+    pre_roll = b"\x01\x00" * 160
+    wake_frame = b"\x02\x00" * 160
+    silence = b"\x00\x00" * 160
+    microphone = FakeFrameMicrophone(
+        [pre_roll, wake_frame, LOUD_FRAME, LOUD_FRAME, silence, silence]
+    )
+    delivery = RecordingDelivery()
+    full_stt = RecordingSpeechToText("april, restart the runtime after build")
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=microphone,
+        scorers=[ScriptedScorer([0.0, 0.5])],
+        deliver=delivery,
+        confirmer=SttConfirmer(
+            FakeSpeechToText("april"),
+            audio_cache_path=tuned.audio_cache_path,
+        ),
+        transcriber=full_stt,
+        player=RecordingAudioPlayer(),
+        mute=MuteSwitch(tuned.mute_flag_path),
+    )
+
+    await sentinel.run_once()
+
+    assert microphone.opened_streams == 1
+    assert len(delivery.events) == 1
+    assert delivery.events[0].text == "restart the runtime after build"
+    assert len(full_stt.payloads) == 1
+    payload = full_stt.payloads[0]
+    assert pre_roll in payload
+    assert wake_frame in payload
+    assert LOUD_FRAME in payload
+    assert list(Path(tuned.audio_cache_path).glob("wake-utterance-*.wav")) == []
+
+
+async def test_sentinel_in_sentence_wake_candidate_preserves_semantic_april(
+    settings_tmp,
+) -> None:
+    tuned = settings_tmp.model_copy(
+        update={
+            "wake": settings_tmp.wake.model_copy(
+                update={"enabled": True, "confirm_with_stt": True}
+            ),
+            "voice": settings_tmp.voice.model_copy(
+                update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+            ),
+        }
+    )
+    delivery = RecordingDelivery()
+    full_stt = RecordingSpeechToText("could you ask April to restart after the build")
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([FRAME, LOUD_FRAME, b"\x00\x00" * 160]),
+        scorers=[ScriptedScorer([0.5])],
+        deliver=delivery,
+        confirmer=SttConfirmer(
+            FakeSpeechToText("could you ask April to restart"),
+            audio_cache_path=tuned.audio_cache_path,
+            strict_address=False,
+        ),
+        transcriber=full_stt,
+        player=RecordingAudioPlayer(),
+        mute=MuteSwitch(tuned.mute_flag_path),
+    )
+
+    await sentinel.run_once()
+
+    assert len(delivery.events) == 1
+    assert delivery.events[0].reason == "stt_confirmed"
+    assert delivery.events[0].text == "could you ask April to restart after the build"
 
 
 async def test_sentinel_stt_confirmation_rejects_unaddressed_speech(settings_tmp) -> None:
@@ -351,6 +486,36 @@ async def test_sentinel_follow_up_window_wakes_on_speech(settings_tmp) -> None:
     assert delivery.events[0].score is None
 
 
+async def test_sentinel_follow_up_window_transcribes_same_session_command(settings_tmp) -> None:
+    clock = ManualClock()
+    tuned = settings_tmp.model_copy(
+        update={
+            "voice": settings_tmp.voice.model_copy(
+                update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+            )
+        }
+    )
+    delivery = RecordingDelivery()
+    full_stt = RecordingSpeechToText("continue with that plan")
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([LOUD_FRAME, b"\x00\x00" * 160]),
+        scorers=[ScriptedScorer([])],
+        deliver=delivery,
+        transcriber=full_stt,
+        player=RecordingAudioPlayer(),
+        mute=MuteSwitch(tuned.mute_flag_path),
+        clock=clock,
+    )
+
+    sentinel.notify_assistant_response()
+    await sentinel.run_once()
+
+    assert len(delivery.events) == 1
+    assert delivery.events[0].reason == "follow_up"
+    assert delivery.events[0].text == "continue with that plan"
+
+
 async def test_sentinel_follow_up_window_expires(settings_tmp) -> None:
     clock = ManualClock()
     tuned = settings_tmp.model_copy(
@@ -377,9 +542,9 @@ async def test_sentinel_mute_releases_microphone(settings_tmp) -> None:
 
     original_handle = sentinel._handle_frame
 
-    async def tracking_handle(frame: bytes) -> None:
+    async def tracking_handle(frame: bytes, frame_source) -> None:
         started.set()
-        await original_handle(frame)
+        await original_handle(frame, frame_source)
 
     sentinel._handle_frame = tracking_handle  # type: ignore[method-assign]
     task = asyncio.create_task(sentinel.run())

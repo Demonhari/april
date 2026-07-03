@@ -65,12 +65,19 @@ def _with_missing_optional_arrays(data: dict[str, object]) -> dict[str, object]:
     return data
 
 
+def _with_default_confidence(data: dict[str, object], *, method: str) -> dict[str, object]:
+    if "confidence" not in data:
+        data["confidence"] = 0.55 if method == "model_repair" else 0.7
+    return data
+
+
 def parse_brain_decision(text: str, *, method: str = "model") -> BrainDecision:
     raw = _remove_trailing_commas(extract_single_json_object(text))
     try:
         data = json.loads(raw)
         if isinstance(data, dict):
             data = _with_missing_optional_arrays(data)
+            data = _with_default_confidence(data, method=method)
         decision = BrainDecision.model_validate(data)
     except (json.JSONDecodeError, PydanticValidationError) as exc:
         raise ValidationError(

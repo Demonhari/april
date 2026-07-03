@@ -30,6 +30,9 @@ agent_app = typer.Typer(help="Direct specialist agent operations.")
 reminder_app = typer.Typer(help="Reminder operations.")
 task_app = typer.Typer(help="Task inspection operations.")
 doc_app = typer.Typer(help="Document operations.")
+daemon_app = typer.Typer(help="Daemon operations.")
+playbook_app = typer.Typer(help="Playbook operations.")
+evolve_app = typer.Typer(help="Evolution operations.")
 app.add_typer(model_app, name="model")
 app.add_typer(project_app, name="project")
 app.add_typer(memory_app, name="memory")
@@ -39,6 +42,12 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(reminder_app, name="reminder")
 app.add_typer(task_app, name="task")
 app.add_typer(doc_app, name="doc")
+app.add_typer(daemon_app, name="daemon")
+app.add_typer(playbook_app, name="playbook")
+app.add_typer(evolve_app, name="evolve")
+
+_DAEMON_AUTOSTART_REPORTED = False
+_CHAT_MODES = {"standard", "deep", "council"}
 
 
 def client() -> AprilApiClient:
@@ -60,16 +69,26 @@ def run(coro: Coroutine[Any, Any, Any]) -> Any:
 
 def _maybe_autostart_daemon() -> None:
     """Best-effort apriald autostart before attach/one-shot, when configured."""
+    global _DAEMON_AUTOSTART_REPORTED
     settings = get_settings()
     if not settings.daemon.autostart_on_cli:
         return
     try:
         from apps.daemon.apriald import autostart_if_needed
     except ImportError:
+        if not _DAEMON_AUTOSTART_REPORTED:
+            console.print(
+                "[yellow]Daemon autostart unavailable: apps.daemon.apriald is not "
+                "implemented yet.[/yellow]"
+            )
+            _DAEMON_AUTOSTART_REPORTED = True
         return
     try:
         autostart_if_needed(settings)
-    except Exception:
+    except Exception as exc:
+        if not _DAEMON_AUTOSTART_REPORTED:
+            console.print(f"[yellow]Daemon autostart failed: {exc}[/yellow]")
+            _DAEMON_AUTOSTART_REPORTED = True
         # Autostart is a convenience; attach/one-shot still report a clear
         # offline error if the API stays unreachable.
         return
@@ -80,6 +99,74 @@ def _print_chat_result(result: dict[str, Any]) -> None:
     if result.get("pending_approval"):
         console.print("[yellow]Approval required:[/yellow]")
         print_jsonish(result["pending_approval"])
+
+
+def _handle_repl_command(message: str, conversation_id: str | None) -> bool:
+    stripped = message.strip()
+    if not stripped.startswith("/"):
+        return False
+    command, _, rest = stripped.partition(" ")
+    if command == "/status":
+        health = run(client().get("/health", auth=False))
+        sessions_data = run(client().get("/sessions"))
+        approvals_data = run(client().get("/approvals"))
+        print_jsonish(
+            {
+                "health": health,
+                "session_conversation_id": conversation_id,
+                "sessions": sessions_data.get("sessions", [])[:3],
+                "pending_approvals": approvals_data.get("approvals", []),
+            }
+        )
+        return True
+    if command == "/deep":
+        if not rest.strip():
+            console.print("Usage: /deep <message>")
+            return True
+        data = run(
+            client().post(
+                "/chat",
+                {
+                    "message": rest.strip(),
+                    "conversation_id": conversation_id,
+                    "mode": "deep",
+                },
+            )
+        )
+        _print_chat_result(data["result"])
+        return True
+    if command == "/council":
+        if not rest.strip():
+            console.print("Usage: /council <message>")
+            return True
+        data = run(
+            client().post(
+                "/chat",
+                {
+                    "message": rest.strip(),
+                    "conversation_id": conversation_id,
+                    "mode": "council",
+                },
+            )
+        )
+        _print_chat_result(data["result"])
+        return True
+    if command == "/approve":
+        approval_id = rest.strip()
+        if not approval_id:
+            console.print("Usage: /approve <id>")
+            return True
+        print_jsonish(run(client().post("/tools/approve", {"approval_id": approval_id})))
+        return True
+    if command == "/deny":
+        approval_id = rest.strip()
+        if not approval_id:
+            console.print("Usage: /deny <id>")
+            return True
+        print_jsonish(run(client().post("/tools/deny", {"approval_id": approval_id})))
+        return True
+    console.print(f"Unknown command: {command}")
+    return True
 
 
 def attach() -> None:
@@ -94,6 +181,8 @@ def attach() -> None:
         if message.strip() in {"/quit", "/exit"}:
             return
         if not message.strip():
+            continue
+        if _handle_repl_command(message, conversation_id):
             continue
         response = run(
             client().post("/chat", {"message": message, "conversation_id": conversation_id})
@@ -188,12 +277,16 @@ def ask(
     project_id: str | None = typer.Option(None, "--project-id"),
     repo_path: str | None = typer.Option(None, "--repo-path"),
     conversation_id: str | None = typer.Option(None, "--conversation-id"),
+    mode: str = typer.Option("standard", "--mode", help="standard, deep, or council."),
 ) -> None:
+    if mode not in _CHAT_MODES:
+        raise typer.BadParameter("mode must be standard, deep, or council")
     payload = {
         "message": message,
         "project_id": project_id,
         "repo_path": repo_path,
         "conversation_id": conversation_id,
+        "mode": mode,
     }
     data = run(client().post("/chat", payload))
     result = data["result"]
@@ -207,18 +300,24 @@ def ask(
 def chat(
     project_id: str | None = typer.Option(None, "--project-id"),
     repo_path: str | None = typer.Option(None, "--repo-path"),
+    mode: str = typer.Option("standard", "--mode", help="standard, deep, or council."),
 ) -> None:
+    if mode not in _CHAT_MODES:
+        raise typer.BadParameter("mode must be standard, deep, or council")
     console.print("APRIL chat. Type /quit to exit.")
     conversation_id = str(uuid.uuid4())
     while True:
         message = Prompt.ask("you")
         if message.strip() in {"/quit", "/exit"}:
             return
+        if _handle_repl_command(message, conversation_id):
+            continue
         ask(
             message,
             project_id=project_id,
             repo_path=repo_path,
             conversation_id=conversation_id,
+            mode=mode,
         )
 
 
@@ -552,15 +651,108 @@ def voice_enroll(
 
 @voice_app.command("listen")
 def voice_listen() -> None:
-    from services.voice.conversation_loop import WakeWordConversationLoop
+    from april_common.errors import RuntimeUnavailableError
     from services.voice.health import voice_health
+    from services.wake.sentinel import run_sentinel
 
     settings = get_settings()
     health_report = voice_health(settings)
     if health_report.status == "degraded":
         console.print(health_report.model_dump())
-    loop = WakeWordConversationLoop(api_client=client())
-    run(loop.run_forever())
+    try:
+        run(run_sentinel(settings))
+    except RuntimeUnavailableError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+@daemon_app.command("install")
+def daemon_install() -> None:
+    from apps.daemon.launchd import LaunchdManager
+
+    path = LaunchdManager(get_settings()).install()
+    print_jsonish({"installed": True, "plist_path": str(path)})
+
+
+@daemon_app.command("uninstall")
+def daemon_uninstall() -> None:
+    from apps.daemon.launchd import LaunchdManager
+
+    removed = LaunchdManager(get_settings()).uninstall()
+    print_jsonish({"removed": removed})
+
+
+@daemon_app.command("start")
+def daemon_start() -> None:
+    from apps.daemon.apriald import start_daemon_background
+
+    print_jsonish(start_daemon_background(get_settings()))
+
+
+@daemon_app.command("stop")
+def daemon_stop() -> None:
+    from apps.daemon.apriald import stop_daemon
+
+    print_jsonish(stop_daemon(get_settings()))
+
+
+@daemon_app.command("status")
+def daemon_status() -> None:
+    from apps.daemon.apriald import read_daemon_status
+    from apps.daemon.launchd import LaunchdManager
+
+    settings = get_settings()
+    status = read_daemon_status(settings)
+    status["launchd"] = LaunchdManager(settings).status()
+    print_jsonish(status)
+
+
+@playbook_app.command("list")
+def playbook_list() -> None:
+    print_jsonish(run(client().get("/playbooks")))
+
+
+@playbook_app.command("run")
+def playbook_run(
+    playbook_id: str,
+    project_id: str | None = typer.Option(None, "--project-id"),
+    conversation_id: str | None = typer.Option(None, "--conversation-id"),
+) -> None:
+    payload = {"project_id": project_id, "conversation_id": conversation_id}
+    print_jsonish(run(client().post(f"/playbooks/{playbook_id}/run", payload)))
+
+
+@playbook_app.command("adopt")
+def playbook_adopt(path: Path) -> None:
+    import json
+
+    import yaml
+
+    from skills.playbooks import PlaybookDefinition
+
+    resolved = path.expanduser().resolve()
+    if resolved.suffix == ".json":
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    else:
+        payload = yaml.safe_load(resolved.read_text(encoding="utf-8"))
+    playbook = PlaybookDefinition.model_validate(payload)
+    print_jsonish(run(client().post("/playbooks/adopt", playbook.model_dump())))
+
+
+@evolve_app.command("versions")
+def evolve_versions(agent: str | None = typer.Option(None, "--agent")) -> None:
+    params = {"agent": agent} if agent else None
+    print_jsonish(run(client().get("/evolution/versions", params=params)))
+
+
+@evolve_app.command("rollback")
+def evolve_rollback(agent: str, version: int) -> None:
+    print_jsonish(run(client().post("/evolution/rollback", {"agent": agent, "version": version})))
+
+
+@evolve_app.command("report")
+def evolve_report() -> None:
+    print_jsonish(run(client().get("/evolution/report/latest")))
 
 
 if __name__ == "__main__":

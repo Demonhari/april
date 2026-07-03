@@ -13,12 +13,15 @@ class MemoryRetriever:
         self.policy = MemoryPolicy()
 
     async def hybrid_search(self, query: str, *, limit: int = 10) -> list[SearchResult]:
-        lexical = [
+        lexical_memories = [
             memory
             for memory in await self.sqlite_memory.search_memories(query)
             if not self.policy.is_sensitive(memory.content)
         ]
-        vector = self.vector_memory.search(query, limit=limit)
+        try:
+            vector = self.vector_memory.search(query, limit=limit, source_type="memory")
+        except Exception:
+            vector = []
         results: list[SearchResult] = [
             SearchResult(
                 id=memory.id,
@@ -26,13 +29,30 @@ class MemoryRetriever:
                 content=memory.content,
                 metadata={"kind": memory.kind, "reason": memory.reason},
             )
-            for memory in lexical
+            for memory in lexical_memories
         ]
         seen = {result.id for result in results}
         for result in vector:
+            record = await self.sqlite_memory.get_memory(result.id)
+            if record is None or self.policy.is_sensitive(record.content):
+                continue
             if result.id not in seen:
-                results.append(result)
-        return results[:limit]
+                results.append(
+                    result.model_copy(
+                        update={
+                            "content": record.content,
+                            "metadata": {
+                                **result.metadata,
+                                "kind": record.kind,
+                                "reason": record.reason,
+                            },
+                        }
+                    )
+                )
+                seen.add(result.id)
+        selected = results[:limit]
+        await self.sqlite_memory.mark_memories_used([result.id for result in selected])
+        return selected
 
     async def recent_memories(self, *, limit: int = 5) -> list[SearchResult]:
         memories = [
@@ -40,7 +60,7 @@ class MemoryRetriever:
             for memory in await self.sqlite_memory.list_memories()
             if not self.policy.is_sensitive(memory.content)
         ][:limit]
-        return [
+        results = [
             SearchResult(
                 id=memory.id,
                 score=1.0,
@@ -49,6 +69,8 @@ class MemoryRetriever:
             )
             for memory in memories
         ]
+        await self.sqlite_memory.mark_memories_used([result.id for result in results])
+        return results
 
     def repo_chunks(
         self,

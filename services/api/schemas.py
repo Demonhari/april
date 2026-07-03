@@ -12,6 +12,7 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
     project_id: str | None = None
     repo_path: str | None = None
+    mode: Literal["standard", "deep", "council"] = "standard"
 
 
 class ChatResponse(BaseModel):
@@ -84,6 +85,20 @@ class FeedbackRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=2_000)
     conversation_id: str | None = None
     agent_run_id: str | None = None
+
+
+class PlaybookRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: str | None = None
+    project_id: str | None = None
+
+
+class EvolutionRollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str
+    version: int = Field(ge=1)
 
 
 class ProjectCreateRequest(BaseModel):

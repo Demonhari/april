@@ -15,6 +15,9 @@ from april_common.settings import AprilSettings, get_settings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.model_registry import ModelRegistry
 from services.brain.orchestrator import AprilOrchestrator
+from services.evolution.dreamer import DreamerService
+from services.evolution.scheduler import EvolutionSchedulerGate
+from services.memory.archive import ArchiveReflectionService
 from services.memory.database import Database
 from services.memory.embeddings import embedding_provider_from_config
 from services.memory.migrations import run_migrations
@@ -24,6 +27,7 @@ from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
 from services.permissions.engine import PermissionEngine
 from services.permissions.tool_execution import ToolExecutionService
+from services.pool.governor import ResourceGovernor
 from services.scheduler import SchedulerService, notification_sink_from_settings
 from services.wake.session_manager import SessionManager
 from skills.registry import ToolRegistry, default_registry
@@ -45,12 +49,18 @@ class ApiContainer:
     orchestrator: AprilOrchestrator
     scheduler: SchedulerService | None = None
     session_manager: SessionManager | None = None
+    archive_reflection: ArchiveReflectionService | None = None
 
     def require_session_manager(self) -> SessionManager:
         if self.session_manager is None:
             self.session_manager = SessionManager(
                 self.memory,
                 continuity_minutes=self.settings.session.continuity_minutes,
+                on_close=(
+                    self.archive_reflection.reflect_session
+                    if self.archive_reflection is not None
+                    else None
+                ),
             )
         return self.session_manager
 
@@ -138,16 +148,32 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         agent_registry=agent_registry,
         memory_retriever=memory_retriever,
     )
+    archive_reflection = ArchiveReflectionService(
+        active_settings,
+        memory=memory,
+        runtime_client=runtime_client,
+        vector_memory=vector_memory,
+        audit=audit,
+    )
     sink = notification_sink_from_settings(active_settings, audit)
+    governor = ResourceGovernor(active_settings)
+    dreamer = DreamerService(
+        active_settings,
+        memory=memory,
+        gate=EvolutionSchedulerGate(active_settings, memory, governor=governor),
+        audit=audit,
+    )
     scheduler = SchedulerService(
         settings=active_settings,
         memory=memory,
         audit=audit,
         sink=sink,
+        dreamer=dreamer,
     )
     session_manager = SessionManager(
         memory,
         continuity_minutes=active_settings.session.continuity_minutes,
+        on_close=archive_reflection.reflect_session,
     )
     return ApiContainer(
         settings=active_settings,
@@ -164,4 +190,5 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         orchestrator=orchestrator,
         scheduler=scheduler,
         session_manager=session_manager,
+        archive_reflection=archive_reflection,
     )

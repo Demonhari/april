@@ -18,6 +18,12 @@ from april_common.time import parse_utc_iso, utc_now
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage
 from services.brain.agent_loop import StructuredAgentLoop
+from services.brain.intelligence_ladder import (
+    ChatMode,
+    IntelligenceLadder,
+    LadderRun,
+    LadderSelection,
+)
 from services.brain.memory_policy import AgentMemoryContext, build_agent_memory_context
 from services.brain.planner import task_plan_from_decision
 from services.brain.reasoning_resolver import resolve_reasoning_model
@@ -107,6 +113,11 @@ class AprilOrchestrator:
             tool_executor=tool_executor,
             memory=memory,
         )
+        self.intelligence_ladder = IntelligenceLadder(
+            settings=settings,
+            runtime_client=runtime_client,
+            agent_registry=agent_registry,
+        )
 
     async def chat(
         self,
@@ -117,6 +128,7 @@ class AprilOrchestrator:
         actor: str = "local-user",
         project_id: str | None = None,
         repo_path: str | None = None,
+        mode: ChatMode = "standard",
     ) -> AgentResult:
         prepared = await self._prepare_turn(
             message,
@@ -127,6 +139,15 @@ class AprilOrchestrator:
             repo_path=repo_path,
             structured_specialists=True,
         )
+        selection = self._select_intelligence_rung(prepared, message=message, mode=mode)
+        ladder_result = await self._maybe_run_ladder(prepared, message, selection)
+        if ladder_result is not None:
+            return ladder_result
+        if selection.rung == 2:
+            return await self._run_verified_prepared(prepared, message)
+        return await self._run_standard_prepared(prepared, message)
+
+    async def _run_standard_prepared(self, prepared: PreparedTurn, message: str) -> AgentResult:
         if prepared.structured_agent:
             return await self._run_structured_prepared(prepared, message)
         if prepared.pending_approval is not None:
@@ -159,6 +180,45 @@ class AprilOrchestrator:
         await self._update_task_status(prepared, "completed")
         return result
 
+    async def _run_verified_prepared(self, prepared: PreparedTurn, message: str) -> AgentResult:
+        if prepared.structured_agent or prepared.pending_approval is not None:
+            return await self._run_standard_prepared(prepared, message)
+        if prepared.final_message is not None:
+            return await self._run_standard_prepared(prepared, message)
+
+        response = await self.runtime_client.chat(
+            model_id=prepared.model_id,
+            messages=prepared.messages,
+            request_id=prepared.request_id,
+        )
+        verified = await self.intelligence_ladder.verify_and_revise(
+            message=message,
+            initial_answer=response.content,
+            model_id=prepared.model_id,
+            request_id=prepared.request_id,
+        )
+        final_message = verified.final_message
+        await self.memory.add_message(prepared.conversation_id, "assistant", final_message)
+        result = AgentResult(
+            status="ok",
+            final_message=final_message,
+            conversation_id=prepared.conversation_id,
+            local_citations=prepared.citations,
+            warnings=[*prepared.warnings, *response.warnings, *verified.warnings],
+            usage={**response.usage.model_dump(), **verified.usage},
+        )
+        prepared.run_metadata.update(verified.metadata)
+        await self.memory.record_agent_run(
+            conversation_id=prepared.conversation_id,
+            agent=prepared.agent_name,
+            status=result.status,
+            model_id=prepared.model_id,
+            summary=prepared.decision.decision_summary,
+            metadata=prepared.run_metadata,
+        )
+        await self._update_task_status(prepared, "completed")
+        return result
+
     async def stream_chat(
         self,
         message: str,
@@ -168,6 +228,7 @@ class AprilOrchestrator:
         actor: str = "local-user",
         project_id: str | None = None,
         repo_path: str | None = None,
+        mode: ChatMode = "standard",
     ) -> AsyncIterator[tuple[StreamEventName, dict[str, Any]]]:
         prepared = await self._prepare_turn(
             message,
@@ -178,6 +239,7 @@ class AprilOrchestrator:
             repo_path=repo_path,
             structured_specialists=True,
         )
+        selection = self._select_intelligence_rung(prepared, message=message, mode=mode)
         yield (
             "meta",
             {
@@ -188,6 +250,8 @@ class AprilOrchestrator:
                 "routing_method": prepared.decision.routing_method,
                 "citations": [citation.model_dump() for citation in prepared.citations],
                 "run_metadata": prepared.run_metadata,
+                "chat_mode": selection.mode,
+                "intelligence_rung": selection.rung,
             },
         )
         yield (
@@ -199,8 +263,25 @@ class AprilOrchestrator:
                 "routing_method": prepared.decision.routing_method,
                 "decision_summary": prepared.decision.decision_summary,
                 "run_metadata": prepared.run_metadata,
+                "confidence": prepared.decision.confidence,
+                "chat_mode": selection.mode,
+                "intelligence_rung": selection.rung,
             },
         )
+        ladder_result = await self._maybe_run_ladder(prepared, message, selection)
+        if ladder_result is not None:
+            yield ("final_answer", {"message": ladder_result.final_message})
+            yield ("token", {"text": ladder_result.final_message})
+            yield ("usage", ladder_result.usage)
+            yield ("done", {"finish_reason": "stop" if ladder_result.status == "ok" else "error"})
+            return
+        if selection.rung == 2:
+            result = await self._run_verified_prepared(prepared, message)
+            yield ("final_answer", {"message": result.final_message})
+            yield ("token", {"text": result.final_message})
+            yield ("usage", result.usage)
+            yield ("done", {"finish_reason": "stop" if result.status == "ok" else "error"})
+            return
         if prepared.structured_agent:
             yield (
                 "agent_iteration",
@@ -322,6 +403,102 @@ class AprilOrchestrator:
             "message": message,
             "proposed_changes": [change.model_dump() for change in proposed_changes],
         }
+
+    def _select_intelligence_rung(
+        self,
+        prepared: PreparedTurn,
+        *,
+        message: str,
+        mode: ChatMode,
+    ) -> LadderSelection:
+        selection = self.intelligence_ladder.select(
+            message=message,
+            decision=prepared.decision,
+            mode=mode,
+        )
+        prepared.run_metadata.update(
+            {
+                "chat_mode": selection.mode,
+                "intelligence_rung": selection.rung,
+                "intelligence_reason": selection.reason,
+                "routing_confidence": prepared.decision.confidence,
+            }
+        )
+        return selection
+
+    async def _maybe_run_ladder(
+        self,
+        prepared: PreparedTurn,
+        message: str,
+        selection: LadderSelection,
+    ) -> AgentResult | None:
+        if selection.rung == 0:
+            run = LadderRun(
+                status="ok",
+                final_message=self.intelligence_ladder.reflex_answer(message),
+                mode=selection.mode,
+                rung=0,
+                model_id=prepared.model_id,
+                metadata={
+                    "mode": selection.mode,
+                    "intelligence_rung": 0,
+                    "deterministic": True,
+                },
+            )
+            return await self._finish_ladder_run(prepared, run)
+        if selection.rung == 3:
+            run = await self.intelligence_ladder.run_deep(
+                message=message,
+                prompt_messages=prepared.messages,
+                fallback_model_id=prepared.model_id,
+                request_id=prepared.request_id,
+            )
+            return await self._finish_ladder_run(prepared, run)
+        if selection.rung == 4:
+            run = await self.intelligence_ladder.run_council(
+                message=message,
+                prompt_messages=prepared.messages,
+                fallback_model_id=prepared.model_id,
+                request_id=prepared.request_id,
+            )
+            return await self._finish_ladder_run(prepared, run)
+        return None
+
+    async def _finish_ladder_run(self, prepared: PreparedTurn, run: LadderRun) -> AgentResult:
+        prepared.run_metadata.update(run.metadata)
+        if run.candidates:
+            prepared.run_metadata["council_candidates"] = [
+                {
+                    "responder_id": candidate.responder_id,
+                    "score": candidate.score,
+                    "rationale": candidate.rationale,
+                }
+                for candidate in run.candidates
+            ]
+        if run.status == "ok":
+            await self.memory.add_message(prepared.conversation_id, "assistant", run.final_message)
+        status: Literal["ok", "unavailable"] = "ok" if run.status == "ok" else "unavailable"
+        result = AgentResult(
+            status=status,
+            final_message=run.final_message,
+            conversation_id=prepared.conversation_id,
+            local_citations=prepared.citations,
+            warnings=[*prepared.warnings, *run.warnings],
+            usage=run.usage,
+        )
+        await self.memory.record_agent_run(
+            conversation_id=prepared.conversation_id,
+            agent=prepared.agent_name,
+            status=result.status,
+            model_id=run.model_id or prepared.model_id,
+            summary=prepared.decision.decision_summary,
+            metadata=prepared.run_metadata,
+        )
+        await self._update_task_status(
+            prepared,
+            "completed" if result.status == "ok" else "error",
+        )
+        return result
 
     async def _prepare_turn(
         self,

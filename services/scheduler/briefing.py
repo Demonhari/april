@@ -44,6 +44,7 @@ async def compose_briefing(
     now_iso: str,
     until_iso: str,
     repo_activity: list[RepoActivity] | None = None,
+    evolution_report: dict[str, object] | None = None,
 ) -> Notification:
     """Build a plain-text daily briefing Notification with no LLM or external I/O.
 
@@ -83,6 +84,12 @@ async def compose_briefing(
     activity_lines = _repo_activity_lines(repo_activity)
     if activity_lines:
         body = body + "\n\n" + "\n".join(activity_lines)
+    if evolution_report is not None:
+        status = str(evolution_report.get("status", "unknown"))
+        reason = str(evolution_report.get("reason", ""))
+        body = body + f"\n\nDreamer: {status}"
+        if reason:
+            body = body + f" ({reason[:120]})"
 
     return Notification(
         kind="briefing",

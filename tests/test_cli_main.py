@@ -4,7 +4,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-from apps.cli.main import app
+from apps.cli.main import _handle_repl_command, app
 
 
 class FakeApiClient:
@@ -21,6 +21,8 @@ class FakeApiClient:
             return {"models": [{"id": "april-brain", "role": "brain", "state": "loaded"}]}
         if path == "/approvals":
             return {"approvals": []}
+        if path == "/sessions":
+            return {"sessions": [{"id": "session-1"}]}
         if path == "/projects":
             return {"projects": []}
         if path == "/memory/export":
@@ -31,6 +33,12 @@ class FakeApiClient:
             return {"reminders": []}
         if path == "/tasks":
             return {"tasks": []}
+        if path == "/playbooks":
+            return {"playbooks": []}
+        if path == "/evolution/versions":
+            return {"versions": []}
+        if path == "/evolution/report/latest":
+            return {"report": None}
         if path == "/voice/doctor":
             return {"status": "disabled"}
         raise AssertionError(path)
@@ -55,6 +63,12 @@ class FakeApiClient:
             return {"result": {"ok": True}}
         if path == "/reminders":
             return {"reminder": {"id": "reminder-1", **payload}}
+        if path == "/playbooks/adopt":
+            return {"adopted": True, "id": payload["id"]}
+        if path.endswith("/run") and path.startswith("/playbooks/"):
+            return {"run": {"status": "completed"}}
+        if path == "/evolution/rollback":
+            return {"rollback": {"status": "applied", **payload}}
         raise AssertionError(path)
 
     async def delete(self, path: str) -> dict[str, Any]:
@@ -88,6 +102,11 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         ["reminder", "create", "stand up", "--due-at", "2026-06-21T09:00:00Z"],
         ["reminder", "delete", "reminder-1"],
         ["task", "list"],
+        ["playbook", "list"],
+        ["playbook", "run", "sample"],
+        ["evolve", "versions"],
+        ["evolve", "rollback", "general_agent", "1"],
+        ["evolve", "report"],
         ["voice", "health"],
         ["voice", "doctor"],
     ]
@@ -97,7 +116,13 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
     assert (
         "POST",
         "/chat",
-        {"message": "hello", "project_id": None, "repo_path": None, "conversation_id": None},
+        {
+            "message": "hello",
+            "project_id": None,
+            "repo_path": None,
+            "conversation_id": None,
+            "mode": "standard",
+        },
     ) in fake.calls
     assert (
         "POST",
@@ -118,6 +143,95 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         {"content": "stand up", "due_at": "2026-06-21T09:00:00Z"},
     ) in fake.calls
     assert ("DELETE", "/reminders/reminder-1", None) in fake.calls
+    assert ("GET", "/playbooks", None) in fake.calls
+    assert (
+        "POST",
+        "/playbooks/sample/run",
+        {"project_id": None, "conversation_id": None},
+    ) in fake.calls
+    assert ("GET", "/evolution/versions", None) in fake.calls
+    assert (
+        "POST",
+        "/evolution/rollback",
+        {"agent": "general_agent", "version": 1},
+    ) in fake.calls
+
+
+def test_playbook_adopt_reads_local_definition(monkeypatch, tmp_path) -> None:
+    fake = FakeApiClient()
+    monkeypatch.setattr("apps.cli.main.client", lambda: fake)
+    path = tmp_path / "playbook.yaml"
+    path.write_text(
+        """
+id: local-playbook
+name: Local playbook
+agent_id: general_agent
+trigger_examples:
+  - local
+steps:
+  - tool: create_reminder
+    args:
+      content: stand up
+""",
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(app, ["playbook", "adopt", str(path)])
+    assert result.exit_code == 0, result.output
+    assert fake.calls[-1][0:2] == ("POST", "/playbooks/adopt")
+    assert fake.calls[-1][2]["id"] == "local-playbook"
+
+
+def test_repl_slash_commands_delegate_to_existing_api(monkeypatch) -> None:
+    fake = FakeApiClient()
+    monkeypatch.setattr("apps.cli.main.client", lambda: fake)
+
+    assert _handle_repl_command("/status", "conversation-1") is True
+    assert ("GET", "/health", None) in fake.calls
+    assert ("GET", "/sessions", None) in fake.calls
+    assert ("GET", "/approvals", None) in fake.calls
+
+    assert _handle_repl_command("/approve approval-1", "conversation-1") is True
+    assert ("POST", "/tools/approve", {"approval_id": "approval-1"}) in fake.calls
+
+    assert _handle_repl_command("/deny approval-1", "conversation-1") is True
+    assert ("POST", "/tools/deny", {"approval_id": "approval-1"}) in fake.calls
+
+    assert _handle_repl_command("/deep compare options", "conversation-1") is True
+    assert (
+        "POST",
+        "/chat",
+        {
+            "message": "compare options",
+            "conversation_id": "conversation-1",
+            "mode": "deep",
+        },
+    ) in fake.calls
+
+    assert _handle_repl_command("/council compare options", "conversation-1") is True
+    assert (
+        "POST",
+        "/chat",
+        {
+            "message": "compare options",
+            "conversation_id": "conversation-1",
+            "mode": "council",
+        },
+    ) in fake.calls
+
+
+def test_voice_listen_uses_sentinel(monkeypatch) -> None:
+    import services.wake.sentinel as sentinel_module
+
+    called: dict[str, object] = {}
+
+    async def fake_run_sentinel(settings: object) -> None:
+        called["settings"] = settings
+
+    monkeypatch.setattr(sentinel_module, "run_sentinel", fake_run_sentinel)
+    runner = CliRunner()
+    result = runner.invoke(app, ["voice", "listen"])
+    assert result.exit_code == 0, result.output
+    assert "settings" in called
 
 
 def test_voice_ptt_modes_use_capture_strategy(monkeypatch) -> None:

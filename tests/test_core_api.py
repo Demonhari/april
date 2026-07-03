@@ -304,6 +304,32 @@ def test_chat_routes_reading_agent_through_structured_loop(settings_tmp) -> None
     assert len(rows) == 1
 
 
+def test_chat_deep_mode_uses_explicit_ladder_mode(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/chat",
+        json={"message": "Compare approaches for local memory.", "mode": "deep"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["status"] == "ok"
+    assert result["final_message"].startswith("Mode: deep")
+    rows = anyio.run(
+        container.database.fetchall,
+        "SELECT metadata_json FROM agent_runs WHERE status = ?",
+        ("ok",),
+    )
+    metadata = [json.loads(row["metadata_json"]) for row in rows]
+    assert any(
+        item.get("chat_mode") == "deep" and item.get("intelligence_rung") == 3
+        for item in metadata
+    )
+
+
 def test_repo_request_without_project_asks_for_selection(settings_tmp) -> None:
     import anyio
 
@@ -914,6 +940,30 @@ def test_voice_input_preserves_conversation_id(settings_tmp) -> None:
     )
     assert voice.status_code == 200
     assert voice.json()["result"]["conversation_id"] == conversation_id
+
+
+def test_wake_endpoint_voice_and_terminal_join_same_session(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    voice = client.post(
+        "/wake",
+        json={"source": "voice", "text": "plan my work today"},
+        headers=auth(settings_tmp),
+    )
+    terminal = client.post(
+        "/wake",
+        json={"source": "terminal", "text": "continue that plan"},
+        headers=auth(settings_tmp),
+    )
+    assert voice.status_code == 200
+    assert terminal.status_code == 200
+    first = voice.json()
+    second = terminal.json()
+    assert second["joined_existing"] is True
+    assert second["session_id"] == first["session_id"]
+    assert second["conversation_id"] == first["conversation_id"]
 
 
 def test_project_add_normalizes_and_deduplicates(settings_tmp) -> None:

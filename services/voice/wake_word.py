@@ -70,9 +70,11 @@ class OpenWakeWordDetector(WakeWordDetector):
             model_reset()
 
     def detect(self, frame: bytes) -> bool:
+        self._validate_frame_config(frame)
+        model = self._load()
         detected = False
         for window in self._aggregate_windows(frame):
-            if self._predict_window(self._load(), window):
+            if self._predict_window(model, window):
                 detected = True
         return detected
 
@@ -84,21 +86,26 @@ class OpenWakeWordDetector(WakeWordDetector):
         needs the raw model confidence. Frames smaller than an 80 ms window
         aggregate across calls and yield 0.0 until a full window is available.
         """
+        self._validate_frame_config(frame)
+        model = self._load()
         best = 0.0
         for window in self._aggregate_windows(frame):
-            prediction = self._load().predict(window)  # type: ignore[attr-defined]
+            prediction = model.predict(window)  # type: ignore[attr-defined]
             if isinstance(prediction, dict):
                 for value in prediction.values():
                     best = max(best, float(value))
         return best
 
-    def _aggregate_windows(self, frame: bytes) -> list[np.ndarray]:
+    def _validate_frame_config(self, frame: bytes) -> None:
         if len(frame) % 2 != 0:
             raise RuntimeUnavailableError("Wake-word frames must be 16-bit PCM.")
         if self.channels != 1 or self.sample_rate != WAKE_WORD_SAMPLE_RATE:
             raise RuntimeUnavailableError(
                 "Wake word requires mono, 16 kHz, 16-bit signed PCM audio."
             )
+
+    def _aggregate_windows(self, frame: bytes) -> list[np.ndarray]:
+        self._validate_frame_config(frame)
         # Raw microphone bytes are converted to int16 samples; the openWakeWord
         # model is only ever called with a numpy int16 array, never raw bytes.
         samples = np.frombuffer(frame, dtype=np.int16)

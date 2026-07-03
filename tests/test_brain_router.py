@@ -136,6 +136,7 @@ class UnknownAgentRouter:
             intent="bad",
             agent="missing_agent",  # type: ignore[arg-type]
             model_id="april-brain",
+            confidence=0.1,
             tools_needed=[],
             planned_tool_calls=[],
             memory_queries=[],

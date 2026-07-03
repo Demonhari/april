@@ -513,6 +513,12 @@ def test_openwakeword_requires_configured_existing_model(tmp_path: Path) -> None
         detector.detect(b"\x00\x00" * 80)
 
 
+def test_openwakeword_score_requires_configured_existing_model(tmp_path: Path) -> None:
+    detector = OpenWakeWordDetector(tmp_path / "missing.onnx")
+    with pytest.raises(RuntimeUnavailableError, match="missing"):
+        detector.score(b"\x00\x00" * 80)
+
+
 def test_openwakeword_validates_pcm_frame_width(tmp_path: Path) -> None:
     model = tmp_path / "wake.onnx"
     model.write_bytes(b"fake")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from april_common.errors import PermissionDeniedError
 from april_common.time import utc_now_iso
@@ -61,16 +61,34 @@ class SqliteMemory:
         kind: str = "fact",
         reason: str,
         project_id: str | None = None,
+        confidence: float = 0.7,
+        source: str = "user",
+        expires_at: str | None = None,
+        superseded_by: str | None = None,
     ) -> MemoryRecord:
         memory_id = str(uuid.uuid4())
         created_at = utc_now_iso()
         async with self.database.transaction() as conn:
             await conn.execute(
                 """
-                INSERT INTO memories(id, project_id, kind, content, reason, created_at)
-                VALUES(?, ?, ?, ?, ?, ?)
+                INSERT INTO memories(
+                    id, project_id, kind, content, reason, created_at,
+                    confidence, source, expires_at, superseded_by
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (memory_id, project_id, kind, content, reason, created_at),
+                (
+                    memory_id,
+                    project_id,
+                    kind,
+                    content,
+                    reason,
+                    created_at,
+                    confidence,
+                    source,
+                    expires_at,
+                    superseded_by,
+                ),
             )
             await conn.execute(
                 "INSERT INTO memories_fts(id, content, reason) VALUES(?, ?, ?)",
@@ -83,7 +101,30 @@ class SqliteMemory:
             project_id=project_id,
             reason=reason,
             created_at=created_at,
+            confidence=confidence,
+            source=source,
+            expires_at=expires_at,
+            superseded_by=superseded_by,
         )
+
+    async def get_memory(
+        self, memory_id: str, *, include_inactive: bool = False
+    ) -> MemoryRecord | None:
+        if include_inactive:
+            row = await self.database.fetchone("SELECT * FROM memories WHERE id = ?", (memory_id,))
+        else:
+            row = await self.database.fetchone(
+                """
+                SELECT * FROM memories
+                WHERE id = ?
+                  AND superseded_by IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+                """,
+                (memory_id, utc_now_iso()),
+            )
+        if row is None:
+            return None
+        return MemoryRecord.model_validate(dict(row))
 
     async def find_duplicate_memory(
         self,
@@ -107,13 +148,36 @@ class SqliteMemory:
                 return record
         return None
 
-    async def list_memories(self, *, project_id: str | None = None) -> list[MemoryRecord]:
+    async def list_memories(
+        self, *, project_id: str | None = None, include_inactive: bool = False
+    ) -> list[MemoryRecord]:
+        active_clause = (
+            ""
+            if include_inactive
+            else "AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at > ?)"
+        )
+        params: tuple[object, ...]
         if project_id is None:
-            rows = await self.database.fetchall("SELECT * FROM memories ORDER BY created_at DESC")
-        else:
+            params = (utc_now_iso(),) if not include_inactive else ()
             rows = await self.database.fetchall(
-                "SELECT * FROM memories WHERE project_id = ? ORDER BY created_at DESC",
-                (project_id,),
+                f"""
+                SELECT * FROM memories
+                WHERE 1 = 1 {active_clause}
+                ORDER BY created_at DESC
+                """,
+                params,
+            )
+        else:
+            params = (
+                (project_id, utc_now_iso()) if not include_inactive else (project_id,)
+            )
+            rows = await self.database.fetchall(
+                f"""
+                SELECT * FROM memories
+                WHERE project_id = ? {active_clause}
+                ORDER BY created_at DESC
+                """,
+                params,
             )
         return [MemoryRecord.model_validate(dict(row)) for row in rows]
 
@@ -122,6 +186,8 @@ class SqliteMemory:
     ) -> list[MemoryRecord]:
         if query.strip() in {"", "*"}:
             return await self.list_memories(project_id=project_id)
+        active_sql = "superseded_by IS NULL AND (expires_at IS NULL OR expires_at > ?)"
+        now = utc_now_iso()
         if project_id is None:
             rows = await self.database.fetchall(
                 """
@@ -129,10 +195,12 @@ class SqliteMemory:
                 FROM memories_fts f
                 JOIN memories m ON m.id = f.id
                 WHERE memories_fts MATCH ?
+                  AND m.superseded_by IS NULL
+                  AND (m.expires_at IS NULL OR m.expires_at > ?)
                 ORDER BY rank
                 LIMIT 20
                 """,
-                (query,),
+                (query, now),
             )
         else:
             rows = await self.database.fetchall(
@@ -141,27 +209,58 @@ class SqliteMemory:
                 FROM memories_fts f
                 JOIN memories m ON m.id = f.id
                 WHERE memories_fts MATCH ? AND m.project_id = ?
+                  AND m.superseded_by IS NULL
+                  AND (m.expires_at IS NULL OR m.expires_at > ?)
                 ORDER BY rank
                 LIMIT 20
                 """,
-                (query, project_id),
+                (query, project_id, now),
             )
         if not rows:
             if project_id is None:
                 rows = await self.database.fetchall(
-                    "SELECT * FROM memories WHERE content LIKE ? OR reason LIKE ? LIMIT 20",
-                    (f"%{query}%", f"%{query}%"),
+                    f"""
+                    SELECT * FROM memories
+                    WHERE ({active_sql}) AND (content LIKE ? OR reason LIKE ?)
+                    LIMIT 20
+                    """,
+                    (now, f"%{query}%", f"%{query}%"),
                 )
             else:
                 rows = await self.database.fetchall(
                     """
                     SELECT * FROM memories
-                    WHERE project_id = ? AND (content LIKE ? OR reason LIKE ?)
+                    WHERE project_id = ?
+                      AND superseded_by IS NULL
+                      AND (expires_at IS NULL OR expires_at > ?)
+                      AND (content LIKE ? OR reason LIKE ?)
                     LIMIT 20
                     """,
-                    (project_id, f"%{query}%", f"%{query}%"),
+                    (project_id, now, f"%{query}%", f"%{query}%"),
                 )
         return [MemoryRecord.model_validate(dict(row)) for row in rows]
+
+    async def mark_memories_used(self, memory_ids: list[str]) -> None:
+        if not memory_ids:
+            return
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            for memory_id in dict.fromkeys(memory_ids):
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET use_count = use_count + 1, last_used_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, memory_id),
+                )
+
+    async def count_machine_memories_since(self, since_iso: str, *, source: str) -> int:
+        row = await self.database.fetchone(
+            "SELECT COUNT(*) AS count FROM memories WHERE source = ? AND created_at >= ?",
+            (source, since_iso),
+        )
+        return int(row["count"]) if row is not None else 0
 
     async def delete_memory(self, memory_id: str) -> bool:
         async with self.database.transaction() as conn:
@@ -786,7 +885,7 @@ class SqliteMemory:
     async def record_feedback_event(
         self,
         *,
-        rating: str,
+        rating: Literal["good", "bad"],
         reason: str | None = None,
         session_id: str | None = None,
         conversation_id: str | None = None,
@@ -808,7 +907,7 @@ class SqliteMemory:
             session_id=session_id,
             conversation_id=conversation_id,
             agent_run_id=agent_run_id,
-            rating=rating,  # type: ignore[arg-type]
+            rating=rating,
             reason=reason,
             created_at=created_at,
         )

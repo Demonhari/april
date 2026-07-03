@@ -6,6 +6,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -39,8 +40,10 @@ from services.api.schemas import (
     ChatRequest,
     ChatResponse,
     DocumentCreateRequest,
+    EvolutionRollbackRequest,
     FeedbackRequest,
     MemoryCreateRequest,
+    PlaybookRunRequest,
     ProjectCreateRequest,
     ReminderCreateRequest,
     SessionAttachRequest,
@@ -49,16 +52,19 @@ from services.api.schemas import (
     WakeRequest,
 )
 from services.april_runtime.schemas import LoadModelRequest
+from services.evolution.dreamer import latest_report
+from services.evolution.versions import PromptOverlayManager
 from services.memory.writer import MemoryWriter
 from services.scheduler import compose_briefing, compute_repo_activity
-from services.wake.schemas import WakeEvent
-from services.wake.wake_bus import WakeBus
 from services.voice.health import (
     microphone_access,
     query_audio_devices,
     voice_health,
     voice_readiness_summary,
 )
+from services.wake.schemas import WakeEvent
+from services.wake.wake_bus import WakeBus
+from skills.playbooks import PlaybookDefinition, PlaybookLoader, PlaybookRunner
 
 _DESKTOP_WEB_DIR = Path(__file__).resolve().parents[2] / "apps" / "desktop" / "web"
 
@@ -354,6 +360,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             request_id=request_id,
             project_id=request.project_id,
             repo_path=request.repo_path,
+            mode=request.mode,
         )
         return ChatResponse(request_id=request_id, result=result)
 
@@ -372,6 +379,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                 request_id=request_id,
                 project_id=request.project_id,
                 repo_path=request.repo_path,
+                mode=request.mode,
             ):
                 yield _sse_event(event_name, request_id, payload)
 
@@ -389,6 +397,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             request_id=request_id,
             project_id=request.project_id,
             repo_path=request.repo_path,
+            mode=request.mode,
         )
         return ChatResponse(request_id=request_id, result=result)
 
@@ -659,6 +668,69 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     async def tasks(active: ApiContainer = Depends(authorized)) -> object:
         return {"tasks": [task.model_dump() for task in await active.memory.list_tasks()]}
 
+    @app.get("/playbooks")
+    async def playbooks(active: ApiContainer = Depends(authorized)) -> object:
+        loader = PlaybookLoader(active.settings.playbooks_path)
+        return {"playbooks": [playbook.model_dump() for playbook in loader.list()]}
+
+    @app.post("/playbooks/adopt")
+    async def playbook_adopt(
+        request: PlaybookDefinition,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        loader = PlaybookLoader(active.settings.playbooks_path)
+        path = loader.adopt(request)
+        return {"adopted": True, "id": request.id, "path": str(path)}
+
+    @app.post("/playbooks/{playbook_id}/run")
+    async def playbook_run(
+        playbook_id: str,
+        request: PlaybookRunRequest,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        loader = PlaybookLoader(active.settings.playbooks_path)
+        playbook = loader.get(playbook_id)
+        if playbook is None:
+            raise HTTPException(status_code=404, detail="playbook not found")
+        result = await PlaybookRunner(active.tool_executor).run(
+            playbook,
+            conversation_id=request.conversation_id,
+            project_id=request.project_id,
+        )
+        return {"run": asdict(result)}
+
+    @app.get("/evolution/versions")
+    async def evolution_versions(
+        agent: str | None = None,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        manager = PromptOverlayManager(
+            active.settings,
+            active.database,
+            audit=active.approvals.audit,
+        )
+        return {"versions": await manager.versions(agent=agent)}
+
+    @app.post("/evolution/rollback")
+    async def evolution_rollback(
+        request: EvolutionRollbackRequest,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        manager = PromptOverlayManager(
+            active.settings,
+            active.database,
+            audit=active.approvals.audit,
+        )
+        result = await manager.rollback(agent=request.agent, version=request.version)
+        payload = asdict(result)
+        if payload.get("path") is not None:
+            payload["path"] = str(payload["path"])
+        return {"rollback": payload}
+
+    @app.get("/evolution/report/latest")
+    async def evolution_report_latest(active: ApiContainer = Depends(authorized)) -> object:
+        return {"report": latest_report(active.settings)}
+
     @app.get("/scheduler/briefing/preview")
     async def scheduler_briefing_preview(
         active: ApiContainer = Depends(authorized),
@@ -674,6 +746,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             now_iso=now.isoformat().replace("+00:00", "Z"),
             until_iso=until.isoformat().replace("+00:00", "Z"),
             repo_activity=repo_activity,
+            evolution_report=latest_report(active.settings),
         )
         return notification.model_dump()
 

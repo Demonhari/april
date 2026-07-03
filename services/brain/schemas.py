@@ -21,6 +21,7 @@ class BrainDecision(BaseModel):
     intent: str
     agent: AgentName
     model_id: str
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     tools_needed: list[str] = Field(default_factory=list)
     planned_tool_calls: list[PlannedToolCall] = Field(default_factory=list)
     memory_queries: list[str] = Field(default_factory=list)

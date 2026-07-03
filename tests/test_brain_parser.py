@@ -16,6 +16,18 @@ def test_valid_strict_json() -> None:
     decision = parse_brain_decision(VALID)
     assert decision.intent == "planning"
     assert decision.routing_method == "model"
+    assert decision.confidence == 0.7
+
+
+def test_parser_preserves_model_confidence() -> None:
+    decision = parse_brain_decision(
+        """
+        {"intent":"planning","agent":"general_agent","model_id":"april-brain",
+        "confidence":0.91,"permission_level":0,"risk_level":"none",
+        "needs_confirmation":false,"decision_summary":"General"}
+        """
+    )
+    assert decision.confidence == 0.91
 
 
 def test_valid_structured_tool_calls() -> None:
@@ -70,9 +82,11 @@ async def test_malformed_json_repair() -> None:
 
     decision = await parse_with_repair("not json", repair)
     assert decision.routing_method == "model_repair"
+    assert decision.confidence == 0.55
 
 
 def test_fallback_routing() -> None:
     decision = FallbackRouter().route("April, check why the animation in this repository is broken")
     assert decision.agent == "coding_agent"
     assert decision.permission_level == 1
+    assert decision.confidence == 0.45

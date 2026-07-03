@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
 from april_common.time import parse_utc_iso, utc_now
@@ -24,10 +24,12 @@ class SessionManager:
         *,
         continuity_minutes: float,
         clock: Callable[[], datetime] | None = None,
+        on_close: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self.memory = memory
         self.continuity_minutes = continuity_minutes
         self.clock = clock or utc_now
+        self.on_close = on_close
 
     async def handle_wake(self, event: WakeEvent) -> WakeResolution:
         now = self.clock()
@@ -55,7 +57,10 @@ class SessionManager:
 
     async def close(self, session_id: str) -> bool:
         now_iso = self.clock().isoformat().replace("+00:00", "Z")
-        return await self.memory.close_session(session_id, at=now_iso)
+        closed = await self.memory.close_session(session_id, at=now_iso)
+        if closed and self.on_close is not None:
+            await self.on_close(session_id)
+        return closed
 
     async def _resolve_session(
         self, event: WakeEvent, now: datetime, now_iso: str
@@ -67,7 +72,7 @@ class SessionManager:
             return refreshed, True
         if latest is not None:
             # The stale session is closed so exactly one session is ever open.
-            await self.memory.close_session(latest.id, at=now_iso)
+            await self.close(latest.id)
         conversation_id = await self.memory.create_conversation(actor="local-user")
         session = await self.memory.create_session(
             source=event.source,

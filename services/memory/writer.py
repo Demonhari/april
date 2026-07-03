@@ -19,6 +19,8 @@ class MemoryWriter:
         memory_type: str = "fact",
         requested_by_user: bool = False,
         project_id: str | None = None,
+        confidence: float = 0.7,
+        source: str = "user",
     ) -> MemoryRecord:
         decision = self.policy.evaluate(content, requested_by_user=requested_by_user)
         if not decision.allowed:
@@ -35,4 +37,6 @@ class MemoryWriter:
             kind=memory_type,
             reason=reason or decision.reason,
             project_id=project_id,
+            confidence=confidence,
+            source=source,
         )
