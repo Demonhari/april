@@ -18,6 +18,7 @@ from april_common.time import parse_utc_iso, utc_now
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage
 from services.brain.agent_loop import StructuredAgentLoop
+from services.brain.feedback_classifier import classify_implicit_correction
 from services.brain.intelligence_ladder import (
     ChatMode,
     IntelligenceLadder,
@@ -139,6 +140,7 @@ class AprilOrchestrator:
         repo_path: str | None = None,
         mode: ChatMode = "standard",
     ) -> AgentResult:
+        await self._maybe_record_implicit_correction(message, conversation_id)
         playbook_result = await self._maybe_run_playbook(
             message,
             conversation_id=conversation_id,
@@ -164,6 +166,45 @@ class AprilOrchestrator:
         if selection.rung == 2:
             return await self._run_verified_prepared(prepared, message)
         return await self._run_standard_prepared(prepared, message)
+
+    async def _maybe_record_implicit_correction(
+        self, message: str, conversation_id: str | None
+    ) -> None:
+        """Record a conservative implicit negative signal on clear corrections.
+
+        Deterministic prefix classification only (no model), bound to the most
+        recent agent run of an *existing* conversation. Failures are swallowed:
+        feedback capture must never break the chat turn itself.
+        """
+        if conversation_id is None:
+            return
+        marker = classify_implicit_correction(message)
+        if marker is None:
+            return
+        try:
+            agent_run_id = await self.memory.latest_agent_run_id(
+                conversation_id=conversation_id
+            )
+            if agent_run_id is None:
+                return
+            record = await self.memory.record_feedback_event(
+                rating="bad",
+                reason=f"implicit_correction: {marker}",
+                conversation_id=conversation_id,
+                agent_run_id=agent_run_id,
+            )
+            self.approvals.audit.write(
+                {
+                    "event_type": "feedback_recorded",
+                    "actor": "local-user",
+                    "rating": record.rating,
+                    "kind": "implicit_correction",
+                    "reason_length": len(record.reason or ""),
+                    "agent_run_bound": True,
+                }
+            )
+        except Exception:
+            return
 
     async def _maybe_run_playbook(
         self,
@@ -1032,6 +1073,7 @@ class AprilOrchestrator:
             actor=actor,
             request_id=request_id,
         )
+        await self._record_denial_feedback(approval, suspended)
         if suspended is None:
             return {"status": "denied", "approval_id": approval_id}
         await self.memory.mark_agent_run_denied(approval_id=approval_id)
@@ -1046,6 +1088,34 @@ class AprilOrchestrator:
             payload={"approval_id": approval_id, "run_id": suspended.agent_run_id},
         )
         return {"status": "denied", "approval_id": approval_id, "result": result.model_dump()}
+
+    async def _record_denial_feedback(self, approval: Any, suspended: Any) -> None:
+        """A denied approval is an explicit negative signal about the proposal.
+
+        Recorded as a feedback event so evolution/scorecards can learn from it;
+        failures are swallowed because denial itself must always succeed.
+        """
+        try:
+            record = await self.memory.record_feedback_event(
+                rating="bad",
+                reason=f"approval_denied: {approval.tool}",
+                conversation_id=(
+                    suspended.conversation_id if suspended is not None else None
+                ),
+                agent_run_id=(suspended.agent_run_id if suspended is not None else None),
+            )
+            self.approvals.audit.write(
+                {
+                    "event_type": "feedback_recorded",
+                    "actor": "local-user",
+                    "rating": record.rating,
+                    "kind": "approval_denied",
+                    "reason_length": len(record.reason or ""),
+                    "agent_run_bound": record.agent_run_id is not None,
+                }
+            )
+        except Exception:
+            return
 
     async def _run_structured_prepared(self, prepared: PreparedTurn, message: str) -> AgentResult:
         agent = self.agent_registry.get(prepared.agent_name)

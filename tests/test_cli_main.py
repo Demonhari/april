@@ -39,6 +39,18 @@ class FakeApiClient:
             return {"versions": []}
         if path == "/evolution/report/latest":
             return {"report": None}
+        if path == "/evolution/status":
+            return {"status": {"enabled": False, "kill_switch_active": False}}
+        if path == "/evolution/history":
+            return {"runs": []}
+        if path == "/evolution/diff":
+            return {"agent": params["agent"], "diff": "+new line", "from_version": 1}
+        if path == "/evolution/overlays/pending":
+            return {"pending": []}
+        if path == "/pool/agents":
+            return {"agents": []}
+        if path == "/memory/inspect":
+            return {"memories": [], "state": params.get("state")}
         if path == "/voice/doctor":
             return {"status": "disabled"}
         raise AssertionError(path)
@@ -69,6 +81,16 @@ class FakeApiClient:
             return {"run": {"status": "completed"}}
         if path == "/evolution/rollback":
             return {"rollback": {"status": "applied", **payload}}
+        if path == "/evolution/off":
+            return {"kill_switch_active": True}
+        if path == "/evolution/on":
+            return {"kill_switch_active": False}
+        if path == "/evolution/dataset/export":
+            return {"export": {"path": "dataset.jsonl", "chat_pairs": 0}}
+        if path == "/evolution/overlays/approve":
+            return {"approval": {"status": "applied", **payload}}
+        if path.startswith("/sessions/") and path.endswith("/close"):
+            return {"closed": True}
         raise AssertionError(path)
 
     async def delete(self, path: str) -> dict[str, Any]:
@@ -90,6 +112,7 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         ["approve", "approval-1"],
         ["deny", "approval-1"],
         ["agent", "run", "coding_agent", "inspect"],
+        ["agent", "pool"],
         ["projects"],
         ["project", "add", "/tmp/project"],
         ["project", "index", "project-1"],
@@ -97,6 +120,7 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         ["memory", "search", "query"],
         ["memory", "delete", "memory-1"],
         ["memory", "export"],
+        ["memory", "inspect", "--state", "superseded"],
         ["conversation", "delete", "conversation-1"],
         ["reminder", "list"],
         ["reminder", "create", "stand up", "--due-at", "2026-06-21T09:00:00Z"],
@@ -107,6 +131,14 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         ["evolve", "versions"],
         ["evolve", "rollback", "general_agent", "1"],
         ["evolve", "report"],
+        ["evolve", "status"],
+        ["evolve", "history"],
+        ["evolve", "diff", "general_agent"],
+        ["evolve", "off"],
+        ["evolve", "on"],
+        ["evolve", "pending"],
+        ["evolve", "approve", "coding_agent", "a" * 64],
+        ["evolve", "dataset", "export", "--name", "nightly"],
         ["voice", "health"],
         ["voice", "doctor"],
     ]
@@ -155,6 +187,18 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         "/evolution/rollback",
         {"agent": "general_agent", "version": 1},
     ) in fake.calls
+    assert ("GET", "/evolution/status", None) in fake.calls
+    assert ("GET", "/evolution/history", {"limit": 20}) in fake.calls
+    assert ("GET", "/evolution/diff", {"agent": "general_agent"}) in fake.calls
+    assert ("POST", "/evolution/off", {}) in fake.calls
+    assert ("POST", "/evolution/on", {}) in fake.calls
+    assert ("GET", "/evolution/overlays/pending", None) in fake.calls
+    assert (
+        "POST",
+        "/evolution/overlays/approve",
+        {"agent": "coding_agent", "content_hash": "a" * 64},
+    ) in fake.calls
+    assert ("POST", "/evolution/dataset/export", {"name": "nightly"}) in fake.calls
 
 
 def test_playbook_adopt_reads_local_definition(monkeypatch, tmp_path) -> None:
@@ -232,6 +276,32 @@ def test_voice_listen_uses_sentinel(monkeypatch) -> None:
     result = runner.invoke(app, ["voice", "listen"])
     assert result.exit_code == 0, result.output
     assert "settings" in called
+
+
+def test_top_level_listen_flag_uses_sentinel(monkeypatch) -> None:
+    import services.wake.sentinel as sentinel_module
+
+    called: dict[str, object] = {}
+
+    async def fake_run_sentinel(settings: object) -> None:
+        called["settings"] = settings
+
+    monkeypatch.setattr(sentinel_module, "run_sentinel", fake_run_sentinel)
+    result = CliRunner().invoke(app, ["--listen"])
+    assert result.exit_code == 0, result.output
+    assert "settings" in called
+
+
+def test_speaker_gate_only_supports_off() -> None:
+    import pytest
+
+    from april_common.settings import WakeSettings
+
+    assert WakeSettings().speaker_gate == "off"
+    # YAML 1.1 parses an unquoted `off` as False; it must still mean "off".
+    assert WakeSettings(speaker_gate=False).speaker_gate == "off"
+    with pytest.raises(ValueError, match="speaker_gate currently supports only: off"):
+        WakeSettings(speaker_gate="soft")
 
 
 def test_voice_ptt_modes_use_capture_strategy(monkeypatch) -> None:

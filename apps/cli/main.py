@@ -169,25 +169,45 @@ def _handle_repl_command(message: str, conversation_id: str | None) -> bool:
     return True
 
 
+def _close_session(session_id: str | None) -> None:
+    """Best-effort session close so Archive reflection runs on REPL exit."""
+    if not session_id:
+        return
+    try:
+        run(client().post(f"/sessions/{session_id}/close", {}))
+    except Exception:
+        console.print("[yellow]Could not close the session; it will close on idle.[/yellow]")
+
+
 def attach() -> None:
     """Bare `april`: join (or start) the current session and talk."""
     _maybe_autostart_daemon()
     data = run(client().post("/sessions", {"source": "terminal"}))
     conversation_id = data.get("conversation_id")
+    session_id = data.get("session_id")
     joined = "existing" if data.get("joined_existing") else "new"
     console.print(f"Attached to {joined} APRIL session. Type /quit to exit.")
-    while True:
-        message = Prompt.ask("you")
-        if message.strip() in {"/quit", "/exit"}:
-            return
-        if not message.strip():
-            continue
-        if _handle_repl_command(message, conversation_id):
-            continue
-        response = run(
-            client().post("/chat", {"message": message, "conversation_id": conversation_id})
-        )
-        _print_chat_result(response["result"])
+    try:
+        while True:
+            try:
+                message = Prompt.ask("you")
+            except EOFError:
+                # Ctrl-D ends the REPL exactly like /quit.
+                return
+            if message.strip() in {"/quit", "/exit"}:
+                return
+            if not message.strip():
+                continue
+            if _handle_repl_command(message, conversation_id):
+                continue
+            response = run(
+                client().post("/chat", {"message": message, "conversation_id": conversation_id})
+            )
+            _print_chat_result(response["result"])
+    finally:
+        # Every exit path (quit, Ctrl-D, Ctrl-C, errors) closes the session so
+        # ArchiveReflectionService.reflect_session runs server-side.
+        _close_session(session_id)
 
 
 def one_shot(message: str) -> None:
@@ -202,9 +222,21 @@ def one_shot(message: str) -> None:
 
 
 @app.callback(invoke_without_command=True)
-def _root(ctx: typer.Context) -> None:
+def _root(
+    ctx: typer.Context,
+    listen: bool = typer.Option(
+        False,
+        "--listen",
+        help="Hand this terminal to hands-free voice (same as `april voice listen`).",
+    ),
+) -> None:
     if ctx.invoked_subcommand is None:
-        attach()
+        if listen:
+            # Compatibility alias: `april --listen` starts the Sentinel loop.
+            # No shell hooks are installed; this simply blocks this terminal.
+            voice_listen()
+        else:
+            attach()
 
 
 def known_command_names() -> set[str]:
@@ -363,6 +395,12 @@ def deny(approval_id: str) -> None:
     print_jsonish(data)
 
 
+@agent_app.command("pool")
+def agent_pool() -> None:
+    """Show the named agent pool: call signs plus persisted run/feedback stats."""
+    print_jsonish(run(client().get("/pool/agents")))
+
+
 @agent_app.command("run")
 def agent_run(
     agent: str,
@@ -444,6 +482,20 @@ def memory_delete(memory_id: str) -> None:
 @memory_app.command("export")
 def memory_export() -> None:
     data = run(client().get("/memory/export"))
+    print_jsonish(data)
+
+
+@memory_app.command("inspect")
+def memory_inspect(
+    state: str = typer.Option(
+        "machine",
+        "--state",
+        help="machine, superseded, expired, fading, or active.",
+    ),
+    limit: int = typer.Option(100, "--limit", min=1, max=500),
+) -> None:
+    """Inspect machine-written, superseded, expired, or fading memories."""
+    data = run(client().get("/memory/inspect", params={"state": state, "limit": limit}))
     print_jsonish(data)
 
 
@@ -753,6 +805,82 @@ def evolve_rollback(agent: str, version: int) -> None:
 @evolve_app.command("report")
 def evolve_report() -> None:
     print_jsonish(run(client().get("/evolution/report/latest")))
+
+
+@evolve_app.command("status")
+def evolve_status() -> None:
+    """Show evolution enablement, kill switch, last run, and overlay counts."""
+    print_jsonish(run(client().get("/evolution/status")))
+
+
+@evolve_app.command("history")
+def evolve_history(limit: int = typer.Option(20, "--limit", min=1, max=200)) -> None:
+    """List past Dreamer runs, newest first."""
+    print_jsonish(run(client().get("/evolution/history", params={"limit": limit})))
+
+
+@evolve_app.command("diff")
+def evolve_diff(
+    agent: str,
+    from_version: int | None = typer.Option(None, "--from", min=1),
+    to_version: int | None = typer.Option(None, "--to", min=1),
+) -> None:
+    """Unified diff between two prompt-overlay versions of one agent."""
+    params: dict[str, Any] = {"agent": agent}
+    if from_version is not None:
+        params["from_version"] = from_version
+    if to_version is not None:
+        params["to_version"] = to_version
+    data = run(client().get("/evolution/diff", params=params))
+    if data.get("diff"):
+        console.print(data["diff"])
+    else:
+        print_jsonish(data)
+
+
+@evolve_app.command("off")
+def evolve_off() -> None:
+    """Set the local kill switch: the Dreamer never runs while it is active."""
+    data = run(client().post("/evolution/off", {}))
+    print_jsonish(data)
+    console.print("Evolution is now hard-disabled. Re-enable with: april evolve on")
+
+
+@evolve_app.command("on")
+def evolve_on() -> None:
+    """Clear the local kill switch (config evolution.enabled still applies)."""
+    print_jsonish(run(client().post("/evolution/on", {})))
+
+
+@evolve_app.command("pending")
+def evolve_pending() -> None:
+    """List write-capable agent overlays awaiting explicit approval."""
+    print_jsonish(run(client().get("/evolution/overlays/pending")))
+
+
+@evolve_app.command("approve")
+def evolve_approve(agent: str, content_hash: str) -> None:
+    """Approve one pending overlay by agent and exact SHA-256 content hash."""
+    data = run(
+        client().post(
+            "/evolution/overlays/approve",
+            {"agent": agent, "content_hash": content_hash},
+        )
+    )
+    print_jsonish(data)
+
+
+evolve_dataset_app = typer.Typer(help="Fine-tuning dataset operations (export only).")
+evolve_app.add_typer(evolve_dataset_app, name="dataset")
+
+
+@evolve_dataset_app.command("export")
+def evolve_dataset_export(
+    name: str | None = typer.Option(None, "--name", help="Dataset basename."),
+) -> None:
+    """Export the reviewable JSONL fine-tune dataset under data/evolution/datasets."""
+    data = run(client().post("/evolution/dataset/export", {"name": name}))
+    print_jsonish(data)
 
 
 if __name__ == "__main__":

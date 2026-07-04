@@ -60,7 +60,7 @@ class PromptOverlayManager:
         source: Literal["dreamer", "forge", "hand"] = "dreamer",
         approved: bool = False,
     ) -> OverlayApplyResult:
-        reason = self._rejection_reason(content)
+        reason = self.rejection_reason(content)
         if reason is not None:
             self._audit("prompt_overlay_discarded", agent=agent, reason=reason)
             return OverlayApplyResult("discarded", agent, reason=reason)
@@ -185,7 +185,8 @@ class PromptOverlayManager:
         )
         return int(row["next_version"]) if row is not None else 1
 
-    def _rejection_reason(self, content: str) -> str | None:
+    def rejection_reason(self, content: str) -> str | None:
+        """Policy check shared by auto-apply and the user approval path."""
         if len(content) > self.settings.evolution.prompt_overlay_max_chars:
             return "overlay exceeds prompt_overlay_max_chars"
         if _STRUCTURAL_OVERLAY_RE.search(content):

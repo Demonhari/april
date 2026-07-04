@@ -990,7 +990,17 @@ run april voice test-tts "Hello Hari"
 run april voice ptt
 run april voice listen
 run april memory doctor
+run april memory inspect --state machine
 run april eval brain --fake
+run april sessions
+run april good
+run april bad "wrong file"
+run april agent pool
+run april evolve status
+run april evolve history
+run april evolve pending
+run april evolve off
+run april evolve dataset export
 ```
 
 `run april --fake` starts missing services with `APRIL_RUNTIME_BACKEND=fake`
@@ -1279,6 +1289,7 @@ april voice health
 april voice devices
 april voice ptt
 april voice listen
+april --listen        # top-level alias: hands this terminal to the Sentinel
 run april setup voice \
   --whisper-binary data/voice_artifacts/whisper.cpp/build/bin/whisper-cli \
   --whisper-model data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin \
@@ -1340,7 +1351,15 @@ Until that real ONNX model exists and the live wake check passes,
 `wake_word_live_verified` remains false.
 
 Push-to-talk starts only from explicit CLI invocation. API, Runtime, desktop, and
-normal CLI startup never activate the microphone.
+normal CLI startup never activate the microphone. `april --listen` is a plain
+alias for `april voice listen` — it blocks the current terminal on the Sentinel
+loop and installs no shell hooks of any kind.
+
+**Speaker gating is not implemented.** `wake.speaker_gate` accepts only `off`;
+config validation rejects anything else, so the setting cannot silently pretend
+to verify who is speaking. `april voice enroll` records local enrollment samples
+for a future soft speaker gate, but no verifier model exists yet and enrollment
+never changes wake behaviour.
 
 `run april voice verify-live` is the explicit live hardware check. It runs voice
 doctor, prints macOS microphone permission guidance, asks before recording a
@@ -1402,6 +1421,57 @@ run april briefing
 This calls the authenticated `GET /scheduler/briefing/preview` endpoint and
 renders the title and body. `GET /health` reports the scheduler block
 (`enabled`, `running`, `briefing_enabled`, `fired_reminders`).
+
+## v2 Control Plane (sessions, feedback, evolution, pool)
+
+**Sessions & Archive reflection.** Every surface (terminal, voice, desktop,
+hotkey, socket) converges on one continuity-aware session stream. Closing a
+session — `POST /sessions/{id}/close`, quitting the CLI REPL (`/quit`, `/exit`,
+Ctrl-D, Ctrl-C), or the idle sweep once `session.continuity_minutes` elapses
+(scheduler-driven) — triggers local Archive reflection, which may write bounded,
+policy-filtered machine memories. Inspect sessions with `april sessions` or the
+Desktop *Sessions* screen.
+
+**Feedback.** `april good` / `april bad "reason"` (or the 👍/👎 buttons on
+Desktop chat answers) record explicit feedback bound to the latest agent run.
+Denying an approval records an `approval_denied` negative signal automatically.
+A deliberately conservative, deterministic prefix classifier (no model) records
+`implicit_correction` feedback only for unambiguous correction openers such as
+"That's wrong…" inside an existing conversation.
+
+**Memory lifecycle.** Machine-written memories decay deterministically when
+unused (confidence shrinks; low-confidence rows start *fading* with a future
+`expires_at`). Nothing is silently deleted — inspect any state with
+`april memory inspect --state machine|superseded|expired|fading|active`.
+
+**Self-evolution (Dreamer) controls.** The nightly Dreamer stays OFF by default
+and is additionally gated by AC power (`pmset`), user idleness (`ioreg`
+HIDIdleTime), a wall-clock budget (`evolution.max_minutes`), and a local kill
+switch:
+
+```bash
+april evolve status            # enabled, kill switch, last run, overlay counts
+april evolve history           # past runs, newest first
+april evolve report            # latest nightly report (newest by created_at)
+april evolve pending           # write-capable overlays awaiting approval
+april evolve approve AGENT SHA256   # approve exact overlay bytes
+april evolve diff AGENT [--from N --to M]
+april evolve rollback AGENT VERSION
+april evolve off               # hard kill switch (data/evolution/DISABLED)
+april evolve on                # clear the kill switch
+april evolve dataset export --name my-dataset   # reviewable JSONL (M15)
+```
+
+Overlays are advisory prose only: structural tool/permission content is
+rejected at generation, at approval, and again at load. Write-capable agents
+(Forge/Hand) never auto-apply — their overlays wait in `evolve pending`.
+LoRA adapters can be served via `adapter_path` in `configs/models.yaml`;
+training is a manual local runbook (see `scripts/finetune/README.md`).
+
+**Named agent pool.** `april agent pool` (or `GET /pool/agents`) shows each
+specialist's call sign (Prime, Sage, Muse, Scout, Forge, Hand) with honest
+rolling stats aggregated from persisted `agent_runs` and `feedback_events` —
+no synthesized scores.
 
 ## Quality Gates
 

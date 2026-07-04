@@ -88,6 +88,16 @@ class LlamaCppBackend(RuntimeBackend):
             "chat_format": llama_chat_format(model.chat_format),
         }
         kwargs.update({key: value for key, value in optional_values.items() if value is not None})
+        if model.adapter_path is not None:
+            adapter = model.adapter_path.expanduser().resolve(strict=False)
+            if not adapter.exists():
+                # Fail closed with an actionable error instead of silently
+                # serving the base model without its configured adapter.
+                raise RuntimeUnavailableError(
+                    "Configured LoRA adapter file is missing.",
+                    {"model_id": model.id, "adapter": adapter.name},
+                )
+            kwargs["lora_path"] = str(adapter)
         if model.role == "embedding":
             # A chat Llama instance cannot also embed; an embedding-role model is
             # loaded as its own dedicated instance with embedding mode enabled.

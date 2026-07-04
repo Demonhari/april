@@ -284,6 +284,55 @@ class SqliteMemory:
                 )
         return await self.get_memory(memory_id, include_inactive=True)
 
+    async def set_memory_decay(
+        self, memory_id: str, *, confidence: float, expires_at: str | None
+    ) -> bool:
+        """Deterministic decay update: lower confidence, optionally start fading."""
+        cursor = await self.database.execute(
+            "UPDATE memories SET confidence = ?, expires_at = ? WHERE id = ?",
+            (confidence, expires_at, memory_id),
+        )
+        return cursor.rowcount > 0
+
+    async def list_memories_by_state(
+        self, state: str, *, limit: int = 100
+    ) -> list[MemoryRecord]:
+        """Inspect memory lifecycle states without hiding or deleting anything.
+
+        States: ``machine`` (machine-written, still active), ``superseded``,
+        ``expired`` (expires_at passed), ``fading`` (expires_at set but not yet
+        reached), and ``active`` (what retrieval serves).
+        """
+        now = utc_now_iso()
+        capped = max(1, min(limit, 500))
+        clauses = {
+            "machine": (
+                "source != 'user' AND superseded_by IS NULL "
+                "AND (expires_at IS NULL OR expires_at > ?)",
+                (now, capped),
+            ),
+            "superseded": ("superseded_by IS NOT NULL", (capped,)),
+            "expired": ("expires_at IS NOT NULL AND expires_at <= ?", (now, capped)),
+            "fading": (
+                "expires_at IS NOT NULL AND expires_at > ? AND superseded_by IS NULL",
+                (now, capped),
+            ),
+            "active": (
+                "superseded_by IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+                (now, capped),
+            ),
+        }
+        if state not in clauses:
+            raise ValueError(
+                "state must be one of machine, superseded, expired, fading, active"
+            )
+        where, params = clauses[state]
+        rows = await self.database.fetchall(
+            f"SELECT * FROM memories WHERE {where} ORDER BY created_at DESC LIMIT ?",
+            params,
+        )
+        return [MemoryRecord.model_validate(dict(row)) for row in rows]
+
     async def supersede_memory(self, memory_id: str, *, superseded_by: str) -> bool:
         """Mark a memory as superseded without deleting the row."""
         cursor = await self.database.execute(
@@ -998,6 +1047,18 @@ class SqliteMemory:
         if row is None:
             return None
         return self._session_from_row(row)
+
+    async def list_open_sessions(self, *, limit: int = 50) -> list[SessionRecord]:
+        rows = await self.database.fetchall(
+            """
+            SELECT * FROM sessions
+            WHERE closed_at IS NULL
+            ORDER BY last_activity_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(limit, 500)),),
+        )
+        return [self._session_from_row(row) for row in rows]
 
     async def touch_session(self, session_id: str, *, at: str | None = None) -> None:
         await self.database.execute(

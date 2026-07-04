@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -50,6 +52,8 @@ class DreamerService:
         audit: AuditLogger | None = None,
         guard: EvolutionWriteGuard | None = None,
         overlay_manager: PromptOverlayManager | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        nice_applier: Callable[[int], str | None] | None = None,
     ) -> None:
         self.settings = settings
         self.memory = memory
@@ -59,21 +63,53 @@ class DreamerService:
         self.overlay_manager = overlay_manager or PromptOverlayManager(
             settings, memory.database, audit=audit, guard=self.guard
         )
+        self.clock = clock
+        # Renicing is process-wide and irreversible for an unprivileged process,
+        # so it is only applied when a dedicated dreamer worker injects an
+        # applier (see run_standalone). The in-process scheduler path must never
+        # deprioritize the shared Core API process.
+        self.nice_applier = nice_applier
 
     async def run_once(self, now: datetime) -> DreamerRunResult:
         decision = await self.gate.should_run(now)
         if not decision.allowed:
             return DreamerRunResult("skipped", decision.reason)
+        self._apply_nice()
         run_id = str(uuid.uuid4())
+        started = self.clock()
+        budget_seconds = float(self.settings.evolution.max_minutes) * 60.0
         phases: dict[str, dict[str, Any]] = {}
 
-        await self._run_phase(phases, "replay", self._phase_replay(now))
-        await self._run_phase(phases, "distill", self._phase_distill())
-        await self._run_phase(phases, "mine", self._phase_mine())
-        candidates = await self._run_phase(phases, "evolve", self._phase_evolve())
-        await self._run_phase(
-            phases, "examine", self._phase_examine(candidates or [], run_id=run_id)
-        )
+        def budget_left() -> bool:
+            return (self.clock() - started) < budget_seconds
+
+        candidates: list[OverlayCandidate] | None = []
+        work_phases: list[tuple[str, Callable[[], Any]]] = [
+            ("replay", lambda: self._phase_replay(now)),
+            ("distill", self._phase_distill),
+            ("mine", self._phase_mine),
+            ("evolve", self._phase_evolve),
+            (
+                "examine",
+                lambda: self._phase_examine(candidates or [], run_id=run_id),
+            ),
+        ]
+        for name, phase_factory in work_phases:
+            if not budget_left():
+                # The wall-clock budget is enforced between phases: a phase in
+                # flight finishes, later phases are skipped and say why.
+                phases[name] = {
+                    "status": "skipped",
+                    "reason": "wall clock budget exhausted "
+                    f"(evolution.max_minutes={self.settings.evolution.max_minutes})",
+                }
+                self._audit(
+                    "dreamer_phase_skipped_budget", run_id=run_id, detail=name
+                )
+                continue
+            result = await self._run_phase(phases, name, phase_factory())
+            if name == "evolve":
+                candidates = result
 
         report_path, report = write_report(
             self.settings, guard=self.guard, run_id=run_id, phases=phases
@@ -125,7 +161,12 @@ class DreamerService:
 
     async def _phase_distill(self) -> tuple[Any, dict[str, Any]]:
         report = await consolidate_memories(self.memory, guard=self.guard)
-        return report, report.to_payload()
+        # Deterministic decay/fading of stale machine memories runs with the
+        # same fence; nothing is ever deleted, fading rows stay inspectable.
+        from services.memory.decay import apply_memory_decay
+
+        decay = await apply_memory_decay(self.memory, guard=self.guard)
+        return report, {**report.to_payload(), **decay.to_payload()}
 
     async def _phase_mine(self) -> tuple[Any, dict[str, Any]]:
         report = await mine_playbook_candidates(self.memory, self.settings, guard=self.guard)
@@ -186,6 +227,22 @@ class DreamerService:
         }
         return payload, payload
 
+    def _apply_nice(self) -> None:
+        """Lower this process's priority when a dedicated worker asked for it."""
+        if self.nice_applier is None:
+            return
+        error = self.nice_applier(self.settings.governor.dreamer_nice)
+        if error is None:
+            self._audit(
+                "dreamer_nice_applied",
+                run_id=None,
+                detail=f"nice={self.settings.governor.dreamer_nice}",
+            )
+        else:
+            # Failing to renice is never fatal; the run continues at normal
+            # priority with the reason on record.
+            self._audit("dreamer_nice_failed", run_id=None, detail=error)
+
     def _audit(self, event_type: str, *, run_id: str | None, detail: str | None = None) -> None:
         if self.audit is not None:
             self.audit.write(
@@ -198,11 +255,94 @@ class DreamerService:
             )
 
 
+def process_nice_applier(nice: int) -> str | None:
+    """Renice the *current* process. Only safe in a dedicated dreamer worker.
+
+    Unprivileged processes cannot lower niceness back down afterwards, which is
+    exactly why the in-process scheduler path never uses this.
+    """
+    import os
+
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, nice)
+    except (AttributeError, OSError, PermissionError) as exc:
+        return f"setpriority failed: {exc}"
+    return None
+
+
+def _report_sort_key(path: Any) -> tuple[str, str]:
+    """Newest-first key: embedded created_at wins, filesystem mtime breaks ties.
+
+    Report filenames are UUIDs, so lexicographic filename order says nothing
+    about recency; the report's own created_at field is authoritative.
+    """
+    created_at = ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            created_at = str(payload.get("created_at", ""))
+    except (OSError, json.JSONDecodeError):
+        created_at = ""
+    try:
+        mtime = f"{path.stat().st_mtime:020.6f}"
+    except OSError:
+        mtime = ""
+    return (created_at, mtime)
+
+
 def latest_report(settings: AprilSettings) -> dict[str, Any] | None:
-    reports = sorted((settings.evolution_path / "reports").glob("*.json"))
+    reports = list((settings.evolution_path / "reports").glob("*.json"))
     if not reports:
         return None
+    newest = max(reports, key=_report_sort_key)
     try:
-        return json.loads(reports[-1].read_text(encoding="utf-8"))
+        return json.loads(newest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+async def run_standalone(settings: AprilSettings, now: datetime) -> DreamerRunResult:
+    """Dedicated dreamer worker: own DB connection, governor gate, and renice.
+
+    This is the only path that applies governor.dreamer_nice — it deprioritizes
+    a process whose whole job is the nightly dream, never the shared Core API.
+    """
+    from april_common.audit import AuditLogger
+    from services.memory.database import Database
+    from services.memory.migrations import run_migrations
+    from services.pool.governor import ResourceGovernor
+
+    database = Database(settings.database_path)
+    await database.connect()
+    try:
+        await run_migrations(database)
+        memory = SqliteMemory(database)
+        audit = AuditLogger(settings.audit_path)
+        gate = EvolutionSchedulerGate(
+            settings, memory, governor=ResourceGovernor(settings)
+        )
+        dreamer = DreamerService(
+            settings,
+            memory=memory,
+            gate=gate,
+            audit=audit,
+            nice_applier=process_nice_applier,
+        )
+        return await dreamer.run_once(now)
+    finally:
+        await database.close()
+
+
+def main() -> None:
+    """`python -m services.evolution.dreamer`: run one gated dream cycle."""
+    import asyncio
+
+    from april_common.settings import get_settings
+    from april_common.time import utc_now
+
+    result = asyncio.run(run_standalone(get_settings(), utc_now()))
+    print(json.dumps({"status": result.status, "reason": result.reason}))
+
+
+if __name__ == "__main__":
+    main()

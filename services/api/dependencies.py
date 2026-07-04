@@ -181,17 +181,18 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         gate=EvolutionSchedulerGate(active_settings, memory, governor=governor),
         audit=audit,
     )
+    session_manager = SessionManager(
+        memory,
+        continuity_minutes=active_settings.session.continuity_minutes,
+        on_close=archive_reflection.reflect_session,
+    )
     scheduler = SchedulerService(
         settings=active_settings,
         memory=memory,
         audit=audit,
         sink=sink,
         dreamer=dreamer,
-    )
-    session_manager = SessionManager(
-        memory,
-        continuity_minutes=active_settings.session.continuity_minutes,
-        on_close=archive_reflection.reflect_session,
+        session_manager=session_manager,
     )
     return ApiContainer(
         settings=active_settings,

@@ -181,6 +181,17 @@ function updateRail() {
   setRailItem("rail-backend", undefined, "backend", backend.backend + " · " + badge);
   setRailItem("rail-project", undefined, "project", selectedProject ? selectedProject.name : "no project");
   setRailItem("rail-conv", undefined, "conv", CONVERSATION_ID.slice(0, 8));
+  // Wake/mute status: booleans from /health only; "unknown" when unreported.
+  const wake = state.health && state.health.wake;
+  if (!wake) {
+    setRailItem("rail-wake", "neutral", "wake", "unknown");
+  } else if (!wake.enabled) {
+    setRailItem("rail-wake", "neutral", "wake", "off");
+  } else if (wake.muted) {
+    setRailItem("rail-wake", "warn", "wake", "muted");
+  } else {
+    setRailItem("rail-wake", "ok", "wake", "on");
+  }
 }
 
 // Back-compat name: refreshes health + the always-on rail. Called only from the
@@ -716,6 +727,7 @@ async function streamChat(message) {
         assistantText = handleChatEvent(evt, assistant, assistantText, chips);
       }
     }
+    if (assistantText) addFeedbackControls();
   } catch (_err) {
     showBanner("Chat stream network error. Is the local API running?");
     if (assistant) { assistant.className = "msg errline"; assistant.textContent = "Network error during stream."; }
@@ -725,6 +737,28 @@ async function streamChat(message) {
     // A finished turn may have produced or consumed an approval; refresh.
     refreshApprovals();
   }
+}
+
+// Explicit thumbs feedback on the just-finished assistant answer. Feedback is
+// bound server-side to this conversation's most recent agent run.
+function addFeedbackControls() {
+  const host = consoleHost();
+  if (!host) return;
+  const log = host.querySelector(".console");
+  if (!log) return;
+  const row = el("div", "feedback-row");
+  row.innerHTML =
+    "<button class='btn secondary' data-fb='good' title='Mark this answer good'>👍</button>" +
+    "<button class='btn secondary' data-fb='bad' title='Mark this answer bad'>👎</button>";
+  const send = async (rating) => {
+    try {
+      await api("POST", "/feedback", { rating, conversation_id: CONVERSATION_ID });
+      row.innerHTML = "<span class='kv'>feedback recorded: " + esc(rating) + "</span>";
+    } catch (_err) { /* banner already shown by api() */ }
+  };
+  row.querySelector("[data-fb='good']").addEventListener("click", () => send("good"));
+  row.querySelector("[data-fb='bad']").addEventListener("click", () => send("bad"));
+  log.appendChild(row);
 }
 
 function parseSse(frame) {
@@ -935,6 +969,159 @@ screens.projects = async function () {
     list.appendChild(item);
   }
   screenEl.appendChild(list);
+};
+
+screens.sessions = async function () {
+  screenEl.appendChild(screenHeader("Sessions",
+    "Cross-surface wake sessions. Closing a session triggers local Archive reflection."));
+  const data = await api("GET", "/sessions");
+  const sessions = (data && data.sessions) || [];
+  const list = card("<div class='panel-title'>Recent sessions</div>");
+  if (!sessions.length) list.innerHTML += "<span class='muted'>No sessions yet.</span>";
+  for (const s of sessions) {
+    const open = !s.closed_at;
+    const item = el("div", "list-item");
+    item.innerHTML =
+      "<div class='row'><strong>" + esc(s.source) + "</strong>" +
+      (open ? " <span class='pill ok'>open</span>" : " <span class='pill'>closed</span>") +
+      "<span class='grow'></span>" +
+      (open ? "<button class='btn secondary' data-act='close'>Close & reflect</button>" : "") +
+      "</div>" +
+      "<div class='kv'>started " + esc(s.started_at) + " · last activity " + esc(s.last_activity_at) + "</div>" +
+      "<div class='kv'>session " + esc(s.id) + (s.conversation_id ? " · conv " + esc(String(s.conversation_id).slice(0, 8)) : "") + "</div>";
+    const closeBtn = item.querySelector("[data-act='close']");
+    if (closeBtn) closeBtn.addEventListener("click", async () => {
+      await api("POST", "/sessions/" + encodeURIComponent(s.id) + "/close");
+      showBannerInfo("Session closed; Archive reflection ran.");
+      navigate("sessions");
+    });
+    list.appendChild(item);
+  }
+  screenEl.appendChild(list);
+};
+
+screens.playbooks = async function () {
+  screenEl.appendChild(screenHeader("Playbooks",
+    "Declarative step lists (data, never code). Every step runs through the permission engine; L3+ steps pause for exact-action approval."));
+  const data = await api("GET", "/playbooks");
+  const playbooks = (data && data.playbooks) || [];
+  const list = card("<div class='panel-title'>Adopted playbooks</div>");
+  if (!playbooks.length) {
+    list.innerHTML += "<span class='muted'>No playbooks adopted yet. Adopt one with `april playbook adopt FILE`.</span>";
+  }
+  for (const pb of playbooks) {
+    const item = el("div", "list-item");
+    item.innerHTML =
+      "<div class='row'><strong>" + esc(pb.name) + "</strong> <span class='pill'>" + esc(pb.status) + "</span>" +
+      "<span class='grow'></span><button class='btn secondary' data-act='run'>Run</button></div>" +
+      "<div class='kv'>id " + esc(pb.id) + " · agent " + esc(pb.agent_id) + " · " + pb.steps.length + " step(s)</div>" +
+      "<div class='kv'>triggers: " + esc((pb.trigger_examples || []).join(" · ")) + "</div>" +
+      "<div class='kv' data-role='last-run'>last run: …</div>";
+    item.querySelector("[data-act='run']").addEventListener("click", async () => {
+      const result = await api("POST", "/playbooks/" + encodeURIComponent(pb.id) + "/run", {
+        project_id: selectedProject ? selectedProject.id : null,
+        conversation_id: null,
+      });
+      const run = result && result.run;
+      if (run && run.status === "pending_approval") {
+        showBanner("Playbook paused: a step needs exact-action approval. Review under Approvals.");
+      } else if (run) {
+        showBannerInfo("Playbook " + pb.id + " " + run.status + " (" + run.steps_completed + " step(s)).");
+      }
+      navigate("playbooks");
+    });
+    list.appendChild(item);
+    pollGet("/playbooks/" + encodeURIComponent(pb.id) + "/runs?limit=1").then((runsData) => {
+      const runs = (runsData && runsData.runs) || [];
+      const slot = item.querySelector("[data-role='last-run']");
+      if (!slot) return;
+      slot.textContent = runs.length
+        ? "last run: " + runs[0].status + " at " + (runs[0].completed_at || runs[0].created_at)
+        : "last run: never";
+    });
+  }
+  screenEl.appendChild(list);
+};
+
+screens.evolution = async function () {
+  screenEl.appendChild(screenHeader("Evolution",
+    "Nightly Dreamer status, prompt-overlay versions, pending approvals, and rollback. Overlays are advisory prose only — never tools, permissions, or policy."));
+  const statusData = await api("GET", "/evolution/status");
+  const st = (statusData && statusData.status) || {};
+  const flags =
+    "<div class='row'>" +
+    "<span class='pill " + (st.enabled ? "ok" : "") + "'>config " + (st.enabled ? "enabled" : "disabled") + "</span>" +
+    "<span class='pill " + (st.kill_switch_active ? "warn" : "") + "'>kill switch " + (st.kill_switch_active ? "ACTIVE" : "clear") + "</span>" +
+    "<span class='kv'>window " + esc(st.window || "—") + " · max " + esc(String(st.max_minutes || "—")) + " min</span>" +
+    "<span class='grow'></span>" +
+    (st.kill_switch_active
+      ? "<button class='btn secondary' id='evo-on'>Clear kill switch</button>"
+      : "<button class='btn secondary' id='evo-off'>Hard-disable (kill switch)</button>") +
+    "</div>" +
+    "<div class='kv'>last run: " + (st.last_run ? esc(st.last_run.date) + " · " + esc(st.last_run.status) : "never") + "</div>" +
+    (st.latest_report ? "<div class='kv'>latest report: " + esc(st.latest_report.summary || "") + "</div>" : "");
+  screenEl.appendChild(card(flags));
+  const offBtn = document.getElementById("evo-off");
+  if (offBtn) offBtn.addEventListener("click", async () => {
+    await api("POST", "/evolution/off");
+    showBannerInfo("Evolution kill switch set. The Dreamer will not run.");
+    navigate("evolution");
+  });
+  const onBtn = document.getElementById("evo-on");
+  if (onBtn) onBtn.addEventListener("click", async () => {
+    await api("POST", "/evolution/on");
+    showBannerInfo("Evolution kill switch cleared.");
+    navigate("evolution");
+  });
+
+  const pendingData = await api("GET", "/evolution/overlays/pending");
+  const pending = (pendingData && pendingData.pending) || [];
+  const pendingCard = card("<div class='panel-title'>Overlays awaiting approval</div>");
+  if (!pending.length) pendingCard.innerHTML += "<span class='muted'>Nothing awaiting approval.</span>";
+  for (const p of pending) {
+    const item = el("div", "list-item");
+    item.innerHTML =
+      "<div class='row'><strong>" + esc(p.agent) + "</strong>" +
+      (p.blocked_reason ? " <span class='pill warn'>blocked: " + esc(p.blocked_reason) + "</span>" : "") +
+      "<span class='grow'></span>" +
+      (p.blocked_reason ? "" : "<button class='btn secondary' data-act='approve'>Approve exact bytes</button>") +
+      "</div>" +
+      "<div class='kv'>sha256 " + esc(p.content_hash) + " · " + p.chars + " chars</div>" +
+      "<pre class='mono'>" + esc(p.preview) + "</pre>";
+    const approveBtn = item.querySelector("[data-act='approve']");
+    if (approveBtn) approveBtn.addEventListener("click", async () => {
+      const result = await api("POST", "/evolution/overlays/approve",
+        { agent: p.agent, content_hash: p.content_hash });
+      const approval = result && result.approval;
+      showBannerInfo("Overlay approval: " + ((approval && approval.status) || "unknown"));
+      navigate("evolution");
+    });
+    pendingCard.appendChild(item);
+  }
+  screenEl.appendChild(pendingCard);
+
+  const versionsData = await api("GET", "/evolution/versions");
+  const versions = (versionsData && versionsData.versions) || [];
+  const versionsCard = card("<div class='panel-title'>Overlay versions</div>");
+  if (!versions.length) versionsCard.innerHTML += "<span class='muted'>No overlay versions recorded.</span>";
+  for (const v of versions) {
+    const item = el("div", "list-item");
+    item.innerHTML =
+      "<div class='row'><strong>" + esc(v.agent) + "</strong> <span class='kv'>v" + esc(String(v.version)) + "</span>" +
+      (v.active ? " <span class='pill ok'>active</span>" : "") +
+      "<span class='grow'></span>" +
+      (v.active ? "" : "<button class='btn secondary' data-act='rollback'>Activate this version</button>") +
+      "</div>" +
+      "<div class='kv'>created " + esc(v.created_at) + " · eval " + esc(String(v.eval_score)) + " vs baseline " + esc(String(v.baseline_score)) + "</div>";
+    const rollbackBtn = item.querySelector("[data-act='rollback']");
+    if (rollbackBtn) rollbackBtn.addEventListener("click", async () => {
+      await api("POST", "/evolution/rollback", { agent: v.agent, version: v.version });
+      showBannerInfo("Rolled " + v.agent + " back to v" + v.version + ".");
+      navigate("evolution");
+    });
+    versionsCard.appendChild(item);
+  }
+  screenEl.appendChild(versionsCard);
 };
 
 screens.approvals = async function () {

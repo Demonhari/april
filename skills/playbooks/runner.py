@@ -7,6 +7,7 @@ from typing import Any, Literal
 from services.memory.sqlite_memory import SqliteMemory
 from services.permissions.tool_execution import ToolExecutionService
 from skills.playbooks.schema import PlaybookDefinition, PlaybookStep
+from skills.playbooks.variables import PlaybookExpansionError, expand_playbook_steps
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +47,29 @@ class PlaybookRunner:
         actor: str = "local-user",
         source: Literal["api", "cli"] = "api",
     ) -> PlaybookRunResult:
+        # Deterministic, bounded procedural-variable expansion happens before
+        # this run is recorded, so $last_run refers to the *previous* run.
+        # Expanded steps are data only; each still runs through the permission
+        # engine below, so L3+ steps keep their exact-action approvals.
+        steps: list[PlaybookStep] = list(playbook.steps)
+        expansion_error: str | None = None
+        if self.memory is not None:
+            try:
+                expansion = await expand_playbook_steps(playbook, memory=self.memory)
+                steps = expansion.steps
+            except PlaybookExpansionError as exc:
+                expansion_error = str(exc)
         run_id = await self._start_run(playbook, conversation_id=conversation_id)
+        if expansion_error is not None:
+            await self._finish_run(
+                run_id, status="failed", steps_completed=0, detail=expansion_error
+            )
+            return PlaybookRunResult(playbook.id, "failed", 0, (), run_id=run_id)
         results: list[PlaybookStepResult] = []
         completed = 0
         status: Literal["completed", "pending_approval", "failed"] = "completed"
         detail: str | None = None
-        for index, step in enumerate(playbook.steps):
+        for index, step in enumerate(steps):
             outcome = await self._run_step(
                 playbook,
                 step,

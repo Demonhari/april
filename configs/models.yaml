@@ -1,3 +1,9 @@
+# M15: any llama_cpp model may additionally set `adapter_path` to a local LoRA
+# adapter file. The llama_cpp backend applies it on top of the base GGUF at
+# load time; a configured-but-missing adapter is a load error (never a silent
+# base-model fallback). Adapters are local artifacts you train and place
+# yourself — see scripts/finetune/README.md for the CPU-only runbook.
+#   adapter_path: models/adapters/april-brain-lora.gguf
 models:
   brain:
     id: april-brain

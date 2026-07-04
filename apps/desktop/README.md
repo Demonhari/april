@@ -44,6 +44,25 @@ The cockpit is primary; every previous screen plus **Readiness** (Chat, Projects
 Approvals, Memory, Reminders, Readiness, Status & Models, Activity) is still
 reachable from the compact top nav as a detail screen.
 
+## v2 screens and controls
+
+- **Sessions** — recent cross-surface wake sessions from `GET /sessions`; open
+  sessions have a *Close & reflect* button (`POST /sessions/{id}/close`) that
+  triggers server-side Archive reflection.
+- **Playbooks** — adopted playbooks from `GET /playbooks` with a Run button
+  (`POST /playbooks/{id}/run`) and the last recorded run per playbook. L3+
+  steps pause for exact-action approval; the UI routes to Approvals instead of
+  acting.
+- **Evolution** — Dreamer status/kill switch (`GET /evolution/status`,
+  `POST /evolution/off|on`), write-capable overlays awaiting approval with
+  exact SHA-256 approval (`GET /evolution/overlays/pending`,
+  `POST /evolution/overlays/approve`), and overlay version history with
+  rollback (`GET /evolution/versions`, `POST /evolution/rollback`).
+- **Feedback buttons** — 👍/👎 under each completed chat answer post
+  `POST /feedback` bound to this conversation.
+- **Wake rail item** — the header shows `wake off / on / muted / unknown` from
+  the boolean `wake` block of the redacted `GET /health`; no paths or scores.
+
 ## Readiness screen
 
 Readiness is an authenticated, local-only setup detail screen backed by

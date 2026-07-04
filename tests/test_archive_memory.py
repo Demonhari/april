@@ -375,7 +375,7 @@ class FakeReranker:
         self.ordered_ids = ordered_ids
         self.calls: list[tuple[str, list[str]]] = []
 
-    async def rerank(self, query, candidates, *, limit):  # noqa: ANN001
+    async def rerank(self, query, candidates, *, limit):
         self.calls.append((query, [candidate.id for candidate in candidates]))
         if self.ordered_ids is None:
             return None

@@ -64,6 +64,22 @@ class SessionManager:
             await self.on_close(session_id)
         return closed
 
+    async def close_idle_sessions(self) -> list[str]:
+        """Close every open session idle past the continuity window.
+
+        This is the idle-reflection rule: a session that would no longer be
+        joined by a new wake (its continuity window elapsed) is closed, which
+        triggers the same ``on_close`` reflection path as an explicit close.
+        """
+        now = self.clock()
+        closed: list[str] = []
+        for session in await self.memory.list_open_sessions():
+            if self._within_continuity(session, now):
+                continue
+            if await self.close(session.id):
+                closed.append(session.id)
+        return closed
+
     async def _resolve_session(
         self, event: WakeEvent, now: datetime, now_iso: str
     ) -> tuple[SessionRecord, bool]:

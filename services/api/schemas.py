@@ -104,6 +104,19 @@ class EvolutionRollbackRequest(BaseModel):
     version: int = Field(ge=1)
 
 
+class DatasetExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+class OverlayApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str = Field(min_length=1, max_length=64)
+    content_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
 class ProjectCreateRequest(BaseModel):
     path: str
     name: str | None = None

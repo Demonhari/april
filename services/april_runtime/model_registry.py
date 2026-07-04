@@ -64,6 +64,9 @@ class ModelDefinition(BaseModel):
     chat_format: ChatFormat | None = None
     idle_unload_seconds: float | None = Field(default=None, gt=0)
     priority: int = 0
+    # Optional local LoRA adapter (M15). Applied on top of the base GGUF at
+    # load time by the llama_cpp backend; never downloaded automatically.
+    adapter_path: Path | None = None
 
     @field_validator("backend")
     @classmethod
@@ -81,6 +84,14 @@ class ModelDefinition(BaseModel):
 
     def resolved_path(self, root: Path) -> Path:
         expanded = self.path.expanduser()
+        if expanded.is_absolute():
+            return expanded.resolve(strict=False)
+        return (root / expanded).resolve(strict=False)
+
+    def resolved_adapter_path(self, root: Path) -> Path | None:
+        if self.adapter_path is None:
+            return None
+        expanded = self.adapter_path.expanduser()
         if expanded.is_absolute():
             return expanded.resolve(strict=False)
         return (root / expanded).resolve(strict=False)

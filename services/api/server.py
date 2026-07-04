@@ -39,10 +39,12 @@ from services.api.schemas import (
     AgentRunRequest,
     ChatRequest,
     ChatResponse,
+    DatasetExportRequest,
     DocumentCreateRequest,
     EvolutionRollbackRequest,
     FeedbackRequest,
     MemoryCreateRequest,
+    OverlayApprovalRequest,
     PlaybookRunRequest,
     ProjectCreateRequest,
     ReminderCreateRequest,
@@ -52,9 +54,18 @@ from services.api.schemas import (
     WakeRequest,
 )
 from services.april_runtime.schemas import LoadModelRequest
+from services.evolution.approval import PromptOverlayApprovalService
+from services.evolution.dataset_export import export_finetune_dataset
 from services.evolution.dreamer import latest_report
+from services.evolution.inspect import (
+    evolution_history,
+    evolution_status,
+    overlay_diff,
+    set_evolution_kill_switch,
+)
 from services.evolution.versions import PromptOverlayManager
 from services.memory.writer import MemoryWriter
+from services.pool.agent_pool import AgentPool
 from services.scheduler import compose_briefing, compute_repo_activity
 from services.voice.health import (
     microphone_access,
@@ -239,6 +250,12 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                 },
                 "vector_index": active.vector_memory.health(),
                 "voice": voice_health(active.settings).model_dump(),
+                # Booleans only: wake configuration + the local hard-mute flag.
+                # No paths or scores are ever exposed here.
+                "wake": {
+                    "enabled": active.settings.wake.enabled,
+                    "muted": active.settings.mute_flag_path.exists(),
+                },
                 "scheduler": {
                     "enabled": active.settings.scheduler.enabled,
                     "running": active.scheduler.running if active.scheduler else False,
@@ -441,6 +458,29 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         event = WakeEvent(source=request.source, reason="session_attach")
         return await _handle_wake_event(active, event, request_id=request_id)
 
+    @app.post("/sessions/{session_id}/close")
+    async def session_close(
+        session_id: str,
+        active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
+    ) -> object:
+        request_id = x_request_id or str(uuid.uuid4())
+        session_manager = active.require_session_manager()
+        record = await active.memory.get_session(session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        closed = await session_manager.close(session_id)
+        active.approvals.audit.write(
+            {
+                "event_type": "session_closed",
+                "request_id": request_id,
+                "actor": "local-user",
+                "reference_id": session_id,
+                "outcome": "closed" if closed else "already_closed",
+            }
+        )
+        return {"session_id": session_id, "closed": closed}
+
     @app.post("/agents/run")
     async def agents_run(
         request: AgentRunRequest,
@@ -592,6 +632,21 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     async def memory_delete(memory_id: str, active: ApiContainer = Depends(authorized)) -> object:
         return {"deleted": await active.memory.delete_memory(memory_id)}
 
+    @app.get("/memory/inspect")
+    async def memory_inspect(
+        state: str = "machine",
+        limit: int = 100,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        try:
+            records = await active.memory.list_memories_by_state(state, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "state": state,
+            "memories": [record.model_dump() for record in records],
+        }
+
     @app.get("/memory/export")
     async def memory_export(
         project_id: str | None = None, active: ApiContainer = Depends(authorized)
@@ -727,7 +782,8 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         limit: int = 50,
         active: ApiContainer = Depends(authorized),
     ) -> object:
-        return {"runs": await active.memory.list_playbook_runs(playbook_id=playbook_id, limit=limit)}
+        runs = await active.memory.list_playbook_runs(playbook_id=playbook_id, limit=limit)
+        return {"runs": runs}
 
     @app.get("/evolution/versions")
     async def evolution_versions(
@@ -760,6 +816,108 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.get("/evolution/report/latest")
     async def evolution_report_latest(active: ApiContainer = Depends(authorized)) -> object:
         return {"report": latest_report(active.settings)}
+
+    @app.get("/evolution/status")
+    async def evolution_status_endpoint(active: ApiContainer = Depends(authorized)) -> object:
+        return {"status": await evolution_status(active.settings, active.database)}
+
+    @app.get("/evolution/history")
+    async def evolution_history_endpoint(
+        limit: int = 20,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        return {"runs": await evolution_history(active.database, limit=limit)}
+
+    @app.get("/evolution/diff")
+    async def evolution_diff_endpoint(
+        agent: str,
+        from_version: int | None = None,
+        to_version: int | None = None,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        return await overlay_diff(
+            active.settings,
+            active.database,
+            agent=agent,
+            from_version=from_version,
+            to_version=to_version,
+        )
+
+    @app.post("/evolution/off")
+    async def evolution_off(
+        active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
+    ) -> object:
+        result = set_evolution_kill_switch(active.settings, disabled=True)
+        active.approvals.audit.write(
+            {
+                "event_type": "evolution_kill_switch_set",
+                "request_id": x_request_id or str(uuid.uuid4()),
+                "actor": "local-user",
+                "outcome": "disabled",
+            }
+        )
+        return result
+
+    @app.post("/evolution/on")
+    async def evolution_on(
+        active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
+    ) -> object:
+        result = set_evolution_kill_switch(active.settings, disabled=False)
+        active.approvals.audit.write(
+            {
+                "event_type": "evolution_kill_switch_set",
+                "request_id": x_request_id or str(uuid.uuid4()),
+                "actor": "local-user",
+                "outcome": "cleared",
+            }
+        )
+        return result
+
+    @app.post("/evolution/dataset/export")
+    async def evolution_dataset_export(
+        request: DatasetExportRequest,
+        active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
+    ) -> object:
+        result = await export_finetune_dataset(
+            active.memory,
+            active.settings,
+            dataset_name=request.name,
+        )
+        active.approvals.audit.write(
+            {
+                "event_type": "evolution_dataset_exported",
+                "request_id": x_request_id or str(uuid.uuid4()),
+                "actor": "local-user",
+                "outcome": "written",
+            }
+        )
+        return {"export": result.to_payload()}
+
+    @app.get("/evolution/overlays/pending")
+    async def evolution_overlays_pending(
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        service = PromptOverlayApprovalService(
+            active.settings, active.database, audit=active.approvals.audit
+        )
+        return {"pending": [item.to_payload() for item in await service.list_pending()]}
+
+    @app.post("/evolution/overlays/approve")
+    async def evolution_overlays_approve(
+        request: OverlayApprovalRequest,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        service = PromptOverlayApprovalService(
+            active.settings, active.database, audit=active.approvals.audit
+        )
+        result = await service.approve(agent=request.agent, content_hash=request.content_hash)
+        payload = asdict(result)
+        if payload.get("path") is not None:
+            payload["path"] = str(payload["path"])
+        return {"approval": payload}
 
     @app.get("/scheduler/briefing/preview")
     async def scheduler_briefing_preview(
@@ -857,6 +1015,14 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                 if chunk.metadata.get("path")
             ],
         }
+
+    @app.get("/pool/agents")
+    async def pool_agents(active: ApiContainer = Depends(authorized)) -> object:
+        pool = AgentPool(
+            active.memory,
+            known_agents=[agent.name for agent in active.agent_registry.list()],
+        )
+        return {"agents": [card.to_payload() for card in await pool.scorecards()]}
 
     @app.get("/runtime/models")
     async def runtime_models(active: ApiContainer = Depends(authorized)) -> object:

@@ -11,6 +11,7 @@ from services.scheduler.briefing import compose_briefing
 from services.scheduler.clock import Clock, SystemClock
 from services.scheduler.notifications import Notification, NotificationSink
 from services.scheduler.repo_monitor import RepoActivity, compute_repo_activity
+from services.wake.session_manager import SessionManager
 
 _LAST_BRIEFING_KEY = "last_briefing_date"
 
@@ -32,6 +33,7 @@ class SchedulerService:
         clock: Clock | None = None,
         local_tz: tzinfo | None = None,
         dreamer: DreamerService | None = None,
+        session_manager: SessionManager | None = None,
     ) -> None:
         self.settings = settings
         self.memory = memory
@@ -41,9 +43,11 @@ class SchedulerService:
         self._local_tz_override = local_tz
         self._task: asyncio.Task[None] | None = None
         self.dreamer = dreamer
+        self.session_manager = session_manager
         self._fired_reminders = 0
         self._fired_briefings = 0
         self._fired_dreamer_runs = 0
+        self._closed_idle_sessions = 0
 
     @property
     def running(self) -> bool:
@@ -60,6 +64,10 @@ class SchedulerService:
     @property
     def fired_dreamer_count(self) -> int:
         return self._fired_dreamer_runs
+
+    @property
+    def closed_idle_session_count(self) -> int:
+        return self._closed_idle_sessions
 
     def _local_tz(self) -> tzinfo:
         if self._local_tz_override is not None:
@@ -113,6 +121,10 @@ class SchedulerService:
             await self._maybe_run_dreamer()
         except Exception as exc:
             self.audit.write({"event": "scheduler.dreamer_error", "error": str(exc)})
+        try:
+            await self._close_idle_sessions()
+        except Exception as exc:
+            self.audit.write({"event": "scheduler.idle_session_error", "error": str(exc)})
 
     async def _fire_due_reminders(self) -> None:
         now_iso = self._now_iso()
@@ -173,6 +185,24 @@ class SchedulerService:
         result = await self.dreamer.run_once(self.clock.now())
         if result.status == "completed":
             self._fired_dreamer_runs += 1
+
+    async def _close_idle_sessions(self) -> None:
+        """Idle-reflection sweep: close sessions past the continuity window.
+
+        Closing goes through the SessionManager so Archive reflection runs
+        exactly as it does for explicit closes.
+        """
+        if self.session_manager is None:
+            return
+        closed = await self.session_manager.close_idle_sessions()
+        for session_id in closed:
+            self.audit.write(
+                {
+                    "event": "scheduler.idle_session_closed",
+                    "reference_id": session_id,
+                }
+            )
+        self._closed_idle_sessions += len(closed)
 
     def _briefing_time(self) -> time:
         hours, _, minutes = self.settings.scheduler.briefing_time.partition(":")
