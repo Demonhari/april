@@ -295,7 +295,7 @@ def test_run_april_voice_verify_wake_live_uses_local_verifier(tmp_path: Path, mo
             wake_word_live_verified=True,
         )
 
-    monkeypatch.setattr("apps.runner.main.run_wake_word_live_verification", _fake_wake_live)
+    monkeypatch.setattr("apps.runner.main.run_sentinel_live_verification", _fake_wake_live)
     out = tmp_path / "wake-live.json"
     result = CliRunner().invoke(
         app,
@@ -321,7 +321,7 @@ def test_run_april_voice_verify_wake_live_exits_nonzero_on_fail(
     async def _fake_wake_live(**kwargs: object) -> WakeWordLiveReport:
         return WakeWordLiveReport(summary="fail")
 
-    monkeypatch.setattr("apps.runner.main.run_wake_word_live_verification", _fake_wake_live)
+    monkeypatch.setattr("apps.runner.main.run_sentinel_live_verification", _fake_wake_live)
     result = CliRunner().invoke(app, ["april", "voice", "verify-wake-live"])
     assert result.exit_code == 1
 

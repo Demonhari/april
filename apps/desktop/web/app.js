@@ -1472,6 +1472,7 @@ screens.readiness = async function () {
   const models = (readiness.models && readiness.models.registered) || [];
   const voice = readiness.voice || {};
   const security = readiness.security || {};
+  const daemon = readiness.daemon || {};
   const guidance = readiness.verification_guidance || {};
 
   // Compact, read-only operator console up top: the daily-driver status at a
@@ -1508,6 +1509,8 @@ screens.readiness = async function () {
       ["Database", (core.database && core.database.status) || "unknown"],
       ["Vector index", (core.vector_index && (core.vector_index.status || core.vector_index.state)) || "unknown"],
       ["Scheduler", core.scheduler && core.scheduler.enabled ? (core.scheduler.running ? "running" : "enabled") : "disabled"],
+      ["Daemon status", daemon.status || "unknown"],
+      ["Daemon details", boolText(daemon.details_available === true)],
     ])
   ));
 
@@ -1539,10 +1542,15 @@ screens.readiness = async function () {
       ["Configured provider", embeddings.configured_provider || "hashed-token"],
       ["Active provider", embeddings.active_provider || "hashed-token"],
       ["Embedding model", embeddings.embedding_model_id || "not configured"],
+      ["Model registered", boolText(embeddings.embedding_model_registered === true)],
+      ["Model file exists", boolText(embeddings.embedding_model_path_exists === true)],
       ["Dimensions", D.formatInt(embeddings.dimensions)],
       ["Index compatible", boolText(embeddings.index_compatible !== false)],
       ["Reindex required", boolText(embeddings.reindex_required === true)],
     ]);
+  if (embeddings.embedding_model_missing_reason) {
+    embeddingHtml += "<div class='kv warn'>" + esc(embeddings.embedding_model_missing_reason) + "</div>";
+  }
   if (embeddings.fell_back_to_hashed_token) {
     embeddingHtml += "<div class='kv warn'>runtime-local requested but unavailable; " +
       "fell back to hashed-token embeddings (weaker semantic memory).</div>";
@@ -1582,10 +1590,13 @@ screens.readiness = async function () {
   ));
 
   const artifacts = Array.isArray(voice.artifacts) ? voice.artifacts : [];
+  const speakerGate = voice.speaker_gate || {};
   let voiceHtml = "<div class='panel-title'>Voice readiness</div>" +
     kvRows([
       ["Voice enabled", boolText(voice.enabled)],
       ["Voice milestone", voice.voice_milestone || "disabled"],
+      ["Sentinel live verified", boolText(voice.sentinel_live_verified === true)],
+      ["Speaker gate", (speakerGate.mode || "off") + (speakerGate.supported ? "" : " (unsupported)")],
       ["sounddevice", voice.sounddevice_available ? "available" : "missing"],
       ["Input devices", D.formatInt(voice.input_device_count)],
       ["Output devices", D.formatInt(voice.output_device_count)],

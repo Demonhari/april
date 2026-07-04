@@ -357,6 +357,7 @@ async def test_archive_reflection_runs_on_session_close(settings_tmp) -> None:
         memories = await memory.search_memories("morning")
         assert len(memories) == 1
         assert memories[0].content == "I prefer morning planning"
+        assert memories[0].project_id is None
         transcript = agent.transcripts[0]
         assert "Remember I prefer morning planning" in transcript
         # Reflection context includes sanitized tool summaries and feedback…
@@ -364,6 +365,39 @@ async def test_archive_reflection_runs_on_session_close(settings_tmp) -> None:
         assert "good: helpful plan" in transcript
         # …but never tool arguments or results (no secrets in reflection input).
         assert "secret-arg-must-not-leak" not in transcript
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_reflection_preserves_project_scope(settings_tmp) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        project = await memory.add_project("/tmp/april-test-project", name="APRIL")
+        candidate = _candidate("APRIL project uses local-only runtime", kind="project_state")
+        service = ArchiveReflectionService(
+            settings_tmp,
+            memory=memory,
+            runtime_client=FakeArchiveRuntime("{}"),  # type: ignore[arg-type]
+            archive_agent=FakeArchiveAgent([candidate]),  # type: ignore[arg-type]
+            writer=ArchiveMemoryWriter(memory, daily_cap=10),
+        )
+        manager = SessionManager(
+            memory,
+            continuity_minutes=10,
+            on_close=service.reflect_session,
+        )
+        conversation_id = await memory.create_conversation(project_id=project.id)
+        session = await memory.create_session(source="voice", conversation_id=conversation_id)
+        await memory.add_message(conversation_id, "user", "APRIL project stays local-only.")
+
+        assert await manager.close(session.id) is True
+
+        scoped_memories = await memory.list_memories(project_id=project.id)
+        assert len(scoped_memories) == 1
+        assert scoped_memories[0].project_id == project.id
+        all_memories = await memory.list_memories()
+        assert [record.project_id for record in all_memories] == [project.id]
     finally:
         await database.close()
 

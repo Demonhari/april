@@ -228,29 +228,37 @@ class IntelligenceLadder:
         fallback_model_id: str,
         request_id: str,
     ) -> LadderRun:
-        resolution = await resolve_reasoning_model(
-            runtime_client=self.runtime_client,
-            fallback_model_id=fallback_model_id,
-        )
-        user_prompt = self._reasoning_user_prompt(
-            mode="deep",
-            message=message,
-            prompt_messages=prompt_messages,
-        )
-        response = await self._bounded_chat(
-            model_id=resolution.model_id,
-            messages=[
-                ChatMessage(role="system", content=self._reasoning_system_prompt()),
-                ChatMessage(role="user", content=user_prompt),
-            ],
-            request_id=request_id,
-        )
+        response = None
+        model_id = fallback_model_id
         metadata = {
             "mode": "deep",
             "intelligence_rung": 3,
             "budget_seconds": self.settings.deep_mode.max_seconds,
-            "model_resolution": resolution.metadata(),
+            "model_resolution": _budget_unresolved_model_metadata(fallback_model_id),
         }
+        try:
+            async with asyncio.timeout(self.settings.deep_mode.max_seconds):
+                resolution = await resolve_reasoning_model(
+                    runtime_client=self.runtime_client,
+                    fallback_model_id=fallback_model_id,
+                )
+                model_id = resolution.model_id
+                metadata["model_resolution"] = resolution.metadata()
+                user_prompt = self._reasoning_user_prompt(
+                    mode="deep",
+                    message=message,
+                    prompt_messages=prompt_messages,
+                )
+                response = await self._bounded_chat(
+                    model_id=model_id,
+                    messages=[
+                        ChatMessage(role="system", content=self._reasoning_system_prompt()),
+                        ChatMessage(role="user", content=user_prompt),
+                    ],
+                    request_id=request_id,
+                )
+        except TimeoutError:
+            response = None
         if response is None:
             return LadderRun(
                 status="unavailable",
@@ -260,7 +268,7 @@ class IntelligenceLadder:
                 ),
                 mode="deep",
                 rung=3,
-                model_id=resolution.model_id,
+                model_id=model_id,
                 warnings=["Deep mode exceeded its configured local budget."],
                 metadata=metadata,
             )
@@ -269,7 +277,7 @@ class IntelligenceLadder:
             final_message=f"{_MODE_ANNOUNCEMENTS[3]}\n\n{response.content}",
             mode="deep",
             rung=3,
-            model_id=resolution.model_id,
+            model_id=model_id,
             usage=response.usage.model_dump(),
             warnings=response.warnings,
             metadata=metadata,
@@ -365,46 +373,66 @@ class IntelligenceLadder:
         fallback_model_id: str,
         request_id: str,
     ) -> LadderRun:
-        resolution = await resolve_reasoning_model(
-            runtime_client=self.runtime_client,
-            fallback_model_id=fallback_model_id,
-        )
+        model_id = fallback_model_id
         members = self._council_members()[: self.settings.deep_mode.council_n]
-        tasks = [
-            self._bounded_chat(
-                model_id=resolution.model_id,
-                messages=[
-                    ChatMessage(role="system", content=system_prompt),
-                    ChatMessage(
-                        role="user",
-                        content=self._council_prompt(role, message, prompt_messages),
-                    ),
-                ],
-                request_id=f"{request_id}-{role}",
-            )
-            for role, system_prompt in members
-        ]
-        responses = await asyncio.gather(*tasks)
         raw_candidates: list[CouncilCandidate] = []
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         warnings: list[str] = []
-        for (role, _prompt), response in zip(members, responses, strict=True):
-            if response is None:
-                warnings.append(f"Council responder {role} exceeded the local budget.")
-                continue
-            raw_candidates.append(CouncilCandidate(responder_id=role, content=response.content))
-            for key, value in response.usage.model_dump().items():
-                if isinstance(value, int):
-                    usage[key] = usage.get(key, 0) + value
-            warnings.extend(response.warnings)
+        judged: list[CouncilCandidate] | None = None
         metadata: dict[str, Any] = {
             "mode": "council",
             "intelligence_rung": 4,
             "budget_seconds": self.settings.deep_mode.max_seconds,
-            "model_resolution": resolution.metadata(),
+            "model_resolution": _budget_unresolved_model_metadata(fallback_model_id),
             "candidate_count": len(raw_candidates),
             "council_members": [role for role, _prompt in members],
         }
+        try:
+            async with asyncio.timeout(self.settings.deep_mode.max_seconds):
+                resolution = await resolve_reasoning_model(
+                    runtime_client=self.runtime_client,
+                    fallback_model_id=fallback_model_id,
+                )
+                model_id = resolution.model_id
+                metadata["model_resolution"] = resolution.metadata()
+                tasks = [
+                    self._bounded_chat(
+                        model_id=model_id,
+                        messages=[
+                            ChatMessage(role="system", content=system_prompt),
+                            ChatMessage(
+                                role="user",
+                                content=self._council_prompt(role, message, prompt_messages),
+                            ),
+                        ],
+                        request_id=f"{request_id}-{role}",
+                    )
+                    for role, system_prompt in members
+                ]
+                responses = await asyncio.gather(*tasks)
+                for (role, _prompt), response in zip(members, responses, strict=True):
+                    if response is None:
+                        warnings.append(
+                            f"Council responder {role} exceeded the local budget."
+                        )
+                        continue
+                    raw_candidates.append(
+                        CouncilCandidate(responder_id=role, content=response.content)
+                    )
+                    for key, value in response.usage.model_dump().items():
+                        if isinstance(value, int):
+                            usage[key] = usage.get(key, 0) + value
+                    warnings.extend(response.warnings)
+                metadata["candidate_count"] = len(raw_candidates)
+                if raw_candidates:
+                    judged = await self._judge_candidates(
+                        message=message,
+                        candidates=raw_candidates,
+                        model_id=model_id,
+                        request_id=request_id,
+                    )
+        except TimeoutError:
+            warnings.append("Council mode exceeded its whole-rung local budget.")
         if not raw_candidates:
             return LadderRun(
                 status="unavailable",
@@ -414,16 +442,10 @@ class IntelligenceLadder:
                 ),
                 mode="council",
                 rung=4,
-                model_id=resolution.model_id,
+                model_id=model_id,
                 warnings=warnings or ["Council mode produced no complete local candidates."],
                 metadata=metadata,
             )
-        judged = await self._judge_candidates(
-            message=message,
-            candidates=raw_candidates,
-            model_id=resolution.model_id,
-            request_id=request_id,
-        )
         if judged is not None:
             candidates = judged
             metadata["council_scoring"] = "scout"
@@ -449,7 +471,7 @@ class IntelligenceLadder:
             final_message=final_message,
             mode="council",
             rung=4,
-            model_id=resolution.model_id,
+            model_id=model_id,
             usage=usage,
             warnings=warnings,
             metadata={**metadata, "selected_responder": best.responder_id},
@@ -680,6 +702,16 @@ def select_best_candidate(candidates: list[CouncilCandidate]) -> CouncilCandidat
     if not candidates:
         raise ValueError("No council candidates to score.")
     return max(candidates, key=lambda candidate: (candidate.score, len(candidate.content)))
+
+
+def _budget_unresolved_model_metadata(fallback_model_id: str) -> dict[str, str]:
+    return {
+        "requested_role": "reasoning",
+        "selected_role": "brain",
+        "selected_model_id": fallback_model_id,
+        "fallback_model_id": fallback_model_id,
+        "reason": "not_resolved_before_budget",
+    }
 
 
 _DISAGREEMENT_SCORE_MARGIN = 0.15

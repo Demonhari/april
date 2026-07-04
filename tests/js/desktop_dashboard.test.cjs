@@ -21,12 +21,13 @@ function check(name, condition) {
 check("agent code general", D.agentCode("general_agent") === "GEN");
 check("agent code coding", D.agentCode("coding_agent") === "COD");
 check("agent code reading", D.agentCode("reading_agent") === "RDG");
+check("agent code archive", D.agentCode("memory_agent") === "ARC");
 check("agent code creative", D.agentCode("creative_agent") === "CRE");
 check("agent code reasoning", D.agentCode("reasoning_agent") === "RSN");
 check("agent code system", D.agentCode("system_action_agent") === "SYS");
 check("agent code unknown", D.agentCode("mystery_agent") === "unknown");
 check("agent code missing", D.agentCode(null) === "unknown");
-check("six agents", D.AGENTS.length === 6);
+check("seven agents", D.AGENTS.length === 7);
 
 // --- honest formatters -----------------------------------------------------
 check("formatInt zero preserved", D.formatInt(0) === "0");

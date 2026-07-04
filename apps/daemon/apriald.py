@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -9,9 +10,10 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from april_common.settings import AprilSettings, get_settings
+from april_common.time import utc_now_iso
 from services.pool.governor import GovernorDecision, ResourceGovernor
 
 
@@ -81,6 +83,10 @@ def daemon_pid_path(settings: AprilSettings) -> Path:
     return settings.resolve_path(Path("data/apriald.pid"))
 
 
+def daemon_status_path(settings: AprilSettings) -> Path:
+    return settings.resolve_path(Path("data/apriald.status.json"))
+
+
 class DaemonLock:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -141,6 +147,7 @@ class AprialdSupervisor:
         _write_pid_file(self.settings, os.getpid())
         for runtime in self.children.values():
             await self._ensure_child(runtime)
+        self._write_status(await self.health())
 
     async def run_forever(self, *, interval_seconds: float = 2.0) -> None:
         await self.start()
@@ -154,7 +161,9 @@ class AprialdSupervisor:
     async def supervise_once(self) -> DaemonHealth:
         for runtime in self.children.values():
             await self._ensure_child(runtime)
-        return await self.health()
+        health = await self.health()
+        self._write_status(health)
+        return health
 
     async def health(self) -> DaemonHealth:
         governor = self.governor.assess_resident()
@@ -165,8 +174,9 @@ class AprialdSupervisor:
             child_health.append(child)
             if child.status != "running":
                 degraded = True
+        status = "paused" if not governor.allowed else ("degraded" if degraded else "ok")
         return DaemonHealth(
-            status="degraded" if degraded else "ok",
+            status=status,
             children=tuple(child_health),
             governor=governor,
         )
@@ -184,6 +194,7 @@ class AprialdSupervisor:
                 process.kill()
                 await process.wait()
         daemon_pid_path(self.settings).unlink(missing_ok=True)
+        self._write_stopped_status()
         self.lock.release()
 
     async def _ensure_child(self, runtime: ChildRuntime) -> None:
@@ -229,7 +240,7 @@ class AprialdSupervisor:
             return ChildHealth(
                 name=runtime.spec.name,
                 status="paused",
-                pid=None,
+                pid=process.pid if process is not None and process.returncode is None else None,
                 restarts=runtime.restarts,
                 last_exit_code=runtime.last_exit_code,
                 detail=runtime.paused_reason,
@@ -261,6 +272,35 @@ class AprialdSupervisor:
                 detail="health_check_failed",
             )
         return ChildHealth(runtime.spec.name, "running", process.pid, runtime.restarts)
+
+    def _write_status(self, health: DaemonHealth) -> None:
+        _write_status_payload(self.settings, _daemon_health_payload(health, pid=os.getpid()))
+
+    def _write_stopped_status(self) -> None:
+        children = [
+            {
+                "name": runtime.spec.name,
+                "status": "stopped",
+                "pid": None,
+                "restarts": runtime.restarts,
+                "last_exit_code": runtime.last_exit_code,
+                "detail": None,
+                "paused_reason": None,
+                "degraded_reason": None,
+            }
+            for runtime in self.children.values()
+        ]
+        _write_status_payload(
+            self.settings,
+            {
+                "schema_version": 1,
+                "status": "stopped",
+                "pid": None,
+                "generated_at": utc_now_iso(),
+                "children": children,
+                "governor": {"allowed": None, "reasons": []},
+            },
+        )
 
     async def _spawn_process(self, spec: ChildSpec) -> ProcessHandle:
         env = os.environ.copy()
@@ -316,14 +356,35 @@ async def _loopback_health_check(spec: ChildSpec) -> bool:
 
 
 def read_daemon_status(settings: AprilSettings) -> dict[str, object]:
+    status_payload = _read_status_payload(settings)
     pid_path = daemon_pid_path(settings)
     if not pid_path.exists():
-        return {"status": "stopped", "pid": None}
+        return _merge_daemon_status(
+            base={"status": "stopped", "pid": None},
+            payload=status_payload,
+        )
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
-        return {"status": "degraded", "pid": None, "detail": "invalid pid file"}
-    return {"status": "running" if _pid_alive(pid) else "stale", "pid": pid}
+        return _merge_daemon_status(
+            base={"status": "degraded", "pid": None, "detail": "invalid pid file"},
+            payload=status_payload,
+        )
+    if not _pid_alive(pid):
+        return _merge_daemon_status(
+            base={
+                "status": "stale",
+                "pid": pid,
+                "detail": "pid file points to a stopped process",
+            },
+            payload=status_payload,
+        )
+    if status_payload is None:
+        return {"status": "running", "pid": pid, "details_available": False}
+    return _merge_daemon_status(
+        base={"status": _operator_status(status_payload), "pid": pid},
+        payload=status_payload,
+    )
 
 
 def start_daemon_background(settings: AprilSettings) -> dict[str, object]:
@@ -371,6 +432,92 @@ def _write_pid_file(settings: AprilSettings, pid: int) -> None:
     path = daemon_pid_path(settings)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{pid}\n", encoding="utf-8")
+
+
+def _daemon_health_payload(health: DaemonHealth, *, pid: int | None) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": health.status,
+        "pid": pid,
+        "generated_at": utc_now_iso(),
+        "children": [_child_health_payload(child) for child in health.children],
+        "governor": {
+            "allowed": health.governor.allowed,
+            "reasons": list(health.governor.reasons),
+        },
+    }
+
+
+def _child_health_payload(child: ChildHealth) -> dict[str, object]:
+    return {
+        "name": child.name,
+        "status": child.status,
+        "pid": child.pid,
+        "restarts": child.restarts,
+        "last_exit_code": child.last_exit_code,
+        "detail": child.detail,
+        "paused_reason": child.detail if child.status == "paused" else None,
+        "degraded_reason": child.detail if child.status == "degraded" else None,
+    }
+
+
+def _write_status_payload(settings: AprilSettings, payload: dict[str, object]) -> None:
+    path = daemon_status_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(tmp_path, 0o600)
+    tmp_path.replace(path)
+
+
+def _read_status_payload(settings: AprilSettings) -> dict[str, Any] | None:
+    path = daemon_status_path(settings)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != 1:
+        return None
+    return payload
+
+
+def _merge_daemon_status(
+    *, base: dict[str, object], payload: dict[str, Any] | None
+) -> dict[str, object]:
+    merged = dict(base)
+    merged["details_available"] = payload is not None
+    if payload is None:
+        return merged
+    for key in ("generated_at", "children", "governor"):
+        if key in payload:
+            merged[key] = payload[key]
+    if "supervisor_status" not in merged and "status" in payload:
+        merged["supervisor_status"] = payload["status"]
+    return merged
+
+
+def _operator_status(payload: dict[str, Any]) -> str:
+    children = payload.get("children")
+    governor = payload.get("governor")
+    if (
+        isinstance(governor, dict)
+        and governor.get("allowed") is False
+        and isinstance(children, list)
+        and children
+        and all(
+            isinstance(child, dict) and child.get("status") == "paused"
+            for child in children
+        )
+    ):
+        return "paused"
+    status = payload.get("status")
+    if status == "ok":
+        return "running"
+    if isinstance(status, str):
+        return status
+    return "running"
 
 
 def _pid_alive(pid: int) -> bool:

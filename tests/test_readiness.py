@@ -40,12 +40,15 @@ def _write_home(
     backend: str = "fake",
     models: dict[str, dict] | None = None,
     voice: dict | None = None,
+    memory: dict | None = None,
 ) -> Path:
     configs = home / "configs"
     configs.mkdir(parents=True, exist_ok=True)
     april: dict = {"environment": "development", "runtime": {"backend": backend}}
     if voice is not None:
         april["voice"] = voice
+    if memory is not None:
+        april["memory"] = memory
     (configs / "april.yaml").write_text(yaml.safe_dump(april), encoding="utf-8")
     if models is None:
         models = {
@@ -98,6 +101,64 @@ def test_missing_model_file_is_a_blocker(tmp_path: Path) -> None:
     assert "configured GGUF model files" in report.blockers
     assert report.real_model_ready is False
     assert report.models[0].path_exists is False
+
+
+def test_runtime_local_embedding_model_is_reported(tmp_path: Path) -> None:
+    home = _write_home(
+        tmp_path,
+        backend="llama_cpp",
+        memory={
+            "embedding_provider": "runtime-local",
+            "embedding_model_id": "april-embedding",
+        },
+    )
+    report = build_readiness_report(home)
+
+    check = next(c for c in report.checks if c.name == "runtime-local embedding model")
+    assert check.status == "blocker"
+    assert "april-embedding" in check.detail
+    assert "runtime-local embedding model" in report.blockers
+
+
+def test_readiness_reports_speaker_gate_daemon_and_sentinel_status(
+    tmp_path: Path,
+) -> None:
+    home = _write_home(tmp_path, backend="fake")
+    report = build_readiness_report(home)
+
+    assert report.speaker_gate == "off"
+    assert report.speaker_gate_supported is False
+    assert report.daemon_status == "stopped"
+    assert report.daemon_details_available is False
+    assert report.sentinel_live_status == "not_verified"
+    assert next(c for c in report.checks if c.name == "speaker gate").status == "skipped"
+    assert next(c for c in report.checks if c.name == "daemon detailed status").status == (
+        "warning"
+    )
+
+
+def test_readiness_detects_verified_sentinel_report(tmp_path: Path) -> None:
+    home = _write_home(tmp_path, backend="fake")
+    verification = home / "data" / "verification"
+    verification.mkdir(parents=True)
+    (verification / "wake-live.json").write_text(
+        json.dumps(
+            {
+                "report_type": "wake_word_live",
+                "pipeline": "sentinel",
+                "wake_word_live_verified": True,
+                "summary": "pass",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_readiness_report(home)
+
+    assert report.sentinel_live_status == "verified"
+    assert next(c for c in report.checks if c.name == "Sentinel live verification").status == (
+        "ok"
+    )
 
 
 def test_default_repo_config_keeps_voice_out_of_blockers(tmp_path: Path) -> None:

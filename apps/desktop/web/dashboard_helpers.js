@@ -20,11 +20,12 @@
   const UNAVAILABLE = "not available";
   const NOT_VERIFIED = "not yet verified";
 
-  // The six known specialists rendered in the router/orbit visualisation.
+  // The known specialists rendered in the router/orbit visualisation.
   const AGENTS = [
     { id: "general_agent", code: "GEN", label: "General" },
     { id: "coding_agent", code: "COD", label: "Coding" },
     { id: "reading_agent", code: "RDG", label: "Reading" },
+    { id: "memory_agent", code: "ARC", label: "Archive" },
     { id: "creative_agent", code: "CRE", label: "Creative" },
     { id: "reasoning_agent", code: "RSN", label: "Reasoning" },
     { id: "system_action_agent", code: "SYS", label: "System" },

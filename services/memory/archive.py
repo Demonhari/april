@@ -255,13 +255,14 @@ class ArchiveReflectionService:
         vector_memory: VectorMemory | None = None,
         audit: AuditLogger | None = None,
         archive_agent: ArchiveAgent | None = None,
+        archive_model_id: str | None = None,
         writer: ArchiveMemoryWriter | None = None,
     ) -> None:
         self.settings = settings
         self.memory = memory
         self.archive_agent = archive_agent or ArchiveAgent(
             runtime_client,
-            model_id=settings.brain.model_id,
+            model_id=archive_model_id or settings.brain.model_id,
         )
         self.writer = writer or ArchiveMemoryWriter(
             memory,
@@ -274,6 +275,8 @@ class ArchiveReflectionService:
         session = await self.memory.get_session(session_id)
         if session is None or session.conversation_id is None:
             return []
+        conversation = await self.memory.get_conversation(session.conversation_id)
+        project_id = conversation.project_id if conversation is not None else None
         messages = await self.memory.recent_messages(session.conversation_id, limit=50)
         transcript = _session_transcript(messages)
         if not transcript.strip():
@@ -311,7 +314,7 @@ class ArchiveReflectionService:
         return await self.writer.write_candidates(
             candidates,
             source_session_id=session_id,
-            project_id=None,
+            project_id=project_id,
         )
 
 

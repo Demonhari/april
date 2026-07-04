@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import anyio
 import pytest
 from fastapi.testclient import TestClient
 
+from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
 from services.api.server import create_app
 from services.memory.database import Database
@@ -27,6 +29,17 @@ class FakeReflection:
     async def reflect_session(self, session_id: str) -> list[object]:
         self.sessions.append(session_id)
         return []
+
+
+class ExplodingReflection:
+    """Fails with content that must never be copied into audit records."""
+
+    def __init__(self) -> None:
+        self.sessions: list[str] = []
+
+    async def reflect_session(self, session_id: str) -> list[object]:
+        self.sessions.append(session_id)
+        raise RuntimeError("transcript-leak-marker")
 
 
 async def _memory(settings: AprilSettings) -> tuple[Database, SqliteMemory]:
@@ -56,6 +69,28 @@ def test_session_close_api_triggers_reflection(settings_tmp) -> None:
     assert again.status_code == 200
     assert again.json()["closed"] is False
     assert reflection.sessions == [session_id]
+
+
+def test_session_close_api_is_best_effort_when_reflection_fails(settings_tmp) -> None:
+    container = anyio.run(make_container, settings_tmp)
+    reflection = ExplodingReflection()
+    container.archive_reflection = reflection  # type: ignore[assignment]
+    container.session_manager = None
+    client = TestClient(create_app(container))
+
+    created = client.post("/sessions", json={"source": "terminal"}, headers=auth(settings_tmp))
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    closed = client.post(f"/sessions/{session_id}/close", headers=auth(settings_tmp))
+    assert closed.status_code == 200
+    assert closed.json() == {"session_id": session_id, "closed": True}
+    assert reflection.sessions == [session_id]
+
+    audit_text = settings_tmp.audit_path.read_text(encoding="utf-8")
+    assert "archive_reflection_failed" in audit_text
+    assert "RuntimeError" in audit_text
+    assert "transcript-leak-marker" not in audit_text
 
 
 def test_session_close_unknown_session_is_404(settings_tmp) -> None:
@@ -102,6 +137,53 @@ async def test_close_idle_sessions_triggers_reflection(settings_tmp) -> None:
 
         # Sweep is idempotent.
         assert await manager.close_idle_sessions() == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_session_wake_continues_when_reflection_fails(settings_tmp) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        now = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+        reflection = ExplodingReflection()
+        manager = SessionManager(
+            memory,
+            continuity_minutes=10.0,
+            clock=lambda: now,
+            on_close=reflection.reflect_session,
+            audit=AuditLogger(settings_tmp.audit_path),
+        )
+        first = await manager.handle_wake(WakeEvent(source="terminal"))
+
+        now = datetime(2026, 7, 3, 12, 30, tzinfo=UTC)
+        second = await manager.handle_wake(WakeEvent(source="terminal"))
+
+        assert second.session_id != first.session_id
+        assert second.joined_existing is False
+        assert reflection.sessions == [first.session_id]
+        first_record = await memory.get_session(first.session_id)
+        second_record = await memory.get_session(second.session_id)
+        assert first_record is not None
+        assert first_record.closed_at is not None
+        assert second_record is not None
+        assert second_record.closed_at is None
+
+        entries = [
+            json.loads(line)
+            for line in settings_tmp.audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        failures = [
+            entry for entry in entries if entry.get("event_type") == "archive_reflection_failed"
+        ]
+        assert len(failures) == 1
+        assert failures[0]["actor"] == "archive_agent"
+        assert failures[0]["reference_id"] == first.session_id
+        assert failures[0]["error_type"] == "RuntimeError"
+        assert failures[0]["error_message_length"] == len("transcript-leak-marker")
+        assert "transcript-leak-marker" not in settings_tmp.audit_path.read_text(
+            encoding="utf-8"
+        )
     finally:
         await database.close()
 

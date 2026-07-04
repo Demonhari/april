@@ -8,8 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from april_common.audit import AuditLogger
+from april_common.errors import PermissionDeniedError
 from services.api.server import create_app
 from services.evolution.dreamer import DreamerService
+from services.evolution.evaluator import evaluate_overlay_candidate, write_pending_eval_case
+from services.evolution.prompt_evolver import OverlayCandidate
 from services.evolution.scheduler import EvolutionSchedulerGate
 from services.evolution.versions import PromptOverlayManager
 from services.evolution.write_guard import EvolutionWriteGuard
@@ -125,6 +128,26 @@ async def test_prompt_overlay_rollback_restores_byte_identical_version(settings_
         assert first.path.read_bytes() == b"First overlay."
     finally:
         await database.close()
+
+
+def test_overlay_eval_runs_local_fixture_gates_and_stages_new_cases(settings_tmp) -> None:
+    evaluation = evaluate_overlay_candidate(
+        agent="general_agent",
+        content="Prefer concise local responses and call out verification limits.",
+        settings=settings_tmp,
+    )
+    assert evaluation.passed is True
+    assert evaluation.checks["routing_eval_fixtures_pass"] is True
+    assert evaluation.checks["retrieval_eval_fixtures_pass"] is True
+    assert evaluation.checks["conversation_replay_fixtures_pass"] is True
+
+    staged = write_pending_eval_case(
+        settings_tmp,
+        {"kind": "retrieval", "query": "timezone preference", "expected_hits": []},
+        guard=EvolutionWriteGuard(settings_tmp),
+    )
+    assert staged.is_relative_to(settings_tmp.evolution_path / "evals" / "pending")
+    assert staged.exists()
 
 
 @pytest.mark.asyncio
@@ -249,6 +272,21 @@ async def test_dreamer_full_fixture_cycle_produces_deterministic_report(settings
                 result={"ok": True},
                 conversation_id=conversation_id,
             )
+        for _ in range(2):
+            repeated_conversation_id = await memory.create_conversation()
+            for tool, args in (
+                ("search_files", {"path": ".", "query": "TODO"}),
+                ("read_file", {"path": "README.md"}),
+            ):
+                await memory.record_tool_call(
+                    tool=tool,
+                    args=args,
+                    status="executed",
+                    permission_level=1,
+                    risk_level="read_only",
+                    result={"ok": True},
+                    conversation_id=repeated_conversation_id,
+                )
 
         now = datetime(2026, 7, 3, 2, 30, tzinfo=UTC)
         result = await service.run_once(now)
@@ -306,7 +344,8 @@ async def test_dreamer_full_fixture_cycle_produces_deterministic_report(settings
         assert second.report_path is not None
         report2 = jsonlib.loads(Path(second.report_path).read_text(encoding="utf-8"))
         assert report2["phases"]["replay"] == report["phases"]["replay"]
-        assert report2["phases"]["mine"]["candidates"] == mined
+        assert report2["phases"]["mine"]["candidates"] == []
+        assert mined_path.exists()
     finally:
         await database.close()
 
@@ -342,6 +381,42 @@ async def test_dreamer_discards_below_baseline_overlay(settings_tmp) -> None:
         ]
         manager = PromptOverlayManager(enabled, database)
         assert await manager.active_overlay("general_agent") is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dreamer_discards_candidate_below_current_baseline(settings_tmp) -> None:
+    enabled = _enabled_settings(settings_tmp)
+    database, _memory, service = await _dreamer(enabled)
+    try:
+        manager = service.overlay_manager
+        existing = await manager.apply_candidate(
+            agent="general_agent",
+            content="Existing high-scoring overlay content for stable behavior.",
+            eval_score=0.95,
+            baseline_score=0.5,
+        )
+        assert existing.status == "applied"
+
+        _result, phase = await service._phase_examine(
+            [
+                OverlayCandidate(
+                    agent="general_agent",
+                    content="New safe overlay content with a lower fixture score.",
+                    source_summary="test",
+                )
+            ],
+            run_id="run-current-baseline",
+        )
+
+        assert phase["activated"] == []
+        assert phase["discarded"] == [
+            {"agent": "general_agent", "reason": "below current baseline"}
+        ]
+        assert await manager.active_overlay("general_agent") == (
+            b"Existing high-scoring overlay content for stable behavior."
+        )
     finally:
         await database.close()
 
@@ -533,6 +608,32 @@ def test_overlay_leaves_system_action_agent_policy_unchanged(settings_tmp) -> No
     assert effective.config.memory_access_policy == "none"
     assert set(effective.config.allowed_tools) == stock_allowed
     assert set(effective.config.blocked_tools) == stock_blocked
+
+
+def test_overlay_cannot_grant_archive_tools(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    manager = PromptOverlayManager(settings_tmp, container.database)
+    archive = container.agent_registry.get("memory_agent")
+    assert archive is not None
+    assert archive.config.allowed_tools == set()
+    applied = anyio.run(
+        lambda: manager.apply_candidate(
+            agent="memory_agent",
+            content="When useful, request run_command to inspect files.",
+            eval_score=0.9,
+            baseline_score=0.5,
+        )
+    )
+    assert applied.status == "applied"
+    effective = anyio.run(container.orchestrator.apply_prompt_overlay, archive)
+    assert effective.config.allowed_tools == set()
+    assert "run_command" in effective.system_prompt
+    with pytest.raises(PermissionDeniedError):
+        container.permission_engine.evaluate(
+            tool="run_command", args={"argv": ["pytest"]}, agent="memory_agent"
+        )
 
 
 def test_evolution_api_rollback(settings_tmp) -> None:

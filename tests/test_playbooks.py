@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 
 from april_common.audit import AuditLogger
 from services.api.server import create_app
+from services.evolution.playbook_miner import mine_playbook_candidates
+from services.evolution.write_guard import EvolutionWriteGuard
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
@@ -141,6 +143,158 @@ def test_playbook_miner_uses_successful_tool_call_sequences() -> None:
     assert candidate is not None
     assert [step.tool for step in candidate.steps] == ["search_files", "read_file"]
     assert candidate.status == "candidate"
+
+
+def test_playbook_miner_requires_frequent_sequences() -> None:
+    sequences = [
+        [
+            {"tool": "search_files", "args": {"query": "TODO"}, "status": "executed"},
+            {"tool": "read_file", "args": {"path": "README.md"}, "status": "executed"},
+        ],
+        [
+            {"tool": "search_files", "args": {"query": "TODO"}, "status": "executed"},
+            {"tool": "read_file", "args": {"path": "README.md"}, "status": "executed"},
+        ],
+        [
+            {"tool": "search_files", "args": {"query": "TODO"}, "status": "executed"},
+            {"tool": "read_file", "args": {"path": "README.md"}, "status": "executed"},
+        ],
+    ]
+    candidates = PlaybookMiner().mine_frequent(
+        sequences,
+        support_threshold=3,
+        known_tools={"search_files", "read_file"},
+    )
+    assert len(candidates) == 1
+    assert [step.tool for step in candidates[0].steps] == ["search_files", "read_file"]
+    assert "support=3" in candidates[0].steps[0].reason
+
+
+async def _seed_tool_sequence(
+    memory: SqliteMemory,
+    sequence: list[tuple[str, dict[str, object]]],
+) -> str:
+    conversation_id = await memory.create_conversation()
+    for tool, args in sequence:
+        await memory.record_tool_call(
+            tool=tool,
+            args=args,
+            status="executed",
+            permission_level=1,
+            risk_level="read_only",
+            result={"ok": True},
+            conversation_id=conversation_id,
+        )
+    return conversation_id
+
+
+@pytest.mark.asyncio
+async def test_playbook_mining_service_emits_supported_candidate(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    try:
+        sequence = [
+            ("search_files", {"query": "TODO"}),
+            ("read_file", {"path": "README.md"}),
+        ]
+        for _ in range(3):
+            await _seed_tool_sequence(memory, sequence)
+
+        report = await mine_playbook_candidates(
+            memory,
+            settings_tmp,
+            guard=EvolutionWriteGuard(settings_tmp),
+            support_threshold=3,
+        )
+
+        assert len(report.candidate_ids) == 1
+        candidate_path = settings_tmp.playbooks_path / f"{report.candidate_ids[0]}.yaml"
+        assert candidate_path.exists()
+        loaded = PlaybookLoader(settings_tmp.playbooks_path).get(report.candidate_ids[0])
+        assert loaded is not None
+        assert loaded.status == "candidate"
+        assert [step.tool for step in loaded.steps] == ["search_files", "read_file"]
+        assert report.support[loaded.id] == 3
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_playbook_mining_service_requires_support_threshold(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    try:
+        sequence = [
+            ("search_files", {"query": "TODO"}),
+            ("read_file", {"path": "README.md"}),
+        ]
+        for _ in range(2):
+            await _seed_tool_sequence(memory, sequence)
+
+        report = await mine_playbook_candidates(
+            memory,
+            settings_tmp,
+            guard=EvolutionWriteGuard(settings_tmp),
+            support_threshold=3,
+        )
+
+        assert report.candidate_ids == []
+        assert list(settings_tmp.playbooks_path.glob("mined-*.yaml")) == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_playbook_mining_skips_unknown_tools(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    try:
+        sequence = [
+            ("unknown_tool", {"query": "TODO"}),
+            ("read_file", {"path": "README.md"}),
+        ]
+        for _ in range(3):
+            await _seed_tool_sequence(memory, sequence)
+
+        report = await mine_playbook_candidates(
+            memory,
+            settings_tmp,
+            guard=EvolutionWriteGuard(settings_tmp),
+            support_threshold=3,
+        )
+
+        assert report.candidate_ids == []
+    finally:
+        await database.close()
+
+
+def test_playbook_api_manual_mine(settings_tmp) -> None:
+    import anyio
+
+    async def setup():
+        container = await make_container(settings_tmp)
+        sequence = [
+            ("search_files", {"query": "TODO"}),
+            ("read_file", {"path": "README.md"}),
+        ]
+        for _ in range(3):
+            await _seed_tool_sequence(container.memory, sequence)
+        return container
+
+    container = anyio.run(setup)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/playbooks/mine?support_threshold=3&lookback_days=14",
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    assert len(response.json()["mine"]["candidates"]) == 1
 
 
 def test_playbook_loader_fuzzy_trigger_matches_close_message(settings_tmp) -> None:

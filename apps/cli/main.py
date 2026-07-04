@@ -774,6 +774,18 @@ def playbook_run(
     print_jsonish(run(client().post(f"/playbooks/{playbook_id}/run", payload)))
 
 
+@playbook_app.command("mine")
+def playbook_mine(
+    support_threshold: int = typer.Option(3, "--support", min=2),
+    lookback_days: int = typer.Option(14, "--lookback-days", min=1),
+) -> None:
+    path = (
+        "/playbooks/mine"
+        f"?support_threshold={support_threshold}&lookback_days={lookback_days}"
+    )
+    print_jsonish(run(client().post(path, {})))
+
+
 @playbook_app.command("adopt")
 def playbook_adopt(path: Path) -> None:
     import json

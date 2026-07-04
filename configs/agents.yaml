@@ -32,6 +32,15 @@ agents:
     memory_access: conversation_and_safe_memory
     maximum_tool_iterations: 3
     output_schema: AgentResult
+  memory_agent:
+    description: Archive reflection and durable memory extraction.
+    model_id: april-reading
+    prompt_path: agents/memory/prompt.md
+    allowed_tools: []
+    blocked_tools: [write_file, run_command, git_commit, patch_applier, open_url, open_app]
+    memory_access: conversation_and_safe_memory
+    maximum_tool_iterations: 2
+    output_schema: AgentResult
   creative_agent:
     description: Ideas, scripts, concepts, and local notes.
     model_id: april-brain

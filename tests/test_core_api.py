@@ -173,11 +173,25 @@ def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
     assert embeddings["active_provider"] in {"hashed-token", "runtime-local"}
     assert embeddings["reindex_command"] == "run april memory reindex"
     assert isinstance(embeddings["reindex_required"], bool)
+    assert "embedding_model_registered" in embeddings
+    assert "embedding_model_path_exists" in embeddings
+    assert voice["speaker_gate"]["mode"] == "off"
+    assert voice["speaker_gate"]["supported"] is False
+    assert isinstance(voice["sentinel_live_verified"], bool)
     # Readiness exposes a redacted local config fingerprint + per-type report
     # freshness so the operator console / daily-driver doctor can flag staleness.
     body = response.json()
     assert "config_fingerprint" in body
     assert isinstance(body["reports"], dict)
+    assert body["daemon"]["status"] in {
+        "stopped",
+        "running",
+        "degraded",
+        "paused",
+        "stale",
+        "unknown",
+    }
+    assert isinstance(body["daemon"]["details_available"], bool)
 
 
 def test_generated_api_token_authenticates(settings_tmp) -> None:
@@ -515,6 +529,11 @@ def test_chat_stream_structured_approval_payload_shape(settings_tmp) -> None:
 def test_memory_retrieval_in_prompt(settings_tmp) -> None:
     import anyio
 
+    settings_tmp.evolution_path.mkdir(parents=True, exist_ok=True)
+    (settings_tmp.evolution_path / "user_model.md").write_text(
+        "# APRIL User Model\n\n- I prefer local-only status briefs\n",
+        encoding="utf-8",
+    )
     container = anyio.run(make_container, settings_tmp)
 
     async def seed_memory() -> None:
@@ -532,11 +551,18 @@ def test_memory_retrieval_in_prompt(settings_tmp) -> None:
     )
     assert "Local APRIL memory" in prompt
     assert "deep work" in prompt
+    assert "Local APRIL user model" in prompt
+    assert "local-only status briefs" in prompt
 
 
 def test_system_action_agent_gets_no_prior_conversation_history(settings_tmp) -> None:
     import anyio
 
+    settings_tmp.evolution_path.mkdir(parents=True, exist_ok=True)
+    (settings_tmp.evolution_path / "user_model.md").write_text(
+        "# APRIL User Model\n\n- I prefer local-only status briefs\n",
+        encoding="utf-8",
+    )
     container = anyio.run(make_container, settings_tmp)
     client = TestClient(create_app(container))
     first = client.post(
@@ -562,6 +588,8 @@ def test_system_action_agent_gets_no_prior_conversation_history(settings_tmp) ->
     )
     assert "Recent conversation history" not in prompt
     assert "April, plan my work today." not in prompt
+    assert "Local APRIL user model" not in prompt
+    assert "local-only status briefs" not in prompt
 
 
 def test_coding_agent_gets_project_chunks_only_for_selected_project(settings_tmp) -> None:

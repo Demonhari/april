@@ -63,6 +63,7 @@ class ApiContainer:
                     if self.archive_reflection is not None
                     else None
                 ),
+                audit=self.approvals.audit,
             )
         return self.session_manager
 
@@ -166,12 +167,23 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         playbook_loader=playbook_loader,
         playbook_runner=playbook_runner,
     )
+    memory_agent = agent_registry.get("memory_agent")
+    archive_model_id = (
+        memory_agent.model_id
+        if memory_agent is not None and memory_agent.model_id is not None
+        else (
+            reading_agent.model_id
+            if reading_agent is not None and reading_agent.model_id is not None
+            else active_settings.brain.model_id
+        )
+    )
     archive_reflection = ArchiveReflectionService(
         active_settings,
         memory=memory,
         runtime_client=runtime_client,
         vector_memory=vector_memory,
         audit=audit,
+        archive_model_id=archive_model_id,
     )
     sink = notification_sink_from_settings(active_settings, audit)
     governor = ResourceGovernor(active_settings)
@@ -185,6 +197,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         memory,
         continuity_minutes=active_settings.session.continuity_minutes,
         on_close=archive_reflection.reflect_session,
+        audit=audit,
     )
     scheduler = SchedulerService(
         settings=active_settings,

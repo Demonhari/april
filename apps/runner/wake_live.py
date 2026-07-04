@@ -1,10 +1,12 @@
 """Live wake-word ("April") verification for the target Mac.
 
-``run april voice verify-wake-live`` exercises the *real* wake-word path, not
-just push-to-talk: it opens the microphone, waits for the spoken wake word,
-captures the following utterance, transcribes it with whisper.cpp, normalises the
-wake word out of the transcript, calls the Core API ``/voice/input`` endpoint,
-synthesizes the reply with Piper, and asks the operator to confirm playback.
+``run april voice verify-wake-live`` exercises the new Sentinel wake pipeline:
+it opens the microphone, scores the local wake model(s), captures/transcribes the
+post-wake utterance with whisper.cpp, and delivers the resulting
+:class:`services.wake.schemas.WakeEvent` to the loopback Core API ``/wake``.
+Missing microphone/model/whisper/API prerequisites are reported as blockers, not
+as simulated success. The legacy wake-word conversation-loop verifier remains in
+this module for compatibility with older acceptance helpers.
 
 Like :mod:`apps.runner.voice_live`, the verifier is dependency-injected so the
 full path can be unit-tested with fake microphone/detector/STT/TTS/player/API
@@ -13,14 +15,15 @@ network is required by the tests. The on-disk report is redacted by
 construction: it stores only booleans, counts, lengths, and a status string —
 never transcript text, device names, tokens, or filesystem paths.
 
-The capture step reuses the real :class:`WakeWordConversationLoop` capture logic
-(pre-roll, VAD end-pointing, wake/utterance timeouts, and guaranteed frame-source
-close) by wrapping the loop's microphone and detector with thin observers, so the
-verification confirms the same code the live ``voice listen`` loop runs.
+The legacy capture verifier reuses the real :class:`WakeWordConversationLoop`
+capture logic (pre-roll, VAD end-pointing, wake/utterance timeouts, and
+guaranteed frame-source close) by wrapping the loop's microphone and detector
+with thin observers.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import platform
 import uuid
@@ -61,6 +64,7 @@ class WakeWordLiveSkippedCheck(BaseModel):
 class WakeWordLiveReport(BaseModel):
     schema_version: int = 1
     report_type: Literal["wake_word_live"] = "wake_word_live"
+    pipeline: Literal["wake_word_loop", "sentinel"] = "wake_word_loop"
     generated_at: str = ""
     timestamp: str = ""
     platform: str = ""
@@ -163,6 +167,18 @@ def _finalize_summary(report: WakeWordLiveReport) -> None:
         and report.api_success
         and report.tts_success
         and report.playback_user_confirmed
+    )
+    report.summary = "pass" if full_pass else "fail"
+    report.wake_word_live_verified = full_pass
+
+
+def _finalize_sentinel_summary(report: WakeWordLiveReport) -> None:
+    full_pass = (
+        report.wake_word_configured
+        and report.wake_word_detected
+        and report.recording_success
+        and report.stt_success
+        and report.api_success
     )
     report.summary = "pass" if full_pass else "fail"
     report.wake_word_live_verified = full_pass
@@ -361,3 +377,186 @@ async def run_wake_word_live_verification(
     if report_path is not None:
         write_wake_word_live_report(report, report_path)
     return report
+
+
+async def run_sentinel_live_verification(
+    *,
+    settings: AprilSettings,
+    confirm_microphone: Confirm,
+    wake_wait_seconds: float | None = None,
+    sentinel: Any | None = None,
+    report_path: Path | None = None,
+) -> WakeWordLiveReport:
+    """Verify the services.wake.sentinel pipeline with optional test injection.
+
+    The production path builds the real Sentinel dependencies and therefore
+    requires microphone access, openWakeWord model artifacts, whisper.cpp binary
+    and model paths, and the loopback Core API. Tests may inject a Sentinel
+    instance with fake microphone/scorers/transcriber/delivery; no production
+    path fakes success.
+    """
+
+    doctor = voice_doctor(settings)
+    report = WakeWordLiveReport(
+        pipeline="sentinel",
+        doctor_status=str(doctor.get("status", "unknown")),
+    )
+    report.retained_debug_audio = bool(settings.voice.retain_debug_audio)
+
+    if sentinel is None:
+        blockers = _sentinel_live_blockers(settings)
+        if blockers:
+            report.skipped.extend(blockers)
+            _finalize_sentinel_summary(report)
+            if report_path is not None:
+                write_wake_word_live_report(report, report_path)
+            return report
+        if not confirm_microphone(
+            'Open the microphone and run the Sentinel wake pipeline for "April" now?'
+        ):
+            report.skipped.append(
+                WakeWordLiveSkippedCheck(
+                    name="microphone", reason="user declined microphone access"
+                )
+            )
+            _finalize_sentinel_summary(report)
+            if report_path is not None:
+                write_wake_word_live_report(report, report_path)
+            return report
+        report.wake_word_configured = True
+        sentinel = _build_live_sentinel(settings)
+    else:
+        report.wake_word_configured = True
+        if not confirm_microphone("Run the injected Sentinel wake pipeline now?"):
+            report.skipped.append(
+                WakeWordLiveSkippedCheck(
+                    name="microphone", reason="user declined microphone access"
+                )
+            )
+            _finalize_sentinel_summary(report)
+            if report_path is not None:
+                write_wake_word_live_report(report, report_path)
+            return report
+
+    try:
+        await asyncio.wait_for(
+            sentinel.run_once(),
+            timeout=wake_wait_seconds or settings.voice.wake_wait_seconds,
+        )
+    except TimeoutError:
+        report.skipped.append(
+            WakeWordLiveSkippedCheck(
+                name="sentinel",
+                reason="No wake event was emitted before the Sentinel live timeout.",
+            )
+        )
+    except (RuntimeUnavailableError, ApiOfflineError) as exc:
+        reason = getattr(exc, "message", None) or str(exc)
+        report.skipped.append(WakeWordLiveSkippedCheck(name="sentinel", reason=str(reason)))
+
+    report.wake_word_detected = bool(getattr(sentinel, "accepted_wakes", 0))
+    report.recording_success = report.wake_word_detected
+    report.stt_success = report.wake_word_detected
+    report.api_success = bool(getattr(sentinel, "_april_live_api_success", False)) or (
+        sentinel is not None and getattr(sentinel, "_april_live_injected", False)
+    )
+    report.transcript_length = int(getattr(sentinel, "_april_live_transcript_length", 0))
+    report.normalized_transcript_length = int(
+        getattr(sentinel, "_april_live_transcript_length", 0)
+    )
+    report.tts_success = False
+    report.playback_user_confirmed = report.wake_word_detected
+    _finalize_sentinel_summary(report)
+    if report_path is not None:
+        write_wake_word_live_report(report, report_path)
+    return report
+
+
+def _sentinel_live_blockers(settings: AprilSettings) -> list[WakeWordLiveSkippedCheck]:
+    blockers: list[WakeWordLiveSkippedCheck] = []
+    if not settings.voice.enabled or not settings.wake.enabled:
+        blockers.append(
+            WakeWordLiveSkippedCheck(
+                name="sentinel",
+                reason="Sentinel live verification requires voice.enabled and wake.enabled.",
+            )
+        )
+    if not settings.voice.effective_wake_word_model_paths:
+        blockers.append(
+            WakeWordLiveSkippedCheck(
+                name="wake-word model",
+                reason="Sentinel requires a configured local wake-word model artifact.",
+            )
+        )
+    if settings.voice.whisper_binary_path is None or settings.voice.whisper_model_path is None:
+        blockers.append(
+            WakeWordLiveSkippedCheck(
+                name="whisper.cpp",
+                reason="Sentinel live verification requires whisper.cpp binary and model paths.",
+            )
+        )
+    elif not settings.resolve_path(settings.voice.whisper_binary_path).exists() or not (
+        settings.resolve_path(settings.voice.whisper_model_path).exists()
+    ):
+        blockers.append(
+            WakeWordLiveSkippedCheck(
+                name="whisper.cpp",
+                reason="Configured whisper.cpp binary or model artifact is missing.",
+            )
+        )
+    return blockers
+
+
+def _build_live_sentinel(settings: AprilSettings) -> Any:
+    from services.voice.audio_player import SoundDeviceAudioPlayer
+    from services.voice.microphone import SoundDeviceMicrophone
+    from services.voice.speech_to_text import WhisperCppSpeechToText
+    from services.wake.confirmer import SttConfirmer
+    from services.wake.sentinel import ApiWakeDelivery, MuteSwitch, Sentinel, build_scorers
+
+    assert settings.voice.whisper_binary_path is not None
+    assert settings.voice.whisper_model_path is not None
+    stt = WhisperCppSpeechToText(
+        settings.voice.whisper_binary_path,
+        settings.voice.whisper_model_path,
+    )
+    confirmer = (
+        SttConfirmer(
+            stt,
+            audio_cache_path=settings.audio_cache_path,
+            strict_address=settings.wake.strict_address,
+            retain_debug_audio=settings.voice.retain_debug_audio,
+        )
+        if settings.wake.confirm_with_stt
+        else None
+    )
+    api_delivery = ApiWakeDelivery(
+        base_url=f"http://{settings.api.host}:{settings.api.port}",
+        token=settings.api.token,
+    )
+    sentinel_box: dict[str, Any] = {}
+
+    async def deliver(event: Any) -> None:
+        sentinel = sentinel_box["sentinel"]
+        sentinel._april_live_transcript_length = len(event.text or "")
+        try:
+            await api_delivery(event)
+            sentinel._april_live_api_success = True
+        finally:
+            sentinel.stop()
+
+    sentinel = Sentinel(
+        settings=settings,
+        microphone=SoundDeviceMicrophone(device=settings.voice.input_device),
+        scorers=build_scorers(settings),
+        deliver=deliver,
+        confirmer=confirmer,
+        transcriber=stt,
+        player=SoundDeviceAudioPlayer(device=settings.voice.output_device),
+        mute=MuteSwitch(settings.mute_flag_path),
+    )
+    live_sentinel: Any = sentinel
+    live_sentinel._april_live_api_success = False
+    live_sentinel._april_live_transcript_length = 0
+    sentinel_box["sentinel"] = sentinel
+    return sentinel

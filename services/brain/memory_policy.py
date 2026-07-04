@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from services.memory.retriever import MemoryRetriever
@@ -15,6 +16,7 @@ class AgentMemoryContext:
     durable_memories: list[SearchResult] = field(default_factory=list)
     project_chunks: list[SearchResult] = field(default_factory=list)
     document_chunks: list[SearchResult] = field(default_factory=list)
+    user_model: str | None = None
 
 
 def _is_document_intent(intent: str) -> bool:
@@ -31,6 +33,8 @@ async def build_agent_memory_context(
     intent: str,
     message: str,
     project: Project | None,
+    user_model_path: Path | None = None,
+    user_model_max_chars: int = 4000,
     history_limit: int = 8,
 ) -> AgentMemoryContext:
     if policy == "none":
@@ -61,12 +65,14 @@ async def build_agent_memory_context(
         and _is_document_intent(intent)
     ):
         document_chunks = memory_retriever.document_chunks(message)
+    user_model = _read_user_model(user_model_path, max_chars=user_model_max_chars)
 
     return AgentMemoryContext(
         history=bounded_history,
         durable_memories=durable_memories,
         project_chunks=project_chunks,
         document_chunks=document_chunks,
+        user_model=user_model,
     )
 
 
@@ -84,3 +90,16 @@ async def _safe_memory_results(
     if not results and intent in {"planning", "normal_conversation", "direct_agent_run"}:
         results = await memory_retriever.recent_memories(limit=3)
     return results[:6]
+
+
+def _read_user_model(path: Path | None, *, max_chars: int) -> str | None:
+    if path is None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    return stripped[:max_chars]

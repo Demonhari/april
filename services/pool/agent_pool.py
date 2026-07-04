@@ -14,6 +14,7 @@ CALL_SIGNS: dict[str, str] = {
     "reasoning_agent": "Sage",
     "creative_agent": "Muse",
     "reading_agent": "Scout",
+    "memory_agent": "Archive",
     "coding_agent": "Forge",
     "system_action_agent": "Hand",
 }

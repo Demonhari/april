@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
+from april_common.audit import AuditLogger
 from april_common.time import parse_utc_iso, utc_now
 from services.memory.schemas import SessionRecord
 from services.memory.sqlite_memory import SqliteMemory
@@ -25,11 +26,13 @@ class SessionManager:
         continuity_minutes: float,
         clock: Callable[[], datetime] | None = None,
         on_close: Callable[[str], Awaitable[object]] | None = None,
+        audit: AuditLogger | None = None,
     ) -> None:
         self.memory = memory
         self.continuity_minutes = continuity_minutes
         self.clock = clock or utc_now
         self.on_close = on_close
+        self.audit = audit
 
     async def handle_wake(self, event: WakeEvent) -> WakeResolution:
         now = self.clock()
@@ -61,7 +64,10 @@ class SessionManager:
         now_iso = self.clock().isoformat().replace("+00:00", "Z")
         closed = await self.memory.close_session(session_id, at=now_iso)
         if closed and self.on_close is not None:
-            await self.on_close(session_id)
+            try:
+                await self.on_close(session_id)
+            except Exception as exc:
+                self._audit_reflection_failure(session_id, exc)
         return closed
 
     async def close_idle_sessions(self) -> list[str]:
@@ -114,3 +120,16 @@ class SessionManager:
             return False
         window = timedelta(minutes=self.continuity_minutes)
         return now - last_activity <= window
+
+    def _audit_reflection_failure(self, session_id: str, exc: Exception) -> None:
+        if self.audit is None:
+            return
+        self.audit.write(
+            {
+                "event_type": "archive_reflection_failed",
+                "actor": "archive_agent",
+                "reference_id": session_id,
+                "error_type": type(exc).__name__,
+                "error_message_length": len(str(exc)),
+            }
+        )

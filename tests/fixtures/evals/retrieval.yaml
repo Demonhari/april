@@ -1,0 +1,23 @@
+cases:
+  - id: editor_preference
+    query: editor preference concise
+    memories:
+      - id: pref_concise
+        kind: preference
+        content: I prefer concise local answers.
+      - id: project_runtime
+        kind: project_state
+        content: APRIL uses a local runtime.
+    expected_hits:
+      - pref_concise
+  - id: local_runtime_project
+    query: local runtime project
+    memories:
+      - id: pref_concise
+        kind: preference
+        content: I prefer concise local answers.
+      - id: project_runtime
+        kind: project_state
+        content: APRIL uses a local runtime.
+    expected_hits:
+      - project_runtime

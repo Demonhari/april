@@ -97,7 +97,7 @@ from apps.runner.verify import (
     write_workflow_report,
 )
 from apps.runner.voice_live import VoiceLiveReport, run_voice_live_verification
-from apps.runner.wake_live import WakeWordLiveReport, run_wake_word_live_verification
+from apps.runner.wake_live import WakeWordLiveReport, run_sentinel_live_verification
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.config_validation import validate_configuration
 from april_common.effective_config import load_agents_file, load_permissions_file, load_tools_file
@@ -113,6 +113,8 @@ from services.memory.user_profile import UserProfileStore
 from services.voice.health import voice_doctor as collect_voice_doctor
 
 _T = TypeVar("_T")
+
+run_wake_word_live_verification = run_sentinel_live_verification
 
 app = typer.Typer(help="Global command dispatcher.")
 april_app = typer.Typer(help="Run APRIL from any folder.", invoke_without_command=True)
@@ -1526,10 +1528,12 @@ def voice_verify_wake_live(
         help="Keep the exact temporary audio files created by this explicit verification run.",
     ),
 ) -> None:
-    """Verify the live wake-word ('April') path end to end on this Mac.
+    """Verify the live Sentinel wake-word ('April') path on this Mac.
 
     Start APRIL services first (``run april`` or ``run april --fake``) so the
-    Core ``/voice/input`` endpoint can be reached during verification.
+    Core ``/wake`` endpoint can be reached during verification. This command
+    requires microphone access, whisper.cpp, a local wake-word model, and the
+    loopback API; missing artifacts are reported as blockers, not passes.
     """
     settings = _manager().settings
     doctor = collect_voice_doctor(settings)
@@ -1548,24 +1552,20 @@ def voice_verify_wake_live(
         return typer.confirm(message, default=False)
 
     result = asyncio.run(
-        run_wake_word_live_verification(
+        run_sentinel_live_verification(
             settings=settings,
             confirm_microphone=confirm,
-            confirm_playback=confirm,
             wake_wait_seconds=wake_wait_seconds,
-            utterance_max_seconds=utterance_max_seconds,
-            retain_debug_audio=retain_debug_audio,
             report_path=report,
         )
     )
     console.print(
-        "Wake-word live verification: "
+        "Sentinel live verification: "
         f"{result.summary} (wake_word_detected={result.wake_word_detected}, "
         f"recording={result.recording_success}, stt={result.stt_success}, "
         f"transcript_length={result.transcript_length}, "
         f"normalized_transcript_length={result.normalized_transcript_length}, "
-        f"api={result.api_success}, tts={result.tts_success}, "
-        f"playback_confirmed={result.playback_user_confirmed})"
+        f"api={result.api_success})"
     )
     for skipped in result.skipped:
         console.print(f"[yellow]Skipped {skipped.name}:[/yellow] {skipped.reason}")
@@ -2553,7 +2553,6 @@ def _wake_word_live_runner(settings: Any) -> Callable[[], WakeWordLiveReport]:
             run_wake_word_live_verification(
                 settings=settings,
                 confirm_microphone=confirm,
-                confirm_playback=confirm,
             )
         )
 

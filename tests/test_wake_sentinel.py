@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from apps.runner.wake_live import run_sentinel_live_verification
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
@@ -718,6 +719,79 @@ async def test_sentinel_barge_in_duck_mode(settings_tmp) -> None:
     assert len(delivery.events) == 1
     assert player.duck_calls == 1
     assert player.stop_calls == 0
+
+
+async def test_sentinel_live_verification_uses_sentinel_pipeline_with_fakes(
+    settings_tmp,
+) -> None:
+    events: list[WakeEvent] = []
+    tuned = settings_tmp.model_copy(
+        update={
+            "wake": settings_tmp.wake.model_copy(
+                update={"enabled": True, "confirm_with_stt": False}
+            ),
+            "voice": settings_tmp.voice.model_copy(update={"enabled": True}),
+        }
+    )
+    box: dict[str, Sentinel] = {}
+
+    async def deliver(event: WakeEvent) -> None:
+        events.append(event)
+        sentinel = box["sentinel"]
+        sentinel._april_live_api_success = True  # type: ignore[attr-defined]
+        sentinel._april_live_transcript_length = len(  # type: ignore[attr-defined]
+            event.text or ""
+        )
+        sentinel.stop()
+
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([LOUD_FRAME, LOUD_FRAME, FRAME, FRAME, FRAME]),
+        scorers=[ScriptedScorer([0.9])],
+        deliver=deliver,
+        transcriber=RecordingSpeechToText("april, open calendar"),
+        player=RecordingAudioPlayer(),
+        mute=MuteSwitch(tuned.mute_flag_path),
+        clock=ManualClock(),
+    )
+    box["sentinel"] = sentinel
+    report_path = settings_tmp.evolution_path / "sentinel-live.json"
+
+    report = await run_sentinel_live_verification(
+        settings=tuned,
+        confirm_microphone=lambda _message: True,
+        wake_wait_seconds=1.0,
+        sentinel=sentinel,
+        report_path=report_path,
+    )
+
+    assert len(events) == 1
+    assert events[0].text == "open calendar"
+    assert report.pipeline == "sentinel"
+    assert report.summary == "pass"
+    assert report.wake_word_live_verified is True
+    assert report.api_success is True
+    persisted = report_path.read_text(encoding="utf-8")
+    assert "open calendar" not in persisted
+    assert str(settings_tmp.home) not in persisted
+
+
+async def test_sentinel_live_verification_reports_missing_artifact_blockers(
+    settings_tmp,
+) -> None:
+    report = await run_sentinel_live_verification(
+        settings=settings_tmp,
+        confirm_microphone=lambda _message: True,
+        wake_wait_seconds=0.1,
+    )
+
+    assert report.pipeline == "sentinel"
+    assert report.summary == "fail"
+    assert report.wake_word_live_verified is False
+    skipped = {item.name for item in report.skipped}
+    assert "sentinel" in skipped
+    assert "wake-word model" in skipped
+    assert "whisper.cpp" in skipped
 
 
 async def test_stt_confirmer_never_opens_its_own_microphone(settings_tmp) -> None:

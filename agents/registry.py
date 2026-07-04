@@ -4,6 +4,7 @@ from agents.base import BaseAgent
 from agents.coding.agent import coding_agent
 from agents.creative.agent import creative_agent
 from agents.general.agent import general_agent
+from agents.memory.agent import memory_agent
 from agents.reading.agent import reading_agent
 from agents.reasoning.agent import reasoning_agent
 from agents.system_action.agent import system_action_agent
@@ -26,6 +27,7 @@ def default_agent_registry() -> AgentRegistry:
             general_agent(),
             coding_agent(),
             reading_agent(),
+            memory_agent(),
             creative_agent(),
             reasoning_agent(),
             system_action_agent(),

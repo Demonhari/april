@@ -53,6 +53,7 @@ from services.api.schemas import (
     ToolRequestEnvelope,
     WakeRequest,
 )
+from services.april_runtime.model_registry import ModelRegistry
 from services.april_runtime.schemas import LoadModelRequest
 from services.evolution.approval import PromptOverlayApprovalService
 from services.evolution.dataset_export import export_finetune_dataset
@@ -63,7 +64,9 @@ from services.evolution.inspect import (
     overlay_diff,
     set_evolution_kill_switch,
 )
+from services.evolution.playbook_miner import mine_playbook_candidates
 from services.evolution.versions import PromptOverlayManager
+from services.evolution.write_guard import EvolutionWriteGuard
 from services.memory.writer import MemoryWriter
 from services.pool.agent_pool import AgentPool
 from services.scheduler import compose_briefing, compute_repo_activity
@@ -759,6 +762,21 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             approval_id=approval_id,
         )
 
+    @app.post("/playbooks/mine")
+    async def playbook_mine(
+        support_threshold: int = 3,
+        lookback_days: int = 14,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        report = await mine_playbook_candidates(
+            active.memory,
+            active.settings,
+            guard=EvolutionWriteGuard(active.settings, audit=active.approvals.audit),
+            support_threshold=max(2, support_threshold),
+            lookback_days=max(1, lookback_days),
+        )
+        return {"mine": report.to_payload()}
+
     @app.post("/playbooks/{playbook_id}/run")
     async def playbook_run(
         playbook_id: str,
@@ -1161,6 +1179,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         "reindex_required": not embedding_index_compatible,
         "reindex_command": "run april memory reindex",
     }
+    embeddings.update(_embedding_model_status(active.settings))
     # query_audio_devices() only *enumerates* devices; it never opens the
     # microphone or starts a stream. Readiness stays inert by construction.
     devices = query_audio_devices()
@@ -1229,6 +1248,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
                 "--report data/verification/workflow-real.json",
                 "run april verify /absolute/path/to/model.gguf --target-mac "
                 "--require-real-model --report data/verification/single-model.json",
+                "run april voice verify-wake-live --report data/verification/wake-live.json",
             ],
             "warnings": [
                 "Fake verification is not real model verification.",
@@ -1253,6 +1273,12 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "push_to_talk_ready": voice_readiness["push_to_talk_ready"],
             "wake_word_ready": voice_readiness["wake_word_ready"],
             "full_voice_loop_ready": voice_readiness["full_voice_loop_ready"],
+            "sentinel_live_verified": live_flags["wake_word_live_verified"],
+            "speaker_gate": {
+                "mode": active.settings.wake.speaker_gate,
+                "supported": False,
+                "detail": "speaker_gate is off; local speaker verification is unsupported.",
+            },
             # Single redacted enum capturing the highest voice milestone reached:
             # disabled / not_configured / push_to_talk_ready / wake_word_ready /
             # full_voice_loop_ready / live_verified / wake_live_verified.
@@ -1276,12 +1302,59 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "cors_enabled": active.settings.api.cors_enabled,
             "development_token_warning": _development_token_warning(active.settings),
         },
+        "daemon": _daemon_readiness(active.settings),
         "next_actions": [
             "run april verify --all-configured-models --require-real-model "
             "--report data/verification/mac-readiness.json",
             "run april voice verify-live --report data/verification/voice-live.json",
+            "run april voice verify-wake-live --report data/verification/wake-live.json",
             "run april setup app-stub",
         ],
+    }
+
+
+def _embedding_model_status(settings: AprilSettings) -> dict[str, Any]:
+    model_id = settings.memory.embedding_model_id
+    status: dict[str, Any] = {
+        "embedding_model_registered": False,
+        "embedding_model_path_exists": False,
+        "embedding_model_missing_reason": None,
+    }
+    if settings.memory.embedding_provider != "runtime-local":
+        status["embedding_model_missing_reason"] = "runtime-local embeddings are not configured"
+        return status
+    if not model_id:
+        status["embedding_model_missing_reason"] = "runtime-local requested without model id"
+        return status
+    try:
+        registry = ModelRegistry.from_file(
+            settings.home / "configs" / "models.yaml",
+            root=settings.home,
+        )
+        model = registry.get(model_id)
+    except Exception:
+        status["embedding_model_missing_reason"] = "embedding model id is not registered"
+        return status
+    path = model.resolved_path(registry.root)
+    status["embedding_model_registered"] = True
+    status["embedding_model_path_exists"] = path.exists()
+    if not path.exists():
+        status["embedding_model_missing_reason"] = f"missing model file: {path.name}"
+    return status
+
+
+def _daemon_readiness(settings: AprilSettings) -> dict[str, Any]:
+    try:
+        from apps.daemon.apriald import read_daemon_status
+
+        payload = read_daemon_status(settings)
+    except Exception:
+        payload = {"status": "unknown", "details_available": False}
+    return {
+        "status": payload.get("status", "unknown"),
+        "details_available": bool(payload.get("details_available", False)),
+        "children": payload.get("children", []),
+        "governor": payload.get("governor", {}),
     }
 
 

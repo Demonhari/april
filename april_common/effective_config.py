@@ -18,6 +18,7 @@ KNOWN_AGENT_IDS = {
     "coding_agent",
     "creative_agent",
     "general_agent",
+    "memory_agent",
     "reading_agent",
     "reasoning_agent",
     "system_action_agent",

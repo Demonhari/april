@@ -142,6 +142,18 @@ class PromptOverlayManager:
             return None
         return text
 
+    async def active_eval_score(self, agent: str) -> float | None:
+        row = await self.database.fetchone(
+            "SELECT eval_score FROM prompt_versions WHERE agent = ? AND active = 1",
+            (agent,),
+        )
+        if row is None:
+            return None
+        try:
+            return float(row["eval_score"])
+        except (TypeError, ValueError):
+            return None
+
     async def versions(self, *, agent: str | None = None) -> list[dict[str, object]]:
         if agent is None:
             rows = await self.database.fetchall(

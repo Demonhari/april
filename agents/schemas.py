@@ -12,6 +12,7 @@ AgentName = Literal[
     "general_agent",
     "coding_agent",
     "reading_agent",
+    "memory_agent",
     "creative_agent",
     "reasoning_agent",
     "system_action_agent",

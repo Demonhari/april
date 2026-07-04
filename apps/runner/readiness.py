@@ -24,6 +24,7 @@ temporary configs with no real GGUF, binary, or device present.
 from __future__ import annotations
 
 import importlib.util
+import json
 import platform
 from pathlib import Path
 from typing import Literal
@@ -50,11 +51,13 @@ _INSTALL_RUNTIME = "pip install -e '.[runtime]'"
 _SETUP_MODELS = "run april setup models"
 _SETUP_VOICE = "run april setup voice"
 _SETUP_TOKENS = "run april setup tokens"
+_SETUP_EMBEDDINGS = "run april setup embeddings --model /absolute/path/to/embedding.gguf --apply"
 _VERIFY_REAL = (
     "run april verify --all-configured-models --require-real-model "
     "--report data/verification/mac-readiness.json"
 )
 _VERIFY_VOICE = "run april voice verify-live --report data/verification/voice-live.json"
+_VERIFY_WAKE = "run april voice verify-wake-live --report data/verification/wake-live.json"
 
 
 class ReadinessCheck(BaseModel):
@@ -102,6 +105,11 @@ class ReadinessReport(BaseModel):
     voice_artifacts: list[VoiceArtifact] = Field(default_factory=list)
     api_token_status: str = "missing"
     runtime_token_status: str = "missing"
+    speaker_gate: str = "off"
+    speaker_gate_supported: bool = False
+    daemon_status: str = "unknown"
+    daemon_details_available: bool = False
+    sentinel_live_status: str = "not_verified"
     checks: list[ReadinessCheck] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
@@ -268,6 +276,56 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 )
             )
 
+    # --- runtime-local embeddings ------------------------------------------
+    if settings.memory.embedding_provider == "runtime-local":
+        embedding_model_id = settings.memory.embedding_model_id
+        if not embedding_model_id:
+            checks.append(
+                ReadinessCheck(
+                    name="runtime-local embedding model",
+                    status="blocker",
+                    detail=(
+                        "runtime-local embeddings are configured but no embedding "
+                        "model id is set."
+                    ),
+                    action=_SETUP_EMBEDDINGS,
+                )
+            )
+        elif registry is None or not registry.exists(embedding_model_id):
+            checks.append(
+                ReadinessCheck(
+                    name="runtime-local embedding model",
+                    status="blocker",
+                    detail=f"Embedding model id is not registered: {embedding_model_id}",
+                    action=_SETUP_EMBEDDINGS,
+                )
+            )
+        else:
+            embedding_model = registry.get(embedding_model_id)
+            embedding_path = embedding_model.resolved_path(registry.root)
+            checks.append(
+                ReadinessCheck(
+                    name="runtime-local embedding model",
+                    status="ok" if embedding_path.exists() else "blocker",
+                    detail=(
+                        f"Registered embedding model {embedding_model_id} exists."
+                        if embedding_path.exists()
+                        else f"Missing embedding model file: {embedding_path.name}"
+                    ),
+                    action=None
+                    if embedding_path.exists()
+                    else _SETUP_EMBEDDINGS,
+                )
+            )
+    else:
+        checks.append(
+            ReadinessCheck(
+                name="runtime-local embedding model",
+                status="skipped",
+                detail="memory.embedding_provider is hashed-token; no embedding GGUF required.",
+            )
+        )
+
     # --- development tokens --------------------------------------------------
     api_status = _token_status(settings.api.token, KNOWN_DEFAULT_API_TOKENS, PLACEHOLDER_API_TOKENS)
     runtime_status = _token_status(
@@ -325,6 +383,42 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         voice_artifacts.append(artifact)
         checks.append(check)
 
+    checks.append(
+        ReadinessCheck(
+            name="speaker gate",
+            status="skipped",
+            detail="speaker_gate is off; local speaker verification is unsupported in this build.",
+        )
+    )
+    sentinel_live_status = _sentinel_live_status(root)
+    checks.append(
+        ReadinessCheck(
+            name="Sentinel live verification",
+            status="ok" if sentinel_live_status == "verified" else "skipped",
+            detail=(
+                "Latest wake-word live report verified the Sentinel pipeline."
+                if sentinel_live_status == "verified"
+                else "Sentinel live pipeline has not been verified on this Mac."
+            ),
+            action=None if sentinel_live_status == "verified" else _VERIFY_WAKE,
+        )
+    )
+    daemon_status_payload = _daemon_status(settings)
+    daemon_status = str(daemon_status_payload.get("status", "unknown"))
+    daemon_details_available = bool(daemon_status_payload.get("details_available", False))
+    checks.append(
+        ReadinessCheck(
+            name="daemon detailed status",
+            status="ok" if daemon_details_available else "warning",
+            detail=(
+                f"details available; daemon status={daemon_status}"
+                if daemon_details_available
+                else f"details unavailable; daemon status={daemon_status}"
+            ),
+            action="run april daemon status" if not daemon_details_available else None,
+        )
+    )
+
     # --- aggregate -----------------------------------------------------------
     blockers = [check.name for check in checks if check.status == "blocker"]
     warnings = [check.name for check in checks if check.status == "warning"]
@@ -364,6 +458,8 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         next_actions.append(_VERIFY_REAL)
     if voice_enabled and _VERIFY_VOICE not in next_actions:
         next_actions.append(_VERIFY_VOICE)
+    if voice_enabled and _VERIFY_WAKE not in next_actions:
+        next_actions.append(_VERIFY_WAKE)
 
     return ReadinessReport(
         generated_at=utc_now_iso(),
@@ -381,8 +477,43 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         voice_artifacts=voice_artifacts,
         api_token_status=api_status,
         runtime_token_status=runtime_status,
+        speaker_gate=settings.wake.speaker_gate,
+        speaker_gate_supported=False,
+        daemon_status=daemon_status,
+        daemon_details_available=daemon_details_available,
+        sentinel_live_status=sentinel_live_status,
         checks=checks,
         blockers=blockers,
         warnings=warnings,
         next_actions=next_actions,
     )
+
+
+def _daemon_status(settings: AprilSettings) -> dict[str, object]:
+    try:
+        from apps.daemon.apriald import read_daemon_status
+
+        return read_daemon_status(settings)
+    except Exception:
+        return {"status": "unknown", "details_available": False}
+
+
+def _sentinel_live_status(home: Path) -> str:
+    latest: tuple[float, bool] | None = None
+    verification_dir = home / "data" / "verification"
+    for path in verification_dir.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("report_type") != "wake_word_live":
+            continue
+        if payload.get("pipeline") != "sentinel":
+            continue
+        order = path.stat().st_mtime
+        verified = bool(payload.get("wake_word_live_verified", False))
+        if latest is None or order > latest[0]:
+            latest = (order, verified)
+    if latest is None:
+        return "not_verified"
+    return "verified" if latest[1] else "failed"

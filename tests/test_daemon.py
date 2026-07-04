@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
+import os
 import plistlib
 from pathlib import Path
 
 import pytest
 
-from apps.daemon.apriald import AprialdSupervisor, DaemonLock
+from apps.daemon.apriald import (
+    AprialdSupervisor,
+    DaemonLock,
+    daemon_pid_path,
+    daemon_status_path,
+    read_daemon_status,
+)
 from apps.daemon.launchd import LaunchdManager
 from services.pool.governor import ResourceGovernor, ResourcePolicy, ResourceSignals
 
@@ -66,6 +74,10 @@ async def _healthy(_spec) -> bool:
     return True
 
 
+async def _unhealthy_api(spec) -> bool:
+    return spec.name != "api"
+
+
 async def _no_sleep(_seconds: float) -> None:
     return None
 
@@ -94,6 +106,21 @@ def _permissive_governor(settings) -> ResourceGovernor:
             )
         ),
         policy=ResourcePolicy(min_ram_headroom_gb=1.0, max_cpu_load_percent=90.0),
+    )
+
+
+def _denying_governor(settings) -> ResourceGovernor:
+    return ResourceGovernor(
+        settings,
+        provider=FixedSignals(
+            ResourceSignals(
+                ram_headroom_gb=0.2,
+                cpu_load_percent=96.0,
+                on_ac_power=True,
+                user_idle_seconds=600.0,
+            )
+        ),
+        policy=ResourcePolicy(min_ram_headroom_gb=1.0, max_cpu_load_percent=80.0),
     )
 
 
@@ -132,6 +159,115 @@ async def test_supervisor_default_safe_config_excludes_sentinel(settings_tmp) ->
         assert health.status == "ok"
     finally:
         await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_reports_running_child_details(settings_tmp) -> None:
+    factory = FakeFactory()
+    supervisor = _supervisor(settings_tmp, factory, ManualClock())
+    await supervisor.start()
+    try:
+        status = read_daemon_status(settings_tmp)
+        assert status["status"] == "running"
+        assert status["pid"] == os.getpid()
+        assert status["details_available"] is True
+        assert status["governor"] == {"allowed": True, "reasons": []}
+        children = {child["name"]: child for child in status["children"]}  # type: ignore[index]
+        assert set(children) == {"runtime", "api"}
+        assert children["runtime"]["status"] == "running"
+        assert children["runtime"]["pid"] == 10_000
+        assert children["runtime"]["restarts"] == 0
+        assert children["runtime"]["last_exit_code"] is None
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_reports_degraded_child(settings_tmp) -> None:
+    factory = FakeFactory()
+    supervisor = AprialdSupervisor(
+        settings_tmp,
+        process_factory=factory,
+        health_checker=_unhealthy_api,
+        governor=_permissive_governor(settings_tmp),
+        sleep=_no_sleep,
+        clock=ManualClock(),
+    )
+    await supervisor.start()
+    try:
+        status = read_daemon_status(settings_tmp)
+        assert status["status"] == "degraded"
+        children = {child["name"]: child for child in status["children"]}  # type: ignore[index]
+        assert children["api"]["status"] == "degraded"
+        assert children["api"]["degraded_reason"] == "health_check_failed"
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_reports_paused_governor_state(settings_tmp) -> None:
+    factory = FakeFactory()
+    supervisor = AprialdSupervisor(
+        settings_tmp,
+        process_factory=factory,
+        health_checker=_healthy,
+        governor=_denying_governor(settings_tmp),
+        sleep=_no_sleep,
+        clock=ManualClock(),
+    )
+    await supervisor.start()
+    try:
+        status = read_daemon_status(settings_tmp)
+        assert status["status"] == "paused"
+        assert status["governor"] == {
+            "allowed": False,
+            "reasons": ["ram_headroom_below_policy", "cpu_load_above_policy"],
+        }
+        assert factory.started == []
+        children = {child["name"]: child for child in status["children"]}  # type: ignore[index]
+        assert {child["status"] for child in children.values()} == {"paused"}
+        assert children["runtime"]["paused_reason"] == (
+            "ram_headroom_below_policy,cpu_load_above_policy"
+        )
+    finally:
+        await supervisor.stop()
+
+
+def test_daemon_status_reports_stale_with_last_details(settings_tmp) -> None:
+    daemon_pid_path(settings_tmp).parent.mkdir(parents=True, exist_ok=True)
+    daemon_pid_path(settings_tmp).write_text("999999\n", encoding="utf-8")
+    daemon_status_path(settings_tmp).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "degraded",
+                "pid": 999999,
+                "generated_at": "2026-07-04T00:00:00Z",
+                "children": [
+                    {
+                        "name": "runtime",
+                        "status": "down",
+                        "pid": 123,
+                        "restarts": 2,
+                        "last_exit_code": 1,
+                        "detail": "restart_scheduled_in=2.0s failures=1",
+                        "paused_reason": None,
+                        "degraded_reason": None,
+                    }
+                ],
+                "governor": {"allowed": True, "reasons": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = read_daemon_status(settings_tmp)
+
+    assert status["status"] == "stale"
+    assert status["pid"] == 999999
+    assert status["details_available"] is True
+    assert status["children"][0]["name"] == "runtime"  # type: ignore[index]
+    assert status["supervisor_status"] == "degraded"
 
 
 @pytest.mark.asyncio

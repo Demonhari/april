@@ -18,6 +18,7 @@ from services.evolution.prompt_evolver import OverlayCandidate, generate_overlay
 from services.evolution.replay import collect_replay_samples
 from services.evolution.report import phase_status_summary, write_report
 from services.evolution.scheduler import EvolutionSchedulerGate
+from services.evolution.user_model import update_user_model
 from services.evolution.versions import PromptOverlayManager
 from services.evolution.write_guard import EvolutionWriteGuard
 from services.memory.sqlite_memory import SqliteMemory
@@ -166,7 +167,16 @@ class DreamerService:
         from services.memory.decay import apply_memory_decay
 
         decay = await apply_memory_decay(self.memory, guard=self.guard)
-        return report, {**report.to_payload(), **decay.to_payload()}
+        user_model = await update_user_model(
+            self.memory,
+            self.settings,
+            guard=self.guard,
+        )
+        return report, {
+            **report.to_payload(),
+            **decay.to_payload(),
+            "user_model": user_model.to_payload(),
+        }
 
     async def _phase_mine(self) -> tuple[Any, dict[str, Any]]:
         report = await mine_playbook_candidates(self.memory, self.settings, guard=self.guard)
@@ -202,14 +212,20 @@ class DreamerService:
                 agent=candidate.agent, content=candidate.content, settings=self.settings
             )
             evaluations.append(evaluation.to_payload())
-            if not evaluation.passed:
-                discarded.append({"agent": candidate.agent, "reason": "below baseline"})
+            active_score = await self.overlay_manager.active_eval_score(candidate.agent)
+            apply_baseline = max(
+                evaluation.baseline,
+                active_score if active_score is not None else evaluation.baseline,
+            )
+            if evaluation.score < apply_baseline:
+                reason = "below current baseline" if active_score is not None else "below baseline"
+                discarded.append({"agent": candidate.agent, "reason": reason})
                 continue
             result = await self.overlay_manager.apply_candidate(
                 agent=candidate.agent,
                 content=candidate.content,
                 eval_score=evaluation.score,
-                baseline_score=evaluation.baseline,
+                baseline_score=apply_baseline,
                 source="dreamer",
             )
             entry = {"agent": candidate.agent, "version": result.version}

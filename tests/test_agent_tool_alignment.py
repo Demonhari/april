@@ -155,7 +155,23 @@ def test_list_reminders_allowed_only_for_general_agent() -> None:
 def test_write_tools_stay_denied_for_general_and_reading_agents() -> None:
     """The conservative blocks held: no write_file/run_command/etc. crept in."""
     engine = _configured_engine()
-    for agent in ("general_agent", "reading_agent"):
+    for agent in ("general_agent", "reading_agent", "memory_agent"):
         for tool in ("write_file", "run_command", "git_commit", "patch_applier", "open_url"):
             with pytest.raises(PermissionDeniedError):
                 engine.evaluate(tool=tool, args={}, agent=agent)
+
+
+def test_archive_agent_has_no_write_capable_tools_by_default() -> None:
+    engine = _configured_engine()
+    for tool in (
+        "remember_memory",
+        "create_reminder",
+        "read_file",
+        "search_files",
+        "document_indexer",
+        "write_file",
+        "run_command",
+        "patch_applier",
+    ):
+        with pytest.raises(PermissionDeniedError):
+            engine.evaluate(tool=tool, args={}, agent="memory_agent")

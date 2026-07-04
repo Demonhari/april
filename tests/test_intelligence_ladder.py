@@ -189,6 +189,35 @@ async def test_council_mode_selects_best_rubric_candidate(settings_tmp) -> None:
 
 
 @pytest.mark.asyncio
+async def test_council_mode_enforces_whole_rung_budget(settings_tmp) -> None:
+    fast_budget = settings_tmp.model_copy(
+        update={
+            "deep_mode": settings_tmp.deep_mode.model_copy(update={"max_seconds": 0.01})
+        }
+    )
+    runtime = LadderRuntime(delay=0.05)
+    ladder = _ladder(fast_budget, runtime)
+
+    result = await ladder.run_council(
+        message="compare local client approaches",
+        prompt_messages=[
+            ChatMessage(role="user", content="User request: compare local client approaches")
+        ],
+        fallback_model_id="april-brain",
+        request_id="r-budget",
+    )
+
+    assert result.status == "unavailable"
+    assert any("whole-rung local budget" in warning for warning in result.warnings)
+    assert result.metadata["candidate_count"] == 0
+    assert all(
+        "score each candidate answer" not in message.content.lower()
+        for call in runtime.calls
+        for message in call["messages"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_council_scout_judge_scores_and_surfaces_disagreement(settings_tmp) -> None:
     import json as jsonlib
 
