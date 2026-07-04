@@ -41,6 +41,7 @@ def _write_home(
     models: dict[str, dict] | None = None,
     voice: dict | None = None,
     memory: dict | None = None,
+    extra: dict | None = None,
 ) -> Path:
     configs = home / "configs"
     configs.mkdir(parents=True, exist_ok=True)
@@ -49,6 +50,8 @@ def _write_home(
         april["voice"] = voice
     if memory is not None:
         april["memory"] = memory
+    if extra is not None:
+        april.update(extra)
     (configs / "april.yaml").write_text(yaml.safe_dump(april), encoding="utf-8")
     if models is None:
         models = {
@@ -156,9 +159,7 @@ def test_readiness_detects_verified_sentinel_report(tmp_path: Path) -> None:
     report = build_readiness_report(home)
 
     assert report.sentinel_live_status == "verified"
-    assert next(c for c in report.checks if c.name == "Sentinel live verification").status == (
-        "ok"
-    )
+    assert next(c for c in report.checks if c.name == "Sentinel live verification").status == ("ok")
 
 
 def test_default_repo_config_keeps_voice_out_of_blockers(tmp_path: Path) -> None:
@@ -331,3 +332,125 @@ def test_broken_config_reports_a_single_blocker(tmp_path: Path) -> None:
     report = build_readiness_report(tmp_path)
     assert report.real_model_ready is False
     assert "model registry" in report.blockers
+
+
+# ---------------------------------------------------------------------------
+# v2 production-readiness checks
+# ---------------------------------------------------------------------------
+
+
+def _check(report: ReadinessReport, name: str):
+    for check in report.checks:
+        if check.name == name:
+            return check
+    return None
+
+
+def test_loopback_binding_ok_by_default(tmp_path: Path) -> None:
+    report = build_readiness_report(_write_home(tmp_path))
+    check = _check(report, "loopback-only binding")
+    assert check is not None
+    assert check.status == "ok"
+
+
+def test_non_loopback_binding_is_a_blocker(tmp_path: Path) -> None:
+    home = _write_home(tmp_path, extra={"api": {"host": "0.0.0.0"}})
+    report = build_readiness_report(home)
+    check = _check(report, "loopback-only binding")
+    assert check is not None
+    assert check.status == "blocker"
+    assert "0.0.0.0" in check.detail
+
+
+def test_hashed_token_embeddings_warn_in_production(tmp_path: Path) -> None:
+    # Production config validation requires real tokens before readiness runs.
+    home = _write_home(
+        tmp_path,
+        extra={
+            "environment": "production",
+            "api": {"token": "prod-api-token-3f9c2a71b4d8"},
+            "runtime": {"backend": "fake", "token": "prod-runtime-token-8e1d5c92aa07"},
+        },
+    )
+    report = build_readiness_report(home)
+    check = _check(report, "embedding provider hardening")
+    assert check is not None
+    assert check.status == "warning"
+    # In development the same config produces no such check.
+    dev_report = build_readiness_report(_write_home(tmp_path))
+    assert _check(dev_report, "embedding provider hardening") is None
+
+
+def test_wake_enabled_without_onnx_model_is_a_blocker(tmp_path: Path) -> None:
+    home = _write_home(tmp_path, extra={"wake": {"enabled": True}})
+    report = build_readiness_report(home)
+    check = _check(report, "wake-word ONNX model")
+    assert check is not None
+    assert check.status == "blocker"
+    # Wake enabled without a live validation record warns.
+    sentinel = _check(report, "Sentinel live verification")
+    assert sentinel is not None
+    assert sentinel.status == "warning"
+    # The unsupported speaker gate is called out, not silently skipped.
+    gate = _check(report, "speaker gate")
+    assert gate is not None
+    assert gate.status == "warning"
+
+
+def test_wake_disabled_keeps_sentinel_and_speaker_gate_informational(tmp_path: Path) -> None:
+    report = build_readiness_report(_write_home(tmp_path))
+    assert _check(report, "wake-word ONNX model") is None
+    sentinel = _check(report, "Sentinel live verification")
+    assert sentinel is not None
+    assert sentinel.status == "skipped"
+    gate = _check(report, "speaker gate")
+    assert gate is not None
+    assert gate.status == "skipped"
+
+
+def test_evolution_without_scheduler_warns(tmp_path: Path) -> None:
+    home = _write_home(tmp_path, extra={"evolution": {"enabled": True}})
+    report = build_readiness_report(home)
+    check = _check(report, "evolution scheduling")
+    assert check is not None
+    assert check.status == "warning"
+
+
+def test_evolution_kill_switch_warns_when_scheduled(tmp_path: Path) -> None:
+    home = _write_home(
+        tmp_path,
+        extra={"evolution": {"enabled": True}, "scheduler": {"enabled": True}},
+    )
+    kill = home / "data" / "evolution" / "DISABLED"
+    kill.parent.mkdir(parents=True, exist_ok=True)
+    kill.write_text("disabled\n", encoding="utf-8")
+    report = build_readiness_report(home)
+    check = _check(report, "evolution kill switch")
+    assert check is not None
+    assert check.status == "warning"
+
+
+def test_pending_eval_cases_warn(tmp_path: Path) -> None:
+    home = _write_home(tmp_path)
+    pending = home / "data" / "evolution" / "evals" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "abc123.yaml").write_text("case_type: negative_feedback\n", encoding="utf-8")
+    report = build_readiness_report(home)
+    check = _check(report, "pending eval cases")
+    assert check is not None
+    assert check.status == "warning"
+    assert "1 staged eval case(s)" in check.detail
+
+
+def test_unreviewed_write_capable_overlays_warn(tmp_path: Path) -> None:
+    home = _write_home(tmp_path)
+    candidates = home / "data" / "evolution" / "candidates"
+    candidates.mkdir(parents=True, exist_ok=True)
+    (candidates / "coding_agent-0.overlay.txt").write_text("guidance\n", encoding="utf-8")
+    # Non-write-capable candidates do not trigger the warning.
+    (candidates / "general_agent-0.overlay.txt").write_text("guidance\n", encoding="utf-8")
+    report = build_readiness_report(home)
+    check = _check(report, "prompt overlay review")
+    assert check is not None
+    assert check.status == "warning"
+    assert "1 overlay candidate(s)" in check.detail

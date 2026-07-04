@@ -18,7 +18,19 @@ class RememberMemoryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content: str = Field(min_length=1, max_length=10_000)
-    memory_type: Literal["fact", "preference", "project", "note"] = "fact"
+    # v2 governed memory kinds; "project" and "note" are legacy v1 aliases kept
+    # so existing callers keep working.
+    memory_type: Literal[
+        "fact",
+        "preference",
+        "correction",
+        "project_state",
+        "skill_note",
+        "relationship",
+        "open_loop",
+        "project",
+        "note",
+    ] = "fact"
     project_id: str | None = None
     source_conversation_id: str | None = None
     reason: str = Field(min_length=1, max_length=500)

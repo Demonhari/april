@@ -124,9 +124,7 @@ def _denying_governor(settings) -> ResourceGovernor:
     )
 
 
-def _supervisor(
-    settings, factory: FakeFactory, clock: ManualClock, **kwargs
-) -> AprialdSupervisor:
+def _supervisor(settings, factory: FakeFactory, clock: ManualClock, **kwargs) -> AprialdSupervisor:
     return AprialdSupervisor(
         settings,
         process_factory=factory,
@@ -313,8 +311,7 @@ async def test_supervisor_starts_children_degrades_and_restarts_with_backoff(set
         degraded = await supervisor.health()
         assert degraded.status == "degraded"
         assert any(
-            child.name == "runtime" and child.status == "down"
-            for child in degraded.children
+            child.name == "runtime" and child.status == "down" for child in degraded.children
         )
 
         await supervisor.supervise_once()

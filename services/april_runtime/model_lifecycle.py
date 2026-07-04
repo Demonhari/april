@@ -5,7 +5,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 from april_common.errors import AprilError, ModelUnavailableError, NotFoundError
 from april_common.time import utc_now_iso
@@ -26,6 +26,16 @@ from services.april_runtime.schemas import (
 
 BackendFactory = Callable[[ModelDefinition], RuntimeBackend]
 RuntimeStreamEventName = Literal["meta", "token", "usage", "done", "error"]
+
+
+class ResourceLoadGate(Protocol):
+    """Structural view of ResourceGovernor used to gate new specialist loads.
+
+    ``assess_resident()`` considers RAM headroom and CPU load only; power and
+    idle state deliberately never block an interactive model load.
+    """
+
+    def assess_resident(self) -> Any: ...  # GovernorDecision-shaped
 
 
 @dataclass(slots=True)
@@ -58,11 +68,16 @@ class ModelLifecycle:
         backend_factory: BackendFactory | None = None,
         root_backend: str | None = None,
         max_loaded_specialist_models: int = 2,
+        governor: ResourceLoadGate | None = None,
     ) -> None:
         self.registry = registry
         self.root_backend = root_backend
         self.context_manager = ContextManager()
         self.max_loaded_specialist_models = max(0, max_loaded_specialist_models)
+        # Optional resource gate for *new specialist loads* only. keep_loaded
+        # models (the brain) and embedding models always load, and power/idle
+        # never block an interactive load — the gate looks at RAM/CPU headroom.
+        self.governor = governor
         self._policy_lock = asyncio.Lock()
         self._states = {
             model.id: ModelRuntimeState(model=model, state=self._initial_state(model))
@@ -153,9 +168,32 @@ class ModelLifecycle:
                 except AprilError:
                     continue
 
+    def _check_resource_gate(self, state: ModelRuntimeState) -> None:
+        """Refuse a *new* specialist load under RAM/CPU pressure.
+
+        Already-loaded models are untouched; the caller sees an explicit
+        ModelUnavailableError with the governor's reasons instead of a silent
+        OOM later. Gate failures (probe errors) never block a load.
+        """
+        if self.governor is None or state.state in {"loaded", "loading"}:
+            return
+        try:
+            decision = self.governor.assess_resident()
+        except Exception:
+            return
+        if getattr(decision, "allowed", True):
+            return
+        reasons = tuple(getattr(decision, "reasons", ()) or ())
+        raise ModelUnavailableError(
+            state.model.id,
+            "Deferred specialist model load under resource pressure.",
+            {"governor_reasons": list(reasons)},
+        )
+
     async def load_model(self, model_id: str) -> ModelRuntimeState:
         state = self.get_state(model_id)
         if self._is_specialist(state.model):
+            self._check_resource_gate(state)
             await self._enforce_lifecycle(target_model_id=model_id)
         async with state.lifecycle_lock:
             if state.state == "loaded":

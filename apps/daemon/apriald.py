@@ -252,8 +252,7 @@ class AprialdSupervisor:
             if runtime.next_restart_at is not None:
                 remaining = max(0.0, runtime.next_restart_at - self.clock())
                 detail = (
-                    f"restart_scheduled_in={remaining:.1f}s "
-                    f"failures={runtime.consecutive_failures}"
+                    f"restart_scheduled_in={remaining:.1f}s failures={runtime.consecutive_failures}"
                 )
             return ChildHealth(
                 runtime.spec.name,
@@ -506,10 +505,7 @@ def _operator_status(payload: dict[str, Any]) -> str:
         and governor.get("allowed") is False
         and isinstance(children, list)
         and children
-        and all(
-            isinstance(child, dict) and child.get("status") == "paused"
-            for child in children
-        )
+        and all(isinstance(child, dict) and child.get("status") == "paused" for child in children)
     ):
         return "paused"
     status = payload.get("status")

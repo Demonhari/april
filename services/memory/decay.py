@@ -70,18 +70,13 @@ async def apply_memory_decay(
             expiry = current + timedelta(days=fade_grace_days)
             expires_at = expiry.isoformat().replace("+00:00", "Z")
             fading = True
-        await memory.set_memory_decay(
-            record.id, confidence=new_confidence, expires_at=expires_at
-        )
+        await memory.set_memory_decay(record.id, confidence=new_confidence, expires_at=expires_at)
         report.decayed += 1
         if fading:
             report.faded += 1
             report.details.append(
-                f"memory {record.id} fading (confidence {new_confidence}), "
-                f"expires {expires_at}"
+                f"memory {record.id} fading (confidence {new_confidence}), expires {expires_at}"
             )
         else:
-            report.details.append(
-                f"memory {record.id} decayed to confidence {new_confidence}"
-            )
+            report.details.append(f"memory {record.id} decayed to confidence {new_confidence}")
     return report

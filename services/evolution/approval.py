@@ -67,9 +67,7 @@ class PromptOverlayApprovalService:
             return []
         applied_hashes = {
             str(row["content_hash"])
-            for row in await self.database.fetchall(
-                "SELECT content_hash FROM prompt_versions"
-            )
+            for row in await self.database.fetchall("SELECT content_hash FROM prompt_versions")
         }
         pending: list[PendingOverlay] = []
         for path in sorted(candidates_dir.glob("*.overlay.txt")):

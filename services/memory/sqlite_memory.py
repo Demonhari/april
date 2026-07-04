@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from april_common.errors import PermissionDeniedError
@@ -169,9 +170,7 @@ class SqliteMemory:
                 params,
             )
         else:
-            params = (
-                (project_id, utc_now_iso()) if not include_inactive else (project_id,)
-            )
+            params = (project_id, utc_now_iso()) if not include_inactive else (project_id,)
             rows = await self.database.fetchall(
                 f"""
                 SELECT * FROM memories
@@ -294,9 +293,7 @@ class SqliteMemory:
         )
         return cursor.rowcount > 0
 
-    async def list_memories_by_state(
-        self, state: str, *, limit: int = 100
-    ) -> list[MemoryRecord]:
+    async def list_memories_by_state(self, state: str, *, limit: int = 100) -> list[MemoryRecord]:
         """Inspect memory lifecycle states without hiding or deleting anything.
 
         States: ``machine`` (machine-written, still active), ``superseded``,
@@ -323,9 +320,7 @@ class SqliteMemory:
             ),
         }
         if state not in clauses:
-            raise ValueError(
-                "state must be one of machine, superseded, expired, fading, active"
-            )
+            raise ValueError("state must be one of machine, superseded, expired, fading, active")
         where, params = clauses[state]
         rows = await self.database.fetchall(
             f"SELECT * FROM memories WHERE {where} ORDER BY created_at DESC LIMIT ?",
@@ -385,9 +380,7 @@ class SqliteMemory:
             )
         return [MemoryContradictionRecord.model_validate(dict(row)) for row in rows]
 
-    async def resolve_memory_contradiction(
-        self, contradiction_id: str, *, resolution: str
-    ) -> bool:
+    async def resolve_memory_contradiction(self, contradiction_id: str, *, resolution: str) -> bool:
         cursor = await self.database.execute(
             """
             UPDATE memory_contradictions
@@ -398,10 +391,15 @@ class SqliteMemory:
         )
         return cursor.rowcount > 0
 
-    async def count_machine_memories_since(self, since_iso: str, *, source: str) -> int:
+    async def count_machine_memories_since(
+        self, since_iso: str, *, source: str | Sequence[str]
+    ) -> int:
+        sources = (source,) if isinstance(source, str) else tuple(source)
+        placeholders = ", ".join("?" for _ in sources)
         row = await self.database.fetchone(
-            "SELECT COUNT(*) AS count FROM memories WHERE source = ? AND created_at >= ?",
-            (source, since_iso),
+            "SELECT COUNT(*) AS count FROM memories "
+            f"WHERE source IN ({placeholders}) AND created_at >= ?",
+            (*sources, since_iso),
         )
         return int(row["count"]) if row is not None else 0
 

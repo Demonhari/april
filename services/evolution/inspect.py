@@ -108,9 +108,7 @@ async def overlay_diff(
     }
 
 
-def set_evolution_kill_switch(
-    settings: AprilSettings, *, disabled: bool
-) -> dict[str, Any]:
+def set_evolution_kill_switch(settings: AprilSettings, *, disabled: bool) -> dict[str, Any]:
     """Flip the local evolution kill switch (a flag file inside the fence)."""
     path = evolution_kill_switch_path(settings)
     if disabled:

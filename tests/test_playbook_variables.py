@@ -26,9 +26,7 @@ def _definition(steps: list[dict]) -> PlaybookDefinition:
 async def test_last_run_substitutes_none_then_real_summary(settings_tmp) -> None:
     database, memory, executor = await _tool_executor(settings_tmp)
     try:
-        playbook = _definition(
-            [{"tool": "echo", "args": {"value": "last run was: $last_run"}}]
-        )
+        playbook = _definition([{"tool": "echo", "args": {"value": "last run was: $last_run"}}])
         runner = PlaybookRunner(executor, memory=memory)
         first = await runner.run(playbook)
         assert first.status == "completed"

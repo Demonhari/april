@@ -47,9 +47,7 @@ async def test_evolution_write_guard_fences_paths_and_audits(settings_tmp) -> No
     assert allowed.exists()
     with pytest.raises(PermissionError):
         guard.write_text(settings_tmp.home / "README.md", "bad")
-    assert "evolution_write_guard_violation" in settings_tmp.audit_path.read_text(
-        encoding="utf-8"
-    )
+    assert "evolution_write_guard_violation" in settings_tmp.audit_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -211,9 +209,7 @@ async def test_dreamer_scheduler_gate_and_report(settings_tmp) -> None:
         assert result.status == "completed"
         assert result.report_path is not None
         # An empty database produces the stock "nothing happened" report.
-        assert "no evolution candidates" in Path(result.report_path).read_text(
-            encoding="utf-8"
-        )
+        assert "no evolution candidates" in Path(result.report_path).read_text(encoding="utf-8")
         second = await service.run_once(now)
         assert second.status == "skipped"
         assert second.reason == "already ran today"
@@ -242,9 +238,7 @@ async def test_dreamer_full_fixture_cycle_produces_deterministic_report(settings
         disliked = await memory.create_memory(
             "I don't like coffee", kind="preference", reason="stated later", confidence=0.7
         )
-        await memory.record_memory_contradiction(
-            memory_id_a=liked.id, memory_id_b=disliked.id
-        )
+        await memory.record_memory_contradiction(memory_id_a=liked.id, memory_id_b=disliked.id)
         conversation_id = await memory.create_conversation()
         run_row_id = await memory.record_agent_run(
             conversation_id=conversation_id,
@@ -332,12 +326,10 @@ async def test_dreamer_full_fixture_cycle_produces_deterministic_report(settings
         rows = await database.fetchall("SELECT * FROM evolution_runs")
         assert len(rows) == 1
         assert report["summary"] != "no evolution candidates were produced"
-        assert "activated 1 prompt overlay(s)" in report["summary"]
+        assert "activated 1 heuristic prompt overlay(s)" in report["summary"]
 
         # Determinism: the same fixtures produce the same phase payloads.
-        gate2 = EvolutionSchedulerGate(
-            enabled, memory, governor=_permissive_governor(enabled)
-        )
+        gate2 = EvolutionSchedulerGate(enabled, memory, governor=_permissive_governor(enabled))
         service2 = DreamerService(enabled, memory=memory, gate=gate2)
         await memory.set_scheduler_state("last_evolution_date", "1999-01-01")
         second = await service2.run_once(now)
@@ -466,6 +458,7 @@ async def test_dreamer_phase_failure_is_isolated(settings_tmp, monkeypatch) -> N
     enabled = _enabled_settings(settings_tmp)
     database, _memory, service = await _dreamer(enabled)
     try:
+
         async def broken_consolidate(*args, **kwargs):
             raise RuntimeError("distill blew up")
 
@@ -501,17 +494,9 @@ async def test_dreamer_writes_never_escape_the_fence(settings_tmp) -> None:
                 risk_level="read_only",
                 conversation_id=conversation_id,
             )
-        before = {
-            path
-            for path in settings_tmp.home.rglob("*")
-            if path.is_file()
-        }
+        before = {path for path in settings_tmp.home.rglob("*") if path.is_file()}
         await service.run_once(datetime(2026, 7, 3, 2, 30, tzinfo=UTC))
-        created = {
-            path
-            for path in settings_tmp.home.rglob("*")
-            if path.is_file()
-        } - before
+        created = {path for path in settings_tmp.home.rglob("*") if path.is_file()} - before
         fenced_roots = (enabled.evolution_path, enabled.playbooks_path)
         for path in created:
             if path == enabled.database_path or path.name.startswith("april.db"):

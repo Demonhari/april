@@ -126,6 +126,7 @@ class ToolExecutionService:
         expected_side_effects: list[str] | None = None,
         approval_metadata: dict[str, Any] | None = None,
     ) -> ToolExecutionOutcome:
+        self._refuse_when_disarmed(tool)
         normalized_args = self.normalize_args(tool, args, context)
         permission = self.permission_engine.evaluate(
             tool=tool,
@@ -188,6 +189,7 @@ class ToolExecutionService:
         args: dict[str, Any] | None = None,
     ) -> ToolExecutionOutcome:
         record = await self.approvals.get(approval_id)
+        self._refuse_when_disarmed(record.tool)
         if (
             record.risk_level == "external_action"
             and not self.settings.permissions.external_actions_enabled
@@ -312,6 +314,25 @@ class ToolExecutionService:
             permission=permission,
             result=result,
         )
+
+    def _refuse_when_disarmed(self, tool: str) -> None:
+        """During a Dreamer phase, Level >= 1 tools must never execute.
+
+        Every registered tool is at least Level 1, so a disarmed context
+        refuses all tool routing outright — analysis phases act on data only.
+        """
+        from services.evolution.disarm import active_disarmed_phase
+
+        phase = active_disarmed_phase()
+        if phase is None:
+            return
+        definition = self.tool_registry.get(tool)
+        level = definition.permission_level if definition is not None else 1
+        if level >= 1:
+            raise PermissionDeniedError(
+                "Tool execution is disarmed during Dreamer phases.",
+                {"tool": tool, "phase": phase},
+            )
 
     async def create_approval(
         self,

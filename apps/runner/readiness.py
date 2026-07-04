@@ -59,6 +59,8 @@ _VERIFY_REAL = (
 _VERIFY_VOICE = "run april voice verify-live --report data/verification/voice-live.json"
 _VERIFY_WAKE = "run april voice verify-wake-live --report data/verification/wake-live.json"
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
 
 class ReadinessCheck(BaseModel):
     name: str
@@ -285,8 +287,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                     name="runtime-local embedding model",
                     status="blocker",
                     detail=(
-                        "runtime-local embeddings are configured but no embedding "
-                        "model id is set."
+                        "runtime-local embeddings are configured but no embedding model id is set."
                     ),
                     action=_SETUP_EMBEDDINGS,
                 )
@@ -312,9 +313,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                         if embedding_path.exists()
                         else f"Missing embedding model file: {embedding_path.name}"
                     ),
-                    action=None
-                    if embedding_path.exists()
-                    else _SETUP_EMBEDDINGS,
+                    action=None if embedding_path.exists() else _SETUP_EMBEDDINGS,
                 )
             )
     else:
@@ -323,6 +322,47 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 name="runtime-local embedding model",
                 status="skipped",
                 detail="memory.embedding_provider is hashed-token; no embedding GGUF required.",
+            )
+        )
+
+    # --- loopback-only binding ------------------------------------------------
+    non_loopback = [
+        f"{name}={host}"
+        for name, host in (("api.host", settings.api.host), ("runtime.host", settings.runtime.host))
+        if host not in _LOOPBACK_HOSTS
+    ]
+    if non_loopback:
+        checks.append(
+            ReadinessCheck(
+                name="loopback-only binding",
+                status="blocker",
+                detail="Non-loopback bind address configured: " + ", ".join(sorted(non_loopback)),
+                action="Set api.host and runtime.host to 127.0.0.1 (APRIL is loopback-only).",
+            )
+        )
+    else:
+        checks.append(
+            ReadinessCheck(
+                name="loopback-only binding",
+                status="ok",
+                detail="API and runtime bind to loopback only.",
+            )
+        )
+
+    # --- hashed-token embeddings in production --------------------------------
+    if (
+        settings.memory.embedding_provider == "hashed-token"
+        and settings.environment == "production"
+    ):
+        checks.append(
+            ReadinessCheck(
+                name="embedding provider hardening",
+                status="warning",
+                detail=(
+                    "hashed-token embeddings are active in a production environment; "
+                    "semantic memory is degraded and hardened go-live holds at warning."
+                ),
+                action=_SETUP_EMBEDDINGS,
             )
         )
 
@@ -383,26 +423,102 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         voice_artifacts.append(artifact)
         checks.append(check)
 
+    wake_enabled = settings.wake.enabled
     checks.append(
         ReadinessCheck(
             name="speaker gate",
-            status="skipped",
-            detail="speaker_gate is off; local speaker verification is unsupported in this build.",
+            # With wake enabled this is an explicit production limitation, not
+            # a silent skip: no local speaker verification exists in this build.
+            status="warning" if wake_enabled else "skipped",
+            detail=(
+                "speaker_gate is off; local speaker verification is unsupported in this build."
+                + (" Anyone near the microphone can wake APRIL." if wake_enabled else "")
+            ),
         )
     )
+    if wake_enabled and not settings.voice.effective_wake_word_model_paths:
+        checks.append(
+            ReadinessCheck(
+                name="wake-word ONNX model",
+                status="blocker",
+                detail="wake.enabled is on but no wake-word model path is configured.",
+                action=_SETUP_VOICE,
+            )
+        )
     sentinel_live_status = _sentinel_live_status(root)
+    if sentinel_live_status == "verified":
+        sentinel_check_status: CheckStatus = "ok"
+        sentinel_detail = "Latest wake-word live report verified the Sentinel pipeline."
+    elif wake_enabled:
+        # Wake is enabled but never live-validated on this machine: warn.
+        sentinel_check_status = "warning"
+        sentinel_detail = (
+            "wake.enabled is on but the Sentinel pipeline has no live validation "
+            "record on this Mac."
+        )
+    else:
+        sentinel_check_status = "skipped"
+        sentinel_detail = "Sentinel live pipeline has not been verified on this Mac."
     checks.append(
         ReadinessCheck(
             name="Sentinel live verification",
-            status="ok" if sentinel_live_status == "verified" else "skipped",
-            detail=(
-                "Latest wake-word live report verified the Sentinel pipeline."
-                if sentinel_live_status == "verified"
-                else "Sentinel live pipeline has not been verified on this Mac."
-            ),
+            status=sentinel_check_status,
+            detail=sentinel_detail,
             action=None if sentinel_live_status == "verified" else _VERIFY_WAKE,
         )
     )
+
+    # --- evolution/scheduler wiring -------------------------------------------
+    if settings.evolution.enabled and not settings.scheduler.enabled:
+        checks.append(
+            ReadinessCheck(
+                name="evolution scheduling",
+                status="warning",
+                detail=(
+                    "evolution.enabled is on but scheduler.enabled is off; the nightly "
+                    "Dreamer will never run automatically."
+                ),
+                action="Set scheduler.enabled: true (or run the Dreamer manually).",
+            )
+        )
+    if settings.scheduler.enabled and settings.evolution.enabled:
+        kill_switch = settings.evolution_path / "DISABLED"
+        if kill_switch.exists():
+            checks.append(
+                ReadinessCheck(
+                    name="evolution kill switch",
+                    status="warning",
+                    detail="Scheduler and evolution are enabled but the local kill switch "
+                    "file is present; Dreamer runs are blocked.",
+                    action="Remove data/evolution/DISABLED to re-enable nightly evolution.",
+                )
+            )
+
+    # --- unreviewed evolution artifacts ---------------------------------------
+    pending_overlays = _pending_write_capable_overlay_count(settings)
+    if pending_overlays:
+        checks.append(
+            ReadinessCheck(
+                name="prompt overlay review",
+                status="warning",
+                detail=(
+                    f"{pending_overlays} overlay candidate(s) for write-capable agents "
+                    "are stored and may await review (already-applied candidates are "
+                    "listed precisely by the API)."
+                ),
+                action="run april evolve overlays pending",
+            )
+        )
+    pending_evals = _pending_eval_case_count(settings)
+    if pending_evals:
+        checks.append(
+            ReadinessCheck(
+                name="pending eval cases",
+                status="warning",
+                detail=f"{pending_evals} staged eval case(s) have not been reviewed.",
+                action="Review data/evolution/evals/pending and promote or delete cases.",
+            )
+        )
     daemon_status_payload = _daemon_status(settings)
     daemon_status = str(daemon_status_payload.get("status", "unknown"))
     daemon_details_available = bool(daemon_status_payload.get("details_available", False))
@@ -487,6 +603,32 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         warnings=warnings,
         next_actions=next_actions,
     )
+
+
+def _pending_write_capable_overlay_count(settings: AprilSettings) -> int:
+    """File-only count of stored overlay candidates for write-capable agents.
+
+    Readiness stays inert (no DB connection), so this may include candidates a
+    later approval already applied; the check wording says so and points at the
+    precise API listing.
+    """
+    candidates_dir = settings.evolution_path / "candidates"
+    if not candidates_dir.is_dir():
+        return 0
+    write_capable = {"coding_agent", "system_action_agent"}
+    count = 0
+    for path in candidates_dir.glob("*.overlay.txt"):
+        agent = path.name.rsplit("-", 1)[0]
+        if agent in write_capable:
+            count += 1
+    return count
+
+
+def _pending_eval_case_count(settings: AprilSettings) -> int:
+    pending_dir = settings.evolution_path / "evals" / "pending"
+    if not pending_dir.is_dir():
+        return 0
+    return sum(1 for path in pending_dir.glob("*.yaml") if path.is_file())
 
 
 def _daemon_status(settings: AprilSettings) -> dict[str, object]:

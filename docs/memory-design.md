@@ -51,6 +51,20 @@ existing record for exact duplicate content/type/project writes. Memory write
 audit records include IDs, type, project/conversation scope, and content length,
 but not the stored content itself.
 
+Governed memory kinds (v2): `fact`, `preference`, `correction`, `project_state`,
+`skill_note`, `relationship`, and `open_loop`. The legacy v1 kinds `project` and
+`note` are still accepted and stored as-is so old clients and rows keep working.
+
+Memory provenance (v2 `source` column): `user` (explicit manual writes),
+`reflection` (Archive session reflection), `dream` (Dreamer consolidation), and
+`import` (bulk import). `archive` is the legacy spelling of `reflection`;
+existing rows keep it, retrieval treats any non-`user` source as machine-written,
+and the Archive daily cap counts both spellings. Archive reflection discards
+candidates below `evolution.archive_min_confidence` (default 0.5), and its
+contradiction detection (negation flips plus deterministic subject/value
+mismatches) only ever flags pairs for Dreamer adjudication — it never deletes or
+supersedes memory on its own.
+
 The vector index stores metadata and matrix data separately as `records.json`,
 `metadata.json`, and `vectors.npy`. Writes are batched under a local file lock
 and committed through atomic temporary-file replacement. Search uses the

@@ -99,36 +99,132 @@ def _ladder(settings_tmp, runtime: LadderRuntime) -> IntelligenceLadder:
 
 def test_ladder_selects_reflex_deep_verified_and_council(settings_tmp) -> None:
     ladder = _ladder(settings_tmp, LadderRuntime())
-    assert ladder.select(
-        message="April, what time is it?",
-        decision=_decision(),
-        mode="standard",
-    ).rung == 0
-    assert ladder.select(
-        message="compare options",
-        decision=_decision(),
-        mode="deep",
-    ).rung == 3
-    assert ladder.select(
-        message="double check your answer",
-        decision=_decision(),
-        mode="standard",
-    ).rung == 2
-    assert ladder.select(
-        message="compare options",
-        decision=_decision(),
-        mode="council",
-    ).rung == 4
-    assert ladder.select(
-        message="run pytest",
-        decision=_decision(
-            tools_needed=["run_command"],
-            permission_level=3,
-            risk_level="code_write",
-            needs_confirmation=True,
-        ),
-        mode="deep",
-    ).rung == 1
+    assert (
+        ladder.select(
+            message="April, what time is it?",
+            decision=_decision(),
+            mode="standard",
+        ).rung
+        == 0
+    )
+    assert (
+        ladder.select(
+            message="compare options",
+            decision=_decision(),
+            mode="deep",
+        ).rung
+        == 3
+    )
+    assert (
+        ladder.select(
+            message="double check your answer",
+            decision=_decision(),
+            mode="standard",
+        ).rung
+        == 2
+    )
+    assert (
+        ladder.select(
+            message="compare options",
+            decision=_decision(),
+            mode="council",
+        ).rung
+        == 4
+    )
+    assert (
+        ladder.select(
+            message="run pytest",
+            decision=_decision(
+                tools_needed=["run_command"],
+                permission_level=3,
+                risk_level="code_write",
+                needs_confirmation=True,
+            ),
+            mode="deep",
+        ).rung
+        == 1
+    )
+
+
+def test_memory_recall_subject_detection(settings_tmp) -> None:
+    ladder = _ladder(settings_tmp, LadderRuntime())
+    assert (
+        ladder.memory_recall_subject("what is my favorite editor?", _decision())
+        == "favorite editor"
+    )
+    assert (
+        ladder.memory_recall_subject("April, what's my dentist's name", _decision())
+        == "dentist's name"
+    )
+    assert (
+        ladder.memory_recall_subject("do you remember my wifi setup notes", _decision())
+        == "wifi setup notes"
+    )
+    # Non-recall phrasing never matches.
+    assert ladder.memory_recall_subject("what is the capital of France", _decision()) is None
+    assert ladder.memory_recall_subject("update my favorite editor", _decision()) is None
+    # Tool-needing or confirmation-needing decisions are never reflex-eligible.
+    assert (
+        ladder.memory_recall_subject(
+            "what is my favorite editor",
+            _decision(tools_needed=["read_file"], permission_level=1),
+        )
+        is None
+    )
+    assert (
+        ladder.memory_recall_subject(
+            "what is my favorite editor",
+            _decision(permission_level=3, needs_confirmation=True),
+        )
+        is None
+    )
+
+
+def test_memory_reflex_answer_labels_memory_source(settings_tmp) -> None:
+    ladder = _ladder(settings_tmp, LadderRuntime())
+    answer = ladder.memory_reflex_answer("The user's favorite editor is vim")
+    assert answer.startswith("Mode: reflex")
+    assert "From local memory: The user's favorite editor is vim" in answer
+
+
+@pytest.mark.asyncio
+async def test_memory_reflex_requires_unique_exact_hit(settings_tmp) -> None:
+    import anyio  # noqa: F401
+
+    from tests.test_core_api import make_container
+
+    container = await make_container(settings_tmp)
+    orchestrator = container.orchestrator
+    await container.memory.create_memory(
+        "The user's favorite editor is vim",
+        kind="preference",
+        reason="stated",
+    )
+    result = await orchestrator.chat("what is my favorite editor?", request_id="reflex-1")
+    assert result.status == "ok"
+    assert result.final_message.startswith("Mode: reflex")
+    assert "From local memory: The user's favorite editor is vim" in result.final_message
+    rows = await container.database.fetchall(
+        "SELECT metadata_json FROM agent_runs ORDER BY created_at DESC LIMIT 1"
+    )
+    import json as jsonlib
+
+    metadata = jsonlib.loads(rows[0]["metadata_json"])
+    assert metadata["intelligence_rung"] == 0
+    assert metadata["reflex"] == "memory_hit"
+
+    # A second matching memory makes the recall ambiguous: normal routing wins.
+    await container.memory.create_memory(
+        "The user's favorite editor at work is emacs",
+        kind="preference",
+        reason="stated",
+    )
+    ambiguous = await orchestrator.chat("what is my favorite editor?", request_id="reflex-2")
+    assert "From local memory:" not in ambiguous.final_message
+
+    # A recall with no stored memory routes normally too.
+    miss = await orchestrator.chat("what is my dog's name?", request_id="reflex-3")
+    assert "From local memory:" not in miss.final_message
 
 
 def test_reflex_answer_is_deterministic_local(settings_tmp) -> None:
@@ -153,9 +249,7 @@ async def test_deep_mode_uses_reasoning_model_and_hard_budget(settings_tmp) -> N
     assert result.final_message.startswith("Mode: deep")
 
     fast_budget = settings_tmp.model_copy(
-        update={
-            "deep_mode": settings_tmp.deep_mode.model_copy(update={"max_seconds": 0.01})
-        }
+        update={"deep_mode": settings_tmp.deep_mode.model_copy(update={"max_seconds": 0.01})}
     )
     slow = _ladder(fast_budget, LadderRuntime(delay=0.05))
     stopped = await slow.run_deep(
@@ -191,9 +285,7 @@ async def test_council_mode_selects_best_rubric_candidate(settings_tmp) -> None:
 @pytest.mark.asyncio
 async def test_council_mode_enforces_whole_rung_budget(settings_tmp) -> None:
     fast_budget = settings_tmp.model_copy(
-        update={
-            "deep_mode": settings_tmp.deep_mode.model_copy(update={"max_seconds": 0.01})
-        }
+        update={"deep_mode": settings_tmp.deep_mode.model_copy(update={"max_seconds": 0.01})}
     )
     runtime = LadderRuntime(delay=0.05)
     ladder = _ladder(fast_budget, runtime)
@@ -251,44 +343,59 @@ async def test_council_scout_judge_scores_and_surfaces_disagreement(settings_tmp
 def test_confidence_drives_rung_selection(settings_tmp) -> None:
     ladder = _ladder(settings_tmp, LadderRuntime())
     # Mid confidence escalates to verified.
-    assert ladder.select(
-        message="what changed in the runtime design",
-        decision=_decision(confidence=0.55),
-        mode="standard",
-    ).rung == 2
+    assert (
+        ladder.select(
+            message="what changed in the runtime design",
+            decision=_decision(confidence=0.55),
+            mode="standard",
+        ).rung
+        == 2
+    )
     # Low confidence escalates to deep.
-    assert ladder.select(
-        message="what changed in the runtime design",
-        decision=_decision(confidence=0.3),
-        mode="standard",
-    ).rung == 3
+    assert (
+        ladder.select(
+            message="what changed in the runtime design",
+            decision=_decision(confidence=0.3),
+            mode="standard",
+        ).rung
+        == 3
+    )
     # High confidence stays on the standard route.
-    assert ladder.select(
-        message="what changed in the runtime design",
-        decision=_decision(confidence=0.9),
-        mode="standard",
-    ).rung == 1
+    assert (
+        ladder.select(
+            message="what changed in the runtime design",
+            decision=_decision(confidence=0.9),
+            mode="standard",
+        ).rung
+        == 1
+    )
     # Tool/approval paths never escalate regardless of confidence.
-    assert ladder.select(
-        message="what changed in the runtime design",
-        decision=_decision(
-            confidence=0.2,
-            tools_needed=["run_command"],
-            permission_level=3,
-            risk_level="code_write",
-            needs_confirmation=True,
-        ),
-        mode="standard",
-    ).rung == 1
+    assert (
+        ladder.select(
+            message="what changed in the runtime design",
+            decision=_decision(
+                confidence=0.2,
+                tools_needed=["run_command"],
+                permission_level=3,
+                risk_level="code_write",
+                needs_confirmation=True,
+            ),
+            mode="standard",
+        ).rung
+        == 1
+    )
 
 
 def test_deep_phrases_and_high_stakes_select_rungs(settings_tmp) -> None:
     ladder = _ladder(settings_tmp, LadderRuntime())
-    assert ladder.select(
-        message="think hard about the best architecture",
-        decision=_decision(),
-        mode="standard",
-    ).rung == 3
+    assert (
+        ladder.select(
+            message="think hard about the best architecture",
+            decision=_decision(),
+            mode="standard",
+        ).rung
+        == 3
+    )
     high_stakes = ladder.select(
         message="this is a high stakes decision about my career",
         decision=_decision(),

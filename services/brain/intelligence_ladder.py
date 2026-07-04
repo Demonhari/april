@@ -39,6 +39,13 @@ _DEEP_PHRASES = (
     "think carefully",
     "reason step by step",
 )
+# Recall-question shapes eligible for the R0 memory reflex. Deliberately
+# narrow: only first-person possessive recall ("my X") qualifies.
+_MEMORY_RECALL_PATTERNS = (
+    re.compile(r"^(?:what is|what's|whats) my (?P<subject>.+)$"),
+    re.compile(r"^(?:do you remember|remind me(?: of| about)?) my (?P<subject>.+)$"),
+)
+
 _HIGH_STAKES_PHRASES = (
     "high stakes",
     "high-stakes",
@@ -210,6 +217,30 @@ class IntelligenceLadder:
             "current date",
             "date",
         }
+
+    def memory_recall_subject(self, message: str, decision: BrainDecision) -> str | None:
+        """Deterministic recall-question detection for the R0 memory reflex.
+
+        Returns the recall subject ("favorite editor" from "what is my favorite
+        editor?") only for plain read-only turns. Retrieval scores are not
+        calibrated confidence, so the reflex itself later requires a *unique*
+        token-exact durable-memory match before answering without a model.
+        """
+        if decision.permission_level > 1 or decision.needs_confirmation:
+            return None
+        if decision.tools_needed or decision.planned_tool_calls:
+            return None
+        normalized = _normalize(message)
+        for pattern in _MEMORY_RECALL_PATTERNS:
+            match = pattern.match(normalized)
+            if match:
+                subject = match.group("subject").strip()
+                if len(subject.split()) >= 1 and len(subject) >= 3:
+                    return subject
+        return None
+
+    def memory_reflex_answer(self, memory_content: str) -> str:
+        return f"{_MODE_ANNOUNCEMENTS[0]}\n\nFrom local memory: {memory_content}"
 
     def reflex_answer(self, message: str) -> str:
         now = self.clock()
@@ -412,9 +443,7 @@ class IntelligenceLadder:
                 responses = await asyncio.gather(*tasks)
                 for (role, _prompt), response in zip(members, responses, strict=True):
                     if response is None:
-                        warnings.append(
-                            f"Council responder {role} exceeded the local budget."
-                        )
+                        warnings.append(f"Council responder {role} exceeded the local budget.")
                         continue
                     raw_candidates.append(
                         CouncilCandidate(responder_id=role, content=response.content)
@@ -451,8 +480,7 @@ class IntelligenceLadder:
             metadata["council_scoring"] = "scout"
         else:
             candidates = [
-                score_council_candidate(candidate, question=message)
-                for candidate in raw_candidates
+                score_council_candidate(candidate, question=message) for candidate in raw_candidates
             ]
             metadata["council_scoring"] = "deterministic_rubric"
         best = select_best_candidate(candidates)
@@ -494,13 +522,10 @@ class IntelligenceLadder:
         """
         scout = self.agent_registry.get("reading_agent")
         scout_prompt = (
-            scout.system_prompt
-            if scout is not None
-            else "You are APRIL's local scoring agent."
+            scout.system_prompt if scout is not None else "You are APRIL's local scoring agent."
         )
         listing = "\n\n".join(
-            f"[{candidate.responder_id}]\n{candidate.content[:1200]}"
-            for candidate in candidates
+            f"[{candidate.responder_id}]\n{candidate.content[:1200]}" for candidate in candidates
         )
         response = await self._bounded_chat(
             model_id=scout.model_id if scout is not None and scout.model_id else model_id,

@@ -181,9 +181,7 @@ async def test_stale_session_wake_continues_when_reflection_fails(settings_tmp) 
         assert failures[0]["reference_id"] == first.session_id
         assert failures[0]["error_type"] == "RuntimeError"
         assert failures[0]["error_message_length"] == len("transcript-leak-marker")
-        assert "transcript-leak-marker" not in settings_tmp.audit_path.read_text(
-            encoding="utf-8"
-        )
+        assert "transcript-leak-marker" not in settings_tmp.audit_path.read_text(encoding="utf-8")
     finally:
         await database.close()
 

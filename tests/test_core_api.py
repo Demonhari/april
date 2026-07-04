@@ -344,8 +344,7 @@ def test_chat_deep_mode_uses_explicit_ladder_mode(settings_tmp) -> None:
     )
     metadata = [json.loads(row["metadata_json"]) for row in rows]
     assert any(
-        item.get("chat_mode") == "deep" and item.get("intelligence_rung") == 3
-        for item in metadata
+        item.get("chat_mode") == "deep" and item.get("intelligence_rung") == 3 for item in metadata
     )
 
 
@@ -997,6 +996,33 @@ def test_wake_endpoint_voice_and_terminal_join_same_session(settings_tmp) -> Non
     assert second["joined_existing"] is True
     assert second["session_id"] == first["session_id"]
     assert second["conversation_id"] == first["conversation_id"]
+
+
+def test_wake_endpoint_accepts_transcript_alias(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/wake",
+        json={"source": "voice", "transcript": "plan my work today"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    assert response.json()["session_id"]
+
+
+def test_wake_endpoint_rejects_conflicting_text_and_transcript(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/wake",
+        json={"source": "voice", "text": "one", "transcript": "two"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 422
 
 
 def test_project_add_normalizes_and_deduplicates(settings_tmp) -> None:

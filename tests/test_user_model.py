@@ -41,9 +41,7 @@ async def test_user_model_autoapplies_only_safe_sections(settings_tmp) -> None:
 
         assert report.status == "applied_with_pending_review"
         assert report.path == str(settings_tmp.evolution_path / "user_model.md")
-        content = (settings_tmp.evolution_path / "user_model.md").read_text(
-            encoding="utf-8"
-        )
+        content = (settings_tmp.evolution_path / "user_model.md").read_text(encoding="utf-8")
         assert "concise local summaries" in content
         assert "short local plan" in content
         assert "APRIL" in content

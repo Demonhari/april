@@ -164,9 +164,7 @@ def _fixture_retrieval_hits(query: str, memories: list[Any]) -> list[dict[str, A
 
 def _fake_replay_response(messages: list[Any]) -> str:
     text = " ".join(
-        str(message.get("content", ""))
-        for message in messages
-        if isinstance(message, dict)
+        str(message.get("content", "")) for message in messages if isinstance(message, dict)
     ).casefold()
     if "local" in text:
         return "Deterministic replay: answer locally, preserve local-only constraints."

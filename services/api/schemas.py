@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agents.schemas import AgentResult
 
@@ -57,7 +57,19 @@ class MemoryCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content: str = Field(min_length=1, max_length=10_000)
-    memory_type: Literal["fact", "preference", "project", "note"] = "fact"
+    # v2 governed memory kinds; "project" and "note" are legacy v1 aliases kept
+    # so existing clients keep working (stored as-is, still retrievable).
+    memory_type: Literal[
+        "fact",
+        "preference",
+        "correction",
+        "project_state",
+        "skill_note",
+        "relationship",
+        "open_loop",
+        "project",
+        "note",
+    ] = "fact"
     project_id: str | None = None
     source_conversation_id: str | None = None
     reason: str = Field(min_length=1, max_length=500)
@@ -68,11 +80,20 @@ class WakeRequest(BaseModel):
 
     source: Literal["voice", "terminal", "desktop", "hotkey", "socket"]
     score: float | None = Field(default=None, ge=0.0, le=1.0)
+    # ``transcript`` is accepted as a payload alias for ``text`` (v2 senders);
+    # conflicting values are rejected during validation.
     text: str | None = Field(default=None, min_length=1, max_length=50_000)
     reason: str | None = Field(default=None, max_length=200)
     # Optional v2 fields; older clients omit them and behaviour is unchanged.
     captured_at: str | None = Field(default=None, max_length=64)
     session_hint: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_transcript_alias(cls, payload: object) -> object:
+        from services.wake.schemas import normalize_transcript_alias
+
+        return normalize_transcript_alias(payload)
 
 
 class SessionAttachRequest(BaseModel):

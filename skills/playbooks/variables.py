@@ -71,8 +71,7 @@ async def expand_playbook_steps(
             expanded.append(per_project.model_copy(update={"args": args}))
     if len(expanded) > MAX_EXPANDED_STEPS:
         raise PlaybookExpansionError(
-            f"playbook expansion produced {len(expanded)} steps "
-            f"(maximum {MAX_EXPANDED_STEPS})"
+            f"playbook expansion produced {len(expanded)} steps (maximum {MAX_EXPANDED_STEPS})"
         )
     return ExpandedSteps(steps=expanded, notes=notes)
 
@@ -104,6 +103,4 @@ def _substitute_step(step: PlaybookStep, token: str, replacement: str) -> Playbo
 
 
 def _step_mentions(step: PlaybookStep, token: str) -> bool:
-    return any(
-        isinstance(value, str) and token in value for value in step.args.values()
-    )
+    return any(isinstance(value, str) and token in value for value in step.args.values())

@@ -61,7 +61,7 @@ class RuntimeMemoryReranker:
         )
         prompt = (
             "Rank the local memory snippets by relevance to the query. "
-            f"Return exactly one JSON object {{\"memory_ids\": [...]}} listing at "
+            f'Return exactly one JSON object {{"memory_ids": [...]}} listing at '
             f"most {limit} ids, most relevant first. Use only the given ids.\n\n"
             f"Query:\n{query}\n\nMemories:\n{listing}"
         )
@@ -165,9 +165,7 @@ class MemoryRetriever:
             if not self.policy.is_sensitive(memory.content)
         ]
         try:
-            vector = self.vector_memory.search(
-                query, limit=CANDIDATE_LIMIT, source_type="memory"
-            )
+            vector = self.vector_memory.search(query, limit=CANDIDATE_LIMIT, source_type="memory")
         except Exception:
             vector = []
         results: list[SearchResult] = [

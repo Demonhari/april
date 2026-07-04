@@ -31,9 +31,7 @@ def test_registry_parses_optional_adapter_path(tmp_path: Path) -> None:
     registry = ModelRegistry.from_dict(
         {
             "models": {
-                "brain": _model_data(
-                    tmp_path, adapter_path="models/adapters/brain-lora.gguf"
-                )
+                "brain": _model_data(tmp_path, adapter_path="models/adapters/brain-lora.gguf")
             }
         },
         root=tmp_path,
@@ -45,9 +43,7 @@ def test_registry_parses_optional_adapter_path(tmp_path: Path) -> None:
 
 
 def test_registry_adapter_path_defaults_to_none(tmp_path: Path) -> None:
-    registry = ModelRegistry.from_dict(
-        {"models": {"brain": _model_data(tmp_path)}}, root=tmp_path
-    )
+    registry = ModelRegistry.from_dict({"models": {"brain": _model_data(tmp_path)}}, root=tmp_path)
     model = registry.get("april-brain")
     assert model.adapter_path is None
     assert model.resolved_adapter_path(tmp_path) is None
@@ -79,18 +75,14 @@ async def test_backend_passes_lora_path_when_adapter_exists(
     adapter = tmp_path / "adapters" / "brain-lora.gguf"
     adapter.parent.mkdir(parents=True)
     adapter.write_bytes(b"GGUF")
-    model = ModelDefinition.model_validate(
-        _model_data(tmp_path, adapter_path=str(adapter))
-    )
+    model = ModelDefinition.model_validate(_model_data(tmp_path, adapter_path=str(adapter)))
     backend = LlamaCppBackend()
     await backend.load(model)
     assert _RecordingLlama.last_kwargs["lora_path"] == str(adapter)
 
 
 @pytest.mark.asyncio
-async def test_backend_fails_closed_on_missing_adapter(
-    tmp_path: Path, fake_llama_module
-) -> None:
+async def test_backend_fails_closed_on_missing_adapter(tmp_path: Path, fake_llama_module) -> None:
     base = tmp_path / "brain.gguf"
     base.write_bytes(b"GGUF")
     model = ModelDefinition.model_validate(
@@ -105,12 +97,73 @@ async def test_backend_fails_closed_on_missing_adapter(
 
 
 @pytest.mark.asyncio
-async def test_backend_omits_lora_path_without_adapter(
-    tmp_path: Path, fake_llama_module
-) -> None:
+async def test_backend_omits_lora_path_without_adapter(tmp_path: Path, fake_llama_module) -> None:
     base = tmp_path / "brain.gguf"
     base.write_bytes(b"GGUF")
     model = ModelDefinition.model_validate(_model_data(tmp_path))
     backend = LlamaCppBackend()
     await backend.load(model)
     assert "lora_path" not in _RecordingLlama.last_kwargs
+
+
+@pytest.mark.asyncio
+async def test_dataset_export_excludes_rejected_and_unsafe_rows(settings_tmp) -> None:
+    """M15 export: bad-feedback conversations, sensitive pairs, and superseded
+    memories never reach the fine-tune dataset."""
+    import json
+
+    from services.evolution.dataset_export import export_finetune_dataset
+    from services.memory.database import Database
+    from services.memory.migrations import run_migrations
+    from services.memory.sqlite_memory import SqliteMemory
+
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    try:
+        good = await memory.create_conversation()
+        await memory.add_message(good, "user", "plan my day")
+        await memory.add_message(good, "assistant", "Here is your plan.")
+
+        rejected = await memory.create_conversation()
+        await memory.add_message(rejected, "user", "do the thing")
+        await memory.add_message(rejected, "assistant", "Bad answer.")
+        await memory.record_feedback_event(rating="bad", reason="wrong", conversation_id=rejected)
+
+        sensitive = await memory.create_conversation()
+        await memory.add_message(sensitive, "user", "my password is hunter2")
+        await memory.add_message(sensitive, "assistant", "Noted.")
+
+        keeper = await memory.create_memory("I prefer tea", kind="preference", reason="stated")
+        await memory.create_memory(
+            "I prefer coffee",
+            kind="preference",
+            reason="old",
+            superseded_by=keeper.id,
+        )
+        await memory.create_memory(
+            "my api key is sk-secret-abcdefghijkl",
+            kind="fact",
+            reason="unsafe",
+        )
+
+        result = await export_finetune_dataset(memory, settings_tmp, dataset_name="exclusions")
+        assert result.chat_pairs == 1
+        assert result.excluded_conversations == 1
+        assert result.memories == 1
+        rows = [
+            json.loads(line)
+            for line in result.path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        chat_rows = [row for row in rows if row["type"] == "chat"]
+        memory_rows = [row for row in rows if row["type"] == "memory"]
+        assert [row["conversation_id"] for row in chat_rows] == [good]
+        assert [row["content"] for row in memory_rows] == ["I prefer tea"]
+        text = result.path.read_text(encoding="utf-8")
+        assert "hunter2" not in text
+        assert "sk-secret" not in text
+        assert "Bad answer." not in text
+    finally:
+        await database.close()

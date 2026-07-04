@@ -11,6 +11,7 @@ from services.voice.microphone import write_pcm_wav
 from services.voice.speech_to_text import SpeechToText
 
 __all__ = [
+    "DEFAULT_FUZZY_MAX_DISTANCE",
     "Confirmation",
     "SttConfirmer",
     "canonicalize_wake_word",
@@ -24,20 +25,23 @@ __all__ = [
 _GREETINGS = ("hey", "hi", "hello", "ok", "okay", "yo")
 
 # Fuzzy matching accepts close STT mishearings of the wake word (apryl, avril,
-# aprill, "a pril"). The threshold allows one edit on a five-letter word, and the
-# first letter must match so unrelated words can never drift into a wake.
-_FUZZY_MAX_NORMALIZED_DISTANCE = 0.25
+# aprill, "a pril"). The default threshold allows one edit on a five-letter word
+# (wake.fuzzy_max_distance overrides it), and the first letter must match so
+# unrelated words can never drift into a wake.
+DEFAULT_FUZZY_MAX_DISTANCE = 0.25
 _FUZZY_MIN_WAKE_WORD_LENGTH = 4
 
 
-def _fuzzy_wake_match(token: str, wake_word: str) -> bool:
+def _fuzzy_wake_match(
+    token: str, wake_word: str, *, max_distance: float = DEFAULT_FUZZY_MAX_DISTANCE
+) -> bool:
     if not token:
         return False
     if token == wake_word:
         return True
     if token[0] != wake_word[0] or len(wake_word) < _FUZZY_MIN_WAKE_WORD_LENGTH:
         return False
-    return normalized_edit_distance(token, wake_word) <= _FUZZY_MAX_NORMALIZED_DISTANCE
+    return normalized_edit_distance(token, wake_word) <= max_distance
 
 
 def _split_token(token: str) -> tuple[str, str, str]:
@@ -50,7 +54,12 @@ def _split_token(token: str) -> tuple[str, str, str]:
     return token[:start], token[start:end].casefold(), token[end:]
 
 
-def canonicalize_wake_word(text: str, *, wake_word: str = "april") -> str:
+def canonicalize_wake_word(
+    text: str,
+    *,
+    wake_word: str = "april",
+    max_distance: float = DEFAULT_FUZZY_MAX_DISTANCE,
+) -> str:
     """Rewrite fuzzy wake-word tokens to the canonical form.
 
     Single tokens within one edit ("apryl", "avril", "aprill") and adjacent
@@ -62,7 +71,7 @@ def canonicalize_wake_word(text: str, *, wake_word: str = "april") -> str:
     index = 0
     while index < len(tokens):
         prefix, core, suffix = _split_token(tokens[index])
-        if _fuzzy_wake_match(core, wake_word):
+        if _fuzzy_wake_match(core, wake_word, max_distance=max_distance):
             if core == wake_word:
                 # Exact (case-insensitive) matches keep their original casing;
                 # the address patterns are case-insensitive anyway.
@@ -76,8 +85,8 @@ def canonicalize_wake_word(text: str, *, wake_word: str = "april") -> str:
             if (
                 core
                 and core2
-                and not _fuzzy_wake_match(core2, wake_word)
-                and _fuzzy_wake_match(core + core2, wake_word)
+                and not _fuzzy_wake_match(core2, wake_word, max_distance=max_distance)
+                and _fuzzy_wake_match(core + core2, wake_word, max_distance=max_distance)
             ):
                 result.append(f"{prefix}{wake_word}{suffix2}")
                 index += 2
@@ -102,7 +111,13 @@ def _trailing_pattern(wake_word: str) -> re.Pattern[str]:
     )
 
 
-def strip_vocative(text: str, *, wake_word: str = "april", fuzzy: bool = True) -> str:
+def strip_vocative(
+    text: str,
+    *,
+    wake_word: str = "april",
+    fuzzy: bool = True,
+    fuzzy_max_distance: float = DEFAULT_FUZZY_MAX_DISTANCE,
+) -> str:
     """Remove a vocative wake-word address without touching semantic uses.
 
     "april, restart the runtime" -> "restart the runtime"
@@ -115,7 +130,9 @@ def strip_vocative(text: str, *, wake_word: str = "april", fuzzy: bool = True) -
     if not normalized:
         return normalized
     if fuzzy:
-        normalized = canonicalize_wake_word(normalized, wake_word=wake_word)
+        normalized = canonicalize_wake_word(
+            normalized, wake_word=wake_word, max_distance=fuzzy_max_distance
+        )
     stripped = _leading_pattern(wake_word).sub("", normalized, count=1)
     stripped = _trailing_pattern(wake_word).sub("", stripped, count=1)
     # An empty result means the utterance was only the address itself; callers
@@ -123,9 +140,17 @@ def strip_vocative(text: str, *, wake_word: str = "april", fuzzy: bool = True) -
     return stripped.strip()
 
 
-def mentions_wake_word(text: str, *, wake_word: str = "april", fuzzy: bool = True) -> bool:
+def mentions_wake_word(
+    text: str,
+    *,
+    wake_word: str = "april",
+    fuzzy: bool = True,
+    fuzzy_max_distance: float = DEFAULT_FUZZY_MAX_DISTANCE,
+) -> bool:
     if fuzzy:
-        text = canonicalize_wake_word(" ".join(text.split()), wake_word=wake_word)
+        text = canonicalize_wake_word(
+            " ".join(text.split()), wake_word=wake_word, max_distance=fuzzy_max_distance
+        )
     return bool(re.search(rf"\b{re.escape(wake_word)}\b", text, flags=re.IGNORECASE))
 
 
@@ -135,6 +160,7 @@ def is_addressed(
     wake_word: str = "april",
     strict: bool = False,
     fuzzy: bool = True,
+    fuzzy_max_distance: float = DEFAULT_FUZZY_MAX_DISTANCE,
 ) -> bool:
     """Whether the transcript addresses APRIL.
 
@@ -147,7 +173,9 @@ def is_addressed(
     if not normalized:
         return False
     if fuzzy:
-        normalized = canonicalize_wake_word(normalized, wake_word=wake_word)
+        normalized = canonicalize_wake_word(
+            normalized, wake_word=wake_word, max_distance=fuzzy_max_distance
+        )
     if not strict:
         return mentions_wake_word(normalized, wake_word=wake_word, fuzzy=False)
     return bool(
@@ -182,6 +210,7 @@ class SttConfirmer:
         strict_address: bool = False,
         sample_rate: int = 16_000,
         retain_debug_audio: bool = False,
+        fuzzy_max_distance: float = DEFAULT_FUZZY_MAX_DISTANCE,
     ) -> None:
         self.stt = stt
         self.audio_cache_path = audio_cache_path
@@ -189,6 +218,7 @@ class SttConfirmer:
         self.strict_address = strict_address
         self.sample_rate = sample_rate
         self.retain_debug_audio = retain_debug_audio
+        self.fuzzy_max_distance = fuzzy_max_distance
 
     async def confirm(self, frames: Sequence[bytes]) -> Confirmation:
         if not frames:
@@ -203,7 +233,14 @@ class SttConfirmer:
         transcript = " ".join(transcript.split())
         if not transcript:
             return Confirmation(False, "", "", "empty transcript")
-        if not is_addressed(transcript, wake_word=self.wake_word, strict=self.strict_address):
+        if not is_addressed(
+            transcript,
+            wake_word=self.wake_word,
+            strict=self.strict_address,
+            fuzzy_max_distance=self.fuzzy_max_distance,
+        ):
             return Confirmation(False, transcript, "", "transcript does not address APRIL")
-        command = strip_vocative(transcript, wake_word=self.wake_word)
+        command = strip_vocative(
+            transcript, wake_word=self.wake_word, fuzzy_max_distance=self.fuzzy_max_distance
+        )
         return Confirmation(True, transcript, command, "stt confirmed")

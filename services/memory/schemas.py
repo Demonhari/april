@@ -25,6 +25,13 @@ MEMORY_KINDS: tuple[str, ...] = (
     "note",
 )
 
+# v2 provenance vocabulary for memory rows. "user" is explicit manual writes;
+# the rest are machine-written (reflection = Archive session reflection,
+# dream = Dreamer consolidation, import = bulk import). "archive" is the legacy
+# spelling of "reflection" kept readable so existing rows stay valid.
+MEMORY_SOURCES: tuple[str, ...] = ("user", "reflection", "dream", "import")
+LEGACY_MEMORY_SOURCE_ALIASES: dict[str, str] = {"archive": "reflection"}
+
 
 class MemoryRecord(BaseModel):
     id: str

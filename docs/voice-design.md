@@ -90,6 +90,15 @@ downloads or trains one, and `voice doctor` says so explicitly. These paths are
 verified with synthetic PCM, a fake microphone, and mocked input only; a live
 microphone, whisper.cpp, Piper, and openWakeWord are not exercised here.
 
+## Speaker gate (not implemented)
+
+`wake.speaker_gate` supports only `off`. A "soft" speaker gate (biasing wake
+acceptance toward an enrolled voice) requires a real local speaker-verification
+model; APRIL does not fake one. Config validation rejects any other value, and
+readiness reports the gate as an explicit production blocker for deployments
+that require speaker identification. Do not advertise speaker identification
+as implemented until a local verifier is integrated and live-verified.
+
 ## Live verification
 
 `run april voice verify-live` is the explicit live-hardware path. It does not

@@ -12,7 +12,9 @@ from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
 from services.evolution.consolidate import consolidate_memories
+from services.evolution.disarm import disarmed_execution
 from services.evolution.evaluator import evaluate_overlay_candidate
+from services.evolution.feedback_eval import count_pending_eval_cases
 from services.evolution.playbook_miner import mine_playbook_candidates
 from services.evolution.prompt_evolver import OverlayCandidate, generate_overlay_candidates
 from services.evolution.replay import collect_replay_samples
@@ -104,16 +106,18 @@ class DreamerService:
                     "reason": "wall clock budget exhausted "
                     f"(evolution.max_minutes={self.settings.evolution.max_minutes})",
                 }
-                self._audit(
-                    "dreamer_phase_skipped_budget", run_id=run_id, detail=name
-                )
+                self._audit("dreamer_phase_skipped_budget", run_id=run_id, detail=name)
                 continue
             result = await self._run_phase(phases, name, phase_factory())
             if name == "evolve":
                 candidates = result
 
         report_path, report = write_report(
-            self.settings, guard=self.guard, run_id=run_id, phases=phases
+            self.settings,
+            guard=self.guard,
+            run_id=run_id,
+            phases=phases,
+            pending_eval_cases=count_pending_eval_cases(self.settings),
         )
         phases["report"] = {"status": "completed", "path": str(report_path)}
         self.guard.validate_table("evolution_runs")
@@ -142,12 +146,15 @@ class DreamerService:
         )
         return DreamerRunResult("completed", "completed", report_path=str(report_path))
 
-    async def _run_phase(
-        self, phases: dict[str, dict[str, Any]], name: str, coroutine: Any
-    ) -> Any:
-        """Run one phase in isolation: a failure is recorded, never propagated."""
+    async def _run_phase(self, phases: dict[str, dict[str, Any]], name: str, coroutine: Any) -> Any:
+        """Run one phase in isolation: a failure is recorded, never propagated.
+
+        Every phase runs disarmed: normal Level >= 1 tool execution routed
+        through the permission layer is refused for the duration of the phase.
+        """
         try:
-            result, payload = await coroutine
+            with disarmed_execution(name):
+                result, payload = await coroutine
         except Exception as exc:
             phases[name] = {"status": "failed", "error": str(exc)[:500]}
             self._audit("dreamer_phase_failed", run_id=None, detail=f"{name}: {exc}")
@@ -197,6 +204,10 @@ class DreamerService:
         payload = {
             "candidates": [candidate.to_payload() for candidate in candidates],
             "stored_paths": stored,
+            # Honest labelling: overlay candidates come from deterministic
+            # templates over local feedback, not from an LLM. Any improvement
+            # claim must come from the examine-phase evals, never from here.
+            "method": "deterministic-heuristic",
         }
         return candidates, payload
 
@@ -334,9 +345,7 @@ async def run_standalone(settings: AprilSettings, now: datetime) -> DreamerRunRe
         await run_migrations(database)
         memory = SqliteMemory(database)
         audit = AuditLogger(settings.audit_path)
-        gate = EvolutionSchedulerGate(
-            settings, memory, governor=ResourceGovernor(settings)
-        )
+        gate = EvolutionSchedulerGate(settings, memory, governor=ResourceGovernor(settings))
         dreamer = DreamerService(
             settings,
             memory=memory,

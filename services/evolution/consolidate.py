@@ -43,9 +43,9 @@ async def consolidate_memories(
     # earliest row; later rows are superseded by it.
     groups: dict[tuple[str, str, str | None], list[Any]] = {}
     for record in await memory.list_memories():
-        groups.setdefault(
-            (record.kind, _normalized(record.content), record.project_id), []
-        ).append(record)
+        groups.setdefault((record.kind, _normalized(record.content), record.project_id), []).append(
+            record
+        )
     for records in groups.values():
         if len(records) < 2:
             continue

@@ -70,19 +70,23 @@ def _sentinel(
     frames: int = 6,
     stt_text: str | None = None,
     confirm_with_stt: bool | None = None,
+    instant_accept: bool | None = None,
     clock: ManualClock | None = None,
+    stt: SpeechToText | None = None,
 ) -> tuple[Sentinel, FakeFrameMicrophone, RecordingDelivery, RecordingAudioPlayer]:
     wake_update: dict[str, object] = {"enabled": True}
     if confirm_with_stt is not None:
         wake_update["confirm_with_stt"] = confirm_with_stt
-    tuned = settings.model_copy(
-        update={"wake": settings.wake.model_copy(update=wake_update)}
-    )
+    if instant_accept is not None:
+        wake_update["instant_accept"] = instant_accept
+    tuned = settings.model_copy(update={"wake": settings.wake.model_copy(update=wake_update)})
     microphone = FakeFrameMicrophone([FRAME] * frames)
     delivery = RecordingDelivery()
     player = RecordingAudioPlayer()
     confirmer = None
-    if stt_text is not None:
+    if stt is not None:
+        confirmer = SttConfirmer(stt, audio_cache_path=tuned.audio_cache_path)
+    elif stt_text is not None:
         confirmer = SttConfirmer(
             FakeSpeechToText(stt_text),
             audio_cache_path=tuned.audio_cache_path,
@@ -186,6 +190,27 @@ def test_fuzzy_can_be_disabled() -> None:
     assert strip_vocative("apryl, restart it", fuzzy=False) == "apryl, restart it"
 
 
+def test_fuzzy_threshold_is_configurable() -> None:
+    # A zero distance budget accepts only the exact wake word.
+    assert not is_addressed("apryl, restart the runtime", fuzzy_max_distance=0.0)
+    assert is_addressed("april, restart the runtime", fuzzy_max_distance=0.0)
+    # A looser budget accepts variants the default would reject
+    # ("apryll" is two edits from "april": 2/6 ≈ 0.33 > 0.25).
+    assert not is_addressed("apryll, restart the runtime")
+    assert is_addressed("apryll, restart the runtime", fuzzy_max_distance=0.4)
+
+
+async def test_stt_confirmer_honours_configured_fuzzy_distance(settings_tmp) -> None:
+    confirmer = SttConfirmer(
+        FakeSpeechToText("apryl, restart the runtime"),
+        audio_cache_path=settings_tmp.audio_cache_path,
+        fuzzy_max_distance=0.0,
+    )
+    confirmation = await confirmer.confirm([FRAME])
+    assert confirmation.accepted is False
+    assert "does not address" in confirmation.reason
+
+
 async def test_sentinel_stt_confirmation_accepts_fuzzy_variant(settings_tmp) -> None:
     sentinel, _mic, delivery, _player = _sentinel(
         settings_tmp,
@@ -279,6 +304,63 @@ async def test_wake_bus_rejects_invalid_payloads(settings_tmp) -> None:
         await bus.stop()
 
 
+def test_wake_event_accepts_transcript_alias() -> None:
+    event = WakeEvent.model_validate({"source": "socket", "transcript": "open my notes"})
+    assert event.text == "open my notes"
+    # Matching duplicate values are tolerated; only conflicts are rejected.
+    event = WakeEvent.model_validate(
+        {"source": "socket", "text": "open my notes", "transcript": "open my notes"}
+    )
+    assert event.text == "open my notes"
+    with pytest.raises(ValueError, match="conflicting"):
+        WakeEvent.model_validate(
+            {"source": "socket", "text": "open my notes", "transcript": "something else"}
+        )
+
+
+async def test_wake_bus_accepts_transcript_alias_payload(settings_tmp) -> None:
+    received: list[WakeEvent] = []
+
+    async def handler(event: WakeEvent) -> dict[str, object]:
+        received.append(event)
+        return {}
+
+    socket_path = _short_socket_path()
+    bus = WakeBus(socket_path, handler)
+    await bus.start()
+    try:
+        reader, writer = await asyncio.open_unix_connection(path=str(socket_path))
+        writer.write(b'{"source": "socket", "transcript": "open my notes"}\n')
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
+        assert b'"ok": true' in raw
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await bus.stop()
+    assert len(received) == 1
+    assert received[0].text == "open my notes"
+
+
+async def test_wake_bus_rejects_conflicting_text_and_transcript(settings_tmp) -> None:
+    async def handler(event: WakeEvent) -> dict[str, object]:
+        raise AssertionError("handler must not run for conflicting payloads")
+
+    socket_path = _short_socket_path()
+    bus = WakeBus(socket_path, handler)
+    await bus.start()
+    try:
+        reader, writer = await asyncio.open_unix_connection(path=str(socket_path))
+        writer.write(b'{"source": "socket", "text": "one", "transcript": "two"}\n')
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
+        assert b'"ok": false' in raw
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await bus.stop()
+
+
 async def test_wake_bus_refuses_non_socket_path(settings_tmp) -> None:
     socket_path = _short_socket_path()
     socket_path.write_text("not a socket", encoding="utf-8")
@@ -344,9 +426,7 @@ async def test_wake_event_persists_flags_not_transcripts(settings_tmp) -> None:
     database, memory = await _memory(settings_tmp)
     try:
         manager = SessionManager(memory, continuity_minutes=10)
-        await manager.handle_wake(
-            WakeEvent(source="voice", score=0.5, text="restart the runtime")
-        )
+        await manager.handle_wake(WakeEvent(source="voice", score=0.5, text="restart the runtime"))
         events = await memory.list_wake_events()
         assert len(events) == 1
         assert events[0].transcript_present is True
@@ -486,6 +566,51 @@ async def test_sentinel_stt_confirmation_accepts_and_strips_vocative(settings_tm
     event = delivery.events[0]
     assert event.reason == "stt_confirmed"
     assert event.text == "restart the runtime"
+
+
+async def test_sentinel_instant_accept_skips_stt_for_high_scores(settings_tmp) -> None:
+    stt = RecordingSpeechToText("april")
+    sentinel, _mic, delivery, _player = _sentinel(
+        settings_tmp,
+        scores=[0.9],
+        confirm_with_stt=True,
+        instant_accept=True,
+        stt=stt,
+    )
+    await sentinel.run_once()
+    assert len(delivery.events) == 1
+    assert delivery.events[0].reason == "accepted_by_score"
+    assert stt.payloads == []  # STT confirmation never ran
+
+
+async def test_sentinel_instant_accept_still_confirms_marginal_candidates(settings_tmp) -> None:
+    stt = RecordingSpeechToText("april, restart the runtime")
+    sentinel, _mic, delivery, _player = _sentinel(
+        settings_tmp,
+        scores=[0.5],
+        confirm_with_stt=True,
+        instant_accept=True,
+        stt=stt,
+    )
+    await sentinel.run_once()
+    assert len(delivery.events) == 1
+    assert delivery.events[0].reason == "stt_confirmed"
+    assert len(stt.payloads) == 1
+
+
+async def test_sentinel_instant_accept_disabled_confirms_high_scores(settings_tmp) -> None:
+    stt = RecordingSpeechToText("april, restart the runtime")
+    sentinel, _mic, delivery, _player = _sentinel(
+        settings_tmp,
+        scores=[0.9],
+        confirm_with_stt=True,
+        instant_accept=False,
+        stt=stt,
+    )
+    await sentinel.run_once()
+    assert len(delivery.events) == 1
+    assert delivery.events[0].reason == "stt_confirmed"
+    assert len(stt.payloads) == 1
 
 
 async def test_sentinel_full_utterance_capture_preserves_pre_roll(settings_tmp) -> None:
@@ -658,9 +783,7 @@ async def test_sentinel_follow_up_window_transcribes_same_session_command(settin
 async def test_sentinel_follow_up_window_expires(settings_tmp) -> None:
     clock = ManualClock()
     tuned = settings_tmp.model_copy(
-        update={
-            "voice": settings_tmp.voice.model_copy(update={"vad_required_frames": 1})
-        }
+        update={"voice": settings_tmp.voice.model_copy(update={"vad_required_frames": 1})}
     )
     sentinel, _mic, delivery, _player = _sentinel(
         tuned, scores=[], frames=0, confirm_with_stt=False, clock=clock

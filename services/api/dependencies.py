@@ -74,6 +74,20 @@ class ApiContainer:
         await self.database.close()
 
 
+def select_archive_model_id(agent_registry: AgentRegistry, settings: AprilSettings) -> str:
+    """Model for Archive session reflection: memory agent, then reading agent.
+
+    Reflection is a memory/reading task, so it must use the configured
+    memory_agent (or reading_agent) model and only fall back to the brain
+    model when neither agent declares one.
+    """
+    for agent_name in ("memory_agent", "reading_agent"):
+        agent = agent_registry.get(agent_name)
+        if agent is not None and agent.model_id is not None:
+            return str(agent.model_id)
+    return settings.brain.model_id
+
+
 async def build_container(settings: AprilSettings | None = None) -> ApiContainer:
     active_settings = settings or get_settings()
     errors = validate_configuration(active_settings.home)
@@ -167,16 +181,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         playbook_loader=playbook_loader,
         playbook_runner=playbook_runner,
     )
-    memory_agent = agent_registry.get("memory_agent")
-    archive_model_id = (
-        memory_agent.model_id
-        if memory_agent is not None and memory_agent.model_id is not None
-        else (
-            reading_agent.model_id
-            if reading_agent is not None and reading_agent.model_id is not None
-            else active_settings.brain.model_id
-        )
-    )
+    archive_model_id = select_archive_model_id(agent_registry, active_settings)
     archive_reflection = ArchiveReflectionService(
         active_settings,
         memory=memory,

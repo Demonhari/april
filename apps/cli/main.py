@@ -779,10 +779,7 @@ def playbook_mine(
     support_threshold: int = typer.Option(3, "--support", min=2),
     lookback_days: int = typer.Option(14, "--lookback-days", min=1),
 ) -> None:
-    path = (
-        "/playbooks/mine"
-        f"?support_threshold={support_threshold}&lookback_days={lookback_days}"
-    )
+    path = f"/playbooks/mine?support_threshold={support_threshold}&lookback_days={lookback_days}"
     print_jsonish(run(client().post(path, {})))
 
 

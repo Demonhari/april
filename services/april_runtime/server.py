@@ -31,10 +31,13 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
         registry = ModelRegistry.from_file(
             settings.home / "configs" / "models.yaml", root=settings.home
         )
+        from services.pool.governor import ResourceGovernor
+
         active_lifecycle = ModelLifecycle(
             registry,
             root_backend=settings.runtime.backend,
             max_loaded_specialist_models=settings.runtime.max_loaded_specialist_models,
+            governor=ResourceGovernor(settings),
         )
     else:
         active_lifecycle = lifecycle

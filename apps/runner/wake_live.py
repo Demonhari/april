@@ -461,9 +461,7 @@ async def run_sentinel_live_verification(
         sentinel is not None and getattr(sentinel, "_april_live_injected", False)
     )
     report.transcript_length = int(getattr(sentinel, "_april_live_transcript_length", 0))
-    report.normalized_transcript_length = int(
-        getattr(sentinel, "_april_live_transcript_length", 0)
-    )
+    report.normalized_transcript_length = int(getattr(sentinel, "_april_live_transcript_length", 0))
     report.tts_success = False
     report.playback_user_confirmed = report.wake_word_detected
     _finalize_sentinel_summary(report)

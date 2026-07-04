@@ -114,9 +114,9 @@ async def test_dreamer_wall_clock_budget_skips_late_phases(settings_tmp) -> None
         assert result.status == "completed"
         assert result.report_path is not None
         report = json.loads(
-            (enabled.evolution_path / "reports").joinpath(
-                result.report_path.rsplit("/", 1)[-1]
-            ).read_text(encoding="utf-8")
+            (enabled.evolution_path / "reports")
+            .joinpath(result.report_path.rsplit("/", 1)[-1])
+            .read_text(encoding="utf-8")
         )
         statuses = report["phase_statuses"]
         assert statuses["replay"] == "completed"
@@ -156,13 +156,134 @@ async def test_dreamer_nice_applied_only_via_injected_applier(settings_tmp) -> N
 
 
 @pytest.mark.asyncio
+async def test_disarmed_context_blocks_tool_execution(settings_tmp) -> None:
+    from april_common.errors import PermissionDeniedError
+    from services.evolution.disarm import disarmed_execution
+    from services.permissions.approvals import ApprovalStore
+    from services.permissions.engine import PermissionEngine
+    from services.permissions.tool_execution import ToolExecutionService
+    from skills.registry import default_registry
+
+    database, memory = await _memory(settings_tmp)
+    try:
+        registry = default_registry()
+        executor = ToolExecutionService(
+            settings=settings_tmp,
+            memory=memory,
+            tool_registry=registry,
+            permission_engine=PermissionEngine(registry),
+            approvals=ApprovalStore(
+                database, AuditLogger(settings_tmp.audit_path), expiry_seconds=60
+            ),
+        )
+        context = await executor.context(
+            request_id="disarm-test",
+            actor="dreamer",
+            agent_id="general_agent",
+            source="orchestrator",
+        )
+        # Even a Level 1 read-only tool is refused inside a Dreamer phase.
+        with disarmed_execution("replay"), pytest.raises(PermissionDeniedError, match="disarmed"):
+            await executor.request_or_execute(
+                tool="list_reminders",
+                args={},
+                context=context,
+            )
+        # Outside the disarmed context the same call executes normally.
+        outcome = await executor.request_or_execute(
+            tool="list_reminders",
+            args={},
+            context=context,
+        )
+        assert outcome.status == "executed"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dreamer_phase_cannot_route_tools(settings_tmp, monkeypatch) -> None:
+    """A hostile/buggy phase that tries to run a tool is blocked and isolated."""
+    from april_common.errors import PermissionDeniedError
+    from services.permissions.approvals import ApprovalStore
+    from services.permissions.engine import PermissionEngine
+    from services.permissions.tool_execution import ToolExecutionService
+    from skills.registry import default_registry
+
+    enabled = _enabled_settings(settings_tmp)
+    database, memory = await _memory(enabled)
+    try:
+        registry = default_registry()
+        executor = ToolExecutionService(
+            settings=enabled,
+            memory=memory,
+            tool_registry=registry,
+            permission_engine=PermissionEngine(registry),
+            approvals=ApprovalStore(database, AuditLogger(enabled.audit_path), expiry_seconds=60),
+        )
+        attempts: list[str] = []
+
+        async def hostile_replay(memory_arg, *, seed):
+            context = await executor.context(
+                request_id="dreamer-hostile",
+                actor="dreamer",
+                agent_id="general_agent",
+                source="orchestrator",
+            )
+            try:
+                await executor.request_or_execute(tool="list_reminders", args={}, context=context)
+                attempts.append("executed")
+            except PermissionDeniedError:
+                attempts.append("blocked")
+                raise
+
+        monkeypatch.setattr("services.evolution.dreamer.collect_replay_samples", hostile_replay)
+        gate = EvolutionSchedulerGate(enabled, memory, governor=_permissive_governor(enabled))
+        service = DreamerService(enabled, memory=memory, gate=gate)
+        result = await service.run_once(datetime(2026, 7, 3, 2, 30, tzinfo=UTC))
+        # The run completes (phase failure is isolated), the tool never ran.
+        assert result.status == "completed"
+        assert attempts == ["blocked"]
+        report = latest_report(enabled)
+        assert report is not None
+        assert report["phase_statuses"]["replay"] == "failed"
+        assert "disarmed" in report["phases"]["replay"]["error"]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dreamer_report_includes_pending_eval_cases_and_honest_labels(
+    settings_tmp,
+) -> None:
+    from services.evolution.evaluator import write_pending_eval_case
+
+    enabled = _enabled_settings(settings_tmp)
+    database, memory = await _memory(enabled)
+    try:
+        write_pending_eval_case(enabled, {"case_type": "negative_feedback", "prompt": "x"})
+        gate = EvolutionSchedulerGate(enabled, memory, governor=_permissive_governor(enabled))
+        service = DreamerService(enabled, memory=memory, gate=gate)
+        result = await service.run_once(datetime(2026, 7, 3, 2, 30, tzinfo=UTC))
+        assert result.status == "completed"
+        report = latest_report(enabled)
+        assert report is not None
+        assert report["pending_eval_cases"] == 1
+        assert "1 staged eval case(s) await review" in report["summary"]
+        # Prompt evolution is heuristic and must be labelled as such.
+        assert report["phases"]["evolve"]["method"] == "deterministic-heuristic"
+        # Playbook candidate/adoption counts are part of the mine payload.
+        assert "adopted" in report["phases"]["mine"]
+        assert "approval_required" in report["phases"]["mine"]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_kill_switch_blocks_dreamer_and_audits_reason(settings_tmp) -> None:
     enabled = _enabled_settings(settings_tmp)
     database, memory = await _memory(enabled)
     try:
-        EvolutionWriteGuard(enabled).write_text(
-            evolution_kill_switch_path(enabled), "disabled\n"
-        )
+        EvolutionWriteGuard(enabled).write_text(evolution_kill_switch_path(enabled), "disabled\n")
         gate = EvolutionSchedulerGate(enabled, memory, governor=_permissive_governor(enabled))
         service = DreamerService(enabled, memory=memory, gate=gate)
         result = await service.run_once(datetime(2026, 7, 3, 2, 30, tzinfo=UTC))
@@ -262,9 +383,7 @@ def test_dataset_export_api_writes_into_fence(settings_tmp) -> None:
 
 def _seed_pending_candidate(settings, content: str, *, agent: str = "coding_agent") -> str:
     guard = EvolutionWriteGuard(settings)
-    guard.write_text(
-        settings.evolution_path / "candidates" / f"{agent}-0.overlay.txt", content
-    )
+    guard.write_text(settings.evolution_path / "candidates" / f"{agent}-0.overlay.txt", content)
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
@@ -320,9 +439,7 @@ def test_malicious_pending_overlay_cannot_change_policy(settings_tmp) -> None:
     assert result["status"] == "discarded"
 
     # No overlay version was created; agent tool policy is untouched.
-    versions = client.get(
-        "/evolution/versions", params={"agent": "coding_agent"}, headers=headers
-    )
+    versions = client.get("/evolution/versions", params={"agent": "coding_agent"}, headers=headers)
     assert versions.json()["versions"] == []
     registry_agent = container.agent_registry.get("coding_agent")
     assert registry_agent is not None
@@ -348,9 +465,7 @@ async def test_overlay_approval_requires_exact_hash(settings_tmp) -> None:
     database, _memory_unused = await _memory(settings_tmp)
     try:
         service = PromptOverlayApprovalService(settings_tmp, database)
-        wrong = await service.approve(
-            agent="coding_agent", content_hash="0" * 64
-        )
+        wrong = await service.approve(agent="coding_agent", content_hash="0" * 64)
         assert wrong.status == "discarded"
         assert wrong.reason == "no pending candidate matches that hash"
     finally:

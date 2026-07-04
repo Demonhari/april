@@ -30,7 +30,7 @@ def test_header_shows_wake_status_from_health_booleans() -> None:
 def test_chat_feedback_buttons_use_feedback_endpoint() -> None:
     assert "addFeedbackControls" in APP_JS
     assert '"/feedback"' in APP_JS
-    assert '{ rating, conversation_id: CONVERSATION_ID }' in APP_JS
+    assert "{ rating, conversation_id: CONVERSATION_ID }" in APP_JS
 
 
 def test_sessions_screen_uses_close_endpoint() -> None:

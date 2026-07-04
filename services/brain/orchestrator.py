@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -30,7 +31,9 @@ from services.brain.planner import task_plan_from_decision
 from services.brain.reasoning_resolver import resolve_reasoning_model
 from services.brain.router import BrainRouter
 from services.brain.schemas import BrainDecision, PlannedToolCall
+from services.evolution.feedback_eval import stage_feedback_eval_case
 from services.evolution.versions import LEARNED_GUIDANCE_HEADER, PromptOverlayManager
+from services.memory.policy import MemoryPolicy
 from services.memory.retriever import MemoryRetriever
 from services.memory.schemas import Message, Project, SearchResult
 from services.memory.sqlite_memory import SqliteMemory
@@ -182,9 +185,7 @@ class AprilOrchestrator:
         if marker is None:
             return
         try:
-            agent_run_id = await self.memory.latest_agent_run_id(
-                conversation_id=conversation_id
-            )
+            agent_run_id = await self.memory.latest_agent_run_id(conversation_id=conversation_id)
             if agent_run_id is None:
                 return
             record = await self.memory.record_feedback_event(
@@ -202,6 +203,13 @@ class AprilOrchestrator:
                     "reason_length": len(record.reason or ""),
                     "agent_run_bound": True,
                 }
+            )
+            await stage_feedback_eval_case(
+                self.settings,
+                self.memory,
+                record,
+                kind="implicit_correction",
+                audit=self.approvals.audit,
             )
         except Exception:
             return
@@ -285,9 +293,7 @@ class AprilOrchestrator:
         if run.status == "completed":
             return AgentResult(
                 status="ok",
-                final_message=(
-                    f"Playbook {playbook_id} completed {run.steps_completed} step(s)."
-                ),
+                final_message=(f"Playbook {playbook_id} completed {run.steps_completed} step(s)."),
                 conversation_id=conversation_id,
             )
         return AgentResult(
@@ -611,6 +617,10 @@ class AprilOrchestrator:
         message: str,
         selection: LadderSelection,
     ) -> AgentResult | None:
+        if selection.rung != 0 and selection.mode == "standard" and not selection.high_stakes:
+            reflex_result = await self._maybe_memory_reflex(prepared, message)
+            if reflex_result is not None:
+                return reflex_result
         if selection.rung == 0:
             run = LadderRun(
                 status="ok",
@@ -642,6 +652,55 @@ class AprilOrchestrator:
             )
             return await self._finish_ladder_run(prepared, run)
         return None
+
+    async def _maybe_memory_reflex(
+        self, prepared: PreparedTurn, message: str
+    ) -> AgentResult | None:
+        """R0 reflex for a unique, token-exact durable-memory recall hit.
+
+        The reflex answers with stored memory verbatim (labelled as such) and
+        never calls a model. It requires deterministic recall phrasing, a
+        read-only decision, and exactly one active non-sensitive memory whose
+        content contains every subject token — ambiguity or misses always fall
+        back to normal routing.
+        """
+        subject = self.intelligence_ladder.memory_recall_subject(message, prepared.decision)
+        if subject is None:
+            return None
+        try:
+            candidates = await self.memory.search_memories(subject)
+        except Exception:
+            return None
+        policy = MemoryPolicy()
+        subject_tokens = set(re.findall(r"[a-z0-9_]+", subject.lower()))
+        subject_tokens -= {"the", "a", "an", "of", "is", "was"}
+        if not subject_tokens:
+            return None
+        matches = []
+        for candidate in candidates:
+            if policy.is_sensitive(candidate.content):
+                continue
+            content_tokens = set(re.findall(r"[a-z0-9_]+", candidate.content.lower()))
+            if subject_tokens.issubset(content_tokens):
+                matches.append(candidate)
+        if len(matches) != 1:
+            return None
+        hit = matches[0]
+        run = LadderRun(
+            status="ok",
+            final_message=self.intelligence_ladder.memory_reflex_answer(hit.content),
+            mode="standard",
+            rung=0,
+            model_id=prepared.model_id,
+            metadata={
+                "mode": "standard",
+                "intelligence_rung": 0,
+                "deterministic": True,
+                "reflex": "memory_hit",
+                "memory_id": hit.id,
+            },
+        )
+        return await self._finish_ladder_run(prepared, run)
 
     async def _finish_ladder_run(self, prepared: PreparedTurn, run: LadderRun) -> AgentResult:
         prepared.run_metadata.update(run.metadata)
@@ -1101,9 +1160,7 @@ class AprilOrchestrator:
             record = await self.memory.record_feedback_event(
                 rating="bad",
                 reason=f"approval_denied: {approval.tool}",
-                conversation_id=(
-                    suspended.conversation_id if suspended is not None else None
-                ),
+                conversation_id=(suspended.conversation_id if suspended is not None else None),
                 agent_run_id=(suspended.agent_run_id if suspended is not None else None),
             )
             self.approvals.audit.write(
@@ -1115,6 +1172,13 @@ class AprilOrchestrator:
                     "reason_length": len(record.reason or ""),
                     "agent_run_bound": record.agent_run_id is not None,
                 }
+            )
+            await stage_feedback_eval_case(
+                self.settings,
+                self.memory,
+                record,
+                kind="approval_denied",
+                audit=self.approvals.audit,
             )
         except Exception:
             return

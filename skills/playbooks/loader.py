@@ -68,8 +68,7 @@ class PlaybookLoader:
             for playbook in self.list()
             if playbook.status == "active"
             and any(
-                self._example_matches(example, normalized)
-                for example in playbook.trigger_examples
+                self._example_matches(example, normalized) for example in playbook.trigger_examples
             )
         ]
         if len(matches) == 1:

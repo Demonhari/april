@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import re
@@ -58,6 +59,7 @@ from services.april_runtime.schemas import LoadModelRequest
 from services.evolution.approval import PromptOverlayApprovalService
 from services.evolution.dataset_export import export_finetune_dataset
 from services.evolution.dreamer import latest_report
+from services.evolution.feedback_eval import stage_feedback_eval_case
 from services.evolution.inspect import (
     evolution_history,
     evolution_status,
@@ -686,9 +688,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                 conversation_id = session.conversation_id
         agent_run_id = request.agent_run_id
         if agent_run_id is None:
-            agent_run_id = await active.memory.latest_agent_run_id(
-                conversation_id=conversation_id
-            )
+            agent_run_id = await active.memory.latest_agent_run_id(conversation_id=conversation_id)
         record = await active.memory.record_feedback_event(
             rating=request.rating,
             reason=request.reason,
@@ -706,6 +706,17 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                 "agent_run_bound": record.agent_run_id is not None,
             }
         )
+        if record.rating == "bad":
+            # Stage a reviewable pending eval case; never let staging failures
+            # break feedback recording itself.
+            with contextlib.suppress(Exception):
+                await stage_feedback_eval_case(
+                    active.settings,
+                    active.memory,
+                    record,
+                    kind="explicit_feedback",
+                    audit=active.approvals.audit,
+                )
         return {"feedback": record.model_dump()}
 
     @app.get("/reminders")

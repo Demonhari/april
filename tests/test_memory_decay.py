@@ -137,9 +137,7 @@ async def test_memory_state_listing_covers_all_states(settings_tmp) -> None:
 
         machine = [record.id for record in await memory.list_memories_by_state("machine")]
         assert machine == [machine_id]
-        superseded = [
-            record.id for record in await memory.list_memories_by_state("superseded")
-        ]
+        superseded = [record.id for record in await memory.list_memories_by_state("superseded")]
         assert superseded == [superseded_id]
         active = [record.id for record in await memory.list_memories_by_state("active")]
         assert set(active) == {machine_id, user_id}

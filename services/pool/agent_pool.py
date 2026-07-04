@@ -70,9 +70,7 @@ class AgentPool:
 
     async def scorecards(self) -> list[AgentScorecard]:
         window_start = (
-            (utc_now() - timedelta(days=ROLLING_WINDOW_DAYS))
-            .isoformat()
-            .replace("+00:00", "Z")
+            (utc_now() - timedelta(days=ROLLING_WINDOW_DAYS)).isoformat().replace("+00:00", "Z")
         )
         run_rows = await self.memory.database.fetchall(
             """
@@ -103,9 +101,7 @@ class AgentPool:
         )
         runs_by_agent = {str(row["agent"]): row for row in run_rows}
         feedback_by_agent = {str(row["agent"]): row for row in feedback_rows}
-        agents = list(
-            dict.fromkeys([*self.known_agents, *runs_by_agent, *feedback_by_agent])
-        )
+        agents = list(dict.fromkeys([*self.known_agents, *runs_by_agent, *feedback_by_agent]))
         cards: list[AgentScorecard] = []
         for agent in agents:
             run = runs_by_agent.get(agent)

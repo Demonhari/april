@@ -143,14 +143,14 @@ async def test_archive_writer_policy_and_vector_index(settings_tmp) -> None:
         ]
         written = outcomes[-1].memory
         assert written is not None
-        assert written.source == "archive"
+        assert written.source == "reflection"
         assert written.confidence == pytest.approx(0.9)
         indexed_ids = {result.id for result in vector.search("APRIL", source_type="memory")}
         assert written.id in indexed_ids
         # The contradiction candidate is kept (and indexed), not discarded.
         contradiction_memory = outcomes[2].memory
         assert contradiction_memory is not None
-        assert contradiction_memory.source == "archive"
+        assert contradiction_memory.source == "reflection"
         assert contradiction_memory.id in indexed_ids
         audit_text = settings_tmp.audit_path.read_text(encoding="utf-8")
         assert "archive_memory_written" in audit_text
@@ -196,7 +196,7 @@ async def test_archive_writer_merges_near_duplicates_and_refreshes(settings_tmp)
         assert merged.use_count == 1
         assert merged.last_used_at is not None
         assert merged.confidence == pytest.approx(0.95)  # max of both
-        assert merged.source == "archive"
+        assert merged.source == "reflection"
         assert len(await memory.list_memories()) == 1
     finally:
         await database.close()
@@ -264,13 +264,147 @@ async def test_archive_writer_flags_contradiction_pair_and_keeps_both(settings_t
 
 
 @pytest.mark.asyncio
+async def test_archive_writer_confidence_threshold_boundary(settings_tmp) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        writer = ArchiveMemoryWriter(memory, daily_cap=20)
+        outcomes = await writer.write_candidates(
+            [
+                _candidate("Below the discard threshold", kind="fact", confidence=0.49),
+                _candidate("At the discard threshold", kind="fact", confidence=0.5),
+            ],
+            source_session_id="session-1",
+        )
+        assert [outcome.status for outcome in outcomes] == ["low_confidence", "written"]
+
+        # The threshold is configurable per the architecture.
+        strict = ArchiveMemoryWriter(memory, daily_cap=20, min_confidence=0.8)
+        outcome = (
+            await strict.write_candidates(
+                [_candidate("Strict threshold discard", kind="fact", confidence=0.7)],
+                source_session_id="session-2",
+            )
+        )[0]
+        assert outcome.status == "low_confidence"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_writer_flags_value_mismatch_contradiction(settings_tmp) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        writer = ArchiveMemoryWriter(memory, daily_cap=20)
+        first = (
+            await writer.write_candidates(
+                [_candidate("the user's editor is vim", kind="preference")],
+                source_session_id="session-1",
+            )
+        )[0]
+        assert first.status == "written"
+        outcome = (
+            await writer.write_candidates(
+                [_candidate("the user's editor is emacs", kind="preference")],
+                source_session_id="session-2",
+            )
+        )[0]
+        assert outcome.status == "contradiction"
+        # Both statements stay active; nothing is deleted or superseded.
+        contents = {record.content for record in await memory.list_memories()}
+        assert contents == {"the user's editor is vim", "the user's editor is emacs"}
+        pairs = await memory.list_memory_contradictions()
+        assert len(pairs) == 1
+        assert pairs[0].status == "pending"
+
+        # Different subjects with the same verb are not contradictions.
+        unrelated = (
+            await writer.write_candidates(
+                [_candidate("the user's shell is zsh", kind="preference")],
+                source_session_id="session-3",
+            )
+        )[0]
+        assert unrelated.status == "written"
+
+        # Bare-pronoun subjects never trigger value-mismatch: two "I prefer …"
+        # statements can coexist and must not be flagged for adjudication.
+        first_pref = (
+            await writer.write_candidates(
+                [_candidate("I prefer answers with examples", kind="fact")],
+                source_session_id="session-4",
+            )
+        )[0]
+        assert first_pref.status == "written"
+        second_pref = (
+            await writer.write_candidates(
+                [_candidate("I prefer answers in bullet points", kind="fact")],
+                source_session_id="session-5",
+            )
+        )[0]
+        assert second_pref.status == "written"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_daily_cap_counts_legacy_archive_rows(settings_tmp) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        # A pre-v2 database row with the legacy "archive" source still counts
+        # against the daily cap after the vocabulary change.
+        await memory.create_memory(
+            "legacy machine memory",
+            kind="fact",
+            reason="written before the source rename",
+            source="archive",
+        )
+        writer = ArchiveMemoryWriter(memory, daily_cap=1)
+        outcome = (
+            await writer.write_candidates(
+                [_candidate("New durable fact", kind="fact")],
+                source_session_id="session-1",
+            )
+        )[0]
+        assert outcome.status == "daily_cap"
+    finally:
+        await database.close()
+
+
+def test_archive_reflection_model_selection(settings_tmp) -> None:
+    """Reflection uses the memory/reading agent model, never the brain by default."""
+    from pathlib import Path
+
+    from april_common.effective_config import build_agent_registry_from_config
+    from services.api.dependencies import select_archive_model_id
+    from services.april_runtime.model_registry import ModelRegistry
+    from skills.registry import default_registry
+
+    repo_home = Path(__file__).resolve().parents[1]
+    model_registry = ModelRegistry.from_file(repo_home / "configs" / "models.yaml", root=repo_home)
+    agent_registry = build_agent_registry_from_config(
+        home=repo_home,
+        model_registry=model_registry,
+        tool_registry=default_registry(),
+    )
+    selected = select_archive_model_id(agent_registry, settings_tmp)
+    memory_agent = agent_registry.get("memory_agent")
+    assert memory_agent is not None
+    assert memory_agent.model_id is not None
+    assert selected == memory_agent.model_id
+    # With the repo's agents.yaml, the memory agent uses the reading model,
+    # which must differ from a silent brain-model fallback.
+    assert selected != settings_tmp.brain.model_id
+
+
+@pytest.mark.asyncio
 async def test_archive_writer_enforces_daily_cap(settings_tmp) -> None:
     database, memory = await _memory(settings_tmp)
     try:
         writer = ArchiveMemoryWriter(memory, daily_cap=1)
         outcomes = await writer.write_candidates(
-            [_candidate("First durable fact", kind="fact"),
-             _candidate("Second durable fact", kind="fact")],
+            [
+                _candidate("First durable fact", kind="fact"),
+                _candidate("Second durable fact", kind="fact"),
+            ],
             source_session_id="session-1",
         )
         assert [outcome.status for outcome in outcomes] == ["written", "daily_cap"]
@@ -492,9 +626,7 @@ async def test_runtime_reranker_returns_none_on_invalid_output(settings_tmp) -> 
         async def chat(self, **kwargs: object):
             from services.april_runtime.schemas import ChatResponse, Usage
 
-            return ChatResponse(
-                request_id="r", model_id="m", content="not json", usage=Usage()
-            )
+            return ChatResponse(request_id="r", model_id="m", content="not json", usage=Usage())
 
     class ExplodingRuntime:
         async def chat(self, **kwargs: object):

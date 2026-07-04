@@ -14,12 +14,22 @@ from services.memory.schemas import MemoryRecord, Message, VectorMetadata
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
 
-ARCHIVE_SOURCE = "archive"
-MIN_ARCHIVE_CONFIDENCE = 0.65
+# v2 source vocabulary: session reflection writes rows as "reflection".
+# "archive" is the legacy spelling; existing rows keep it and the daily cap
+# counts both so old databases never exceed the budget after an upgrade.
+ARCHIVE_SOURCE = "reflection"
+LEGACY_ARCHIVE_SOURCE = "archive"
+# Candidates below this confidence are discarded (architecture: 0.5); override
+# via ArchiveMemoryWriter(min_confidence=...) / evolution.archive_min_confidence.
+MIN_ARCHIVE_CONFIDENCE = 0.5
 # Cosine similarity above which a vector hit of the same kind is treated as a
 # near-duplicate and merged instead of creating a new row.
 NEAR_DUPLICATE_SIMILARITY = 0.92
 _NEGATION_TOKENS = {"not", "no", "never", "don't", "dont", "doesn't", "doesnt", "isn't", "isnt"}
+# Copulas/verbs that split a statement into subject and value for the
+# deterministic value-mismatch contradiction check ("editor is vim" vs
+# "editor is emacs"). Only the first occurrence splits.
+_VALUE_SPLIT_TOKENS = ("is", "are", "prefers", "prefer", "uses", "use", "likes", "wants")
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +92,7 @@ class ArchiveMemoryWriter:
                 "sensitive", candidate, "sensitive-looking content is never stored"
             )
         written_today = await self.memory.count_machine_memories_since(
-            _today_start_iso(), source=ARCHIVE_SOURCE
+            _today_start_iso(), source=(ARCHIVE_SOURCE, LEGACY_ARCHIVE_SOURCE)
         )
         if written_today >= self.daily_cap:
             return self._discard("daily_cap", candidate, "daily archive memory cap reached")
@@ -178,15 +188,22 @@ class ArchiveMemoryWriter:
     async def _contradiction(
         self, candidate: ArchiveMemoryCandidate, *, project_id: str | None
     ) -> MemoryRecord | None:
+        """Deterministic contradiction detection: negation flips and value mismatches.
+
+        Detection only ever flags a pair for Dreamer adjudication; it never
+        deletes or supersedes existing memory on its own.
+        """
         candidate_norm = _normalized(candidate.content)
         candidate_negated = _has_negation(candidate_norm)
         for existing in await self.memory.list_memories(project_id=project_id):
             if existing.kind != candidate.kind:
                 continue
             existing_norm = _normalized(existing.content)
-            if _without_negation(existing_norm) != _without_negation(candidate_norm):
+            if _without_negation(existing_norm) == _without_negation(candidate_norm):
+                if _has_negation(existing_norm) != candidate_negated:
+                    return existing
                 continue
-            if _has_negation(existing_norm) != candidate_negated:
+            if _value_mismatch(existing_norm, candidate_norm):
                 return existing
         return None
 
@@ -268,6 +285,7 @@ class ArchiveReflectionService:
             memory,
             vector_memory=vector_memory,
             audit=audit,
+            min_confidence=settings.evolution.archive_min_confidence,
             daily_cap=settings.evolution.daily_memory_cap,
         )
 
@@ -287,9 +305,7 @@ class ArchiveReflectionService:
         tool_calls = await self.memory.list_tool_call_summaries(
             conversation_id=session.conversation_id
         )
-        feedback = await self.memory.list_feedback_events(
-            conversation_id=session.conversation_id
-        )
+        feedback = await self.memory.list_feedback_events(conversation_id=session.conversation_id)
         sections = [transcript]
         if tool_calls:
             sections.append(
@@ -324,9 +340,7 @@ def _session_transcript(messages: list[Message]) -> str:
 
 def _today_start_iso() -> str:
     now = datetime.now(UTC)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _normalized(value: str) -> str:
@@ -339,3 +353,42 @@ def _has_negation(value: str) -> bool:
 
 def _without_negation(value: str) -> str:
     return " ".join(token for token in value.split() if token not in _NEGATION_TOKENS)
+
+
+def _split_subject_value(value: str) -> tuple[str, str] | None:
+    """Split "the user's editor is vim" into ("the user's editor", "vim")."""
+    tokens = value.split()
+    for index, token in enumerate(tokens):
+        if token in _VALUE_SPLIT_TOKENS and 0 < index < len(tokens) - 1:
+            return " ".join(tokens[:index]), " ".join(tokens[index + 1 :])
+    return None
+
+
+_BARE_SUBJECTS = {"i", "you", "we", "they", "it", "user", "the user"}
+
+
+def _value_mismatch(existing_norm: str, candidate_norm: str) -> bool:
+    """Same specific subject, different stated value ⇒ likely contradiction.
+
+    Both statements must be non-negated (negation pairs are handled separately)
+    and split cleanly around a copula/preference verb with identical subjects.
+    A bare-pronoun subject ("i prefer …") is never enough: two preferences can
+    coexist, and a false contradiction pair would let the Dreamer supersede a
+    valid memory during adjudication.
+    """
+    if _has_negation(existing_norm) or _has_negation(candidate_norm):
+        return False
+    existing_split = _split_subject_value(existing_norm)
+    candidate_split = _split_subject_value(candidate_norm)
+    if existing_split is None or candidate_split is None:
+        return False
+    existing_subject, existing_value = existing_split
+    candidate_subject, candidate_value = candidate_split
+    if existing_subject != candidate_subject or existing_value == candidate_value:
+        return False
+    subject_tokens = existing_subject.split()
+    meaningful = [token for token in subject_tokens if token not in {"the", "a", "an", "my"}]
+    if existing_subject in _BARE_SUBJECTS or len(meaningful) < 1:
+        return False
+    # Require at least one non-pronoun content token in the subject.
+    return any(token not in _BARE_SUBJECTS and len(token) >= 3 for token in meaningful)

@@ -129,6 +129,13 @@ class WakeSettings(BaseModel):
     candidate_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
     accept_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     confirm_with_stt: bool = True
+    # With confirm_with_stt on, instant_accept lets a score at or above
+    # accept_threshold wake without waiting for STT; lower-confidence
+    # candidates are still confirmed. Off = every candidate is confirmed.
+    instant_accept: bool = True
+    # Maximum normalized edit distance for fuzzy wake-word matching in STT
+    # transcripts (0.25 allows one edit on a five-letter word).
+    fuzzy_max_distance: float = Field(default=0.25, ge=0.0, le=0.5)
     ring_buffer_seconds: float = Field(default=10.0, gt=0.0, le=120.0)
     follow_up_seconds: float = Field(default=8.0, ge=0.0, le=120.0)
     strict_address: bool = False
@@ -183,6 +190,9 @@ class EvolutionSettings(BaseModel):
     require_ac_power: bool = True
     max_minutes: int = Field(default=90, ge=1, le=24 * 60)
     daily_memory_cap: int = Field(default=30, ge=0)
+    # Archive reflection candidates below this confidence are discarded
+    # (architecture default: 0.5).
+    archive_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     prompt_overlay_max_chars: int = Field(default=1200, ge=0, le=20_000)
     user_model_autoapply: str = "safe_sections_only"
 
@@ -367,6 +377,8 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_WAKE_CANDIDATE_THRESHOLD": ("wake", "candidate_threshold"),
     "APRIL_WAKE_ACCEPT_THRESHOLD": ("wake", "accept_threshold"),
     "APRIL_WAKE_CONFIRM_WITH_STT": ("wake", "confirm_with_stt"),
+    "APRIL_WAKE_INSTANT_ACCEPT": ("wake", "instant_accept"),
+    "APRIL_WAKE_FUZZY_MAX_DISTANCE": ("wake", "fuzzy_max_distance"),
     "APRIL_WAKE_RING_BUFFER_SECONDS": ("wake", "ring_buffer_seconds"),
     "APRIL_WAKE_FOLLOW_UP_SECONDS": ("wake", "follow_up_seconds"),
     "APRIL_WAKE_STRICT_ADDRESS": ("wake", "strict_address"),

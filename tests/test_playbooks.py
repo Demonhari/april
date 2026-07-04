@@ -65,12 +65,16 @@ async def _tool_executor(settings_tmp) -> tuple[Database, SqliteMemory, ToolExec
         )
     )
     approvals = ApprovalStore(database, AuditLogger(settings_tmp.audit_path), expiry_seconds=60)
-    return database, memory, ToolExecutionService(
-        settings=settings_tmp,
-        memory=memory,
-        tool_registry=registry,
-        permission_engine=PermissionEngine(registry),
-        approvals=approvals,
+    return (
+        database,
+        memory,
+        ToolExecutionService(
+            settings=settings_tmp,
+            memory=memory,
+            tool_registry=registry,
+            permission_engine=PermissionEngine(registry),
+            approvals=approvals,
+        ),
     )
 
 
@@ -274,6 +278,249 @@ async def test_playbook_mining_skips_unknown_tools(settings_tmp) -> None:
         await database.close()
 
 
+def test_playbook_miner_finds_frequent_contiguous_subsequences() -> None:
+    # The shared two-step flow is embedded inside three longer, otherwise
+    # different sequences; whole-sequence grouping would find nothing.
+    core = [
+        {"tool": "search_files", "args": {"query": "TODO"}, "status": "executed"},
+        {"tool": "read_file", "args": {"path": "README.md"}, "status": "executed"},
+    ]
+    sequences = [
+        [{"tool": "git_status", "args": {}, "status": "executed"}, *core],
+        [*core, {"tool": "git_log", "args": {}, "status": "executed"}],
+        [
+            {"tool": "list_files", "args": {"path": "."}, "status": "executed"},
+            *core,
+            {"tool": "git_diff", "args": {}, "status": "executed"},
+        ],
+    ]
+    candidates = PlaybookMiner().mine_frequent(
+        sequences,
+        support_threshold=3,
+        known_tools={
+            "search_files",
+            "read_file",
+            "git_status",
+            "git_log",
+            "git_diff",
+            "list_files",
+        },
+    )
+    assert len(candidates) == 1
+    assert [step.tool for step in candidates[0].steps] == ["search_files", "read_file"]
+    assert "support=3" in candidates[0].steps[0].reason
+
+
+def test_playbook_miner_prefers_longest_closed_subsequence() -> None:
+    # A repeated three-step flow yields one three-step candidate, not the
+    # overlapping two-step fragments it contains.
+    flow = [
+        {"tool": "search_files", "args": {"query": "TODO"}, "status": "executed"},
+        {"tool": "read_file", "args": {"path": "README.md"}, "status": "executed"},
+        {"tool": "git_status", "args": {}, "status": "executed"},
+    ]
+    candidates = PlaybookMiner().mine_frequent(
+        [list(flow) for _ in range(3)],
+        support_threshold=3,
+        known_tools={"search_files", "read_file", "git_status"},
+    )
+    assert len(candidates) == 1
+    assert [step.tool for step in candidates[0].steps] == [
+        "search_files",
+        "read_file",
+        "git_status",
+    ]
+
+
+def test_playbook_miner_bounds_candidate_count_and_size() -> None:
+    # Many distinct frequent flows: the candidate list is capped.
+    sequences = []
+    for variant in range(15):
+        flow = [
+            {"tool": "search_files", "args": {"query": f"q{variant}"}, "status": "executed"},
+            {"tool": "read_file", "args": {"path": f"f{variant}.md"}, "status": "executed"},
+        ]
+        sequences.extend([list(flow) for _ in range(3)])
+    candidates = PlaybookMiner().mine_frequent(
+        sequences,
+        support_threshold=3,
+        known_tools={"search_files", "read_file"},
+        max_candidates=5,
+    )
+    assert len(candidates) == 5
+    # A very long repeated flow is truncated to the step bound.
+    long_flow = [
+        {"tool": "read_file", "args": {"path": f"file{i}.md"}, "status": "executed"}
+        for i in range(20)
+    ]
+    long_candidates = PlaybookMiner().mine_frequent(
+        [list(long_flow) for _ in range(3)],
+        support_threshold=3,
+        known_tools={"read_file"},
+        max_candidates=1,
+    )
+    assert len(long_candidates) == 1
+    assert len(long_candidates[0].steps) <= 10
+
+
+async def _seed_conversation_with_message(
+    memory: SqliteMemory,
+    message: str,
+    sequence: list[tuple[str, dict[str, object]]],
+) -> str:
+    conversation_id = await memory.create_conversation()
+    await memory.add_message(conversation_id, "user", message)
+    for tool, args in sequence:
+        await memory.record_tool_call(
+            tool=tool,
+            args=args,
+            status="executed",
+            permission_level=1,
+            risk_level="read_only",
+            result={"ok": True},
+            conversation_id=conversation_id,
+        )
+    return conversation_id
+
+
+@pytest.mark.asyncio
+async def test_mining_auto_adopts_safe_playbook_with_safe_trigger(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    try:
+        sequence = [
+            ("search_files", {"query": "TODO"}),
+            ("read_file", {"path": "README.md"}),
+        ]
+        for _ in range(3):
+            await _seed_conversation_with_message(memory, "inspect my repo todos", sequence)
+
+        report = await mine_playbook_candidates(
+            memory,
+            settings_tmp,
+            guard=EvolutionWriteGuard(settings_tmp),
+            support_threshold=3,
+        )
+        assert len(report.candidate_ids) == 1
+        assert report.adopted_ids == report.candidate_ids
+        loaded = PlaybookLoader(settings_tmp.playbooks_path).get(report.candidate_ids[0])
+        assert loaded is not None
+        assert loaded.status == "active"
+        assert loaded.trigger_examples == ["inspect my repo todos"]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_mining_l3_candidate_requires_adoption_approval(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    try:
+        # run_command is Level 3: the mined playbook must never auto-adopt.
+        sequence = [
+            ("search_files", {"query": "TODO"}),
+            ("run_command", {"command": "make test"}),
+        ]
+        for _ in range(3):
+            await _seed_conversation_with_message(memory, "run my repo tests", sequence)
+
+        report = await mine_playbook_candidates(
+            memory,
+            settings_tmp,
+            guard=EvolutionWriteGuard(settings_tmp),
+            support_threshold=3,
+        )
+        assert len(report.candidate_ids) == 1
+        assert report.adopted_ids == []
+        assert report.approval_required_ids == report.candidate_ids
+        loaded = PlaybookLoader(settings_tmp.playbooks_path).get(report.candidate_ids[0])
+        assert loaded is not None
+        assert loaded.status == "candidate"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_mining_without_safe_trigger_stays_candidate(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    try:
+        sequence = [
+            ("search_files", {"query": "TODO"}),
+            ("read_file", {"path": "README.md"}),
+        ]
+        # Sensitive user messages: no safe trigger can be suggested.
+        for _ in range(3):
+            await _seed_conversation_with_message(
+                memory, "my password is hunter2, check todos", sequence
+            )
+
+        report = await mine_playbook_candidates(
+            memory,
+            settings_tmp,
+            guard=EvolutionWriteGuard(settings_tmp),
+            support_threshold=3,
+        )
+        assert len(report.candidate_ids) == 1
+        assert report.adopted_ids == []
+        loaded = PlaybookLoader(settings_tmp.playbooks_path).get(report.candidate_ids[0])
+        assert loaded is not None
+        assert loaded.status == "candidate"
+        assert loaded.trigger_examples == []
+        assert any("no safe trigger" in detail for detail in report.details)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_mining_skips_auto_adopt_on_ambiguous_trigger(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    memory = SqliteMemory(database)
+    try:
+        # An active playbook already owns this trigger phrase.
+        loader = PlaybookLoader(settings_tmp.playbooks_path)
+        loader.adopt(
+            PlaybookDefinition(
+                id="existing-playbook",
+                name="Existing",
+                status="active",
+                trigger_examples=["inspect my repo todos"],
+                steps=[{"tool": "read_file", "args": {"path": "README.md"}}],
+            )
+        )
+        sequence = [
+            ("search_files", {"query": "TODO"}),
+            ("read_file", {"path": "README.md"}),
+        ]
+        for _ in range(3):
+            await _seed_conversation_with_message(memory, "inspect my repo todos", sequence)
+
+        report = await mine_playbook_candidates(
+            memory,
+            settings_tmp,
+            guard=EvolutionWriteGuard(settings_tmp),
+            support_threshold=3,
+        )
+        assert len(report.candidate_ids) == 1
+        assert report.adopted_ids == []
+        loaded = loader.get(report.candidate_ids[0])
+        assert loaded is not None
+        assert loaded.status == "candidate"
+        # The colliding trigger falls back to normal routing behaviour: the
+        # loader refuses to match ambiguously once both are present.
+        assert any("ambiguous" in detail for detail in report.details)
+    finally:
+        await database.close()
+
+
 def test_playbook_api_manual_mine(settings_tmp) -> None:
     import anyio
 
@@ -350,11 +597,7 @@ def test_orchestrator_ambiguous_trigger_falls_back_to_brain(settings_tmp) -> Non
             steps=[{"tool": "create_reminder", "args": {"content": "one"}}],
         )
         loader.adopt(base)
-        loader.adopt(
-            base.model_copy(
-                update={"id": "two-playbook", "name": "Two"}
-            )
-        )
+        loader.adopt(base.model_copy(update={"id": "two-playbook", "name": "Two"}))
         result = await container.orchestrator.chat("plan my day")
         # Ambiguity falls back to normal Brain routing (fake runtime answers).
         assert result.status == "ok"

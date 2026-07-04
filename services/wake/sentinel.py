@@ -170,6 +170,16 @@ class Sentinel:
             else:
                 self._reject(score, "below accept threshold without STT confirmation")
             return
+        if wake.instant_accept and score >= wake.accept_threshold:
+            # High-confidence scores wake immediately; STT confirmation is
+            # reserved for candidates between the two thresholds.
+            await self._accept(
+                score=score,
+                reason="accepted_by_score",
+                text=None,
+                frame_source=frame_source,
+            )
+            return
         if self.confirmer is None:
             # Confirmation is required but unavailable: only a high-confidence
             # score may wake, so a marginal candidate can never slip through.
@@ -257,9 +267,7 @@ class Sentinel:
         if transcriber is None:
             return fallback_text
         frames = list(pre_roll)
-        frames.extend(
-            await self._capture_post_wake_frames(frame_source, speech_seen=speech_seen)
-        )
+        frames.extend(await self._capture_post_wake_frames(frame_source, speech_seen=speech_seen))
         if not frames:
             return fallback_text
         capture_path = self.settings.audio_cache_path / f"wake-utterance-{uuid.uuid4()}.wav"
@@ -375,6 +383,7 @@ async def run_sentinel(settings: AprilSettings) -> None:
             audio_cache_path=settings.audio_cache_path,
             strict_address=settings.wake.strict_address,
             retain_debug_audio=settings.voice.retain_debug_audio,
+            fuzzy_max_distance=settings.wake.fuzzy_max_distance,
         )
     sentinel = Sentinel(
         settings=settings,
