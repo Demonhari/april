@@ -48,6 +48,8 @@ async def make_container(
         approvals=approvals,
     )
     from services.brain.orchestrator import AprilOrchestrator
+    from services.evolution.versions import PromptOverlayManager
+    from skills.playbooks import PlaybookLoader, PlaybookRunner
 
     orchestrator = AprilOrchestrator(
         settings=settings_tmp,
@@ -59,6 +61,9 @@ async def make_container(
         tool_executor=tool_executor,
         agent_registry=default_agent_registry(),
         memory_retriever=memory_retriever,
+        overlay_manager=PromptOverlayManager(settings_tmp, database),
+        playbook_loader=PlaybookLoader(settings_tmp.playbooks_path),
+        playbook_runner=PlaybookRunner(tool_executor, memory=memory),
     )
     return ApiContainer(
         settings=settings_tmp,

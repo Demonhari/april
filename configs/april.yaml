@@ -18,6 +18,10 @@ runtime:
 memory:
   database_path: data/april.db
   vector_index_path: data/vector_index
+  # hashed-token stays the default: it is deterministic, offline, and needs no
+  # model files (first run and fake-backend tests keep working). Once a local
+  # embedding-role GGUF is registered in configs/models.yaml, runtime-local is
+  # the recommended semantic provider; switch and run `run april memory reindex`.
   embedding_provider: hashed-token
   embedding_model_id: null
 

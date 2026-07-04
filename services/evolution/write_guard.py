@@ -6,7 +6,17 @@ from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
 
 APPROVED_EVOLUTION_TABLES = frozenset(
-    {"evolution_runs", "prompt_versions", "playbooks", "playbook_runs", "model_adapters"}
+    {
+        "evolution_runs",
+        "prompt_versions",
+        "playbooks",
+        "playbook_runs",
+        "model_adapters",
+        # D2 distill/consolidate: duplicate merges and contradiction
+        # adjudication update rows (supersede/refresh/resolve) — never delete.
+        "memories",
+        "memory_contradictions",
+    }
 )
 
 

@@ -14,7 +14,14 @@ from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
 from services.voice.speech_to_text import FakeSpeechToText, SpeechToText
-from services.wake.confirmer import SttConfirmer, is_addressed, strip_vocative
+from services.wake.confirmer import (
+    SttConfirmer,
+    canonicalize_wake_word,
+    edit_distance,
+    is_addressed,
+    normalized_edit_distance,
+    strip_vocative,
+)
 from services.wake.fakes import (
     FakeFrameMicrophone,
     ManualClock,
@@ -121,6 +128,75 @@ def test_is_addressed_strict_rejects_mid_sentence_mentions() -> None:
     assert not is_addressed("add april to the meeting notes", strict=True)
     assert is_addressed("add april to the meeting notes", strict=False)
     assert not is_addressed("restart the runtime", strict=False)
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy STT confirmation
+# ---------------------------------------------------------------------------
+
+
+def test_edit_distance_is_deterministic() -> None:
+    assert edit_distance("april", "april") == 0
+    assert edit_distance("april", "apryl") == 1
+    assert edit_distance("april", "avril") == 1
+    assert edit_distance("april", "aprill") == 1
+    assert edit_distance("april", "apron") == 2
+    assert normalized_edit_distance("april", "apryl") == pytest.approx(0.2)
+    assert normalized_edit_distance("", "") == 0.0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("apryl, restart the runtime", "april, restart the runtime"),
+        ("avril restart the runtime", "april restart the runtime"),
+        ("hey aprill what's on today", "hey april what's on today"),
+        ("a pril, what time is it", "april, what time is it"),
+        ("add apron to the shopping list", "add apron to the shopping list"),
+        ("a really long sentence", "a really long sentence"),
+        ("april is already canonical", "april is already canonical"),
+    ],
+)
+def test_canonicalize_wake_word(raw: str, expected: str) -> None:
+    assert canonicalize_wake_word(raw) == expected
+
+
+@pytest.mark.parametrize("variant", ["april", "apryl", "avril", "aprill", "a pril"])
+def test_fuzzy_variants_accepted_in_both_modes(variant: str) -> None:
+    assert is_addressed(f"{variant}, restart the runtime", strict=False)
+    assert is_addressed(f"{variant}, restart the runtime", strict=True)
+    assert is_addressed(f"can you check my repo {variant}", strict=True)
+    assert strip_vocative(f"{variant}, restart the runtime") == "restart the runtime"
+
+
+def test_fuzzy_strict_mode_still_rejects_mid_sentence_variants() -> None:
+    assert not is_addressed("add apryl to the meeting notes", strict=True)
+    assert is_addressed("add apryl to the meeting notes", strict=False)
+
+
+def test_fuzzy_does_not_match_unrelated_words() -> None:
+    assert not is_addressed("put the apron on the hook", strict=False)
+    assert not is_addressed("the apple is ripe", strict=False)
+    assert not is_addressed("a really nice day", strict=False)
+
+
+def test_fuzzy_can_be_disabled() -> None:
+    assert not is_addressed("apryl, restart the runtime", strict=False, fuzzy=False)
+    assert strip_vocative("apryl, restart it", fuzzy=False) == "apryl, restart it"
+
+
+async def test_sentinel_stt_confirmation_accepts_fuzzy_variant(settings_tmp) -> None:
+    sentinel, _mic, delivery, _player = _sentinel(
+        settings_tmp,
+        scores=[0.5],
+        stt_text="apryl, restart the runtime",
+        confirm_with_stt=True,
+    )
+    await sentinel.run_once()
+    assert len(delivery.events) == 1
+    event = delivery.events[0]
+    assert event.reason == "stt_confirmed"
+    assert event.text == "restart the runtime"
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +352,68 @@ async def test_wake_event_persists_flags_not_transcripts(settings_tmp) -> None:
         assert events[0].score == 0.5
         row = await database.fetchone("SELECT * FROM wake_events")
         assert "restart the runtime" not in "".join(str(value) for value in dict(row).values())
+    finally:
+        await database.close()
+
+
+async def test_wake_event_backward_compatible_and_persists_new_fields(settings_tmp) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        manager = SessionManager(memory, continuity_minutes=10)
+        # Old-style payload without the new optional fields keeps validating.
+        legacy = WakeEvent.model_validate({"source": "terminal"})
+        assert legacy.captured_at is None
+        assert legacy.session_hint is None
+        await manager.handle_wake(legacy)
+
+        enriched = WakeEvent(
+            source="voice",
+            score=0.8,
+            captured_at="2026-07-03T09:00:00Z",
+            session_hint="nonexistent-session",
+        )
+        await manager.handle_wake(enriched)
+        events = await memory.list_wake_events()
+        persisted = next(event for event in events if event.source == "voice")
+        assert persisted.captured_at == "2026-07-03T09:00:00Z"
+        assert persisted.session_hint == "nonexistent-session"
+    finally:
+        await database.close()
+
+
+async def test_session_hint_joins_open_session_but_never_closed_ones(settings_tmp) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        now = datetime(2026, 7, 3, 9, 0, 0, tzinfo=UTC)
+
+        def clock() -> datetime:
+            return now
+
+        manager = SessionManager(memory, continuity_minutes=10, clock=clock)
+        first = await manager.handle_wake(WakeEvent(source="voice", score=0.8))
+
+        # Outside the continuity window, a valid hint still joins the open session.
+        now = now + timedelta(minutes=30)
+        hinted = await manager.handle_wake(
+            WakeEvent(source="terminal", session_hint=first.session_id)
+        )
+        assert hinted.joined_existing is True
+        assert hinted.session_id == first.session_id
+
+        # A hint naming a closed session falls back to normal continuity flow.
+        await manager.close(first.session_id)
+        now = now + timedelta(minutes=1)
+        stale_hint = await manager.handle_wake(
+            WakeEvent(source="terminal", session_hint=first.session_id)
+        )
+        assert stale_hint.joined_existing is False
+        assert stale_hint.session_id != first.session_id
+
+        # An unknown hint also falls back instead of failing.
+        unknown = await manager.handle_wake(
+            WakeEvent(source="terminal", session_hint="not-a-session")
+        )
+        assert unknown.session_id == stale_hint.session_id
     finally:
         await database.close()
 

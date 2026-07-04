@@ -64,7 +64,12 @@ from services.voice.health import (
 )
 from services.wake.schemas import WakeEvent
 from services.wake.wake_bus import WakeBus
-from skills.playbooks import PlaybookDefinition, PlaybookLoader, PlaybookRunner
+from skills.playbooks import (
+    PlaybookAdoptionService,
+    PlaybookDefinition,
+    PlaybookLoader,
+    PlaybookRunner,
+)
 
 _DESKTOP_WEB_DIR = Path(__file__).resolve().parents[2] / "apps" / "desktop" / "web"
 
@@ -413,6 +418,8 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             score=request.score,
             text=request.text,
             reason=request.reason,
+            captured_at=request.captured_at,
+            session_hint=request.session_hint,
         )
         return await _handle_wake_event(active, event, request_id=request_id)
 
@@ -676,11 +683,26 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.post("/playbooks/adopt")
     async def playbook_adopt(
         request: PlaybookDefinition,
+        approval_id: str | None = None,
         active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
     ) -> object:
-        loader = PlaybookLoader(active.settings.playbooks_path)
-        path = loader.adopt(request)
-        return {"adopted": True, "id": request.id, "path": str(path)}
+        # Level 3+ playbooks require an exact-action adoption approval: the
+        # first call returns pending_approval; re-posting the identical
+        # definition with ?approval_id=... completes adoption.
+        adoption = PlaybookAdoptionService(
+            loader=PlaybookLoader(active.settings.playbooks_path),
+            tool_registry=active.tool_registry,
+            approvals=active.approvals,
+            memory=active.memory,
+            approval_required_at=active.permission_engine.approval_required_at,
+        )
+        return await adoption.adopt(
+            request,
+            actor="local-user",
+            request_id=x_request_id or str(uuid.uuid4()),
+            approval_id=approval_id,
+        )
 
     @app.post("/playbooks/{playbook_id}/run")
     async def playbook_run(
@@ -692,12 +714,20 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         playbook = loader.get(playbook_id)
         if playbook is None:
             raise HTTPException(status_code=404, detail="playbook not found")
-        result = await PlaybookRunner(active.tool_executor).run(
+        result = await PlaybookRunner(active.tool_executor, memory=active.memory).run(
             playbook,
             conversation_id=request.conversation_id,
             project_id=request.project_id,
         )
         return {"run": asdict(result)}
+
+    @app.get("/playbooks/{playbook_id}/runs")
+    async def playbook_runs(
+        playbook_id: str,
+        limit: int = 50,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        return {"runs": await active.memory.list_playbook_runs(playbook_id=playbook_id, limit=limit)}
 
     @app.get("/evolution/versions")
     async def evolution_versions(

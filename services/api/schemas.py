@@ -70,6 +70,9 @@ class WakeRequest(BaseModel):
     score: float | None = Field(default=None, ge=0.0, le=1.0)
     text: str | None = Field(default=None, min_length=1, max_length=50_000)
     reason: str | None = Field(default=None, max_length=200)
+    # Optional v2 fields; older clients omit them and behaviour is unchanged.
+    captured_at: str | None = Field(default=None, max_length=64)
+    session_hint: str | None = Field(default=None, max_length=128)
 
 
 class SessionAttachRequest(BaseModel):

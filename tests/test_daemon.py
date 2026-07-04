@@ -82,12 +82,9 @@ def test_daemon_lock_is_single_instance(tmp_path: Path) -> None:
         first.release()
 
 
-@pytest.mark.asyncio
-async def test_supervisor_starts_children_degrades_and_restarts_with_backoff(settings_tmp) -> None:
-    factory = FakeFactory()
-    clock = ManualClock()
-    governor = ResourceGovernor(
-        settings_tmp,
+def _permissive_governor(settings) -> ResourceGovernor:
+    return ResourceGovernor(
+        settings,
         provider=FixedSignals(
             ResourceSignals(
                 ram_headroom_gb=16.0,
@@ -98,14 +95,75 @@ async def test_supervisor_starts_children_degrades_and_restarts_with_backoff(set
         ),
         policy=ResourcePolicy(min_ram_headroom_gb=1.0, max_cpu_load_percent=90.0),
     )
-    supervisor = AprialdSupervisor(
-        settings_tmp,
+
+
+def _supervisor(
+    settings, factory: FakeFactory, clock: ManualClock, **kwargs
+) -> AprialdSupervisor:
+    return AprialdSupervisor(
+        settings,
         process_factory=factory,
         health_checker=_healthy,
-        governor=governor,
+        governor=_permissive_governor(settings),
         sleep=_no_sleep,
         clock=clock,
+        **kwargs,
     )
+
+
+def _voice_wake_enabled(settings):
+    return settings.model_copy(
+        update={
+            "voice": settings.voice.model_copy(update={"enabled": True}),
+            "wake": settings.wake.model_copy(update={"enabled": True}),
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_supervisor_default_safe_config_excludes_sentinel(settings_tmp) -> None:
+    factory = FakeFactory()
+    supervisor = _supervisor(settings_tmp, factory, ManualClock())
+    await supervisor.start()
+    try:
+        assert factory.started == ["runtime", "api"]
+        assert set(supervisor.children) == {"runtime", "api"}
+        health = await supervisor.health()
+        assert health.status == "ok"
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_includes_sentinel_when_voice_and_wake_enabled(settings_tmp) -> None:
+    factory = FakeFactory()
+    supervisor = _supervisor(_voice_wake_enabled(settings_tmp), factory, ManualClock())
+    await supervisor.start()
+    try:
+        assert factory.started == ["runtime", "api", "sentinel"]
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_excludes_sentinel_when_only_wake_enabled(settings_tmp) -> None:
+    wake_only = settings_tmp.model_copy(
+        update={"wake": settings_tmp.wake.model_copy(update={"enabled": True})}
+    )
+    factory = FakeFactory()
+    supervisor = _supervisor(wake_only, factory, ManualClock())
+    await supervisor.start()
+    try:
+        assert factory.started == ["runtime", "api"]
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_starts_children_degrades_and_restarts_with_backoff(settings_tmp) -> None:
+    factory = FakeFactory()
+    clock = ManualClock()
+    supervisor = _supervisor(_voice_wake_enabled(settings_tmp), factory, clock)
     await supervisor.start()
     try:
         assert factory.started == ["runtime", "api", "sentinel"]
@@ -125,9 +183,56 @@ async def test_supervisor_starts_children_degrades_and_restarts_with_backoff(set
 
         await supervisor.supervise_once()
         assert factory.started == ["runtime", "api", "sentinel"]
+        # A scheduled restart is reported with its remaining delay.
+        scheduled = await supervisor.health()
+        runtime_child = next(c for c in scheduled.children if c.name == "runtime")
+        assert runtime_child.status == "down"
+        assert runtime_child.last_exit_code == 1
+        assert "restart_scheduled_in" in (runtime_child.detail or "")
         clock.advance(3.0)
         await supervisor.supervise_once()
         assert factory.started == ["runtime", "api", "sentinel", "runtime"]
+        assert supervisor.children["runtime"].restarts == 1
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_backoff_is_exponential_capped_and_resets(settings_tmp) -> None:
+    factory = FakeFactory()
+    clock = ManualClock()
+    supervisor = _supervisor(settings_tmp, factory, clock, stable_after_seconds=30.0)
+    await supervisor.start()
+    try:
+        child = supervisor.children["runtime"]
+        base = child.spec.restart_backoff_seconds
+
+        # First failure schedules base backoff; restart fires exactly at it.
+        assert child.process is not None
+        child.process.returncode = 1
+        await supervisor.supervise_once()
+        assert child.next_restart_at == pytest.approx(clock.now + base)
+        clock.advance(base)
+        await supervisor.supervise_once()
+        assert child.restarts == 1
+
+        # Immediate second failure doubles the delay deterministically.
+        assert child.process is not None
+        child.process.returncode = 1
+        await supervisor.supervise_once()
+        assert child.next_restart_at == pytest.approx(clock.now + base * 2)
+        clock.advance(base * 2)
+        await supervisor.supervise_once()
+        assert child.restarts == 2
+
+        # After a long stable run the failure streak resets to base backoff.
+        clock.advance(31.0)
+        await supervisor.supervise_once()
+        assert child.consecutive_failures == 0
+        assert child.process is not None
+        child.process.returncode = 1
+        await supervisor.supervise_once()
+        assert child.next_restart_at == pytest.approx(clock.now + base)
     finally:
         await supervisor.stop()
 
@@ -172,6 +277,9 @@ def test_launchd_install_writes_only_user_launch_agents(settings_tmp, tmp_path: 
     argv = payload["ProgramArguments"]
     assert argv[1:] == ["-m", "apps.daemon.apriald"]
     assert payload["EnvironmentVariables"]["APRIL_HOME"] == str(settings_tmp.home)
+    # User LaunchAgent semantics: start at login and keep the supervisor alive.
+    assert payload["RunAtLoad"] is True
+    assert payload["KeepAlive"] is True
 
     assert manager.uninstall() is True
     assert manager.status()["installed"] is False

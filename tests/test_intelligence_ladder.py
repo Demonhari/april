@@ -38,9 +38,16 @@ def _decision(**updates: object) -> BrainDecision:
 
 
 class LadderRuntime:
-    def __init__(self, *, delay: float = 0.0, reasoning_model: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        delay: float = 0.0,
+        reasoning_model: bool = False,
+        judge_response: str | None = None,
+    ) -> None:
         self.delay = delay
         self.reasoning_model = reasoning_model
+        self.judge_response = judge_response
         self.calls: list[dict[str, Any]] = []
 
     async def chat(self, **kwargs: Any) -> ChatResponse:
@@ -49,7 +56,9 @@ class LadderRuntime:
             await asyncio.sleep(self.delay)
         joined = "\n".join(message.content for message in kwargs["messages"])
         lower = joined.lower()
-        if "council responder role: practical" in lower:
+        if "score each candidate answer" in lower:
+            content = self.judge_response or "not json"
+        elif "council responder role: sage" in lower:
             content = (
                 "Use the local typed client because it preserves approval risk, "
                 "then verify with tests and document the tradeoff."
@@ -161,7 +170,7 @@ async def test_deep_mode_uses_reasoning_model_and_hard_budget(settings_tmp) -> N
 
 @pytest.mark.asyncio
 async def test_council_mode_selects_best_rubric_candidate(settings_tmp) -> None:
-    runtime = LadderRuntime()
+    runtime = LadderRuntime()  # judge returns non-JSON: deterministic fallback
     ladder = _ladder(settings_tmp, runtime)
     result = await ladder.run_council(
         message="compare local client approaches",
@@ -174,7 +183,103 @@ async def test_council_mode_selects_best_rubric_candidate(settings_tmp) -> None:
     assert result.status == "ok"
     assert result.final_message.startswith("Mode: council")
     assert "local typed client" in result.final_message
-    assert result.metadata["selected_responder"] == "practical"
+    assert result.metadata["selected_responder"] == "sage"
+    assert result.metadata["council_scoring"] == "deterministic_rubric"
+    assert result.metadata["council_members"] == ["prime", "sage", "muse"]
+
+
+@pytest.mark.asyncio
+async def test_council_scout_judge_scores_and_surfaces_disagreement(settings_tmp) -> None:
+    import json as jsonlib
+
+    judge_payload = jsonlib.dumps(
+        {
+            "scores": [
+                {"responder_id": "prime", "score": 0.78, "rationale": "close second"},
+                {"responder_id": "sage", "score": 0.82, "rationale": "best tradeoffs"},
+                {"responder_id": "muse", "score": 0.30, "rationale": "thin"},
+            ]
+        }
+    )
+    runtime = LadderRuntime(judge_response=judge_payload)
+    ladder = _ladder(settings_tmp, runtime)
+    result = await ladder.run_council(
+        message="compare local client approaches",
+        prompt_messages=[
+            ChatMessage(role="user", content="User request: compare local client approaches")
+        ],
+        fallback_model_id="april-brain",
+        request_id="r4",
+    )
+    assert result.status == "ok"
+    assert result.metadata["council_scoring"] == "scout"
+    assert result.metadata["selected_responder"] == "sage"
+    disagreement = result.metadata["council_disagreement"]
+    assert disagreement["close_responders"] == ["prime"]
+    assert "Council disagreement" in result.final_message
+
+
+def test_confidence_drives_rung_selection(settings_tmp) -> None:
+    ladder = _ladder(settings_tmp, LadderRuntime())
+    # Mid confidence escalates to verified.
+    assert ladder.select(
+        message="what changed in the runtime design",
+        decision=_decision(confidence=0.55),
+        mode="standard",
+    ).rung == 2
+    # Low confidence escalates to deep.
+    assert ladder.select(
+        message="what changed in the runtime design",
+        decision=_decision(confidence=0.3),
+        mode="standard",
+    ).rung == 3
+    # High confidence stays on the standard route.
+    assert ladder.select(
+        message="what changed in the runtime design",
+        decision=_decision(confidence=0.9),
+        mode="standard",
+    ).rung == 1
+    # Tool/approval paths never escalate regardless of confidence.
+    assert ladder.select(
+        message="what changed in the runtime design",
+        decision=_decision(
+            confidence=0.2,
+            tools_needed=["run_command"],
+            permission_level=3,
+            risk_level="code_write",
+            needs_confirmation=True,
+        ),
+        mode="standard",
+    ).rung == 1
+
+
+def test_deep_phrases_and_high_stakes_select_rungs(settings_tmp) -> None:
+    ladder = _ladder(settings_tmp, LadderRuntime())
+    assert ladder.select(
+        message="think hard about the best architecture",
+        decision=_decision(),
+        mode="standard",
+    ).rung == 3
+    high_stakes = ladder.select(
+        message="this is a high stakes decision about my career",
+        decision=_decision(),
+        mode="standard",
+    )
+    assert high_stakes.rung == 4
+    assert high_stakes.high_stakes is True
+    # High stakes with a tool path still uses the standard permission flow.
+    gated = ladder.select(
+        message="this is a high stakes decision, delete the repo",
+        decision=_decision(
+            tools_needed=["run_command"],
+            permission_level=4,
+            risk_level="system_action",
+            needs_confirmation=True,
+        ),
+        mode="standard",
+    )
+    assert gated.rung == 1
+    assert gated.high_stakes is True
 
 
 def test_council_rubric_scores_and_selects_candidate() -> None:

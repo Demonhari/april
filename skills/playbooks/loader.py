@@ -5,7 +5,12 @@ from pathlib import Path
 
 import yaml
 
+from april_common.text import normalized_edit_distance
 from skills.playbooks.schema import PlaybookDefinition
+
+# A whole-message trigger match tolerates this much normalized edit distance,
+# so "run test playbok" still routes while unrelated text never does.
+FUZZY_TRIGGER_MAX_DISTANCE = 0.2
 
 
 class PlaybookLoader:
@@ -48,13 +53,37 @@ class PlaybookLoader:
         return target
 
     def match_trigger(self, text: str) -> PlaybookDefinition | None:
-        normalized = text.casefold()
+        """Route to a playbook only on an unambiguous trigger match.
+
+        A trigger example matches when it is contained in the message (exact)
+        or the whole message is within a small edit distance of the example
+        (fuzzy). More than one matching playbook is ambiguous and returns
+        ``None`` so the caller falls back to normal Brain routing.
+        """
+        normalized = " ".join(text.casefold().split())
+        if not normalized:
+            return None
         matches = [
             playbook
             for playbook in self.list()
             if playbook.status == "active"
-            and any(example.casefold() in normalized for example in playbook.trigger_examples)
+            and any(
+                self._example_matches(example, normalized)
+                for example in playbook.trigger_examples
+            )
         ]
         if len(matches) == 1:
             return matches[0]
         return None
+
+    @staticmethod
+    def _example_matches(example: str, normalized_message: str) -> bool:
+        normalized_example = " ".join(example.casefold().split())
+        if not normalized_example:
+            return False
+        if normalized_example in normalized_message:
+            return True
+        return (
+            normalized_edit_distance(normalized_example, normalized_message)
+            <= FUZZY_TRIGGER_MAX_DISTANCE
+        )

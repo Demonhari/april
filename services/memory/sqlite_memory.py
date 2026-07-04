@@ -11,6 +11,7 @@ from services.memory.database import Database
 from services.memory.schemas import (
     Conversation,
     FeedbackEventRecord,
+    MemoryContradictionRecord,
     MemoryRecord,
     Message,
     Project,
@@ -254,6 +255,99 @@ class SqliteMemory:
                     """,
                     (now, memory_id),
                 )
+
+    async def refresh_memory(
+        self, memory_id: str, *, confidence: float | None = None
+    ) -> MemoryRecord | None:
+        """Auditable duplicate-merge refresh: bump usage and keep max confidence."""
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            if confidence is None:
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET use_count = use_count + 1, last_used_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, memory_id),
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET use_count = use_count + 1,
+                        last_used_at = ?,
+                        confidence = MAX(confidence, ?)
+                    WHERE id = ?
+                    """,
+                    (now, confidence, memory_id),
+                )
+        return await self.get_memory(memory_id, include_inactive=True)
+
+    async def supersede_memory(self, memory_id: str, *, superseded_by: str) -> bool:
+        """Mark a memory as superseded without deleting the row."""
+        cursor = await self.database.execute(
+            "UPDATE memories SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL",
+            (superseded_by, memory_id),
+        )
+        return cursor.rowcount > 0
+
+    async def record_memory_contradiction(
+        self, *, memory_id_a: str, memory_id_b: str
+    ) -> MemoryContradictionRecord:
+        """Flag a contradictory pair for Dreamer adjudication; both rows are kept."""
+        pair_id = str(uuid.uuid4())
+        created_at = utc_now_iso()
+        await self.database.execute(
+            """
+            INSERT INTO memory_contradictions(
+                id, memory_id_a, memory_id_b, status, created_at
+            )
+            VALUES(?, ?, ?, 'pending', ?)
+            """,
+            (pair_id, memory_id_a, memory_id_b, created_at),
+        )
+        return MemoryContradictionRecord(
+            id=pair_id,
+            memory_id_a=memory_id_a,
+            memory_id_b=memory_id_b,
+            status="pending",
+            created_at=created_at,
+        )
+
+    async def list_memory_contradictions(
+        self, *, status: str | None = "pending", limit: int = 100
+    ) -> list[MemoryContradictionRecord]:
+        capped = max(1, min(limit, 500))
+        if status is None:
+            rows = await self.database.fetchall(
+                "SELECT * FROM memory_contradictions ORDER BY created_at LIMIT ?",
+                (capped,),
+            )
+        else:
+            rows = await self.database.fetchall(
+                """
+                SELECT * FROM memory_contradictions
+                WHERE status = ?
+                ORDER BY created_at
+                LIMIT ?
+                """,
+                (status, capped),
+            )
+        return [MemoryContradictionRecord.model_validate(dict(row)) for row in rows]
+
+    async def resolve_memory_contradiction(
+        self, contradiction_id: str, *, resolution: str
+    ) -> bool:
+        cursor = await self.database.execute(
+            """
+            UPDATE memory_contradictions
+            SET status = 'resolved', resolution = ?, resolved_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (resolution, utc_now_iso(), contradiction_id),
+        )
+        return cursor.rowcount > 0
 
     async def count_machine_memories_since(self, since_iso: str, *, source: str) -> int:
         row = await self.database.fetchone(
@@ -509,6 +603,112 @@ class SqliteMemory:
             """,
             (project_id, head_sha, dirty_count, updated_at),
         )
+
+    async def upsert_playbook(
+        self,
+        *,
+        playbook_id: str,
+        name: str,
+        source: str,
+        status: str,
+        trigger_examples: list[str],
+        steps: list[dict[str, Any]],
+        required_permission_level: int = 1,
+    ) -> None:
+        """Mirror a playbook definition into the playbooks table.
+
+        Playbooks live as YAML/JSON under data/playbooks; this row exists so
+        playbook_runs rows have a valid foreign key and stats can accumulate.
+        """
+        now = utc_now_iso()
+        await self.database.execute(
+            """
+            INSERT INTO playbooks(
+                id, name, source, status, trigger_examples_json, steps_json,
+                required_permission_level, created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                source = excluded.source,
+                status = excluded.status,
+                trigger_examples_json = excluded.trigger_examples_json,
+                steps_json = excluded.steps_json,
+                required_permission_level = excluded.required_permission_level,
+                updated_at = excluded.updated_at
+            """,
+            (
+                playbook_id,
+                name,
+                source,
+                status,
+                json.dumps(trigger_examples, sort_keys=True),
+                json.dumps(steps, sort_keys=True),
+                required_permission_level,
+                now,
+                now,
+            ),
+        )
+
+    async def create_playbook_run(
+        self,
+        *,
+        playbook_id: str,
+        conversation_id: str | None = None,
+        status: str = "running",
+    ) -> str:
+        run_id = str(uuid.uuid4())
+        if conversation_id is not None and await self.get_conversation(conversation_id) is None:
+            # An unknown conversation must not fail the run row's foreign key.
+            conversation_id = None
+        await self.database.execute(
+            """
+            INSERT INTO playbook_runs(
+                id, playbook_id, conversation_id, status, steps_completed, created_at
+            )
+            VALUES(?, ?, ?, ?, 0, ?)
+            """,
+            (run_id, playbook_id, conversation_id, status, utc_now_iso()),
+        )
+        return run_id
+
+    async def finish_playbook_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        steps_completed: int,
+        detail: str | None = None,
+    ) -> None:
+        await self.database.execute(
+            """
+            UPDATE playbook_runs
+            SET status = ?, steps_completed = ?, detail = ?, completed_at = ?
+            WHERE id = ?
+            """,
+            (status, steps_completed, detail, utc_now_iso(), run_id),
+        )
+
+    async def list_playbook_runs(
+        self, *, playbook_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        capped = max(1, min(limit, 500))
+        if playbook_id is None:
+            rows = await self.database.fetchall(
+                "SELECT * FROM playbook_runs ORDER BY created_at DESC LIMIT ?",
+                (capped,),
+            )
+        else:
+            rows = await self.database.fetchall(
+                """
+                SELECT * FROM playbook_runs
+                WHERE playbook_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (playbook_id, capped),
+            )
+        return [dict(row) for row in rows]
 
     async def create_task_plan(self, plan: TaskPlan) -> TaskPlan:
         title = plan.steps[0].title if plan.steps else plan.intent
@@ -828,6 +1028,8 @@ class SqliteMemory:
         accepted: bool = True,
         reason: str | None = None,
         transcript_present: bool = False,
+        captured_at: str | None = None,
+        session_hint: str | None = None,
     ) -> WakeEventRecord:
         event_id = str(uuid.uuid4())
         created_at = utc_now_iso()
@@ -835,9 +1037,9 @@ class SqliteMemory:
             """
             INSERT INTO wake_events(
                 id, session_id, source, score, accepted, reason,
-                transcript_present, created_at
+                transcript_present, captured_at, session_hint, created_at
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -847,6 +1049,8 @@ class SqliteMemory:
                 1 if accepted else 0,
                 reason,
                 1 if transcript_present else 0,
+                captured_at,
+                session_hint,
                 created_at,
             ),
         )
@@ -858,6 +1062,8 @@ class SqliteMemory:
             accepted=accepted,
             reason=reason,
             transcript_present=transcript_present,
+            captured_at=captured_at,
+            session_hint=session_hint,
             created_at=created_at,
         )
 
@@ -912,12 +1118,42 @@ class SqliteMemory:
             created_at=created_at,
         )
 
-    async def list_feedback_events(self, *, limit: int = 100) -> list[FeedbackEventRecord]:
-        rows = await self.database.fetchall(
-            "SELECT * FROM feedback_events ORDER BY created_at DESC LIMIT ?",
-            (max(1, min(limit, 500)),),
-        )
+    async def list_feedback_events(
+        self, *, conversation_id: str | None = None, limit: int = 100
+    ) -> list[FeedbackEventRecord]:
+        capped = max(1, min(limit, 500))
+        if conversation_id is None:
+            rows = await self.database.fetchall(
+                "SELECT * FROM feedback_events ORDER BY created_at DESC LIMIT ?",
+                (capped,),
+            )
+        else:
+            rows = await self.database.fetchall(
+                """
+                SELECT * FROM feedback_events
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (conversation_id, capped),
+            )
         return [FeedbackEventRecord.model_validate(dict(row)) for row in rows]
+
+    async def list_tool_call_summaries(
+        self, *, conversation_id: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Sanitized tool-call summaries for reflection: no args, no results."""
+        rows = await self.database.fetchall(
+            """
+            SELECT tool, status, risk_level, permission_level, created_at
+            FROM tool_calls
+            WHERE conversation_id = ?
+            ORDER BY created_at
+            LIMIT ?
+            """,
+            (conversation_id, max(1, min(limit, 200))),
+        )
+        return [dict(row) for row in rows]
 
     async def latest_agent_run_id(self, *, conversation_id: str | None = None) -> str | None:
         if conversation_id is None:

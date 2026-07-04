@@ -17,11 +17,12 @@ from services.april_runtime.model_registry import ModelRegistry
 from services.brain.orchestrator import AprilOrchestrator
 from services.evolution.dreamer import DreamerService
 from services.evolution.scheduler import EvolutionSchedulerGate
+from services.evolution.versions import PromptOverlayManager
 from services.memory.archive import ArchiveReflectionService
 from services.memory.database import Database
 from services.memory.embeddings import embedding_provider_from_config
 from services.memory.migrations import run_migrations
-from services.memory.retriever import MemoryRetriever
+from services.memory.retriever import MemoryRetriever, RuntimeMemoryReranker
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
@@ -30,6 +31,7 @@ from services.permissions.tool_execution import ToolExecutionService
 from services.pool.governor import ResourceGovernor
 from services.scheduler import SchedulerService, notification_sink_from_settings
 from services.wake.session_manager import SessionManager
+from skills.playbooks import PlaybookLoader, PlaybookRunner
 from skills.registry import ToolRegistry, default_registry
 
 
@@ -102,7 +104,6 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         audit=audit,
     )
     vector_memory = VectorMemory(active_settings.vector_index_path, embedding=embedding)
-    memory_retriever = MemoryRetriever(memory, vector_memory)
     model_registry = ModelRegistry.from_file(
         active_settings.home / "configs" / "models.yaml",
         root=active_settings.home,
@@ -112,6 +113,17 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         model_registry=model_registry,
         tool_registry=default_registry(),
     )
+    # Stage-two memory rerank runs through the local runtime with the reading
+    # agent's (Scout's) model. When the runtime or model is unavailable the
+    # reranker reports failure and retrieval falls back to its deterministic
+    # ranking with an audit event — reranking is never faked.
+    reading_agent = agent_registry.get("reading_agent")
+    reranker = RuntimeMemoryReranker(
+        runtime_client,
+        model_id=(reading_agent.model_id if reading_agent else None)
+        or active_settings.brain.model_id,
+    )
+    memory_retriever = MemoryRetriever(memory, vector_memory, reranker=reranker, audit=audit)
     tool_registry = build_configured_tool_registry(active_settings.home, agent_registry)
     permissions_config = load_permissions_file(active_settings.home)
     active_settings = active_settings.model_copy(
@@ -137,6 +149,9 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         permission_engine=permission_engine,
         approvals=approvals,
     )
+    overlay_manager = PromptOverlayManager(active_settings, database, audit=audit)
+    playbook_loader = PlaybookLoader(active_settings.playbooks_path)
+    playbook_runner = PlaybookRunner(tool_executor, memory=memory)
     orchestrator = AprilOrchestrator(
         settings=active_settings,
         runtime_client=runtime_client,
@@ -147,6 +162,9 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         tool_executor=tool_executor,
         agent_registry=agent_registry,
         memory_retriever=memory_retriever,
+        overlay_manager=overlay_manager,
+        playbook_loader=playbook_loader,
+        playbook_runner=playbook_runner,
     )
     archive_reflection = ArchiveReflectionService(
         active_settings,

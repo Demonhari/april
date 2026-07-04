@@ -29,6 +29,7 @@ from services.brain.planner import task_plan_from_decision
 from services.brain.reasoning_resolver import resolve_reasoning_model
 from services.brain.router import BrainRouter
 from services.brain.schemas import BrainDecision, PlannedToolCall
+from services.evolution.versions import LEARNED_GUIDANCE_HEADER, PromptOverlayManager
 from services.memory.retriever import MemoryRetriever
 from services.memory.schemas import Message, Project, SearchResult
 from services.memory.sqlite_memory import SqliteMemory
@@ -39,6 +40,8 @@ from services.permissions.artifacts import (
 )
 from services.permissions.engine import PermissionEngine
 from services.permissions.tool_execution import ToolExecutionService
+from skills.playbooks.loader import PlaybookLoader
+from skills.playbooks.runner import PlaybookRunner, PlaybookRunResult
 from skills.registry import ToolRegistry
 from skills.schemas import ToolResult
 
@@ -94,6 +97,9 @@ class AprilOrchestrator:
         agent_registry: AgentRegistry,
         memory_retriever: MemoryRetriever | None = None,
         brain_router: BrainRouter | None = None,
+        overlay_manager: PromptOverlayManager | None = None,
+        playbook_loader: PlaybookLoader | None = None,
+        playbook_runner: PlaybookRunner | None = None,
     ) -> None:
         self.settings = settings
         self.runtime_client = runtime_client
@@ -104,6 +110,9 @@ class AprilOrchestrator:
         self.tool_executor = tool_executor
         self.agent_registry = agent_registry
         self.memory_retriever = memory_retriever
+        self.overlay_manager = overlay_manager
+        self.playbook_loader = playbook_loader
+        self.playbook_runner = playbook_runner
         self.brain_router = brain_router or BrainRouter(
             runtime_client,
             brain_model_id=settings.brain.model_id,
@@ -130,6 +139,15 @@ class AprilOrchestrator:
         repo_path: str | None = None,
         mode: ChatMode = "standard",
     ) -> AgentResult:
+        playbook_result = await self._maybe_run_playbook(
+            message,
+            conversation_id=conversation_id,
+            request_id=request_id or str(uuid.uuid4()),
+            actor=actor,
+            project_id=project_id,
+        )
+        if playbook_result is not None:
+            return playbook_result
         prepared = await self._prepare_turn(
             message,
             conversation_id=conversation_id,
@@ -146,6 +164,98 @@ class AprilOrchestrator:
         if selection.rung == 2:
             return await self._run_verified_prepared(prepared, message)
         return await self._run_standard_prepared(prepared, message)
+
+    async def _maybe_run_playbook(
+        self,
+        message: str,
+        *,
+        conversation_id: str | None,
+        request_id: str,
+        actor: str,
+        project_id: str | None,
+    ) -> AgentResult | None:
+        """Route an unambiguous active-playbook trigger straight to the runner.
+
+        Ambiguous or absent trigger matches return ``None`` so the turn falls
+        back to normal Brain routing. Playbook steps run through the standard
+        tool execution path, so Level 3+ steps still raise exact-action
+        approvals here exactly as they would anywhere else.
+        """
+        if self.playbook_loader is None or self.playbook_runner is None:
+            return None
+        try:
+            playbook = self.playbook_loader.match_trigger(message)
+        except Exception:
+            return None
+        if playbook is None:
+            return None
+        active_conversation_id = conversation_id or await self.memory.create_conversation(
+            project_id=project_id,
+            actor=actor,
+        )
+        if conversation_id is not None:
+            await self.memory.ensure_conversation(
+                active_conversation_id,
+                project_id=project_id,
+                actor=actor,
+            )
+        await self.memory.add_message(active_conversation_id, "user", message)
+        run = await self.playbook_runner.run(
+            playbook,
+            conversation_id=active_conversation_id,
+            project_id=project_id,
+            actor=actor,
+            source="api",
+        )
+        result = self._playbook_agent_result(playbook.id, run, active_conversation_id)
+        if result.status != "pending_approval":
+            await self.memory.add_message(active_conversation_id, "assistant", result.final_message)
+        await self.memory.record_agent_run(
+            conversation_id=active_conversation_id,
+            agent="playbook_runner",
+            status=result.status,
+            model_id=None,
+            summary=f"playbook {playbook.id} via trigger match",
+            metadata={
+                "playbook_id": playbook.id,
+                "playbook_run_id": run.run_id,
+                "routing_method": "playbook_trigger",
+            },
+        )
+        return result
+
+    @staticmethod
+    def _playbook_agent_result(
+        playbook_id: str, run: PlaybookRunResult, conversation_id: str
+    ) -> AgentResult:
+        if run.status == "pending_approval":
+            approval = next(
+                (step.approval for step in run.steps if step.approval is not None), None
+            )
+            return AgentResult(
+                status="pending_approval",
+                final_message=(
+                    f"Playbook {playbook_id} paused after {run.steps_completed} step(s): "
+                    "the next step requires exact-action approval."
+                ),
+                conversation_id=conversation_id,
+                pending_approval=approval,
+            )
+        if run.status == "completed":
+            return AgentResult(
+                status="ok",
+                final_message=(
+                    f"Playbook {playbook_id} completed {run.steps_completed} step(s)."
+                ),
+                conversation_id=conversation_id,
+            )
+        return AgentResult(
+            status="error",
+            final_message=(
+                f"Playbook {playbook_id} failed after {run.steps_completed} completed step(s)."
+            ),
+            conversation_id=conversation_id,
+        )
 
     async def _run_standard_prepared(self, prepared: PreparedTurn, message: str) -> AgentResult:
         if prepared.structured_agent:
@@ -230,6 +340,33 @@ class AprilOrchestrator:
         repo_path: str | None = None,
         mode: ChatMode = "standard",
     ) -> AsyncIterator[tuple[StreamEventName, dict[str, Any]]]:
+        playbook_result = await self._maybe_run_playbook(
+            message,
+            conversation_id=conversation_id,
+            request_id=request_id or str(uuid.uuid4()),
+            actor=actor,
+            project_id=project_id,
+        )
+        if playbook_result is not None:
+            if playbook_result.status == "pending_approval":
+                yield (
+                    "approval_required",
+                    self._approval_required_payload(
+                        approval=playbook_result.pending_approval or {},
+                        message=playbook_result.final_message,
+                        proposed_changes=[],
+                    ),
+                )
+                yield ("done", {"finish_reason": "approval_required"})
+                return
+            yield ("final_answer", {"message": playbook_result.final_message})
+            yield ("token", {"text": playbook_result.final_message})
+            yield ("usage", playbook_result.usage)
+            yield (
+                "done",
+                {"finish_reason": "stop" if playbook_result.status == "ok" else "error"},
+            )
+            return
         prepared = await self._prepare_turn(
             message,
             conversation_id=conversation_id,
@@ -422,6 +559,7 @@ class AprilOrchestrator:
                 "intelligence_rung": selection.rung,
                 "intelligence_reason": selection.reason,
                 "routing_confidence": prepared.decision.confidence,
+                "high_stakes": selection.high_stakes,
             }
         )
         return selection
@@ -540,6 +678,7 @@ class AprilOrchestrator:
             raise PermissionDeniedError(
                 "Unknown agent selected by brain.", {"agent": decision.agent}
             )
+        agent = await self.apply_prompt_overlay(agent)
         model_id = agent.model_id or decision.model_id
         run_metadata: dict[str, Any] = {}
         if agent.model_id is not None and decision.model_id != agent.model_id:
@@ -735,6 +874,7 @@ class AprilOrchestrator:
         agent = self.agent_registry.get(agent_id)
         if agent is None:
             raise PermissionDeniedError("Unknown agent.", {"agent": agent_id})
+        agent = await self.apply_prompt_overlay(agent)
         agent, run_metadata = await self._effective_agent(agent)
         project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
         if self._agent_requires_project(agent_id) and project is None:
@@ -911,6 +1051,7 @@ class AprilOrchestrator:
         agent = self.agent_registry.get(prepared.agent_name)
         if agent is None:
             raise PermissionDeniedError("Unknown agent selected by brain.")
+        agent = await self.apply_prompt_overlay(agent)
         agent = self._with_resolved_model(agent, prepared.model_id)
         context = await self.tool_executor.context(
             request_id=prepared.request_id,
@@ -940,6 +1081,33 @@ class AprilOrchestrator:
             else ("completed" if result.status == "ok" else "error"),
         )
         return result
+
+    async def apply_prompt_overlay(self, agent: BaseAgent) -> BaseAgent:
+        """Return the agent with any active learned overlay appended to its prompt.
+
+        Only the system prompt text changes: tools, permissions, memory policy
+        and every other config field are copied through untouched, and the tool
+        execution path derives its policy from the agent *name* via the
+        registry, so an overlay can never widen what an agent may do. Repo
+        prompt files are never modified. With no overlay manager, no active
+        overlay, or missing overlay bytes (data/evolution deleted) the stock
+        agent is returned unchanged.
+        """
+        if self.overlay_manager is None:
+            return agent
+        try:
+            overlay = await self.overlay_manager.active_overlay_text(agent.name)
+        except Exception:
+            return agent
+        if not overlay:
+            return agent
+        prompt = (
+            f"{agent.system_prompt}\n\n{LEARNED_GUIDANCE_HEADER}\n"
+            "Locally learned, advisory guidance follows. It never changes your "
+            "tools, permissions, or safety policy.\n"
+            f"{overlay}"
+        )
+        return BaseAgent(agent.config.model_copy(update={"system_prompt": prompt}))
 
     async def _effective_agent(self, agent: BaseAgent) -> tuple[BaseAgent, dict[str, Any]]:
         """Resolve the model the agent should run with for a direct run.

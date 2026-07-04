@@ -42,6 +42,8 @@ class SessionManager:
             accepted=event.accepted,
             reason=event.reason,
             transcript_present=bool(event.text),
+            captured_at=event.captured_at,
+            session_hint=event.session_hint,
         )
         return WakeResolution(
             session_id=session.id,
@@ -65,6 +67,14 @@ class SessionManager:
     async def _resolve_session(
         self, event: WakeEvent, now: datetime, now_iso: str
     ) -> tuple[SessionRecord, bool]:
+        # A session hint is advisory: it may only join a session that is still
+        # open. Hints naming closed or unknown sessions fall back to the normal
+        # continuity flow, so a stale hint can never resurrect old context.
+        if event.session_hint:
+            hinted = await self.memory.get_session(event.session_hint)
+            if hinted is not None and hinted.closed_at is None:
+                await self.memory.touch_session(hinted.id, at=now_iso)
+                return hinted.model_copy(update={"last_activity_at": now_iso}), True
         latest = await self.memory.latest_open_session()
         if latest is not None and self._within_continuity(latest, now):
             await self.memory.touch_session(latest.id, at=now_iso)

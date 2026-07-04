@@ -35,7 +35,7 @@ async def _dangerous(args: dict[str, object]) -> ToolResult:
     )
 
 
-async def _tool_executor(settings_tmp) -> tuple[Database, ToolExecutionService]:
+async def _tool_executor(settings_tmp) -> tuple[Database, SqliteMemory, ToolExecutionService]:
     database = Database(settings_tmp.database_path)
     await database.connect()
     await run_migrations(database)
@@ -63,7 +63,7 @@ async def _tool_executor(settings_tmp) -> tuple[Database, ToolExecutionService]:
         )
     )
     approvals = ApprovalStore(database, AuditLogger(settings_tmp.audit_path), expiry_seconds=60)
-    return database, ToolExecutionService(
+    return database, memory, ToolExecutionService(
         settings=settings_tmp,
         memory=memory,
         tool_registry=registry,
@@ -85,27 +85,37 @@ def _playbook(*tools: str) -> PlaybookDefinition:
 
 @pytest.mark.asyncio
 async def test_playbook_runner_executes_safe_steps(settings_tmp) -> None:
-    database, executor = await _tool_executor(settings_tmp)
+    database, memory, executor = await _tool_executor(settings_tmp)
     try:
-        result = await PlaybookRunner(executor).run(_playbook("echo"))
+        result = await PlaybookRunner(executor, memory=memory).run(_playbook("echo"))
         assert result.status == "completed"
         assert result.steps_completed == 1
         rows = await database.fetchall("SELECT * FROM tool_calls WHERE tool = ?", ("echo",))
         assert len(rows) == 1
+        # The run is persisted into playbook_runs.
+        runs = await memory.list_playbook_runs(playbook_id="test-playbook")
+        assert len(runs) == 1
+        assert runs[0]["status"] == "completed"
+        assert runs[0]["steps_completed"] == 1
+        assert runs[0]["completed_at"] is not None
     finally:
         await database.close()
 
 
 @pytest.mark.asyncio
 async def test_playbook_runner_pauses_for_l3_approval(settings_tmp) -> None:
-    database, executor = await _tool_executor(settings_tmp)
+    database, memory, executor = await _tool_executor(settings_tmp)
     try:
-        result = await PlaybookRunner(executor).run(_playbook("dangerous"))
+        result = await PlaybookRunner(executor, memory=memory).run(_playbook("dangerous"))
         assert result.status == "pending_approval"
         assert result.steps_completed == 0
         assert result.steps[0].approval is not None
         rows = await database.fetchall("SELECT * FROM approvals WHERE status = 'pending'")
         assert len(rows) == 1
+        runs = await memory.list_playbook_runs(playbook_id="test-playbook")
+        assert len(runs) == 1
+        assert runs[0]["status"] == "pending_approval"
+        assert "exact-action approval" in (runs[0]["detail"] or "")
     finally:
         await database.close()
 
@@ -131,6 +141,135 @@ def test_playbook_miner_uses_successful_tool_call_sequences() -> None:
     assert candidate is not None
     assert [step.tool for step in candidate.steps] == ["search_files", "read_file"]
     assert candidate.status == "candidate"
+
+
+def test_playbook_loader_fuzzy_trigger_matches_close_message(settings_tmp) -> None:
+    loader = PlaybookLoader(settings_tmp.playbooks_path)
+    loader.adopt(_playbook("echo"))
+    # Exact containment still matches; a small typo also routes.
+    assert loader.match_trigger("please run test playbook now") is not None
+    assert loader.match_trigger("run test playbok") is not None
+    # Unrelated text never routes.
+    assert loader.match_trigger("summarize my README") is None
+
+
+def test_orchestrator_routes_unambiguous_trigger_to_playbook(settings_tmp) -> None:
+    import anyio
+
+    async def scenario() -> None:
+        container = await make_container(settings_tmp)
+        loader = PlaybookLoader(settings_tmp.playbooks_path)
+        loader.adopt(
+            PlaybookDefinition(
+                id="reminder-playbook",
+                name="Reminder playbook",
+                agent_id="general_agent",
+                status="active",
+                trigger_examples=["run my reminder playbook"],
+                steps=[{"tool": "create_reminder", "args": {"content": "stand up"}}],
+            )
+        )
+        result = await container.orchestrator.chat("run my reminder playbook")
+        assert result.status == "ok"
+        assert "reminder-playbook" in result.final_message
+        runs = await container.memory.list_playbook_runs(playbook_id="reminder-playbook")
+        assert len(runs) == 1
+        assert runs[0]["status"] == "completed"
+        reminders = await container.memory.list_reminders()
+        assert reminders[0].content == "stand up"
+
+    anyio.run(scenario)
+
+
+def test_orchestrator_ambiguous_trigger_falls_back_to_brain(settings_tmp) -> None:
+    import anyio
+
+    async def scenario() -> None:
+        container = await make_container(settings_tmp)
+        loader = PlaybookLoader(settings_tmp.playbooks_path)
+        base = PlaybookDefinition(
+            id="one-playbook",
+            name="One",
+            agent_id="general_agent",
+            status="active",
+            trigger_examples=["plan my day"],
+            steps=[{"tool": "create_reminder", "args": {"content": "one"}}],
+        )
+        loader.adopt(base)
+        loader.adopt(
+            base.model_copy(
+                update={"id": "two-playbook", "name": "Two"}
+            )
+        )
+        result = await container.orchestrator.chat("plan my day")
+        # Ambiguity falls back to normal Brain routing (fake runtime answers).
+        assert result.status == "ok"
+        assert "playbook" not in result.final_message.casefold()
+        assert await container.memory.list_playbook_runs() == []
+
+    anyio.run(scenario)
+
+
+def test_l3_playbook_adoption_requires_exact_action_approval(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    payload = {
+        "id": "danger-playbook",
+        "name": "Danger playbook",
+        "status": "candidate",
+        "agent_id": "coding_agent",
+        "trigger_examples": ["apply the danger fix"],
+        "steps": [{"tool": "run_command", "args": {"argv": ["pytest"]}}],
+    }
+    first = client.post("/playbooks/adopt", json=payload, headers=auth(settings_tmp))
+    assert first.status_code == 200
+    body = first.json()
+    assert body["status"] == "pending_approval"
+    assert body["required_permission_level"] >= 3
+    approval_id = body["approval"]["approval_id"]
+    # Not adopted yet: the playbook is not active on disk.
+    loader = PlaybookLoader(settings_tmp.playbooks_path)
+    assert loader.get("danger-playbook") is None
+
+    # A modified definition must not consume the approval (exact-action bind).
+    tampered = {**payload, "steps": [{"tool": "run_command", "args": {"argv": ["ruff"]}}]}
+    rejected = client.post(
+        f"/playbooks/adopt?approval_id={approval_id}",
+        json=tampered,
+        headers=auth(settings_tmp),
+    )
+    assert rejected.status_code in (400, 403)
+
+    accepted = client.post(
+        f"/playbooks/adopt?approval_id={approval_id}",
+        json=payload,
+        headers=auth(settings_tmp),
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "adopted"
+    adopted = loader.get("danger-playbook")
+    assert adopted is not None
+    assert adopted.status == "active"
+
+
+def test_safe_playbook_adoption_needs_no_approval(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    payload = {
+        "id": "safe-playbook",
+        "name": "Safe playbook",
+        "status": "candidate",
+        "agent_id": "general_agent",
+        "trigger_examples": ["do the safe thing"],
+        "steps": [{"tool": "create_reminder", "args": {"content": "safe"}}],
+    }
+    response = client.post("/playbooks/adopt", json=payload, headers=auth(settings_tmp))
+    assert response.status_code == 200
+    assert response.json()["status"] == "adopted"
 
 
 def test_playbook_api_list_adopt_and_run(settings_tmp) -> None:

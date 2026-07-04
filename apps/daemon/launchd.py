@@ -31,7 +31,10 @@ class LaunchdManager:
             "ProgramArguments": [sys.executable, "-m", "apps.daemon.apriald"],
             "WorkingDirectory": str(self.settings.home),
             "RunAtLoad": True,
-            "KeepAlive": False,
+            # apriald is the supervisor: launchd must keep it alive so the
+            # supervised children (runtime/API/Sentinel) come back after crashes
+            # or logout/login. apriald's own lock file keeps it single-instance.
+            "KeepAlive": True,
             "EnvironmentVariables": {"APRIL_HOME": str(self.settings.home)},
             "StandardOutPath": str(self.settings.logs_path / "apriald.out.log"),
             "StandardErrorPath": str(self.settings.logs_path / "apriald.err.log"),

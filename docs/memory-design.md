@@ -22,8 +22,19 @@ hashing over normalized tokens. It is stable across Python hash seeds and
 requires no downloads.
 
 The hashed embedding is a baseline retrieval aid, not a semantic model.
-`runtime-local` is reserved for a future explicitly configured local embedding
-model and fails closed in this pass. APRIL does not call cloud embedding APIs.
+`hashed-token` stays the default because it works offline, on first run, and in
+every fake-backend test. `runtime-local` is the recommended semantic provider
+once a local embedding-role GGUF is registered in `configs/models.yaml`: set
+`memory.embedding_provider: runtime-local` and run `run april memory reindex`.
+An unavailable embedding model falls back to hashed-token with an audit event.
+APRIL does not call cloud embedding APIs.
+
+Retrieval is two-stage: deterministic lexical + vector candidate collection
+(top 20), then an optional local rerank (top 5) through the runtime using the
+reading agent's model. When the runtime or model is unavailable the rerank is
+skipped — never faked — and the deterministic ranking is used with a
+`memory_rerank_fallback` audit event. Retrieved memories are marked used
+(`use_count`/`last_used_at`).
 
 Inspect the active provider with:
 

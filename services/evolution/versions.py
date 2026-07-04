@@ -16,6 +16,16 @@ _STRUCTURAL_OVERLAY_RE = re.compile(
     r"(?im)^\s*(tools|permissions|allowed_tools|tool_registry|permission_level)\s*:"
 )
 
+# Header used when active overlay bytes are appended to an agent's effective
+# system prompt. Overlays are advisory prose only: they can never change tools,
+# permissions, configs, or policy, and repo prompt files are never modified.
+LEARNED_GUIDANCE_HEADER = "## Learned guidance (local, advisory only)"
+
+# Agents whose tools can modify the system (Forge writes code, Hand acts on the
+# system). Their overlays never auto-apply, whatever the source: explicit user
+# approval is always required.
+WRITE_CAPABLE_AGENTS = frozenset({"coding_agent", "system_action_agent"})
+
 
 @dataclass(frozen=True, slots=True)
 class OverlayApplyResult:
@@ -57,8 +67,12 @@ class PromptOverlayManager:
         if eval_score < baseline_score:
             self._audit("prompt_overlay_discarded", agent=agent, reason="below baseline")
             return OverlayApplyResult("discarded", agent, reason="eval score below baseline")
-        if source in {"forge", "hand"} and not approved:
-            self._audit("prompt_overlay_approval_required", agent=agent, reason=source)
+        if (source in {"forge", "hand"} or agent in WRITE_CAPABLE_AGENTS) and not approved:
+            self._audit(
+                "prompt_overlay_approval_required",
+                agent=agent,
+                reason=f"source={source} agent={agent}",
+            )
             return OverlayApplyResult("approval_required", agent, reason="user approval required")
         version = await self._next_version(agent)
         path = self.settings.evolution_path / "prompts" / agent / f"v{version}.overlay.txt"
@@ -100,6 +114,33 @@ class PromptOverlayManager:
         if not path.exists():
             return None
         return path.read_bytes()
+
+    async def active_overlay_text(self, agent: str) -> str | None:
+        """Active overlay as bounded, policy-checked text for prompt assembly.
+
+        Returns ``None`` when no overlay is active, its bytes are missing
+        (e.g. data/evolution was deleted — stock behaviour), or the on-disk
+        content was tampered into structural tool/permission changes. The text
+        is re-bounded at read time so a hand-edited file cannot exceed the
+        configured overlay budget.
+        """
+        raw = await self.active_overlay(agent)
+        if raw is None:
+            return None
+        text = raw.decode("utf-8", errors="replace").strip()
+        if not text:
+            return None
+        max_chars = self.settings.evolution.prompt_overlay_max_chars
+        if max_chars > 0:
+            text = text[:max_chars]
+        if _STRUCTURAL_OVERLAY_RE.search(text):
+            self._audit(
+                "prompt_overlay_blocked_at_load",
+                agent=agent,
+                reason="structural content in overlay bytes",
+            )
+            return None
+        return text
 
     async def versions(self, *, agent: str | None = None) -> list[dict[str, object]]:
         if agent is None:

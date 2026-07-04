@@ -21,6 +21,7 @@ class ChildSpec:
     argv: tuple[str, ...]
     health_url: str | None = None
     restart_backoff_seconds: float = 2.0
+    max_restart_backoff_seconds: float = 60.0
 
 
 @dataclass(slots=True)
@@ -28,7 +29,9 @@ class ChildRuntime:
     spec: ChildSpec
     process: ProcessHandle | None = None
     restarts: int = 0
-    next_restart_at: float = 0.0
+    consecutive_failures: int = 0
+    next_restart_at: float | None = None
+    last_started_at: float | None = None
     paused_reason: str | None = None
     last_exit_code: int | None = None
 
@@ -118,6 +121,7 @@ class AprialdSupervisor:
         governor: ResourceGovernor | None = None,
         sleep: Sleep = asyncio.sleep,
         clock: Clock = time.monotonic,
+        stable_after_seconds: float = 30.0,
     ) -> None:
         self.settings = settings
         self.process_factory = process_factory or self._spawn_process
@@ -125,6 +129,7 @@ class AprialdSupervisor:
         self.governor = governor or ResourceGovernor(settings)
         self.sleep = sleep
         self.clock = clock
+        self.stable_after_seconds = stable_after_seconds
         self.lock = DaemonLock(daemon_lock_path(settings))
         self.children: dict[str, ChildRuntime] = {
             spec.name: ChildRuntime(spec=spec) for spec in default_child_specs(settings)
@@ -189,17 +194,34 @@ class AprialdSupervisor:
         runtime.paused_reason = None
         process = runtime.process
         if process is not None and process.returncode is None:
+            if (
+                runtime.consecutive_failures > 0
+                and runtime.last_started_at is not None
+                and self.clock() - runtime.last_started_at >= self.stable_after_seconds
+            ):
+                # The child stayed up long enough: forget the failure streak so
+                # the next crash starts again from the base backoff.
+                runtime.consecutive_failures = 0
             return
         if process is not None and process.returncode is not None:
             runtime.last_exit_code = process.returncode
-            if runtime.next_restart_at <= 0.0:
-                runtime.next_restart_at = self.clock() + runtime.spec.restart_backoff_seconds
+            if runtime.next_restart_at is None:
+                # Deterministic exponential backoff, doubling per consecutive
+                # failure and capped, driven only by the injected clock.
+                runtime.consecutive_failures += 1
+                delay = min(
+                    runtime.spec.restart_backoff_seconds
+                    * (2 ** (runtime.consecutive_failures - 1)),
+                    runtime.spec.max_restart_backoff_seconds,
+                )
+                runtime.next_restart_at = self.clock() + delay
                 return
             if self.clock() < runtime.next_restart_at:
                 return
+            runtime.restarts += 1
         runtime.process = await self.process_factory(runtime.spec)
-        runtime.restarts += 1
-        runtime.next_restart_at = 0.0
+        runtime.last_started_at = self.clock()
+        runtime.next_restart_at = None
 
     async def _child_health(self, runtime: ChildRuntime) -> ChildHealth:
         process = runtime.process
@@ -215,12 +237,20 @@ class AprialdSupervisor:
         if process is None:
             return ChildHealth(runtime.spec.name, "stopped", None, runtime.restarts)
         if process.returncode is not None:
+            detail = None
+            if runtime.next_restart_at is not None:
+                remaining = max(0.0, runtime.next_restart_at - self.clock())
+                detail = (
+                    f"restart_scheduled_in={remaining:.1f}s "
+                    f"failures={runtime.consecutive_failures}"
+                )
             return ChildHealth(
                 runtime.spec.name,
                 "down",
                 process.pid,
                 runtime.restarts,
                 last_exit_code=process.returncode,
+                detail=detail,
             )
         if runtime.spec.health_url is not None and not await self.health_checker(runtime.spec):
             return ChildHealth(
@@ -246,7 +276,7 @@ class AprialdSupervisor:
 
 def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
     python = sys.executable
-    return (
+    specs = [
         ChildSpec(
             name="runtime",
             argv=(python, "-m", "services.april_runtime.server"),
@@ -257,12 +287,19 @@ def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
             argv=(python, "-m", "services.api.server"),
             health_url=f"http://{settings.api.host}:{settings.api.port}/health",
         ),
-        ChildSpec(
-            name="sentinel",
-            argv=(python, "-m", "services.wake.sentinel"),
-            health_url=None,
-        ),
-    )
+    ]
+    # The Sentinel needs a microphone, wake models, and STT. Supervising it with
+    # voice or wake disabled would only crash-loop (run_sentinel raises), so the
+    # default safe config supervises runtime and API only.
+    if settings.voice.enabled and settings.wake.enabled:
+        specs.append(
+            ChildSpec(
+                name="sentinel",
+                argv=(python, "-m", "services.wake.sentinel"),
+                health_url=None,
+            )
+        )
+    return tuple(specs)
 
 
 async def _loopback_health_check(spec: ChildSpec) -> bool:

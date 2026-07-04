@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 async def run_migrations(database: Database) -> None:
@@ -211,7 +211,19 @@ async def run_migrations(database: Database) -> None:
             accepted INTEGER NOT NULL DEFAULT 1,
             reason TEXT,
             transcript_present INTEGER NOT NULL DEFAULT 0,
+            captured_at TEXT,
+            session_hint TEXT,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_contradictions (
+            id TEXT PRIMARY KEY,
+            memory_id_a TEXT NOT NULL REFERENCES memories(id),
+            memory_id_b TEXT NOT NULL REFERENCES memories(id),
+            status TEXT NOT NULL DEFAULT 'pending',
+            resolution TEXT,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS feedback_events (
@@ -353,6 +365,11 @@ async def run_migrations(database: Database) -> None:
     for column, definition in memory_column_defs.items():
         if column not in memory_columns:
             await conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {definition}")
+    columns = await conn.execute("PRAGMA table_info(wake_events)")
+    wake_event_columns = {row[1] for row in await columns.fetchall()}
+    for column in ("captured_at", "session_hint"):
+        if column not in wake_event_columns:
+            await conn.execute(f"ALTER TABLE wake_events ADD COLUMN {column} TEXT")
     columns = await conn.execute("PRAGMA table_info(repo_indexes)")
     repo_index_columns = {row[1] for row in await columns.fetchall()}
     repo_index_column_defs = {

@@ -41,6 +41,18 @@ class MemoryRecord(BaseModel):
     superseded_by: str | None = None
 
 
+class MemoryContradictionRecord(BaseModel):
+    """A contradictory memory pair kept for Dreamer adjudication."""
+
+    id: str
+    memory_id_a: str
+    memory_id_b: str
+    status: str = "pending"
+    resolution: str | None = None
+    created_at: str
+    resolved_at: str | None = None
+
+
 class SessionRecord(BaseModel):
     id: str
     conversation_id: str | None = None
@@ -59,6 +71,8 @@ class WakeEventRecord(BaseModel):
     accepted: bool = True
     reason: str | None = None
     transcript_present: bool = False
+    captured_at: str | None = None
+    session_hint: str | None = None
     created_at: str
 
 

@@ -4,6 +4,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from services.memory.sqlite_memory import SqliteMemory
 from services.permissions.tool_execution import ToolExecutionService
 from skills.playbooks.schema import PlaybookDefinition, PlaybookStep
 
@@ -23,11 +24,18 @@ class PlaybookRunResult:
     status: Literal["completed", "pending_approval", "failed"]
     steps_completed: int
     steps: tuple[PlaybookStepResult, ...] = field(default_factory=tuple)
+    run_id: str | None = None
 
 
 class PlaybookRunner:
-    def __init__(self, tool_executor: ToolExecutionService) -> None:
+    def __init__(
+        self,
+        tool_executor: ToolExecutionService,
+        *,
+        memory: SqliteMemory | None = None,
+    ) -> None:
         self.tool_executor = tool_executor
+        self.memory = memory
 
     async def run(
         self,
@@ -38,8 +46,11 @@ class PlaybookRunner:
         actor: str = "local-user",
         source: Literal["api", "cli"] = "api",
     ) -> PlaybookRunResult:
+        run_id = await self._start_run(playbook, conversation_id=conversation_id)
         results: list[PlaybookStepResult] = []
         completed = 0
+        status: Literal["completed", "pending_approval", "failed"] = "completed"
+        detail: str | None = None
         for index, step in enumerate(playbook.steps):
             outcome = await self._run_step(
                 playbook,
@@ -52,16 +63,51 @@ class PlaybookRunner:
             )
             results.append(outcome)
             if outcome.status == "pending_approval":
-                return PlaybookRunResult(
-                    playbook.id,
-                    "pending_approval",
-                    completed,
-                    tuple(results),
-                )
+                status = "pending_approval"
+                detail = f"step {index} ({step.tool}) awaits exact-action approval"
+                break
             if outcome.status == "failed":
-                return PlaybookRunResult(playbook.id, "failed", completed, tuple(results))
+                status = "failed"
+                detail = f"step {index} ({step.tool}) failed"
+                break
             completed += 1
-        return PlaybookRunResult(playbook.id, "completed", completed, tuple(results))
+        await self._finish_run(run_id, status=status, steps_completed=completed, detail=detail)
+        return PlaybookRunResult(playbook.id, status, completed, tuple(results), run_id=run_id)
+
+    async def _start_run(
+        self, playbook: PlaybookDefinition, *, conversation_id: str | None
+    ) -> str | None:
+        if self.memory is None:
+            return None
+        await self.memory.upsert_playbook(
+            playbook_id=playbook.id,
+            name=playbook.name,
+            source="loader",
+            status=playbook.status,
+            trigger_examples=list(playbook.trigger_examples),
+            steps=[step.model_dump() for step in playbook.steps],
+        )
+        return await self.memory.create_playbook_run(
+            playbook_id=playbook.id,
+            conversation_id=conversation_id,
+        )
+
+    async def _finish_run(
+        self,
+        run_id: str | None,
+        *,
+        status: str,
+        steps_completed: int,
+        detail: str | None,
+    ) -> None:
+        if run_id is None or self.memory is None:
+            return
+        await self.memory.finish_playbook_run(
+            run_id,
+            status=status,
+            steps_completed=steps_completed,
+            detail=detail,
+        )
 
     async def _run_step(
         self,

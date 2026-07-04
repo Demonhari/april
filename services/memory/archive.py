@@ -9,18 +9,24 @@ from agents.memory import ArchiveAgent, ArchiveMemoryCandidate
 from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
+from services.memory.policy import MemoryPolicy
 from services.memory.schemas import MemoryRecord, Message, VectorMetadata
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
 
 ARCHIVE_SOURCE = "archive"
 MIN_ARCHIVE_CONFIDENCE = 0.65
+# Cosine similarity above which a vector hit of the same kind is treated as a
+# near-duplicate and merged instead of creating a new row.
+NEAR_DUPLICATE_SIMILARITY = 0.92
 _NEGATION_TOKENS = {"not", "no", "never", "don't", "dont", "doesn't", "doesnt", "isn't", "isnt"}
 
 
 @dataclass(frozen=True, slots=True)
 class ArchiveWriteOutcome:
-    status: Literal["written", "duplicate", "low_confidence", "daily_cap", "contradiction"]
+    status: Literal[
+        "written", "duplicate", "low_confidence", "daily_cap", "contradiction", "sensitive"
+    ]
     candidate: ArchiveMemoryCandidate
     memory: MemoryRecord | None = None
     detail: str | None = None
@@ -35,12 +41,15 @@ class ArchiveMemoryWriter:
         audit: AuditLogger | None = None,
         min_confidence: float = MIN_ARCHIVE_CONFIDENCE,
         daily_cap: int = 30,
+        near_duplicate_similarity: float = NEAR_DUPLICATE_SIMILARITY,
     ) -> None:
         self.memory = memory
         self.vector_memory = vector_memory
         self.audit = audit
         self.min_confidence = min_confidence
         self.daily_cap = daily_cap
+        self.near_duplicate_similarity = near_duplicate_similarity
+        self.policy = MemoryPolicy()
 
     async def write_candidates(
         self,
@@ -68,31 +77,34 @@ class ArchiveMemoryWriter:
     ) -> ArchiveWriteOutcome:
         if candidate.confidence < self.min_confidence:
             return self._discard("low_confidence", candidate, "confidence below threshold")
+        if self.policy.is_sensitive(candidate.content):
+            return self._discard(
+                "sensitive", candidate, "sensitive-looking content is never stored"
+            )
         written_today = await self.memory.count_machine_memories_since(
             _today_start_iso(), source=ARCHIVE_SOURCE
         )
         if written_today >= self.daily_cap:
             return self._discard("daily_cap", candidate, "daily archive memory cap reached")
-        duplicate = await self.memory.find_duplicate_memory(
-            candidate.content,
-            kind=candidate.kind,
-            project_id=project_id,
-        )
+        duplicate = await self._find_duplicate(candidate, project_id=project_id)
         if duplicate is not None:
+            existing, how = duplicate
+            # Duplicates merge instead of piling up: the existing row's usage is
+            # refreshed and its confidence keeps the maximum of both statements.
+            refreshed = await self.memory.refresh_memory(
+                existing.id, confidence=candidate.confidence
+            )
             self._audit(
                 "archive_memory_duplicate",
                 candidate,
                 source_session_id=source_session_id,
-                memory_id=duplicate.id,
+                memory_id=existing.id,
+                detail=how,
             )
-            return ArchiveWriteOutcome("duplicate", candidate, memory=duplicate)
+            return ArchiveWriteOutcome(
+                "duplicate", candidate, memory=refreshed or existing, detail=how
+            )
         contradiction = await self._contradiction(candidate, project_id=project_id)
-        if contradiction is not None:
-            return self._discard(
-                "contradiction",
-                candidate,
-                f"possible contradiction with memory {contradiction.id}",
-            )
         reason = f"{candidate.reason} (source_session={source_session_id})"
         record = await self.memory.create_memory(
             candidate.content,
@@ -103,6 +115,25 @@ class ArchiveMemoryWriter:
             source=ARCHIVE_SOURCE,
         )
         self._index_memory(record)
+        if contradiction is not None:
+            # Keep both statements and flag the pair; the Dreamer adjudicates
+            # later instead of the writer silently discarding the candidate.
+            pair = await self.memory.record_memory_contradiction(
+                memory_id_a=contradiction.id,
+                memory_id_b=record.id,
+            )
+            detail = (
+                f"kept both; contradiction pair {pair.id} with memory "
+                f"{contradiction.id} flagged for Dreamer adjudication"
+            )
+            self._audit(
+                "archive_memory_contradiction",
+                candidate,
+                source_session_id=source_session_id,
+                memory_id=record.id,
+                detail=detail,
+            )
+            return ArchiveWriteOutcome("contradiction", candidate, memory=record, detail=detail)
         self._audit(
             "archive_memory_written",
             candidate,
@@ -110,6 +141,39 @@ class ArchiveMemoryWriter:
             memory_id=record.id,
         )
         return ArchiveWriteOutcome("written", candidate, memory=record)
+
+    async def _find_duplicate(
+        self, candidate: ArchiveMemoryCandidate, *, project_id: str | None
+    ) -> tuple[MemoryRecord, str] | None:
+        """Exact-normalized duplicate first, then vector near-duplicate if available."""
+        exact = await self.memory.find_duplicate_memory(
+            candidate.content,
+            kind=candidate.kind,
+            project_id=project_id,
+        )
+        if exact is not None:
+            return exact, "exact_duplicate_merged"
+        if self.vector_memory is None:
+            return None
+        try:
+            hits = self.vector_memory.search(candidate.content, limit=3, source_type="memory")
+        except Exception:
+            return None
+        for hit in hits:
+            if hit.score < self.near_duplicate_similarity:
+                continue
+            record = await self.memory.get_memory(hit.id)
+            if record is None or record.kind != candidate.kind:
+                continue
+            if record.project_id != project_id:
+                continue
+            # A near-duplicate that flips negation is a contradiction, not a merge.
+            if _has_negation(_normalized(record.content)) != _has_negation(
+                _normalized(candidate.content)
+            ):
+                continue
+            return record, "near_duplicate_merged"
+        return None
 
     async def _contradiction(
         self, candidate: ArchiveMemoryCandidate, *, project_id: str | None
@@ -128,7 +192,7 @@ class ArchiveMemoryWriter:
 
     def _discard(
         self,
-        status: Literal["low_confidence", "daily_cap", "contradiction"],
+        status: Literal["low_confidence", "daily_cap", "sensitive"],
         candidate: ArchiveMemoryCandidate,
         detail: str,
     ) -> ArchiveWriteOutcome:
@@ -214,8 +278,34 @@ class ArchiveReflectionService:
         transcript = _session_transcript(messages)
         if not transcript.strip():
             return []
+        # Local context beyond raw messages helps the Archive judge what stuck:
+        # sanitized tool-call summaries (never args or outputs, so no secrets)
+        # and feedback/approval outcomes tied to this conversation.
+        tool_calls = await self.memory.list_tool_call_summaries(
+            conversation_id=session.conversation_id
+        )
+        feedback = await self.memory.list_feedback_events(
+            conversation_id=session.conversation_id
+        )
+        sections = [transcript]
+        if tool_calls:
+            sections.append(
+                "Tool calls this session (name, status, risk only):\n"
+                + "\n".join(
+                    f"- {call['tool']}: {call['status']} ({call['risk_level']})"
+                    for call in tool_calls
+                )
+            )
+        if feedback:
+            sections.append(
+                "User feedback this session:\n"
+                + "\n".join(
+                    f"- {event.rating}" + (f": {event.reason}" if event.reason else "")
+                    for event in feedback
+                )
+            )
         candidates = await self.archive_agent.extract(
-            transcript,
+            "\n\n".join(sections),
             request_id=f"archive-{session_id}",
         )
         return await self.writer.write_candidates(
