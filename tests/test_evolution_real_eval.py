@@ -249,9 +249,7 @@ async def test_production_manual_approval_holds_on_fake_or_simulated_runtime(
     content_hash = _seed_pending_overlay(production, _OVERLAY)
     database, _memory_unused = await _memory(production)
     try:
-        service = PromptOverlayApprovalService(
-            production, database, runtime_client=runtime_client
-        )
+        service = PromptOverlayApprovalService(production, database, runtime_client=runtime_client)
         result = await service.approve(agent="coding_agent", content_hash=content_hash)
         assert result.status == "pending_real_runtime"
         assert "fake/simulated" in (result.reason or "")

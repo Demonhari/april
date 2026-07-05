@@ -132,13 +132,8 @@ class PromptOverlayApprovalService:
                 runtime_client=self.runtime_client,
             )
             if not real_eval.passed:
-                reason = (
-                    "real-runtime evaluation required before production activation: "
-                    + (
-                        "; ".join(real_eval.blockers)
-                        if real_eval.blockers
-                        else real_eval.status
-                    )
+                reason = "real-runtime evaluation required before production activation: " + (
+                    "; ".join(real_eval.blockers) if real_eval.blockers else real_eval.status
                 )
                 self._audit(
                     "prompt_overlay_user_approval_blocked",
