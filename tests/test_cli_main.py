@@ -47,6 +47,10 @@ class FakeApiClient:
             return {"agent": params["agent"], "diff": "+new line", "from_version": 1}
         if path == "/evolution/overlays/pending":
             return {"pending": []}
+        if path == "/evolution/evals/pending":
+            return {"pending": []}
+        if path.startswith("/evolution/evals/pending/"):
+            return {"case": {"case_id": path.rsplit("/", 1)[-1]}}
         if path == "/pool/agents":
             return {"agents": []}
         if path == "/memory/inspect":
@@ -95,6 +99,10 @@ class FakeApiClient:
             return {"export": {"path": "dataset.jsonl", "chat_pairs": 0}}
         if path == "/evolution/overlays/approve":
             return {"approval": {"status": "applied", **payload}}
+        if path == "/evolution/evals/promote":
+            return {"promoted": {"status": "reviewed", **payload}}
+        if path == "/evolution/evals/reject":
+            return {"rejected": {"status": "rejected", **payload}}
         if path.startswith("/sessions/") and path.endswith("/close"):
             return {"closed": True}
         raise AssertionError(path)
@@ -145,6 +153,10 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         ["evolve", "pending"],
         ["evolve", "approve", "coding_agent", "a" * 64],
         ["evolve", "dataset", "export", "--name", "nightly"],
+        ["evolve", "evals", "pending"],
+        ["evolve", "evals", "show", "abc123"],
+        ["evolve", "evals", "promote", "abc123", "--expected", "answer with timezone"],
+        ["evolve", "evals", "reject", "abc123", "--reason", "not reproducible"],
         ["voice", "health"],
         ["voice", "doctor"],
     ]
@@ -205,6 +217,18 @@ def test_cli_commands_delegate_to_api(monkeypatch) -> None:
         {"agent": "coding_agent", "content_hash": "a" * 64},
     ) in fake.calls
     assert ("POST", "/evolution/dataset/export", {"name": "nightly"}) in fake.calls
+    assert ("GET", "/evolution/evals/pending", None) in fake.calls
+    assert ("GET", "/evolution/evals/pending/abc123", None) in fake.calls
+    assert (
+        "POST",
+        "/evolution/evals/promote",
+        {"case_id": "abc123", "expected_behavior": "answer with timezone"},
+    ) in fake.calls
+    assert (
+        "POST",
+        "/evolution/evals/reject",
+        {"case_id": "abc123", "reason": "not reproducible"},
+    ) in fake.calls
 
 
 def test_playbook_adopt_reads_local_definition(monkeypatch, tmp_path) -> None:
@@ -267,6 +291,29 @@ def test_repl_slash_commands_delegate_to_existing_api(monkeypatch) -> None:
             "mode": "council",
         },
     ) in fake.calls
+
+
+def test_cli_announces_slow_modes_before_waiting(monkeypatch) -> None:
+    fake = FakeApiClient()
+    monkeypatch.setattr("apps.cli.main.client", lambda: fake)
+    runner = CliRunner()
+
+    deep = runner.invoke(app, ["ask", "compare options", "--mode", "deep"])
+    assert deep.exit_code == 0, deep.output
+    assert "Deep mode" in deep.output
+    # Honest phrasing: no exact timing claim.
+    assert "more carefully" in deep.output
+    assert "answer" in deep.output
+
+    council = runner.invoke(app, ["ask", "compare options", "--mode", "council"])
+    assert council.exit_code == 0, council.output
+    assert "Council mode" in council.output
+
+    # Standard mode stays quiet — existing one-shot output is unchanged.
+    standard = runner.invoke(app, ["ask", "hello"])
+    assert standard.exit_code == 0, standard.output
+    assert "Deep mode" not in standard.output
+    assert "Council mode" not in standard.output
 
 
 def test_voice_listen_uses_sentinel(monkeypatch) -> None:

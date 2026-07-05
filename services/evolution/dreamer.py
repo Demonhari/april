@@ -13,7 +13,11 @@ from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
 from services.evolution.consolidate import consolidate_memories
 from services.evolution.disarm import disarmed_execution
-from services.evolution.evaluator import evaluate_overlay_candidate
+from services.evolution.evaluator import (
+    RuntimeEvalClient,
+    evaluate_overlay_candidate,
+    evaluate_overlay_candidate_real_runtime,
+)
 from services.evolution.feedback_eval import count_pending_eval_cases
 from services.evolution.playbook_miner import mine_playbook_candidates
 from services.evolution.prompt_evolver import OverlayCandidate, generate_overlay_candidates
@@ -57,6 +61,7 @@ class DreamerService:
         overlay_manager: PromptOverlayManager | None = None,
         clock: Callable[[], float] = time.monotonic,
         nice_applier: Callable[[int], str | None] | None = None,
+        runtime_client: RuntimeEvalClient | None = None,
     ) -> None:
         self.settings = settings
         self.memory = memory
@@ -67,6 +72,9 @@ class DreamerService:
             settings, memory.database, audit=audit, guard=self.guard
         )
         self.clock = clock
+        # Optional local runtime handle for production real-runtime evals; when
+        # absent, production candidates stay pending with an explicit blocker.
+        self.runtime_client = runtime_client
         # Renicing is process-wide and irreversible for an unprivileged process,
         # so it is only applied when a dedicated dreamer worker injects an
         # applier (see run_standalone). The in-process scheduler path must never
@@ -217,21 +225,65 @@ class DreamerService:
         activated: list[dict[str, Any]] = []
         discarded: list[dict[str, Any]] = []
         approval_required: list[dict[str, Any]] = []
+        pending_real_runtime: list[dict[str, Any]] = []
         evaluations: list[dict[str, Any]] = []
+        blockers: list[str] = []
+        require_real_runtime = self.settings.environment == "production"
+        real_runtime_counts = {"passed": 0, "failed": 0, "skipped": 0}
         for candidate in candidates:
             evaluation = evaluate_overlay_candidate(
                 agent=candidate.agent, content=candidate.content, settings=self.settings
             )
-            evaluations.append(evaluation.to_payload())
+            evaluation_payload = evaluation.to_payload()
             active_score = await self.overlay_manager.active_eval_score(candidate.agent)
             apply_baseline = max(
                 evaluation.baseline,
                 active_score if active_score is not None else evaluation.baseline,
             )
             if evaluation.score < apply_baseline:
+                evaluations.append(evaluation_payload)
                 reason = "below current baseline" if active_score is not None else "below baseline"
                 discarded.append({"agent": candidate.agent, "reason": reason})
                 continue
+            if require_real_runtime:
+                # Production never activates an overlay on deterministic/fake
+                # replay alone: a real local-runtime eval must pass, otherwise
+                # the candidate stays pending with an explicit reason.
+                real_eval = await evaluate_overlay_candidate_real_runtime(
+                    agent=candidate.agent,
+                    content=candidate.content,
+                    settings=self.settings,
+                    runtime_client=self.runtime_client,
+                )
+                evaluation_payload["real_runtime"] = real_eval.to_payload()
+                evaluations.append(evaluation_payload)
+                if real_eval.passed:
+                    real_runtime_counts["passed"] += 1
+                elif real_eval.skipped:
+                    real_runtime_counts["skipped"] += 1
+                else:
+                    real_runtime_counts["failed"] += 1
+                if not real_eval.passed:
+                    blockers.extend(real_eval.blockers)
+                    pending_real_runtime.append(
+                        {
+                            "agent": candidate.agent,
+                            "status": real_eval.status,
+                            "reason": (
+                                "; ".join(real_eval.blockers)
+                                if real_eval.blockers
+                                else "real-runtime evaluation did not pass"
+                            ),
+                        }
+                    )
+                    self._audit(
+                        "dreamer_overlay_pending_real_runtime",
+                        run_id=run_id,
+                        detail=f"{candidate.agent}: {real_eval.status}",
+                    )
+                    continue
+            else:
+                evaluations.append(evaluation_payload)
             result = await self.overlay_manager.apply_candidate(
                 agent=candidate.agent,
                 content=candidate.content,
@@ -251,6 +303,18 @@ class DreamerService:
             "activated": activated,
             "discarded": discarded,
             "approval_required": approval_required,
+            "pending_real_runtime": pending_real_runtime,
+            "eval_modes": {
+                "environment": self.settings.environment,
+                "real_runtime_required": require_real_runtime,
+                "deterministic_fixture_passed": sum(
+                    1 for item in evaluations if item.get("deterministic_fixture_passed") is True
+                ),
+                "real_runtime_eval_passed": real_runtime_counts["passed"],
+                "real_runtime_eval_failed": real_runtime_counts["failed"],
+                "real_runtime_eval_skipped": real_runtime_counts["skipped"],
+                "blockers": sorted(set(blockers)),
+            },
         }
         return payload, payload
 
@@ -335,6 +399,7 @@ async def run_standalone(settings: AprilSettings, now: datetime) -> DreamerRunRe
     a process whose whole job is the nightly dream, never the shared Core API.
     """
     from april_common.audit import AuditLogger
+    from services.april_runtime.client import RuntimeClient
     from services.memory.database import Database
     from services.memory.migrations import run_migrations
     from services.pool.governor import ResourceGovernor
@@ -352,6 +417,12 @@ async def run_standalone(settings: AprilSettings, now: datetime) -> DreamerRunRe
             gate=gate,
             audit=audit,
             nice_applier=process_nice_applier,
+            # Loopback-only local runtime; used solely for real-runtime evals.
+            runtime_client=RuntimeClient(
+                settings.runtime.url,
+                timeout=settings.runtime.request_timeout_seconds,
+                token=settings.runtime.token,
+            ),
         )
         return await dreamer.run_once(now)
     finally:

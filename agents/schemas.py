@@ -43,6 +43,10 @@ class AgentResult(BaseModel):
     pending_approval: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
     usage: dict[str, Any] = Field(default_factory=dict)
+    # Run metadata mirrored from the orchestrator (chat_mode, intelligence_rung,
+    # model resolution, ...). Advisory/diagnostic only — clients must never
+    # treat it as a permission or policy signal.
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentConfig(BaseModel):

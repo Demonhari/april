@@ -329,6 +329,7 @@ class AprilOrchestrator:
             local_citations=prepared.citations,
             warnings=[*prepared.warnings, *response.warnings],
             usage=response.usage.model_dump(),
+            metadata=dict(prepared.run_metadata),
         )
         await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
@@ -360,6 +361,7 @@ class AprilOrchestrator:
         )
         final_message = verified.final_message
         await self.memory.add_message(prepared.conversation_id, "assistant", final_message)
+        prepared.run_metadata.update(verified.metadata)
         result = AgentResult(
             status="ok",
             final_message=final_message,
@@ -367,8 +369,8 @@ class AprilOrchestrator:
             local_citations=prepared.citations,
             warnings=[*prepared.warnings, *response.warnings, *verified.warnings],
             usage={**response.usage.model_dump(), **verified.usage},
+            metadata=dict(prepared.run_metadata),
         )
-        prepared.run_metadata.update(verified.metadata)
         await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
             agent=prepared.agent_name,
@@ -740,6 +742,7 @@ class AprilOrchestrator:
             local_citations=prepared.citations,
             warnings=[*prepared.warnings, *run.warnings],
             usage=run.usage,
+            metadata=dict(prepared.run_metadata),
         )
         await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
@@ -1223,6 +1226,11 @@ class AprilOrchestrator:
             context_sections=prepared.context_sections,
             run_metadata=prepared.run_metadata,
         )
+        # Mirror the run metadata (chat_mode, intelligence_rung, ...) into the
+        # response; loop-specific keys already present keep priority.
+        result = result.model_copy(
+            update={"metadata": {**prepared.run_metadata, **result.metadata}}
+        )
         if result.status != "pending_approval":
             await self.memory.add_message(
                 prepared.conversation_id, "assistant", result.final_message
@@ -1677,6 +1685,7 @@ class AprilOrchestrator:
             proposed_changes=prepared.proposed_changes,
             pending_approval=prepared.pending_approval,
             warnings=prepared.warnings,
+            metadata=dict(prepared.run_metadata),
         )
         await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
@@ -1696,6 +1705,7 @@ class AprilOrchestrator:
             conversation_id=prepared.conversation_id,
             local_citations=prepared.citations,
             warnings=prepared.warnings,
+            metadata=dict(prepared.run_metadata),
         )
         await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,

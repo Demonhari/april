@@ -102,6 +102,12 @@ class SessionAttachRequest(BaseModel):
     source: Literal["voice", "terminal", "desktop", "hotkey", "socket"] = "terminal"
 
 
+class WakeMuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    muted: bool
+
+
 class FeedbackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -123,6 +129,26 @@ class EvolutionRollbackRequest(BaseModel):
 
     agent: str
     version: int = Field(ge=1)
+
+
+# Eval case ids are content digests assigned at staging time. The strict
+# pattern (no separators, no dots) makes path traversal unrepresentable.
+_EVAL_CASE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+
+
+class EvalPromoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str = Field(min_length=1, max_length=64, pattern=_EVAL_CASE_ID_PATTERN)
+    # The reviewer supplies the expected behaviour; it is never model-invented.
+    expected_behavior: str = Field(min_length=1, max_length=4_000)
+
+
+class EvalRejectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str = Field(min_length=1, max_length=64, pattern=_EVAL_CASE_ID_PATTERN)
+    reason: str = Field(min_length=1, max_length=2_000)
 
 
 class DatasetExportRequest(BaseModel):

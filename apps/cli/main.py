@@ -10,7 +10,7 @@ from typing import Any
 import typer
 from rich.prompt import Prompt
 
-from apps.cli.client import ApiOfflineError, AprilApiClient
+from apps.cli.client import ApiOfflineError, ApiResponseError, AprilApiClient
 from apps.cli.render import (
     console,
     print_approvals,
@@ -123,6 +123,7 @@ def _handle_repl_command(message: str, conversation_id: str | None) -> bool:
         if not rest.strip():
             console.print("Usage: /deep <message>")
             return True
+        _announce_slow_mode("deep")
         data = run(
             client().post(
                 "/chat",
@@ -139,6 +140,7 @@ def _handle_repl_command(message: str, conversation_id: str | None) -> bool:
         if not rest.strip():
             console.print("Usage: /council <message>")
             return True
+        _announce_slow_mode("council")
         data = run(
             client().post(
                 "/chat",
@@ -268,16 +270,39 @@ def health() -> None:
 def mute(
     off: bool = typer.Option(False, "--off", help="Release the hard mute."),
 ) -> None:
-    """Hard-mute the Sentinel: the microphone stream is fully released."""
-    from services.wake.sentinel import MuteSwitch
+    """Hard-mute the Sentinel: the microphone stream is fully released.
 
-    switch = MuteSwitch(get_settings().mute_flag_path)
-    if off:
-        switch.unmute()
-        console.print("Voice unmuted. The Sentinel may reopen the microphone.")
+    The change goes through the Core API so it is audited. Only when the API
+    is unreachable does the CLI flip the local flag directly, and it says so
+    explicitly (unaudited_fallback=true) instead of silently falling back.
+    """
+    muted = not off
+    try:
+        data = asyncio.run(client().post("/wake/mute", {"muted": muted}))
+    except ApiResponseError as exc:
+        # The API is reachable but refused the request (bad token, bad input):
+        # never bypass it with an unaudited local write in that case.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    except ApiOfflineError:
+        from services.wake.sentinel import MuteSwitch
+
+        switch = MuteSwitch(get_settings().mute_flag_path)
+        if muted:
+            switch.mute()
+        else:
+            switch.unmute()
+        console.print(
+            "[yellow]APRIL API is offline; the mute flag was changed locally "
+            "WITHOUT an audit trail (unaudited_fallback=true).[/yellow]"
+        )
+        print_jsonish({"muted": switch.is_muted(), "audited": False, "unaudited_fallback": True})
     else:
-        switch.mute()
+        print_jsonish(data)
+    if muted:
         console.print("Voice hard-muted. The Sentinel releases the microphone.")
+    else:
+        console.print("Voice unmuted. The Sentinel may reopen the microphone.")
 
 
 @app.command()
@@ -303,6 +328,23 @@ def bad(
     print_jsonish(data)
 
 
+def _announce_slow_mode(mode: str) -> None:
+    """Tell the user a slower rung was requested before waiting on it.
+
+    Honest wording only: no exact timing is claimed because none is measured.
+    """
+    if mode == "deep":
+        console.print(
+            "[dim]Deep mode: I'll think about this more carefully. "
+            "This local reasoning pass can take a while.[/dim]"
+        )
+    elif mode == "council":
+        console.print(
+            "[dim]Council mode: several local agents will answer and the best "
+            "answer is selected. This can take a while.[/dim]"
+        )
+
+
 @app.command()
 def ask(
     message: str,
@@ -313,6 +355,7 @@ def ask(
 ) -> None:
     if mode not in _CHAT_MODES:
         raise typer.BadParameter("mode must be standard, deep, or council")
+    _announce_slow_mode(mode)
     payload = {
         "message": message,
         "project_id": project_id,
@@ -507,6 +550,14 @@ def memory_reindex() -> None:
         f"Reindexed {data['reindexed']} records using "
         f"{data['provider']} ({data['dimensions']} dimensions)."
     )
+    if data.get("degraded"):
+        configured = data.get("configured_provider", "unknown")
+        console.print(
+            f"[yellow]Index is degraded: configured provider is {configured} but "
+            f"the active provider is {data['provider']} "
+            f"(fallback_active={data.get('fallback_active', False)}, "
+            f"index_compatible={data.get('index_compatible', True)}).[/yellow]"
+        )
 
 
 @conversation_app.command("delete")
@@ -888,6 +939,60 @@ def evolve_approve(agent: str, content_hash: str) -> None:
         client().post(
             "/evolution/overlays/approve",
             {"agent": agent, "content_hash": content_hash},
+        )
+    )
+    print_jsonish(data)
+
+
+evolve_evals_app = typer.Typer(help="Review staged feedback eval cases.")
+evolve_app.add_typer(evolve_evals_app, name="evals")
+
+
+@evolve_evals_app.command("pending")
+def evolve_evals_pending() -> None:
+    """List staged eval cases awaiting human review."""
+    print_jsonish(run(client().get("/evolution/evals/pending")))
+
+
+@evolve_evals_app.command("show")
+def evolve_evals_show(case_id: str) -> None:
+    """Show one pending eval case in full for local review."""
+    print_jsonish(run(client().get(f"/evolution/evals/pending/{case_id}")))
+
+
+@evolve_evals_app.command("promote")
+def evolve_evals_promote(
+    case_id: str,
+    expected: str = typer.Option(
+        ...,
+        "--expected",
+        help="Human-reviewed expected behaviour for this case (required).",
+    ),
+) -> None:
+    """Promote a pending case into an active reviewed eval case."""
+    data = run(
+        client().post(
+            "/evolution/evals/promote",
+            {"case_id": case_id, "expected_behavior": expected},
+        )
+    )
+    print_jsonish(data)
+
+
+@evolve_evals_app.command("reject")
+def evolve_evals_reject(
+    case_id: str,
+    reason: str = typer.Option(
+        ...,
+        "--reason",
+        help="Why this case should not become an eval (required).",
+    ),
+) -> None:
+    """Reject a pending eval case with a human-supplied reason."""
+    data = run(
+        client().post(
+            "/evolution/evals/reject",
+            {"case_id": case_id, "reason": reason},
         )
     )
     print_jsonish(data)

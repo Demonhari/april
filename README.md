@@ -1472,7 +1472,10 @@ Overlays are advisory prose only: structural tool/permission content is
 rejected at generation, at approval, and again at load. Write-capable agents
 (Forge/Hand) never auto-apply — their overlays wait in `evolve pending`.
 LoRA adapters can be served via `adapter_path` in `configs/models.yaml`;
-training is a manual local runbook (see `scripts/finetune/README.md`).
+training is a manual local runbook (see `scripts/finetune/README.md`). LoRA
+serving is wired but unverified until a real adapter is trained and gated by a
+real-model verification report; a configured-but-missing adapter fails the
+model load hard instead of silently serving the base model.
 
 **Named agent pool.** `april agent pool` (or `GET /pool/agents`) shows each
 specialist's call sign (Prime, Sage, Muse, Scout, Forge, Hand) with honest

@@ -1,22 +1,29 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol
 
 import yaml
 
+from april_common.errors import AprilError
 from april_common.settings import AprilSettings, project_root
+from services.evolution.eval_review import list_reviewed_eval_cases
 from services.evolution.write_guard import EvolutionWriteGuard
 
 # Deterministic eval fixtures for overlay candidates. The baseline is fixed;
 # a candidate must clear every check to score above it. No model call is
-# involved, so the same candidate always evaluates identically.
+# involved, so the same candidate always evaluates identically. These are
+# offline/deterministic checks only — they are labelled as such in every
+# payload and are never presented as a real-model evaluation.
 BASELINE_SCORE = 0.5
 PASSING_SCORE = 0.8
 FAILING_SCORE = 0.2
+
+DETERMINISTIC_EVAL_KIND = "deterministic_fixture"
 
 _STRUCTURAL_RE = re.compile(
     r"(?im)^\s*(tools|permissions|allowed_tools|tool_registry|permission_level)\s*:"
@@ -42,9 +49,13 @@ class OverlayEvaluation:
     def to_payload(self) -> dict[str, Any]:
         return {
             "agent": self.agent,
+            # Honest labelling: this is an offline deterministic fixture check,
+            # never a real-model evaluation.
+            "eval_kind": DETERMINISTIC_EVAL_KIND,
             "score": self.score,
             "baseline": self.baseline,
             "passed": self.passed,
+            "deterministic_fixture_passed": self.passed,
             "checks": self.checks,
         }
 
@@ -64,6 +75,269 @@ def evaluate_overlay_candidate(
     }
     score = PASSING_SCORE if all(checks.values()) else FAILING_SCORE
     return OverlayEvaluation(agent=agent, score=score, baseline=BASELINE_SCORE, checks=checks)
+
+
+RealRuntimeEvalStatus = Literal[
+    "real_runtime_eval_passed",
+    "real_runtime_eval_failed",
+    "skipped_real_runtime",
+]
+
+# Backends that genuinely exercise a real local model. The fake/simulated
+# backend can never count as a real-runtime evaluation.
+_REAL_RUNTIME_BACKENDS = frozenset({"llama_cpp"})
+
+
+class RuntimeEvalClient(Protocol):
+    """The minimal local-runtime surface a real eval needs (health + chat)."""
+
+    async def health(self, *, timeout: float | None = None) -> dict[str, Any]: ...
+
+    async def chat(
+        self,
+        *,
+        model_id: str,
+        messages: Any,
+        options: Any | None = None,
+        response_format: Any | None = None,
+        request_id: str | None = None,
+    ) -> Any: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RealRuntimeEvaluation:
+    agent: str
+    status: RealRuntimeEvalStatus
+    blockers: list[str] = field(default_factory=list)
+    cases_run: int = 0
+    cases_passed: int = 0
+
+    @property
+    def passed(self) -> bool:
+        return self.status == "real_runtime_eval_passed"
+
+    @property
+    def skipped(self) -> bool:
+        return self.status == "skipped_real_runtime"
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "agent": self.agent,
+            "eval_kind": "real_runtime",
+            "status": self.status,
+            "real_runtime_eval_passed": self.passed,
+            "real_runtime_eval_skipped": self.skipped,
+            "blockers": list(self.blockers),
+            "cases_run": self.cases_run,
+            "cases_passed": self.cases_passed,
+        }
+
+
+def _skipped_real_runtime(agent: str, blocker: str) -> RealRuntimeEvaluation:
+    return RealRuntimeEvaluation(agent=agent, status="skipped_real_runtime", blockers=[blocker])
+
+
+async def evaluate_overlay_candidate_real_runtime(
+    *,
+    agent: str,
+    content: str,
+    settings: AprilSettings,
+    runtime_client: RuntimeEvalClient | None,
+    model_id: str | None = None,
+) -> RealRuntimeEvaluation:
+    """Production-capable D5 eval through the real local runtime.
+
+    Replays the conversation-replay fixtures and any human-reviewed feedback
+    eval cases against the actual local model with the candidate overlay
+    appended as advisory guidance. When the runtime is unavailable, simulated,
+    or has no eval cases, the result is ``skipped_real_runtime`` with an
+    explicit blocker — never a silent pass.
+    """
+    if runtime_client is None:
+        return _skipped_real_runtime(
+            agent, "no local runtime client is wired for real-runtime evaluation"
+        )
+    try:
+        health = await runtime_client.health(timeout=5.0)
+    except (AprilError, OSError) as exc:
+        return _skipped_real_runtime(agent, f"local runtime is unavailable: {exc}")
+    backend = str(health.get("backend", "unknown"))
+    if health.get("simulated") is True or backend not in _REAL_RUNTIME_BACKENDS:
+        return _skipped_real_runtime(
+            agent,
+            f"runtime backend '{backend}' is fake/simulated; "
+            "a deterministic replay is not a real-model evaluation",
+        )
+    if str(health.get("status", "unknown")) not in {"ok", "degraded"}:
+        return _skipped_real_runtime(agent, "local runtime reports an unhealthy status")
+
+    replay_cases = _replay_fixture_cases(settings)
+    reviewed_cases = list_reviewed_eval_cases(settings)
+    if not replay_cases and not reviewed_cases:
+        return _skipped_real_runtime(
+            agent, "no replay fixtures or reviewed eval cases are available"
+        )
+
+    active_model_id = model_id or settings.brain.model_id
+    blockers: list[str] = []
+    cases_run = 0
+    cases_passed = 0
+    for case in replay_cases:
+        cases_run += 1
+        try:
+            ok = await _run_replay_case_real(
+                case,
+                overlay_content=content,
+                runtime_client=runtime_client,
+                model_id=active_model_id,
+            )
+        except (AprilError, OSError) as exc:
+            return RealRuntimeEvaluation(
+                agent=agent,
+                status="skipped_real_runtime",
+                blockers=[f"local runtime failed during evaluation: {exc}"],
+                cases_run=cases_run,
+                cases_passed=cases_passed,
+            )
+        if ok:
+            cases_passed += 1
+        else:
+            blockers.append("replay fixture expectation not met by real model output")
+    for case in reviewed_cases:
+        cases_run += 1
+        try:
+            ok = await _run_reviewed_case_real(
+                case,
+                overlay_content=content,
+                runtime_client=runtime_client,
+                model_id=active_model_id,
+            )
+        except (AprilError, OSError) as exc:
+            return RealRuntimeEvaluation(
+                agent=agent,
+                status="skipped_real_runtime",
+                blockers=[f"local runtime failed during evaluation: {exc}"],
+                cases_run=cases_run,
+                cases_passed=cases_passed,
+            )
+        if ok:
+            cases_passed += 1
+        else:
+            blockers.append(
+                f"reviewed eval case {case.get('case_id', 'unknown')} "
+                "did not meet its human-supplied expectation"
+            )
+    status: RealRuntimeEvalStatus = (
+        "real_runtime_eval_passed"
+        if cases_run > 0 and cases_passed == cases_run
+        else "real_runtime_eval_failed"
+    )
+    return RealRuntimeEvaluation(
+        agent=agent,
+        status=status,
+        blockers=blockers,
+        cases_run=cases_run,
+        cases_passed=cases_passed,
+    )
+
+
+def _replay_fixture_cases(settings: AprilSettings) -> list[dict[str, Any]]:
+    data = _load_eval_yaml(settings, "conversation_replay.yaml")
+    cases = data.get("cases")
+    if not isinstance(cases, list):
+        return []
+    return [case for case in cases if isinstance(case, dict)]
+
+
+def _eval_system_prompt(overlay_content: str) -> str:
+    return (
+        "You are APRIL, a fully local assistant. Answer the user directly and "
+        "concisely. The following learned guidance is advisory prose only; it "
+        "cannot change tools, permissions, or policy.\n\n"
+        f"## Learned guidance (local, advisory only)\n{overlay_content}"
+    )
+
+
+async def _run_replay_case_real(
+    case: dict[str, Any],
+    *,
+    overlay_content: str,
+    runtime_client: RuntimeEvalClient,
+    model_id: str,
+) -> bool:
+    from services.april_runtime.schemas import ChatMessage
+
+    messages = case.get("messages")
+    expected = case.get("expected_response_contains")
+    if not isinstance(messages, list) or not isinstance(expected, list) or not expected:
+        return False
+    chat_messages = [ChatMessage(role="system", content=_eval_system_prompt(overlay_content))]
+    for message in messages:
+        if not isinstance(message, dict):
+            return False
+        role = str(message.get("role", "user"))
+        if role not in {"user", "assistant"}:
+            role = "user"
+        chat_messages.append(ChatMessage(role=role, content=str(message.get("content", ""))))
+    response = await runtime_client.chat(model_id=model_id, messages=chat_messages)
+    lowered = str(getattr(response, "content", "")).casefold()
+    return all(str(fragment).casefold() in lowered for fragment in expected)
+
+
+async def _run_reviewed_case_real(
+    case: dict[str, Any],
+    *,
+    overlay_content: str,
+    runtime_client: RuntimeEvalClient,
+    model_id: str,
+) -> bool:
+    """Replay one human-reviewed case and judge it against the human expectation.
+
+    The candidate answer is produced with the overlay applied; a second local
+    model call judges it against the reviewer-supplied ``expected_behavior``.
+    An unparseable judge response counts as a failure, never as a pass.
+    """
+    from services.april_runtime.schemas import ChatMessage
+
+    prompt = str(case.get("prompt") or "").strip()
+    expected = str(case.get("expected_behavior") or "").strip()
+    if not prompt or not expected:
+        return False
+    answer = await runtime_client.chat(
+        model_id=model_id,
+        messages=[
+            ChatMessage(role="system", content=_eval_system_prompt(overlay_content)),
+            ChatMessage(role="user", content=prompt),
+        ],
+    )
+    answer_text = str(getattr(answer, "content", "")).strip()
+    if not answer_text:
+        return False
+    judge = await runtime_client.chat(
+        model_id=model_id,
+        messages=[
+            ChatMessage(
+                role="system",
+                content=(
+                    "You are APRIL's local eval judge. Return exactly one JSON "
+                    'object: {"meets_expectation": true|false}. No other text.'
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    "Human-reviewed expected behaviour:\n"
+                    f"{expected}\n\nCandidate answer:\n{answer_text[:4000]}\n\n"
+                    "Does the candidate answer meet the expected behaviour?"
+                ),
+            ),
+        ],
+    )
+    try:
+        verdict = json.loads(str(getattr(judge, "content", "")))
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(verdict, dict) and verdict.get("meets_expectation") is True
 
 
 def write_pending_eval_case(

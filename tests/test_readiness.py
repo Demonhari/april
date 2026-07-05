@@ -459,6 +459,67 @@ def test_pending_eval_cases_warn(tmp_path: Path) -> None:
     assert "1 staged eval case(s)" in check.detail
 
 
+def test_readiness_mirrors_evolution_status_fields(tmp_path: Path) -> None:
+    home = _write_home(
+        tmp_path,
+        extra={"evolution": {"enabled": True}, "scheduler": {"enabled": True}},
+    )
+    evolution_dir = home / "data" / "evolution"
+    (evolution_dir / "reports").mkdir(parents=True, exist_ok=True)
+    (evolution_dir / "reports" / "run.json").write_text("{}", encoding="utf-8")
+    (evolution_dir / "DISABLED").write_text("disabled\n", encoding="utf-8")
+    pending = evolution_dir / "evals" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "abc123.yaml").write_text("case_type: negative_feedback\n", encoding="utf-8")
+    candidates = evolution_dir / "candidates"
+    candidates.mkdir(parents=True, exist_ok=True)
+    (candidates / "coding_agent-0.overlay.txt").write_text("guidance\n", encoding="utf-8")
+
+    report = build_readiness_report(home)
+
+    assert report.evolution_enabled is True
+    assert report.scheduler_enabled is True
+    assert report.evolution_kill_switch_active is True
+    assert report.dreamer_last_report_available is True
+    assert report.pending_eval_case_count == 1
+    assert report.pending_write_capable_overlay_count == 1
+    # The report stays redacted: no absolute path may appear anywhere.
+    assert str(tmp_path) not in json.dumps(report.model_dump())
+
+
+def test_speaker_gate_detail_is_honest_about_enroll(tmp_path: Path) -> None:
+    home = _write_home(tmp_path, extra={"wake": {"enabled": True}})
+    report = build_readiness_report(home)
+    gate = _check(report, "speaker gate")
+    assert gate is not None
+    assert gate.status == "warning"
+    assert "does not enable the gate" in gate.detail
+    assert "Anyone near the microphone can wake APRIL." in gate.detail
+
+
+def test_missing_lora_adapter_is_a_blocker_and_present_adapter_warns(tmp_path: Path) -> None:
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "brain.gguf").write_bytes(b"GGUF")
+    model = _model_entry("april-brain", path="models/brain.gguf", role="brain")
+    model["adapter_path"] = "models/adapters/brain-lora.gguf"
+    home = _write_home(tmp_path, backend="llama_cpp", models={"brain": model})
+
+    report = build_readiness_report(home)
+    check = _check(report, "LoRA adapter: april-brain")
+    assert check is not None
+    assert check.status == "blocker"
+    assert "fails hard" in check.detail
+
+    adapter = tmp_path / "models" / "adapters" / "brain-lora.gguf"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_bytes(b"GGUF")
+    report_with_adapter = build_readiness_report(home)
+    check_with_adapter = _check(report_with_adapter, "LoRA adapter: april-brain")
+    assert check_with_adapter is not None
+    assert check_with_adapter.status == "warning"
+    assert "unverified until a real adapter is trained and gated" in check_with_adapter.detail
+
+
 def test_unreviewed_write_capable_overlays_warn(tmp_path: Path) -> None:
     home = _write_home(tmp_path)
     candidates = home / "data" / "evolution" / "candidates"

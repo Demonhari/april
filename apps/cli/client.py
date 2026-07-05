@@ -9,6 +9,14 @@ class ApiOfflineError(Exception):
     pass
 
 
+class ApiResponseError(ApiOfflineError):
+    """The API is reachable but returned an error status.
+
+    Distinct from a transport failure so callers with a local fallback (e.g.
+    ``april mute``) never treat a denied/invalid request as "API unavailable".
+    """
+
+
 class AprilApiClient:
     def __init__(self, base_url: str, token: str, *, timeout: float = 120.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -60,7 +68,9 @@ class AprilApiClient:
         data = response.json()
         if response.status_code >= 400:
             message = data.get("error", {}).get("message", "APRIL API returned an error.")
-            raise ApiOfflineError(message)
+            if not isinstance(message, str):
+                message = "APRIL API returned an error."
+            raise ApiResponseError(message)
         return data
 
     def startup_hint(self) -> str:

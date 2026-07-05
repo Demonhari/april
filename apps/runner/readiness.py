@@ -112,6 +112,13 @@ class ReadinessReport(BaseModel):
     daemon_status: str = "unknown"
     daemon_details_available: bool = False
     sentinel_live_status: str = "not_verified"
+    # Dreamer/evolution visibility (file-derived only; readiness stays inert).
+    evolution_enabled: bool = False
+    evolution_kill_switch_active: bool = False
+    scheduler_enabled: bool = False
+    dreamer_last_report_available: bool = False
+    pending_eval_case_count: int = 0
+    pending_write_capable_overlay_count: int = 0
     checks: list[ReadinessCheck] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
@@ -277,6 +284,38 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                     action=_SETUP_MODELS,
                 )
             )
+
+    # --- optional LoRA adapters (M15) ----------------------------------------
+    if registry is not None:
+        for model in registry.list():
+            adapter = model.resolved_adapter_path(registry.root)
+            if adapter is None:
+                continue
+            if adapter.exists():
+                checks.append(
+                    ReadinessCheck(
+                        name=f"LoRA adapter: {model.id}",
+                        status="warning",
+                        detail=(
+                            f"Adapter file {adapter.name} is present. LoRA serving is "
+                            "wired but unverified until a real adapter is trained and "
+                            "gated by a real-model verification report."
+                        ),
+                        action=_VERIFY_REAL,
+                    )
+                )
+            else:
+                checks.append(
+                    ReadinessCheck(
+                        name=f"LoRA adapter: {model.id}",
+                        status="blocker",
+                        detail=(
+                            f"Missing adapter file: {adapter.name}. Model load fails "
+                            "hard rather than silently serving the base model."
+                        ),
+                        action="Train or copy the adapter (see scripts/finetune/README.md).",
+                    )
+                )
 
     embedding_role_models = (
         [model for model in registry.list() if model.role == "embedding"]
@@ -477,7 +516,9 @@ def build_readiness_report(home: Path) -> ReadinessReport:
             # a silent skip: no local speaker verification exists in this build.
             status="warning" if wake_enabled else "skipped",
             detail=(
-                "speaker_gate is off; local speaker verification is unsupported in this build."
+                "speaker_gate is off; no local speaker verifier is implemented in this "
+                "build (speaker_gate=soft stays unsupported until one exists). "
+                "`april voice enroll` only records samples and does not enable the gate."
                 + (" Anyone near the microphone can wake APRIL." if wake_enabled else "")
             ),
         )
@@ -561,8 +602,15 @@ def build_readiness_report(home: Path) -> ReadinessReport:
             ReadinessCheck(
                 name="pending eval cases",
                 status="warning",
-                detail=f"{pending_evals} staged eval case(s) have not been reviewed.",
-                action="Review data/evolution/evals/pending and promote or delete cases.",
+                detail=(
+                    f"{pending_evals} staged eval case(s) have not been reviewed "
+                    "(promoted/rejected cases are no longer counted)."
+                ),
+                action=(
+                    "run april evolve evals pending, then promote with "
+                    "`april evolve evals promote <case_id> --expected ...` or reject "
+                    "with `april evolve evals reject <case_id> --reason ...`"
+                ),
             )
         )
     daemon_status_payload = _daemon_status(settings)
@@ -644,6 +692,12 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         daemon_status=daemon_status,
         daemon_details_available=daemon_details_available,
         sentinel_live_status=sentinel_live_status,
+        evolution_enabled=settings.evolution.enabled,
+        evolution_kill_switch_active=(settings.evolution_path / "DISABLED").exists(),
+        scheduler_enabled=settings.scheduler.enabled,
+        dreamer_last_report_available=any((settings.evolution_path / "reports").glob("*.json")),
+        pending_eval_case_count=pending_evals,
+        pending_write_capable_overlay_count=pending_overlays,
         checks=checks,
         blockers=blockers,
         warnings=warnings,

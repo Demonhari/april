@@ -42,6 +42,8 @@ from services.api.schemas import (
     ChatResponse,
     DatasetExportRequest,
     DocumentCreateRequest,
+    EvalPromoteRequest,
+    EvalRejectRequest,
     EvolutionRollbackRequest,
     FeedbackRequest,
     MemoryCreateRequest,
@@ -52,6 +54,7 @@ from services.api.schemas import (
     SessionAttachRequest,
     ToolApprovalAction,
     ToolRequestEnvelope,
+    WakeMuteRequest,
     WakeRequest,
 )
 from services.april_runtime.model_registry import ModelRegistry
@@ -59,8 +62,16 @@ from services.april_runtime.schemas import LoadModelRequest
 from services.evolution.approval import PromptOverlayApprovalService
 from services.evolution.dataset_export import export_finetune_dataset
 from services.evolution.dreamer import latest_report
+from services.evolution.eval_review import (
+    EvalReviewError,
+    get_pending_case,
+    list_pending_cases,
+    promote_pending_case,
+    reject_pending_case,
+)
 from services.evolution.feedback_eval import stage_feedback_eval_case
 from services.evolution.inspect import (
+    evolution_health_snapshot,
     evolution_history,
     evolution_status,
     overlay_diff,
@@ -79,6 +90,7 @@ from services.voice.health import (
     voice_readiness_summary,
 )
 from services.wake.schemas import WakeEvent
+from services.wake.sentinel import MuteSwitch
 from services.wake.wake_bus import WakeBus
 from skills.playbooks import (
     PlaybookAdoptionService,
@@ -121,6 +133,9 @@ _ACTIVITY_ALLOWED_KEYS = frozenset(
         "kind",
         "sink",
         "date",
+        # wake_mute_changed / eval review events: safe booleans and digests.
+        "muted",
+        "case_id",
     }
 )
 
@@ -269,6 +284,9 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                         active.scheduler.fired_reminder_count if active.scheduler else 0
                     ),
                 },
+                # Dreamer/evolution visibility: booleans, counts, dates, and
+                # fixed gate-reason strings only — never a path or report body.
+                "evolution": await evolution_health_snapshot(active.settings, active.database),
                 "runtime_url": active.settings.runtime.url,
                 "runtime": runtime,
             }
@@ -444,6 +462,32 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             session_hint=request.session_hint,
         )
         return await _handle_wake_event(active, event, request_id=request_id)
+
+    @app.get("/wake/mute")
+    async def wake_mute_status(active: ApiContainer = Depends(authorized)) -> object:
+        # Booleans only; the flag path itself is never exposed.
+        return {"muted": MuteSwitch(active.settings.mute_flag_path).is_muted()}
+
+    @app.post("/wake/mute")
+    async def wake_mute_set(
+        request: WakeMuteRequest,
+        active: ApiContainer = Depends(authorized),
+        x_request_id: str | None = Header(default=None),
+    ) -> object:
+        switch = MuteSwitch(active.settings.mute_flag_path)
+        if request.muted:
+            switch.mute()
+        else:
+            switch.unmute()
+        active.approvals.audit.write(
+            {
+                "event_type": "wake_mute_changed",
+                "request_id": x_request_id or str(uuid.uuid4()),
+                "actor": "local-user",
+                "muted": request.muted,
+            }
+        )
+        return {"muted": switch.is_muted(), "audited": True}
 
     @app.get("/sessions")
     async def sessions(
@@ -665,10 +709,23 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.post("/memory/reindex")
     async def memory_reindex(active: ApiContainer = Depends(authorized)) -> object:
         reindexed = active.vector_memory.reindex()
+        configured_provider = active.settings.memory.embedding_provider
+        active_provider = active.vector_memory.embedding.name
+        vector_health = active.vector_memory.health()
+        # A degraded index is one where the configured provider fell back to
+        # hashed-token, or the persisted index does not match the active
+        # provider. Callers must never see a silent mix.
+        fallback_active = configured_provider == "runtime-local" and (
+            active_provider == "hashed-token"
+        )
         return {
             "reindexed": reindexed,
-            "provider": active.vector_memory.embedding.name,
+            "provider": active_provider,
+            "configured_provider": configured_provider,
             "dimensions": active.vector_memory.embedding.dimensions,
+            "index_compatible": bool(vector_health.get("compatible", True)),
+            "fallback_active": fallback_active,
+            "degraded": fallback_active or not bool(vector_health.get("compatible", True)),
         }
 
     @app.post("/feedback")
@@ -848,7 +905,9 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
 
     @app.get("/evolution/status")
     async def evolution_status_endpoint(active: ApiContainer = Depends(authorized)) -> object:
-        return {"status": await evolution_status(active.settings, active.database)}
+        status = await evolution_status(active.settings, active.database)
+        status["scheduler_running"] = active.scheduler.running if active.scheduler else False
+        return {"status": status}
 
     @app.get("/evolution/history")
     async def evolution_history_endpoint(
@@ -947,6 +1006,57 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         if payload.get("path") is not None:
             payload["path"] = str(payload["path"])
         return {"approval": payload}
+
+    @app.get("/evolution/evals/pending")
+    async def evolution_evals_pending(active: ApiContainer = Depends(authorized)) -> object:
+        return {"pending": list_pending_cases(active.settings)}
+
+    @app.get("/evolution/evals/pending/{case_id}")
+    async def evolution_evals_pending_case(
+        case_id: str,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        try:
+            case = get_pending_case(active.settings, case_id)
+        except EvalReviewError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if case is None:
+            raise HTTPException(status_code=404, detail="pending eval case not found")
+        return {"case": case}
+
+    @app.post("/evolution/evals/promote")
+    async def evolution_evals_promote(
+        request: EvalPromoteRequest,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        try:
+            result = promote_pending_case(
+                active.settings,
+                request.case_id,
+                expected_behavior=request.expected_behavior,
+                audit=active.approvals.audit,
+            )
+        except EvalReviewError as exc:
+            status_code = 404 if "unknown" in str(exc) else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return {"promoted": result}
+
+    @app.post("/evolution/evals/reject")
+    async def evolution_evals_reject(
+        request: EvalRejectRequest,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        try:
+            result = reject_pending_case(
+                active.settings,
+                request.case_id,
+                reason=request.reason,
+                audit=active.approvals.audit,
+            )
+        except EvalReviewError as exc:
+            status_code = 404 if "unknown" in str(exc) else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return {"rejected": result}
 
     @app.get("/scheduler/briefing/preview")
     async def scheduler_briefing_preview(
@@ -1303,7 +1413,12 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "speaker_gate": {
                 "mode": active.settings.wake.speaker_gate,
                 "supported": False,
-                "detail": "speaker_gate is off; local speaker verification is unsupported.",
+                "detail": (
+                    "speaker_gate is off; no local speaker verifier is implemented in "
+                    "this build. `april voice enroll` only records samples and does "
+                    "not enable the gate. With wake enabled, anyone near the "
+                    "microphone can wake APRIL."
+                ),
             },
             # Single redacted enum capturing the highest voice milestone reached:
             # disabled / not_configured / push_to_talk_ready / wake_word_ready /

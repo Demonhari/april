@@ -153,7 +153,13 @@ class WakeSettings(BaseModel):
     @classmethod
     def validate_speaker_gate(cls, value: str) -> str:
         if value not in {"off"}:
-            raise ValueError("speaker_gate currently supports only: off")
+            raise ValueError(
+                "speaker_gate currently supports only: off. No local speaker "
+                "verifier is implemented, so 'soft' would be a fake gate; "
+                "`april voice enroll` records samples only and does not enable "
+                "speaker verification. With wake enabled and speaker_gate off, "
+                "anyone near the microphone can wake APRIL."
+            )
         return value
 
     @model_validator(mode="after")

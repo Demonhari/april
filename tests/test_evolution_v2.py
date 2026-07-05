@@ -390,6 +390,44 @@ def test_dataset_export_api_writes_into_fence(settings_tmp) -> None:
     assert exported_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_dataset_export_excludes_negative_and_inactive_rows(settings_tmp) -> None:
+    from services.evolution.dataset_export import export_finetune_dataset
+
+    database, memory = await _memory(settings_tmp)
+    try:
+        good_conversation = await memory.create_conversation()
+        await memory.add_message(good_conversation, "user", "plan my day")
+        await memory.add_message(good_conversation, "assistant", "start with the big task")
+
+        bad_conversation = await memory.create_conversation()
+        await memory.add_message(bad_conversation, "user", "what is my timezone")
+        await memory.add_message(bad_conversation, "assistant", "wrong timezone answer")
+        await memory.record_feedback_event(rating="bad", conversation_id=bad_conversation)
+
+        kept_memory = await memory.create_memory(
+            "prefers concise answers", kind="preference", reason="stated"
+        )
+        deleted_memory = await memory.create_memory("obsolete detail", kind="fact", reason="stated")
+        await memory.delete_memory(deleted_memory.id)
+
+        result = await export_finetune_dataset(memory, settings_tmp, dataset_name="exclusions")
+        assert result.chat_pairs == 1
+        assert result.excluded_conversations == 1
+        lines = [
+            json.loads(line)
+            for line in result.path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        chat_rows = [line for line in lines if line["type"] == "chat"]
+        assert [row["conversation_id"] for row in chat_rows] == [good_conversation]
+        memory_rows = [line for line in lines if line["type"] == "memory"]
+        assert [row["memory_id"] for row in memory_rows] == [kept_memory.id]
+        assert result.path.resolve().is_relative_to(settings_tmp.evolution_path.resolve())
+    finally:
+        await database.close()
+
+
 def _seed_pending_candidate(settings, content: str, *, agent: str = "coding_agent") -> str:
     guard = EvolutionWriteGuard(settings)
     guard.write_text(settings.evolution_path / "candidates" / f"{agent}-0.overlay.txt", content)
