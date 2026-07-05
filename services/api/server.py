@@ -69,10 +69,12 @@ from services.evolution.eval_review import (
     promote_pending_case,
     reject_pending_case,
 )
-from services.evolution.feedback_eval import stage_feedback_eval_case
+from services.evolution.feedback_eval import count_pending_eval_cases, stage_feedback_eval_case
 from services.evolution.inspect import (
+    count_pending_write_capable_overlay_candidates,
     evolution_health_snapshot,
     evolution_history,
+    evolution_kill_switch_active,
     evolution_status,
     overlay_diff,
     set_evolution_kill_switch,
@@ -989,7 +991,10 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         active: ApiContainer = Depends(authorized),
     ) -> object:
         service = PromptOverlayApprovalService(
-            active.settings, active.database, audit=active.approvals.audit
+            active.settings,
+            active.database,
+            audit=active.approvals.audit,
+            runtime_client=active.runtime_client,
         )
         return {"pending": [item.to_payload() for item in await service.list_pending()]}
 
@@ -999,7 +1004,10 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         active: ApiContainer = Depends(authorized),
     ) -> object:
         service = PromptOverlayApprovalService(
-            active.settings, active.database, audit=active.approvals.audit
+            active.settings,
+            active.database,
+            audit=active.approvals.audit,
+            runtime_client=active.runtime_client,
         )
         result = await service.approve(agent=request.agent, content_hash=request.content_hash)
         payload = asdict(result)
@@ -1307,6 +1315,8 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         "active_provider": active_embedding_provider,
         "runtime_local_requested": configured_embedding_provider == "runtime-local",
         "fell_back_to_hashed_token": fell_back_to_hashed_token,
+        "hashed_token_active": active_embedding_provider == "hashed-token",
+        "hashed_token_fallback_active": fell_back_to_hashed_token,
         "embedding_model_id": active.settings.memory.embedding_model_id,
         "dimensions": vector_health.get("dimensions"),
         "index_compatible": embedding_index_compatible,
@@ -1336,10 +1346,9 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         _voice_artifact(active.settings, "whisper model", active.settings.voice.whisper_model_path),
         _voice_artifact(active.settings, "piper binary", active.settings.voice.piper_binary_path),
         _voice_artifact(active.settings, "piper model", active.settings.voice.piper_model_path),
-        _voice_artifact(
-            active.settings, "wake-word model", active.settings.voice.wake_word_model_path
-        ),
     ]
+    wake_word_model_paths = _wake_word_model_artifacts(active.settings)
+    voice_artifacts.extend(wake_word_model_paths)
     api_localhost = active.settings.api.host in {"127.0.0.1", "localhost"}
     runtime_localhost = active.settings.runtime.url.startswith(
         ("http://127.0.0.1", "http://localhost")
@@ -1349,6 +1358,15 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         or not active.database.path.exists()
         or runtime_simulated is True
     )
+    overlay_approval_service = PromptOverlayApprovalService(
+        active.settings,
+        active.database,
+        audit=active.approvals.audit,
+        runtime_client=active.runtime_client,
+    )
+    pending_write_capable_overlays = await overlay_approval_service.list_pending()
+    pending_real_runtime_blockers = _pending_real_runtime_overlay_blockers(active.settings)
+    real_runtime_required = active.settings.environment == "production"
     return {
         "status": "degraded" if degraded else "ok",
         "core": {
@@ -1370,8 +1388,29 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         "models": {
             "llama_cpp_python_available": importlib.util.find_spec("llama_cpp") is not None,
             "registered": models,
+            "lora_adapters": _lora_adapter_readiness(active.settings),
         },
         "embeddings": embeddings,
+        "evolution": {
+            "enabled": active.settings.evolution.enabled,
+            "kill_switch_active": evolution_kill_switch_active(active.settings),
+            "scheduler_enabled": active.settings.scheduler.enabled,
+            "scheduler_running": active.scheduler.running if active.scheduler else False,
+            "overlay_eval_mode": (
+                "deterministic_fixture_plus_real_runtime"
+                if real_runtime_required
+                else "deterministic_fixture"
+            ),
+            "deterministic_fixture_eval_kind": "deterministic_fixture",
+            "real_runtime_eval_required": real_runtime_required,
+            "pending_real_runtime_overlay_blocker_count": len(pending_real_runtime_blockers),
+            "pending_real_runtime_overlay_blockers": pending_real_runtime_blockers,
+            "pending_write_capable_overlay_approval_count": len(pending_write_capable_overlays),
+            "pending_write_capable_overlay_candidate_count": (
+                count_pending_write_capable_overlay_candidates(active.settings)
+            ),
+            "pending_eval_case_count": count_pending_eval_cases(active.settings),
+        },
         # Redacted local config digest + per-type report freshness, so the Desktop
         # operator console and `doctor --daily-driver` can flag stale reports.
         "config_fingerprint": config_fingerprint_digest(active.settings.home),
@@ -1404,6 +1443,11 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
                 "Allow the terminal app used to run APRIL."
             ),
             "artifacts": voice_artifacts,
+            "wake_word_model_paths": wake_word_model_paths,
+            "wake_live_report_status": (
+                "verified" if live_flags["wake_word_live_verified"] else "not_verified"
+            ),
+            "wake_live_report_missing": not live_flags["wake_word_live_verified"],
             "push_to_talk_available_without_wake_word": True,
             "openwakeword_available": voice_readiness["openwakeword_available"],
             "push_to_talk_ready": voice_readiness["push_to_talk_ready"],
@@ -1494,6 +1538,73 @@ def _embedding_model_status(settings: AprilSettings) -> dict[str, Any]:
     if not path.exists():
         status["embedding_model_missing_reason"] = f"missing model file: {path.name}"
     return status
+
+
+def _wake_word_model_artifacts(settings: AprilSettings) -> list[dict[str, Any]]:
+    paths = settings.voice.effective_wake_word_model_paths
+    if not paths:
+        return [_voice_artifact(settings, "wake-word model", None)]
+    artifacts: list[dict[str, Any]] = []
+    for index, path in enumerate(paths):
+        name = "wake-word model" if index == 0 else f"wake-word model {index + 1}"
+        artifacts.append(_voice_artifact(settings, name, path))
+    return artifacts
+
+
+def _lora_adapter_readiness(settings: AprilSettings) -> list[dict[str, Any]]:
+    try:
+        registry = ModelRegistry.from_file(
+            settings.home / "configs" / "models.yaml",
+            root=settings.home,
+        )
+    except Exception:
+        return []
+    adapters: list[dict[str, Any]] = []
+    for model in registry.list():
+        adapter = model.resolved_adapter_path(registry.root)
+        if adapter is None:
+            continue
+        exists = adapter.exists()
+        adapters.append(
+            {
+                "model_id": model.id,
+                "configured": True,
+                "missing": not exists,
+                "basename": adapter.name,
+                "status": "present_unverified" if exists else "missing_blocker",
+                "detail": (
+                    "adapter present; real-model verification still required"
+                    if exists
+                    else "configured adapter file is missing; model load fails closed"
+                ),
+            }
+        )
+    return adapters
+
+
+def _pending_real_runtime_overlay_blockers(settings: AprilSettings) -> list[dict[str, str]]:
+    report = latest_report(settings)
+    if report is None:
+        return []
+    phases = report.get("phases")
+    examine = phases.get("examine") if isinstance(phases, dict) else None
+    pending = examine.get("pending_real_runtime") if isinstance(examine, dict) else None
+    if not isinstance(pending, list):
+        return []
+    blockers: list[dict[str, str]] = []
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        blockers.append(
+            {
+                "agent": str(item.get("agent") or "unknown"),
+                "status": str(item.get("status") or "unknown"),
+                "reason": _redact_path_text(
+                    str(item.get("reason") or "real-runtime evaluation did not pass")
+                )[:240],
+            }
+        )
+    return blockers
 
 
 def _daemon_readiness(settings: AprilSettings) -> dict[str, Any]:

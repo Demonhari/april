@@ -29,7 +29,7 @@ WRITE_CAPABLE_AGENTS = frozenset({"coding_agent", "system_action_agent"})
 
 @dataclass(frozen=True, slots=True)
 class OverlayApplyResult:
-    status: Literal["applied", "discarded", "approval_required"]
+    status: Literal["applied", "discarded", "approval_required", "pending_real_runtime"]
     agent: str
     version: int | None = None
     reason: str | None = None

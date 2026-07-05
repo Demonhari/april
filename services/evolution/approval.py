@@ -6,7 +6,11 @@ from typing import Any
 
 from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
-from services.evolution.evaluator import evaluate_overlay_candidate
+from services.evolution.evaluator import (
+    RuntimeEvalClient,
+    evaluate_overlay_candidate,
+    evaluate_overlay_candidate_real_runtime,
+)
 from services.evolution.versions import (
     WRITE_CAPABLE_AGENTS,
     OverlayApplyResult,
@@ -55,10 +59,12 @@ class PromptOverlayApprovalService:
         database: Database,
         *,
         audit: AuditLogger | None = None,
+        runtime_client: RuntimeEvalClient | None = None,
     ) -> None:
         self.settings = settings
         self.database = database
         self.audit = audit
+        self.runtime_client = runtime_client
         self.manager = PromptOverlayManager(settings, database, audit=audit)
 
     async def list_pending(self) -> list[PendingOverlay]:
@@ -99,6 +105,12 @@ class PromptOverlayApprovalService:
     async def approve(self, *, agent: str, content_hash: str) -> OverlayApplyResult:
         if len(agent) > _AGENT_NAME_MAX:
             return OverlayApplyResult("discarded", agent[:_AGENT_NAME_MAX], reason="bad agent")
+        if agent not in WRITE_CAPABLE_AGENTS:
+            return OverlayApplyResult(
+                "discarded",
+                agent,
+                reason="overlay approval endpoint is limited to write-capable agents",
+            )
         content = self._find_candidate(agent=agent, content_hash=content_hash)
         if content is None:
             return OverlayApplyResult(
@@ -107,11 +119,38 @@ class PromptOverlayApprovalService:
         evaluation = evaluate_overlay_candidate(
             agent=agent, content=content, settings=self.settings
         )
+        active_score = await self.manager.active_eval_score(agent)
+        apply_baseline = max(
+            evaluation.baseline,
+            active_score if active_score is not None else evaluation.baseline,
+        )
+        if evaluation.score >= apply_baseline and self.settings.environment == "production":
+            real_eval = await evaluate_overlay_candidate_real_runtime(
+                agent=agent,
+                content=content,
+                settings=self.settings,
+                runtime_client=self.runtime_client,
+            )
+            if not real_eval.passed:
+                reason = (
+                    "real-runtime evaluation required before production activation: "
+                    + (
+                        "; ".join(real_eval.blockers)
+                        if real_eval.blockers
+                        else real_eval.status
+                    )
+                )
+                self._audit(
+                    "prompt_overlay_user_approval_blocked",
+                    agent=agent,
+                    detail=f"status={real_eval.status} hash={content_hash[:12]}",
+                )
+                return OverlayApplyResult("pending_real_runtime", agent, reason=reason)
         result = await self.manager.apply_candidate(
             agent=agent,
             content=content,
             eval_score=evaluation.score,
-            baseline_score=evaluation.baseline,
+            baseline_score=apply_baseline,
             source="dreamer",
             approved=True,
         )

@@ -669,6 +669,92 @@ def test_safe_playbook_adoption_needs_no_approval(settings_tmp) -> None:
     assert response.json()["status"] == "adopted"
 
 
+def test_old_playbook_files_still_validate(settings_tmp) -> None:
+    import yaml
+
+    path = settings_tmp.playbooks_path / "old-playbook.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "id": "old-playbook",
+                "name": "Old playbook",
+                "steps": [{"tool": "create_reminder", "args": {"content": "stand up"}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = PlaybookLoader(settings_tmp.playbooks_path).get("old-playbook")
+
+    assert loaded is not None
+    assert loaded.source == "authored"
+    assert loaded.required_permission_level is None
+    assert loaded.stats.runs == 0
+
+
+def test_architecture_style_playbook_metadata_round_trips(settings_tmp) -> None:
+    playbook = PlaybookDefinition(
+        id="arch-playbook",
+        name="Architecture playbook",
+        source="learned",
+        required_permission_level=3,
+        stats={"runs": 4, "success": 3, "last_run": "2026-07-01T00:00:00Z"},
+        trigger_examples=["run architecture flow"],
+        steps=[{"tool": "read_file", "args": {"path": "README.md"}}],
+    )
+    loader = PlaybookLoader(settings_tmp.playbooks_path)
+    loader.adopt(playbook)
+
+    loaded = loader.get("arch-playbook")
+
+    assert loaded is not None
+    assert loaded.status == "active"
+    assert loaded.source == "learned"
+    assert loaded.required_permission_level == 3
+    assert loaded.stats.runs == 4
+    assert loaded.stats.success == 3
+    assert loaded.stats.last_run == "2026-07-01T00:00:00Z"
+
+
+def test_declared_low_permission_level_cannot_lower_adoption_enforcement(
+    settings_tmp,
+) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    payload = {
+        "id": "declared-low-danger",
+        "name": "Declared low danger",
+        "status": "candidate",
+        "source": "authored",
+        "required_permission_level": 1,
+        "agent_id": "coding_agent",
+        "trigger_examples": ["run declared low danger"],
+        "steps": [{"tool": "run_command", "args": {"argv": ["pytest"]}}],
+    }
+
+    response = client.post("/playbooks/adopt", json=payload, headers=auth(settings_tmp))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "pending_approval"
+    assert body["required_permission_level"] >= 3
+
+
+def test_extra_unsafe_playbook_fields_remain_rejected() -> None:
+    with pytest.raises(ValueError, match="Extra inputs"):
+        PlaybookDefinition.model_validate(
+            {
+                "id": "unsafe-playbook",
+                "name": "Unsafe playbook",
+                "allowed_tools": ["run_command"],
+                "steps": [{"tool": "read_file", "args": {"path": "README.md"}}],
+            }
+        )
+
+
 def test_playbook_api_list_adopt_and_run(settings_tmp) -> None:
     import anyio
 

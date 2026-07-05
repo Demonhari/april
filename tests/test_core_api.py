@@ -194,6 +194,62 @@ def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
     assert isinstance(body["daemon"]["details_available"], bool)
 
 
+def test_readiness_reports_evolution_eval_blockers_redacted(settings_tmp) -> None:
+    import anyio
+
+    production = settings_tmp.model_copy(
+        update={
+            "environment": "production",
+            "api": settings_tmp.api.model_copy(update={"token": "prod-api-token-for-test"}),
+        }
+    )
+    report_dir = production.evolution_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "dream.json").write_text(
+        json.dumps(
+            {
+                "run_id": "dream",
+                "created_at": "2026-07-01T00:00:00Z",
+                "phases": {
+                    "examine": {
+                        "pending_real_runtime": [
+                            {
+                                "agent": "coding_agent",
+                                "status": "skipped_real_runtime",
+                                "reason": (
+                                    "local runtime failed at "
+                                    f"{settings_tmp.home}/private/model.gguf"
+                                ),
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    container = anyio.run(make_container, production)
+    client = TestClient(create_app(container))
+
+    response = client.get("/readiness", headers=auth(production))
+
+    assert response.status_code == 200
+    payload = response.json()
+    evolution = payload["evolution"]
+    assert evolution["real_runtime_eval_required"] is True
+    assert evolution["overlay_eval_mode"] == "deterministic_fixture_plus_real_runtime"
+    assert evolution["deterministic_fixture_eval_kind"] == "deterministic_fixture"
+    assert evolution["pending_real_runtime_overlay_blocker_count"] == 1
+    assert evolution["pending_real_runtime_overlay_blockers"][0]["agent"] == "coding_agent"
+    assert "model.gguf" in evolution["pending_real_runtime_overlay_blockers"][0]["reason"]
+    assert "pending_write_capable_overlay_approval_count" in evolution
+    assert "lora_adapters" in payload["models"]
+    assert payload["embeddings"]["hashed_token_active"] is True
+    blob = json.dumps(payload)
+    assert str(settings_tmp.home) not in blob
+    assert "prod-api-token-for-test" not in blob
+
+
 def test_generated_api_token_authenticates(settings_tmp) -> None:
     import anyio
 

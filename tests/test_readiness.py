@@ -532,3 +532,55 @@ def test_unreviewed_write_capable_overlays_warn(tmp_path: Path) -> None:
     assert check is not None
     assert check.status == "warning"
     assert "1 overlay candidate(s)" in check.detail
+
+
+def test_production_readiness_reports_overlay_eval_blockers_redacted(
+    tmp_path: Path,
+) -> None:
+    home = _write_home(
+        tmp_path,
+        backend="fake",
+        extra={
+            "environment": "production",
+            "api": {"token": "prod-api-token-3f9c2a71b4d8"},
+            "runtime": {"backend": "fake", "token": "prod-runtime-token-8e1d5c92aa07"},
+        },
+    )
+    report_dir = home / "data" / "evolution" / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "dream.json").write_text(
+        json.dumps(
+            {
+                "run_id": "dream",
+                "created_at": "2026-07-01T00:00:00Z",
+                "phases": {
+                    "examine": {
+                        "pending_real_runtime": [
+                            {
+                                "agent": "coding_agent",
+                                "status": "skipped_real_runtime",
+                                "reason": f"missing runtime at {tmp_path}/private/model.gguf",
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_readiness_report(home)
+
+    assert report.production_real_runtime_eval_required is True
+    assert report.overlay_eval_mode == "deterministic_fixture_plus_real_runtime"
+    assert report.pending_real_runtime_overlay_blocker_count == 1
+    assert "model.gguf" in report.pending_real_runtime_overlay_blockers[0]
+    assert "pending real-runtime overlay blockers" in report.warnings
+    gate = _check(report, "prompt overlay eval gate")
+    assert gate is not None
+    assert gate.status == "blocker"
+    assert report.hashed_token_embedding_fallback is True
+    assert report.embedding_role_model_registered is False
+    blob = json.dumps(report.model_dump())
+    assert str(tmp_path) not in blob
+    assert "prod-api-token" not in blob

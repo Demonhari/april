@@ -99,28 +99,30 @@ class PlaybookAdoptionService:
                 actor=actor,
                 request_id=request_id,
             )
-        path = self.loader.adopt(playbook)
+        persisted = playbook.model_copy(update={"required_permission_level": level})
+        path = self.loader.adopt(persisted)
         if self.memory is not None:
             await self.memory.upsert_playbook(
-                playbook_id=playbook.id,
-                name=playbook.name,
-                source="adopted",
+                playbook_id=persisted.id,
+                name=persisted.name,
+                source=persisted.source,
                 status="active",
-                trigger_examples=list(playbook.trigger_examples),
-                steps=[step.model_dump() for step in playbook.steps],
+                trigger_examples=list(persisted.trigger_examples),
+                steps=[step.model_dump() for step in persisted.steps],
                 required_permission_level=level,
+                stats=persisted.stats.model_dump(),
             )
         if level >= self.approval_required_at and approval_id is not None:
             await self.approvals.consume(
                 approval_id=approval_id,
-                result={"adopted": True, "playbook_id": playbook.id, "path": str(path)},
+                result={"adopted": True, "playbook_id": persisted.id, "path": str(path)},
                 actor=actor,
                 request_id=request_id,
             )
         return {
             "status": "adopted",
             "adopted": True,
-            "id": playbook.id,
+            "id": persisted.id,
             "path": str(path),
             "required_permission_level": level,
         }

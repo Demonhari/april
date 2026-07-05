@@ -122,7 +122,9 @@ async def mine_playbook_candidates(
             and not _triggers_collide(triggers, active_examples)
         )
         status = "active" if adopt_now else "candidate"
-        definition = definition.model_copy(update={"status": status})
+        definition = definition.model_copy(
+            update={"status": status, "required_permission_level": level}
+        )
         target = settings.playbooks_path / f"{definition.id}.yaml"
         written = guard.write_text(
             target,
@@ -132,11 +134,12 @@ async def mine_playbook_candidates(
         await memory.upsert_playbook(
             playbook_id=definition.id,
             name=definition.name,
-            source="mined",
+            source=definition.source,
             status=status,
             trigger_examples=triggers,
             steps=[step.model_dump() for step in definition.steps],
             required_permission_level=level,
+            stats=definition.stats.model_dump(),
         )
         report.candidate_ids.append(definition.id)
         report.candidate_paths.append(str(written))

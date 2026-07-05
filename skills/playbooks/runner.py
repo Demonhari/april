@@ -100,10 +100,12 @@ class PlaybookRunner:
         await self.memory.upsert_playbook(
             playbook_id=playbook.id,
             name=playbook.name,
-            source="loader",
+            source=playbook.source,
             status=playbook.status,
             trigger_examples=list(playbook.trigger_examples),
             steps=[step.model_dump() for step in playbook.steps],
+            required_permission_level=playbook.required_permission_level or 1,
+            stats=playbook.stats.model_dump(),
         )
         return await self.memory.create_playbook_run(
             playbook_id=playbook.id,

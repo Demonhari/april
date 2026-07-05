@@ -112,6 +112,14 @@ class ReadinessReport(BaseModel):
     daemon_status: str = "unknown"
     daemon_details_available: bool = False
     sentinel_live_status: str = "not_verified"
+    embedding_provider: str = "hashed-token"
+    embedding_role_model_registered: bool = False
+    hashed_token_embedding_fallback: bool = False
+    lora_adapter_missing_count: int = 0
+    overlay_eval_mode: str = "deterministic_fixture"
+    production_real_runtime_eval_required: bool = False
+    pending_real_runtime_overlay_blocker_count: int = 0
+    pending_real_runtime_overlay_blockers: list[str] = Field(default_factory=list)
     # Dreamer/evolution visibility (file-derived only; readiness stays inert).
     evolution_enabled: bool = False
     evolution_kill_switch_active: bool = False
@@ -287,6 +295,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
 
     # --- optional LoRA adapters (M15) ----------------------------------------
     if registry is not None:
+        lora_adapter_missing_count = 0
         for model in registry.list():
             adapter = model.resolved_adapter_path(registry.root)
             if adapter is None:
@@ -305,6 +314,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                     )
                 )
             else:
+                lora_adapter_missing_count += 1
                 checks.append(
                     ReadinessCheck(
                         name=f"LoRA adapter: {model.id}",
@@ -316,6 +326,8 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                         action="Train or copy the adapter (see scripts/finetune/README.md).",
                     )
                 )
+    else:
+        lora_adapter_missing_count = 0
 
     embedding_role_models = (
         [model for model in registry.list() if model.role == "embedding"]
@@ -498,12 +510,26 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         ("whisper model", settings.voice.whisper_model_path, True),
         ("piper binary", settings.voice.piper_binary_path, True),
         ("piper voice model", settings.voice.piper_model_path, True),
-        ("wake-word model", settings.voice.wake_word_model_path, False),
     )
     voice_artifacts: list[VoiceArtifact] = []
     for name, voice_path, required in voice_specs:
         artifact, check = _voice_artifact(
             settings, name, voice_path, enabled=voice_enabled, required=required
+        )
+        voice_artifacts.append(artifact)
+        checks.append(check)
+    wake_word_paths = settings.voice.effective_wake_word_model_paths
+    if wake_word_paths:
+        for index, wake_path in enumerate(wake_word_paths):
+            name = "wake-word model" if index == 0 else f"wake-word model {index + 1}"
+            artifact, check = _voice_artifact(
+                settings, name, wake_path, enabled=voice_enabled, required=False
+            )
+            voice_artifacts.append(artifact)
+            checks.append(check)
+    else:
+        artifact, check = _voice_artifact(
+            settings, "wake-word model", None, enabled=voice_enabled, required=False
         )
         voice_artifacts.append(artifact)
         checks.append(check)
@@ -613,6 +639,39 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 ),
             )
         )
+    pending_real_runtime_blockers = _pending_real_runtime_overlay_blockers(settings)
+    if pending_real_runtime_blockers:
+        checks.append(
+            ReadinessCheck(
+                name="pending real-runtime overlay blockers",
+                status="warning",
+                detail=(
+                    f"{len(pending_real_runtime_blockers)} production overlay candidate(s) "
+                    "are held pending because real-runtime eval did not pass."
+                ),
+                action="run april evolve report",
+            )
+        )
+    production_real_runtime_eval_required = settings.environment == "production"
+    checks.append(
+        ReadinessCheck(
+            name="prompt overlay eval gate",
+            status=(
+                "warning"
+                if production_real_runtime_eval_required and not runtime_is_fake
+                else "blocker"
+                if production_real_runtime_eval_required
+                else "skipped"
+            ),
+            detail=(
+                "Production overlay activation requires deterministic fixture pass plus "
+                "a real-runtime llama_cpp eval; offline readiness does not run model evals."
+                if production_real_runtime_eval_required
+                else "Development/test overlay approval uses deterministic fixture checks only."
+            ),
+            action=_VERIFY_REAL if production_real_runtime_eval_required else None,
+        )
+    )
     daemon_status_payload = _daemon_status(settings)
     daemon_status = str(daemon_status_payload.get("status", "unknown"))
     daemon_details_available = bool(daemon_status_payload.get("details_available", False))
@@ -692,6 +751,18 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         daemon_status=daemon_status,
         daemon_details_available=daemon_details_available,
         sentinel_live_status=sentinel_live_status,
+        embedding_provider=settings.memory.embedding_provider,
+        embedding_role_model_registered=bool(embedding_role_models),
+        hashed_token_embedding_fallback=settings.memory.embedding_provider == "hashed-token",
+        lora_adapter_missing_count=lora_adapter_missing_count,
+        overlay_eval_mode=(
+            "deterministic_fixture_plus_real_runtime"
+            if production_real_runtime_eval_required
+            else "deterministic_fixture"
+        ),
+        production_real_runtime_eval_required=production_real_runtime_eval_required,
+        pending_real_runtime_overlay_blocker_count=len(pending_real_runtime_blockers),
+        pending_real_runtime_overlay_blockers=pending_real_runtime_blockers,
         evolution_enabled=settings.evolution.enabled,
         evolution_kill_switch_active=(settings.evolution_path / "DISABLED").exists(),
         scheduler_enabled=settings.scheduler.enabled,
@@ -729,6 +800,47 @@ def _pending_eval_case_count(settings: AprilSettings) -> int:
     if not pending_dir.is_dir():
         return 0
     return sum(1 for path in pending_dir.glob("*.yaml") if path.is_file())
+
+
+def _pending_real_runtime_overlay_blockers(settings: AprilSettings) -> list[str]:
+    """Redacted reasons from the newest Dreamer report's production real-runtime holdbacks."""
+    reports_dir = settings.evolution_path / "reports"
+    if not reports_dir.is_dir():
+        return []
+    newest: tuple[str, float, Path] | None = None
+    for path in reports_dir.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            stat = path.stat()
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        created_at = str(payload.get("created_at") or payload.get("generated_at") or "")
+        key = (created_at, stat.st_mtime, path)
+        if newest is None or key[:2] > newest[:2]:
+            newest = key
+    if newest is None:
+        return []
+    try:
+        payload = json.loads(newest[2].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    examine = payload.get("phases", {}).get("examine") if isinstance(payload, dict) else None
+    if not isinstance(examine, dict):
+        return []
+    pending = examine.get("pending_real_runtime")
+    if not isinstance(pending, list):
+        return []
+    blockers: list[str] = []
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        agent = str(item.get("agent") or "unknown")
+        status = str(item.get("status") or "unknown")
+        reason = redact_reason(str(item.get("reason") or "real-runtime evaluation did not pass"))
+        blockers.append(f"{agent}: {status}: {reason}"[:240])
+    return blockers
 
 
 def _daemon_status(settings: AprilSettings) -> dict[str, object]:

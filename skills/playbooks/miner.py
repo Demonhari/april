@@ -58,6 +58,7 @@ class PlaybookMiner:
             name=name,
             description="Candidate mined from successful local tool calls.",
             status="candidate",
+            source="learned",
             trigger_examples=[trigger] if trigger else [],
             steps=steps,
         )
@@ -181,6 +182,7 @@ class PlaybookMiner:
                             f"sequence observed in {support} conversations."
                         ),
                         status="candidate",
+                        source="learned",
                         trigger_examples=[],
                         steps=steps,
                     ),

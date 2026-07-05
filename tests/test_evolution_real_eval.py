@@ -8,6 +8,7 @@ with a blocker, never a pass.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +16,7 @@ from typing import Any
 import pytest
 
 from services.april_runtime.schemas import ChatResponse, Usage
+from services.evolution.approval import PromptOverlayApprovalService
 from services.evolution.dreamer import DreamerService
 from services.evolution.eval_review import promote_pending_case
 from services.evolution.evaluator import (
@@ -203,6 +205,131 @@ async def _seed_negative_feedback(memory) -> None:
 def _production_settings(settings_tmp, **overrides):
     enabled = _enabled_settings(settings_tmp, **overrides)
     return enabled.model_copy(update={"environment": "production"})
+
+
+def _seed_pending_overlay(settings, content: str, *, agent: str = "coding_agent") -> str:
+    from services.evolution.write_guard import EvolutionWriteGuard
+
+    EvolutionWriteGuard(settings).write_text(
+        settings.evolution_path / "candidates" / f"{agent}-0.overlay.txt",
+        content,
+    )
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_production_manual_approval_holds_without_runtime(settings_tmp) -> None:
+    production = _production_settings(settings_tmp)
+    content_hash = _seed_pending_overlay(production, _OVERLAY)
+    database, _memory_unused = await _memory(production)
+    try:
+        service = PromptOverlayApprovalService(production, database, runtime_client=None)
+        result = await service.approve(agent="coding_agent", content_hash=content_hash)
+        assert result.status == "pending_real_runtime"
+        assert "no local runtime client" in (result.reason or "")
+        manager = PromptOverlayManager(production, database)
+        assert await manager.active_overlay_text("coding_agent") is None
+        assert await manager.versions(agent="coding_agent") == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runtime_client",
+    [
+        FakeRealRuntimeClient(backend="fake"),
+        FakeRealRuntimeClient(simulated=True),
+    ],
+)
+async def test_production_manual_approval_holds_on_fake_or_simulated_runtime(
+    settings_tmp, runtime_client: FakeRealRuntimeClient
+) -> None:
+    production = _production_settings(settings_tmp)
+    content_hash = _seed_pending_overlay(production, _OVERLAY)
+    database, _memory_unused = await _memory(production)
+    try:
+        service = PromptOverlayApprovalService(
+            production, database, runtime_client=runtime_client
+        )
+        result = await service.approve(agent="coding_agent", content_hash=content_hash)
+        assert result.status == "pending_real_runtime"
+        assert "fake/simulated" in (result.reason or "")
+        manager = PromptOverlayManager(production, database)
+        assert await manager.active_overlay_text("coding_agent") is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_production_manual_approval_holds_on_failing_real_eval(settings_tmp) -> None:
+    production = _production_settings(settings_tmp)
+    content_hash = _seed_pending_overlay(production, _OVERLAY)
+    database, _memory_unused = await _memory(production)
+    try:
+        service = PromptOverlayApprovalService(
+            production,
+            database,
+            runtime_client=FakeRealRuntimeClient(replay_response="unrelated output"),
+        )
+        result = await service.approve(agent="coding_agent", content_hash=content_hash)
+        assert result.status == "pending_real_runtime"
+        assert "expectation not met" in (result.reason or "")
+        manager = PromptOverlayManager(production, database)
+        assert await manager.active_overlay_text("coding_agent") is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_production_manual_approval_applies_after_passing_real_eval(settings_tmp) -> None:
+    production = _production_settings(settings_tmp)
+    content_hash = _seed_pending_overlay(production, _OVERLAY)
+    database, _memory_unused = await _memory(production)
+    try:
+        service = PromptOverlayApprovalService(
+            production,
+            database,
+            runtime_client=FakeRealRuntimeClient(),
+        )
+        result = await service.approve(agent="coding_agent", content_hash=content_hash)
+        assert result.status == "applied"
+        assert result.version == 1
+        manager = PromptOverlayManager(production, database)
+        assert await manager.active_overlay_text("coding_agent") == _OVERLAY
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_development_manual_approval_keeps_deterministic_fixture_behavior(
+    settings_tmp,
+) -> None:
+    content_hash = _seed_pending_overlay(settings_tmp, _OVERLAY)
+    database, _memory_unused = await _memory(settings_tmp)
+    try:
+        service = PromptOverlayApprovalService(settings_tmp, database, runtime_client=None)
+        result = await service.approve(agent="coding_agent", content_hash=content_hash)
+        assert result.status == "applied"
+        manager = PromptOverlayManager(settings_tmp, database)
+        assert await manager.active_overlay_text("coding_agent") == _OVERLAY
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_approval_endpoint_refuses_non_write_capable_overlay(settings_tmp) -> None:
+    content_hash = _seed_pending_overlay(settings_tmp, _OVERLAY, agent="general_agent")
+    database, _memory_unused = await _memory(settings_tmp)
+    try:
+        service = PromptOverlayApprovalService(settings_tmp, database, runtime_client=None)
+        result = await service.approve(agent="general_agent", content_hash=content_hash)
+        assert result.status == "discarded"
+        assert "write-capable" in (result.reason or "")
+        manager = PromptOverlayManager(settings_tmp, database)
+        assert await manager.active_overlay_text("general_agent") is None
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

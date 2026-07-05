@@ -661,6 +661,7 @@ class SqliteMemory:
         trigger_examples: list[str],
         steps: list[dict[str, Any]],
         required_permission_level: int = 1,
+        stats: dict[str, Any] | None = None,
     ) -> None:
         """Mirror a playbook definition into the playbooks table.
 
@@ -672,9 +673,9 @@ class SqliteMemory:
             """
             INSERT INTO playbooks(
                 id, name, source, status, trigger_examples_json, steps_json,
-                required_permission_level, created_at, updated_at
+                required_permission_level, stats_json, created_at, updated_at
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 source = excluded.source,
@@ -682,6 +683,7 @@ class SqliteMemory:
                 trigger_examples_json = excluded.trigger_examples_json,
                 steps_json = excluded.steps_json,
                 required_permission_level = excluded.required_permission_level,
+                stats_json = excluded.stats_json,
                 updated_at = excluded.updated_at
             """,
             (
@@ -692,6 +694,7 @@ class SqliteMemory:
                 json.dumps(trigger_examples, sort_keys=True),
                 json.dumps(steps, sort_keys=True),
                 required_permission_level,
+                json.dumps(stats or {}, sort_keys=True),
                 now,
                 now,
             ),
