@@ -75,8 +75,8 @@ _VOICE_NOTE = (
     "full_wake_voice milestone."
 )
 _EMBED_NOTE = (
-    "Runtime-local embeddings are not configured (memory.embedding_provider is the "
-    "development hashed-token default)."
+    "Runtime-local embeddings are not active (memory.embedding_provider is hashed-token "
+    "or no embedding-role model is selected)."
 )
 _DESKTOP_NOTE = "Desktop app is unsigned/dev-only; no signed Mac app ships in this milestone."
 

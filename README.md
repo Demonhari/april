@@ -202,6 +202,11 @@ real models, live audio, or native Mac packaging.
 | Real-model target-Mac acceptance report | Implemented; runs real checks only when you supply a GGUF |
 | Signed/notarized packaging, launch-at-login | Out of scope (see below) |
 
+Production blockers are explicit, not hidden by fake tests: GGUF files are not
+committed, no wake-word ONNX model ships in the repo, `wake.speaker_gate` only
+supports `off`, LoRA training remains a manual local runbook, and a fake-backend
+verification is never production readiness.
+
 CI and fake verification are not proof of real GGUF readiness. Real-model
 readiness is proven only by a target-Mac report that loads, chats, streams, and
 unloads the configured local GGUF files:
@@ -1351,9 +1356,10 @@ Until that real ONNX model exists and the live wake check passes,
 `wake_word_live_verified` remains false.
 
 Push-to-talk starts only from explicit CLI invocation. API, Runtime, desktop, and
-normal CLI startup never activate the microphone. `april --listen` is a plain
-alias for `april voice listen` — it blocks the current terminal on the Sentinel
-loop and installs no shell hooks of any kind.
+normal CLI startup never activate the microphone. `april voice listen` starts the
+standalone Sentinel loop. `april --listen` first attaches a terminal session,
+then blocks the current terminal on Sentinel with that session as a continuity
+hint; it installs no shell hooks of any kind.
 
 **Speaker gating is not implemented.** `wake.speaker_gate` accepts only `off`;
 config validation rejects anything else, so the setting cannot silently pretend

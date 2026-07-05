@@ -61,6 +61,12 @@ class FakeApiClient:
         self.calls.append(("POST", path, payload))
         if path == "/chat":
             return {"result": {"final_message": "answer", "pending_approval": None}}
+        if path == "/sessions":
+            return {
+                "session_id": "session-1",
+                "conversation_id": "conversation-1",
+                "joined_existing": False,
+            }
         if path == "/agents/run":
             return {"result": {"final_message": "agent answer", "pending_approval": None}}
         if path == "/tools/approve":
@@ -268,28 +274,37 @@ def test_voice_listen_uses_sentinel(monkeypatch) -> None:
 
     called: dict[str, object] = {}
 
-    async def fake_run_sentinel(settings: object) -> None:
+    async def fake_run_sentinel(settings: object, *, session_hint: str | None = None) -> None:
         called["settings"] = settings
+        called["session_hint"] = session_hint
 
     monkeypatch.setattr(sentinel_module, "run_sentinel", fake_run_sentinel)
     runner = CliRunner()
     result = runner.invoke(app, ["voice", "listen"])
     assert result.exit_code == 0, result.output
     assert "settings" in called
+    assert called["session_hint"] is None
 
 
-def test_top_level_listen_flag_uses_sentinel(monkeypatch) -> None:
+def test_top_level_listen_flag_uses_terminal_session_handoff(monkeypatch) -> None:
     import services.wake.sentinel as sentinel_module
 
+    fake = FakeApiClient()
     called: dict[str, object] = {}
 
-    async def fake_run_sentinel(settings: object) -> None:
+    async def fake_run_sentinel(settings: object, *, session_hint: str | None = None) -> None:
         called["settings"] = settings
+        called["session_hint"] = session_hint
 
+    monkeypatch.setattr("apps.cli.main.client", lambda: fake)
+    monkeypatch.setattr("apps.cli.main._maybe_autostart_daemon", lambda: None)
     monkeypatch.setattr(sentinel_module, "run_sentinel", fake_run_sentinel)
     result = CliRunner().invoke(app, ["--listen"])
     assert result.exit_code == 0, result.output
     assert "settings" in called
+    assert called["session_hint"] == "session-1"
+    assert ("POST", "/sessions", {"source": "terminal"}) in fake.calls
+    assert ("POST", "/sessions/session-1/close", {}) in fake.calls
 
 
 def test_speaker_gate_only_supports_off() -> None:

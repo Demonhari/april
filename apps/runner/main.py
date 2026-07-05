@@ -1204,6 +1204,17 @@ def _memory_doctor_report(
     else:
         status = "ok"
 
+    warnings: list[str] = []
+    if (
+        configured_provider != "runtime-local"
+        and getattr(settings, "environment", "development") == "production"
+    ):
+        warnings.append("runtime-local embeddings are not configured in production-like mode")
+    if fallback_to_hashed:
+        warnings.append("runtime-local embeddings fell back to hashed-token")
+    if not model_info["embedding_model_registered"]:
+        warnings.append("no embedding-role model is registered")
+
     report: dict[str, Any] = {
         "status": status,
         "configured_embedding_provider": configured_provider,
@@ -1222,6 +1233,7 @@ def _memory_doctor_report(
         "embedding_model_path_exists": model_info["embedding_model_path_exists"],
         "embedding_model_path_basename": model_info.get("path_basename"),
         "vector_index": index,
+        "warnings": warnings,
     }
     if runtime_local_requested and not (
         model_info["embedding_model_registered"] and model_info["embedding_model_path_exists"]

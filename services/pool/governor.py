@@ -53,6 +53,7 @@ class ResourcePolicy:
     max_cpu_load_percent: float = 90.0
     require_ac_power_for_background: bool = True
     min_idle_seconds_for_background: float = 300.0
+    default_projected_model_load_gb: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,7 @@ class GovernorDecision:
     allowed: bool
     reasons: tuple[str, ...]
     signals: ResourceSignals
+    advisories: tuple[str, ...] = ()
 
 
 class ResourceSignalProvider(Protocol):
@@ -192,6 +194,37 @@ class ResourceGovernor:
             allowed=not reasons,
             reasons=tuple(reasons),
             signals=signals,
+            advisories=resident.advisories,
+        )
+
+    def assess_model_load(self, *, projected_resident_gb: float | None = None) -> GovernorDecision:
+        """Gate a new interactive model load with projected resident memory.
+
+        Power and idle state deliberately do not block an interactive user turn.
+        If the caller cannot project the model's resident footprint, a
+        conservative default is used and surfaced as an advisory rather than
+        silently pretending the signal was exact.
+        """
+        signals = self.provider.sample()
+        reasons: list[str] = []
+        advisories: list[str] = []
+        if projected_resident_gb is None:
+            projected = self.policy.default_projected_model_load_gb
+            advisories.append("projected_model_memory_defaulted")
+        else:
+            projected = max(0.0, projected_resident_gb)
+        required_headroom = self.policy.min_ram_headroom_gb + projected
+        if signals.ram_headroom_gb < self.policy.min_ram_headroom_gb:
+            reasons.append("ram_headroom_below_policy")
+        elif signals.ram_headroom_gb < required_headroom:
+            reasons.append("projected_ram_headroom_below_policy")
+        if signals.cpu_load_percent > self.policy.max_cpu_load_percent:
+            reasons.append("cpu_load_above_policy")
+        return GovernorDecision(
+            allowed=not reasons,
+            reasons=tuple(reasons),
+            signals=signals,
+            advisories=tuple(advisories),
         )
 
 

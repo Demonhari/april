@@ -232,9 +232,9 @@ def _root(
 ) -> None:
     if ctx.invoked_subcommand is None:
         if listen:
-            # Compatibility alias: `april --listen` starts the Sentinel loop.
-            # No shell hooks are installed; this simply blocks this terminal.
-            voice_listen()
+            # Compatibility alias with terminal session continuity: this blocks
+            # the terminal while voice wakes join the attached session.
+            _terminal_voice_listen()
         else:
             attach()
 
@@ -703,6 +703,10 @@ def voice_enroll(
 
 @voice_app.command("listen")
 def voice_listen() -> None:
+    _run_voice_listen()
+
+
+def _run_voice_listen(*, session_hint: str | None = None) -> None:
     from april_common.errors import RuntimeUnavailableError
     from services.voice.health import voice_health
     from services.wake.sentinel import run_sentinel
@@ -712,10 +716,20 @@ def voice_listen() -> None:
     if health_report.status == "degraded":
         console.print(health_report.model_dump())
     try:
-        run(run_sentinel(settings))
+        run(run_sentinel(settings, session_hint=session_hint))
     except RuntimeUnavailableError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+
+
+def _terminal_voice_listen() -> None:
+    _maybe_autostart_daemon()
+    data = run(client().post("/sessions", {"source": "terminal"}))
+    session_id = data.get("session_id")
+    try:
+        _run_voice_listen(session_hint=session_id if isinstance(session_id, str) else None)
+    finally:
+        _close_session(session_id if isinstance(session_id, str) else None)
 
 
 @daemon_app.command("install")

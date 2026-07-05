@@ -44,6 +44,7 @@ from services.permissions.artifacts import (
 )
 from services.permissions.engine import PermissionEngine
 from services.permissions.tool_execution import ToolExecutionService
+from services.pool.agent_pool import AgentPool
 from skills.playbooks.loader import PlaybookLoader
 from skills.playbooks.runner import PlaybookRunner, PlaybookRunResult
 from skills.registry import ToolRegistry
@@ -104,6 +105,7 @@ class AprilOrchestrator:
         overlay_manager: PromptOverlayManager | None = None,
         playbook_loader: PlaybookLoader | None = None,
         playbook_runner: PlaybookRunner | None = None,
+        agent_pool: AgentPool | None = None,
     ) -> None:
         self.settings = settings
         self.runtime_client = runtime_client
@@ -117,6 +119,7 @@ class AprilOrchestrator:
         self.overlay_manager = overlay_manager
         self.playbook_loader = playbook_loader
         self.playbook_runner = playbook_runner
+        self.agent_pool = agent_pool
         self.brain_router = brain_router or BrainRouter(
             runtime_client,
             brain_model_id=settings.brain.model_id,
@@ -163,6 +166,7 @@ class AprilOrchestrator:
             structured_specialists=True,
         )
         selection = self._select_intelligence_rung(prepared, message=message, mode=mode)
+        self._schedule_agent_prewarm(prepared)
         ladder_result = await self._maybe_run_ladder(prepared, message, selection)
         if ladder_result is not None:
             return ladder_result
@@ -424,6 +428,7 @@ class AprilOrchestrator:
             structured_specialists=True,
         )
         selection = self._select_intelligence_rung(prepared, message=message, mode=mode)
+        self._schedule_agent_prewarm(prepared)
         yield (
             "meta",
             {
@@ -610,6 +615,18 @@ class AprilOrchestrator:
             }
         )
         return selection
+
+    def _schedule_agent_prewarm(self, prepared: PreparedTurn) -> None:
+        if self.agent_pool is None:
+            return
+        try:
+            self.agent_pool.schedule_prewarm(
+                agent=prepared.agent_name,
+                model_id=prepared.model_id,
+                request_id=prepared.request_id,
+            )
+        except Exception:
+            return
 
     async def _maybe_run_ladder(
         self,

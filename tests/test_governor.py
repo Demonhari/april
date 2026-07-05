@@ -155,6 +155,42 @@ def test_resident_ignores_power_and_idle(settings_tmp) -> None:
     assert governor.assess_resident().allowed
 
 
+def test_projected_model_memory_can_deny_interactive_load(settings_tmp) -> None:
+    governor = ResourceGovernor(
+        settings_tmp,
+        provider=FixedSignals(
+            ResourceSignals(
+                ram_headroom_gb=2.5,
+                cpu_load_percent=5.0,
+                on_ac_power=True,
+                user_idle_seconds=0.0,
+            )
+        ),
+        policy=ResourcePolicy(min_ram_headroom_gb=1.0, max_cpu_load_percent=90.0),
+    )
+    decision = governor.assess_model_load(projected_resident_gb=2.0)
+    assert not decision.allowed
+    assert "projected_ram_headroom_below_policy" in decision.reasons
+
+
+def test_interactive_model_load_allows_battery_and_active_user(settings_tmp) -> None:
+    governor = ResourceGovernor(
+        settings_tmp,
+        provider=FixedSignals(
+            ResourceSignals(
+                ram_headroom_gb=16.0,
+                cpu_load_percent=5.0,
+                on_ac_power=False,
+                user_idle_seconds=0.0,
+            )
+        ),
+        policy=ResourcePolicy(min_ram_headroom_gb=1.0, max_cpu_load_percent=90.0),
+    )
+    decision = governor.assess_model_load(projected_resident_gb=1.0)
+    assert decision.allowed
+    assert decision.reasons == ()
+
+
 # ---------------------------------------------------------------------------
 # Governor gating of specialist model loads (ModelLifecycle wiring)
 # ---------------------------------------------------------------------------

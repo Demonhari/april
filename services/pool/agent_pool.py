@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal, Protocol
 
 from april_common.time import utc_now
 from services.memory.sqlite_memory import SqliteMemory
@@ -20,6 +21,21 @@ CALL_SIGNS: dict[str, str] = {
 }
 
 ROLLING_WINDOW_DAYS = 30
+PREWARMABLE_AGENTS = frozenset(
+    {"coding_agent", "reading_agent", "reasoning_agent", "creative_agent"}
+)
+
+
+class RuntimePrewarmClient(Protocol):
+    async def load(self, model_id: str, *, request_id: str | None = None) -> Any: ...
+
+
+class PrewarmGovernor(Protocol):
+    def assess_resident(self) -> Any: ...
+
+
+class AuditSink(Protocol):
+    def write(self, payload: dict[str, Any]) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,16 +73,36 @@ class AgentScorecard:
         }
 
 
-class AgentPool:
-    """Read-only scorecards for the named specialist pool.
+@dataclass(frozen=True, slots=True)
+class AgentPrewarmResult:
+    agent: str
+    model_id: str | None
+    status: Literal["attempted", "loaded", "skipped", "failed"]
+    reason: str | None = None
 
-    The pool never executes anything and never bypasses Runtime or the
-    permission engine — it only aggregates persisted run and feedback rows.
+
+class AgentPool:
+    """Scorecards plus best-effort specialist model prewarm.
+
+    The pool never executes tools and never bypasses Runtime or the permission
+    engine. Prewarm only asks April Runtime to load the already-selected model
+    id; failures are audited and never block the user response path.
     """
 
-    def __init__(self, memory: SqliteMemory, *, known_agents: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        memory: SqliteMemory,
+        *,
+        known_agents: list[str] | None = None,
+        runtime_client: RuntimePrewarmClient | None = None,
+        governor: PrewarmGovernor | None = None,
+        audit: AuditSink | None = None,
+    ) -> None:
         self.memory = memory
         self.known_agents = known_agents if known_agents is not None else list(CALL_SIGNS)
+        self.runtime_client = runtime_client
+        self.governor = governor
+        self.audit = audit
 
     async def scorecards(self) -> list[AgentScorecard]:
         window_start = (
@@ -121,3 +157,100 @@ class AgentPool:
                 )
             )
         return cards
+
+    def schedule_prewarm(
+        self,
+        *,
+        agent: str,
+        model_id: str | None,
+        request_id: str | None = None,
+    ) -> asyncio.Task[AgentPrewarmResult] | None:
+        """Fire-and-forget prewarm for the selected specialist model."""
+        if self.runtime_client is None:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        task = loop.create_task(
+            self.prewarm_selected(agent=agent, model_id=model_id, request_id=request_id)
+        )
+        task.add_done_callback(_consume_task_exception)
+        return task
+
+    async def prewarm_selected(
+        self,
+        *,
+        agent: str,
+        model_id: str | None,
+        request_id: str | None = None,
+    ) -> AgentPrewarmResult:
+        if model_id is None:
+            result = AgentPrewarmResult(agent, model_id, "skipped", "no_model_id")
+            self._audit_prewarm(result, request_id=request_id)
+            return result
+        if agent not in PREWARMABLE_AGENTS:
+            result = AgentPrewarmResult(agent, model_id, "skipped", "agent_not_prewarmable")
+            self._audit_prewarm(result, request_id=request_id)
+            return result
+        if self.runtime_client is None:
+            result = AgentPrewarmResult(agent, model_id, "skipped", "runtime_client_unavailable")
+            self._audit_prewarm(result, request_id=request_id)
+            return result
+        governor_decision = self._governor_decision()
+        if governor_decision is not None and not getattr(governor_decision, "allowed", True):
+            reasons = tuple(getattr(governor_decision, "reasons", ()) or ())
+            result = AgentPrewarmResult(
+                agent,
+                model_id,
+                "skipped",
+                ",".join(str(reason) for reason in reasons) or "governor_denied",
+            )
+            self._audit_prewarm(result, request_id=request_id)
+            return result
+
+        self._audit_prewarm(
+            AgentPrewarmResult(agent, model_id, "attempted"),
+            request_id=request_id,
+        )
+        try:
+            await self.runtime_client.load(model_id, request_id=request_id)
+        except Exception as exc:
+            result = AgentPrewarmResult(agent, model_id, "failed", type(exc).__name__)
+            self._audit_prewarm(result, request_id=request_id)
+            return result
+        result = AgentPrewarmResult(agent, model_id, "loaded")
+        self._audit_prewarm(result, request_id=request_id)
+        return result
+
+    def _governor_decision(self) -> Any | None:
+        if self.governor is None:
+            return None
+        model_load = getattr(self.governor, "assess_model_load", None)
+        if callable(model_load):
+            return model_load(projected_resident_gb=None)
+        return self.governor.assess_resident()
+
+    def _audit_prewarm(self, result: AgentPrewarmResult, *, request_id: str | None) -> None:
+        if self.audit is None:
+            return
+        self.audit.write(
+            {
+                "event_type": "agent_model_prewarm",
+                "actor": "agent_pool",
+                "request_id": request_id,
+                "agent": result.agent,
+                "model_id": result.model_id,
+                "status": result.status,
+                "reason": result.reason,
+            }
+        )
+
+
+def _consume_task_exception(task: asyncio.Task[AgentPrewarmResult]) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except Exception:
+        return

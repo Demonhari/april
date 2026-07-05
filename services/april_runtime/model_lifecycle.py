@@ -37,6 +37,10 @@ class ResourceLoadGate(Protocol):
 
     def assess_resident(self) -> Any: ...  # GovernorDecision-shaped
 
+    def assess_model_load(
+        self, *, projected_resident_gb: float | None = None
+    ) -> Any: ...  # GovernorDecision-shaped
+
 
 @dataclass(slots=True)
 class ModelRuntimeState:
@@ -178,7 +182,13 @@ class ModelLifecycle:
         if self.governor is None or state.state in {"loaded", "loading"}:
             return
         try:
-            decision = self.governor.assess_resident()
+            assess_model_load = getattr(self.governor, "assess_model_load", None)
+            if callable(assess_model_load):
+                decision = assess_model_load(
+                    projected_resident_gb=self._projected_model_load_gb(state)
+                )
+            else:
+                decision = self.governor.assess_resident()
         except Exception:
             return
         if getattr(decision, "allowed", True):
@@ -189,6 +199,19 @@ class ModelLifecycle:
             "Deferred specialist model load under resource pressure.",
             {"governor_reasons": list(reasons)},
         )
+
+    def _projected_model_load_gb(self, state: ModelRuntimeState) -> float | None:
+        if self.root_backend == "fake" or state.model.backend == "fake":
+            return 0.0
+        path = state.model.resolved_path(self.registry.root)
+        try:
+            size_gb = path.stat().st_size / (1024**3)
+        except OSError:
+            return None
+        # GGUF resident usage is at least the mapped file and commonly includes
+        # allocator/KV overhead. This conservative projection gates preloads
+        # without claiming to be an exact memory profiler.
+        return max(0.25, size_gb * 1.25)
 
     async def load_model(self, model_id: str) -> ModelRuntimeState:
         state = self.get_state(model_id)

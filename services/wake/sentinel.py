@@ -13,6 +13,7 @@ from april_common.settings import AprilSettings
 from services.voice.audio_player import AudioPlayer
 from services.voice.microphone import Microphone, aclose_frame_source, write_pcm_wav
 from services.voice.speech_to_text import SpeechToText
+from services.voice.text_to_speech import TextToSpeech
 from services.voice.vad import VoiceActivityDetector
 from services.wake.confirmer import SttConfirmer, strip_vocative
 from services.wake.ring_buffer import AudioRingBuffer
@@ -111,6 +112,9 @@ class Sentinel:
 
     def notify_assistant_response(self) -> None:
         """Open the follow-up window: speech soon after a reply wakes directly."""
+        if self.mute.is_muted():
+            self._follow_up_until = None
+            return
         follow_up = self.settings.wake.follow_up_seconds
         if follow_up > 0:
             self._follow_up_until = self.clock() + follow_up
@@ -120,6 +124,7 @@ class Sentinel:
         """Own the microphone until stopped. Mute fully releases the stream."""
         while not self._stopped:
             if self.mute.is_muted():
+                self._follow_up_until = None
                 await self._sleep(self.mute_poll_seconds)
                 continue
             await self.run_once()
@@ -127,6 +132,7 @@ class Sentinel:
     async def run_once(self) -> None:
         """Consume one microphone stream until mute/stop/stream end."""
         if self.mute.is_muted() or self._stopped:
+            self._follow_up_until = None
             return
         frame_source = self.microphone.frames()
         try:
@@ -315,16 +321,40 @@ class Sentinel:
 
 
 class ApiWakeDelivery:
-    """Deliver accepted wakes to the loopback Core API POST /wake."""
+    """Deliver accepted wakes to the loopback Core API POST /wake.
 
-    def __init__(self, *, base_url: str, token: str, timeout: float = 30.0) -> None:
+    When TTS/player are supplied, any assistant reply returned by ``/wake`` is
+    spoken locally and ``on_assistant_response_complete`` is called only after
+    playback finishes. That callback is the production follow-up wake handoff;
+    no speech completion is simulated.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        timeout: float = 30.0,
+        settings: AprilSettings | None = None,
+        tts: TextToSpeech | None = None,
+        player: AudioPlayer | None = None,
+        on_assistant_response_complete: Callable[[], None] | None = None,
+        session_hint: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.settings = settings
+        self.tts = tts
+        self.player = player
+        self.on_assistant_response_complete = on_assistant_response_complete
+        self.session_hint = session_hint
 
     async def __call__(self, event: WakeEvent) -> None:
         import httpx
 
+        if self.session_hint and event.session_hint is None:
+            event = event.model_copy(update={"session_hint": self.session_hint})
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/wake",
@@ -332,6 +362,32 @@ class ApiWakeDelivery:
                 headers={"Authorization": f"Bearer {self.token}"},
             )
             response.raise_for_status()
+        await self._speak_response(response.json())
+
+    async def _speak_response(self, payload: object) -> None:
+        if self.settings is None or self.tts is None or self.player is None:
+            return
+        if not isinstance(payload, dict):
+            return
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return
+        final_message = result.get("final_message")
+        if not isinstance(final_message, str) or not final_message.strip():
+            return
+        self.settings.audio_cache_path.mkdir(parents=True, exist_ok=True)
+        output_path = self.settings.audio_cache_path / f"sentinel-reply-{uuid.uuid4()}.wav"
+        try:
+            spoken_path = await self.tts.synthesize(final_message, output_path)
+            await self.player.play(spoken_path)
+        except Exception as exc:
+            logger.warning("Assistant voice response playback failed: %s", exc)
+            return
+        finally:
+            if not self.settings.voice.retain_debug_audio:
+                output_path.unlink(missing_ok=True)
+        if self.on_assistant_response_complete is not None:
+            self.on_assistant_response_complete()
 
 
 def build_scorers(settings: AprilSettings) -> list[WakeScorer]:
@@ -351,7 +407,7 @@ def build_scorers(settings: AprilSettings) -> list[WakeScorer]:
     return scorers
 
 
-async def run_sentinel(settings: AprilSettings) -> None:
+async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = None) -> None:
     """Production entry point: real microphone, wake models, STT confirmation.
 
     Requires ``voice.enabled`` and ``wake.enabled`` plus at least one wake model.
@@ -361,6 +417,7 @@ async def run_sentinel(settings: AprilSettings) -> None:
     from services.voice.audio_player import SoundDeviceAudioPlayer
     from services.voice.microphone import SoundDeviceMicrophone
     from services.voice.speech_to_text import WhisperCppSpeechToText
+    from services.voice.text_to_speech import PiperTextToSpeech
 
     if not settings.voice.enabled or not settings.wake.enabled:
         raise RuntimeUnavailableError("Sentinel requires voice.enabled and wake.enabled.")
@@ -376,6 +433,14 @@ async def run_sentinel(settings: AprilSettings) -> None:
         settings.voice.whisper_binary_path,
         settings.voice.whisper_model_path,
     )
+    if settings.voice.piper_binary_path is None or settings.voice.piper_model_path is None:
+        raise RuntimeUnavailableError(
+            "Sentinel hands-free replies require Piper binary and model paths."
+        )
+    tts = PiperTextToSpeech(
+        settings.voice.piper_binary_path,
+        settings.voice.piper_model_path,
+    )
     confirmer: SttConfirmer | None = None
     if settings.wake.confirm_with_stt:
         confirmer = SttConfirmer(
@@ -385,18 +450,32 @@ async def run_sentinel(settings: AprilSettings) -> None:
             retain_debug_audio=settings.voice.retain_debug_audio,
             fuzzy_max_distance=settings.wake.fuzzy_max_distance,
         )
+    player = SoundDeviceAudioPlayer(device=settings.voice.output_device)
+    sentinel_ref: Sentinel | None = None
+
+    def assistant_response_complete() -> None:
+        if sentinel_ref is not None:
+            sentinel_ref.notify_assistant_response()
+
+    delivery = ApiWakeDelivery(
+        base_url=f"http://{settings.api.host}:{settings.api.port}",
+        token=settings.api.token,
+        settings=settings,
+        tts=tts,
+        player=player,
+        on_assistant_response_complete=assistant_response_complete,
+        session_hint=session_hint,
+    )
     sentinel = Sentinel(
         settings=settings,
         microphone=SoundDeviceMicrophone(device=settings.voice.input_device),
         scorers=scorers,
-        deliver=ApiWakeDelivery(
-            base_url=f"http://{settings.api.host}:{settings.api.port}",
-            token=settings.api.token,
-        ),
+        deliver=delivery,
         confirmer=confirmer,
         transcriber=stt,
-        player=SoundDeviceAudioPlayer(device=settings.voice.output_device),
+        player=player,
     )
+    sentinel_ref = sentinel
     with contextlib.suppress(KeyboardInterrupt):
         await sentinel.run()
 

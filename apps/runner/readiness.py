@@ -278,6 +278,12 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 )
             )
 
+    embedding_role_models = (
+        [model for model in registry.list() if model.role == "embedding"]
+        if registry is not None
+        else []
+    )
+
     # --- runtime-local embeddings ------------------------------------------
     if settings.memory.embedding_provider == "runtime-local":
         embedding_model_id = settings.memory.embedding_model_id
@@ -303,19 +309,32 @@ def build_readiness_report(home: Path) -> ReadinessReport:
             )
         else:
             embedding_model = registry.get(embedding_model_id)
-            embedding_path = embedding_model.resolved_path(registry.root)
-            checks.append(
-                ReadinessCheck(
-                    name="runtime-local embedding model",
-                    status="ok" if embedding_path.exists() else "blocker",
-                    detail=(
-                        f"Registered embedding model {embedding_model_id} exists."
-                        if embedding_path.exists()
-                        else f"Missing embedding model file: {embedding_path.name}"
-                    ),
-                    action=None if embedding_path.exists() else _SETUP_EMBEDDINGS,
+            if embedding_model.role != "embedding":
+                checks.append(
+                    ReadinessCheck(
+                        name="runtime-local embedding model",
+                        status="blocker",
+                        detail=(
+                            f"Configured embedding model id {embedding_model_id} has "
+                            f"role={embedding_model.role}, not role=embedding."
+                        ),
+                        action=_SETUP_EMBEDDINGS,
+                    )
                 )
-            )
+            else:
+                embedding_path = embedding_model.resolved_path(registry.root)
+                checks.append(
+                    ReadinessCheck(
+                        name="runtime-local embedding model",
+                        status="ok" if embedding_path.exists() else "blocker",
+                        detail=(
+                            f"Registered embedding model {embedding_model_id} exists."
+                            if embedding_path.exists()
+                            else f"Missing embedding model file: {embedding_path.name}"
+                        ),
+                        action=None if embedding_path.exists() else _SETUP_EMBEDDINGS,
+                    )
+                )
     else:
         checks.append(
             ReadinessCheck(
@@ -361,6 +380,33 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 detail=(
                     "hashed-token embeddings are active in a production environment; "
                     "semantic memory is degraded and hardened go-live holds at warning."
+                ),
+                action=_SETUP_EMBEDDINGS,
+            )
+        )
+    if (
+        settings.environment == "production"
+        and settings.memory.embedding_provider != "runtime-local"
+    ):
+        checks.append(
+            ReadinessCheck(
+                name="runtime-local embedding hardening",
+                status="warning",
+                detail=(
+                    "Production-like readiness expects memory.embedding_provider=runtime-local; "
+                    "hashed-token remains a deterministic degraded fallback."
+                ),
+                action=_SETUP_EMBEDDINGS,
+            )
+        )
+    if settings.environment == "production" and not embedding_role_models:
+        checks.append(
+            ReadinessCheck(
+                name="embedding-role model registration",
+                status="warning",
+                detail=(
+                    "No role=embedding model is registered; runtime-local semantic memory "
+                    "cannot become active until one is added."
                 ),
                 action=_SETUP_EMBEDDINGS,
             )

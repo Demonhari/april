@@ -288,3 +288,41 @@ def test_cli_attach_closes_session_on_interrupt(monkeypatch) -> None:
     with pytest.raises(KeyboardInterrupt):
         cli_main.attach()
     assert ("POST", "/sessions/session-1/close") in fake.calls
+
+
+def test_cli_terminal_listen_hands_session_hint_to_sentinel(monkeypatch) -> None:
+    import apps.cli.main as cli_main
+    import services.wake.sentinel as sentinel_module
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, object]] = []
+
+        async def post(self, path: str, payload: object, *, auth: bool = True) -> dict:
+            self.calls.append(("POST", path, payload))
+            if path == "/sessions":
+                return {
+                    "session_id": "session-voice",
+                    "conversation_id": "conversation-voice",
+                    "joined_existing": False,
+                }
+            if path == "/sessions/session-voice/close":
+                return {"session_id": "session-voice", "closed": True}
+            raise AssertionError(path)
+
+    fake = FakeClient()
+    called: dict[str, object] = {}
+
+    async def fake_run_sentinel(settings: object, *, session_hint: str | None = None) -> None:
+        called["settings"] = settings
+        called["session_hint"] = session_hint
+
+    monkeypatch.setattr(cli_main, "client", lambda: fake)
+    monkeypatch.setattr(cli_main, "_maybe_autostart_daemon", lambda: None)
+    monkeypatch.setattr(sentinel_module, "run_sentinel", fake_run_sentinel)
+
+    cli_main._terminal_voice_listen()
+
+    assert called["session_hint"] == "session-voice"
+    assert ("POST", "/sessions", {"source": "terminal"}) in fake.calls
+    assert ("POST", "/sessions/session-voice/close", {}) in fake.calls

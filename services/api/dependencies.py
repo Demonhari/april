@@ -28,6 +28,7 @@ from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
 from services.permissions.engine import PermissionEngine
 from services.permissions.tool_execution import ToolExecutionService
+from services.pool.agent_pool import AgentPool
 from services.pool.governor import ResourceGovernor
 from services.scheduler import SchedulerService, notification_sink_from_settings
 from services.wake.session_manager import SessionManager
@@ -167,6 +168,13 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
     overlay_manager = PromptOverlayManager(active_settings, database, audit=audit)
     playbook_loader = PlaybookLoader(active_settings.playbooks_path)
     playbook_runner = PlaybookRunner(tool_executor, memory=memory)
+    governor = ResourceGovernor(active_settings)
+    agent_pool = AgentPool(
+        memory,
+        runtime_client=runtime_client,
+        governor=governor,
+        audit=audit,
+    )
     orchestrator = AprilOrchestrator(
         settings=active_settings,
         runtime_client=runtime_client,
@@ -180,6 +188,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         overlay_manager=overlay_manager,
         playbook_loader=playbook_loader,
         playbook_runner=playbook_runner,
+        agent_pool=agent_pool,
     )
     archive_model_id = select_archive_model_id(agent_registry, active_settings)
     archive_reflection = ArchiveReflectionService(
@@ -191,7 +200,6 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         archive_model_id=archive_model_id,
     )
     sink = notification_sink_from_settings(active_settings, audit)
-    governor = ResourceGovernor(active_settings)
     dreamer = DreamerService(
         active_settings,
         memory=memory,

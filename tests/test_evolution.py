@@ -371,6 +371,12 @@ async def test_dreamer_discards_below_baseline_overlay(settings_tmp) -> None:
         assert report["phases"]["examine"]["discarded"] == [
             {"agent": "general_agent", "reason": "below baseline"}
         ]
+        assert report["candidate_generation"]["method"] == "deterministic-heuristic"
+        assert report["candidate_generation"]["deterministic_candidate_count"] == 1
+        assert report["candidate_generation"]["model_generated_candidate_count"] == 0
+        assert report["candidate_outcomes"]["discarded_count"] == 1
+        assert report["candidate_outcomes"]["below_baseline_count"] == 1
+        assert report["candidate_outcomes"]["approval_required_count"] == 0
         manager = PromptOverlayManager(enabled, database)
         assert await manager.active_overlay("general_agent") is None
     finally:
@@ -440,6 +446,8 @@ async def test_dreamer_write_capable_agent_overlay_requires_approval(settings_tm
         awaiting = report["phases"]["examine"]["approval_required"]
         assert len(awaiting) == 1
         assert awaiting[0]["agent"] == "coding_agent"
+        assert report["candidate_outcomes"]["approval_required_count"] == 1
+        assert report["candidate_outcomes"]["discarded_count"] == 0
         manager = PromptOverlayManager(enabled, database)
         assert await manager.active_overlay("coding_agent") is None
         # The candidate is preserved as data for later review.

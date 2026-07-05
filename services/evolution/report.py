@@ -64,6 +64,56 @@ def build_briefing_summary(
     return "; ".join(parts)
 
 
+def evolution_report_fields(phases: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    evolve = phases.get("evolve", {})
+    examine = phases.get("examine", {})
+    candidates = evolve.get("candidates", [])
+    candidate_count = len(candidates) if isinstance(candidates, list) else 0
+    method = str(evolve.get("method", "none" if candidate_count == 0 else "unknown"))
+    discarded = examine.get("discarded", [])
+    approval_required = examine.get("approval_required", [])
+    activated = examine.get("activated", [])
+    evaluations = examine.get("evaluations", [])
+    if not isinstance(discarded, list):
+        discarded = []
+    if not isinstance(approval_required, list):
+        approval_required = []
+    if not isinstance(activated, list):
+        activated = []
+    if not isinstance(evaluations, list):
+        evaluations = []
+    below_baseline = [
+        item
+        for item in discarded
+        if isinstance(item, dict) and "baseline" in str(item.get("reason", ""))
+    ]
+    skipped = [
+        {"phase": name, "reason": str(payload.get("reason", "unknown"))[:200]}
+        for name, payload in phases.items()
+        if payload.get("status") == "skipped"
+    ]
+    return {
+        "candidate_generation": {
+            "method": method,
+            "deterministic_candidate_count": (
+                candidate_count if method == "deterministic-heuristic" else 0
+            ),
+            "model_generated_candidate_count": (
+                candidate_count if method == "model-generated" else 0
+            ),
+            "candidate_count": candidate_count,
+        },
+        "candidate_outcomes": {
+            "evaluated_count": len(evaluations),
+            "activated_count": len(activated),
+            "discarded_count": len(discarded),
+            "approval_required_count": len(approval_required),
+            "below_baseline_count": len(below_baseline),
+        },
+        "skipped_phases": skipped,
+    }
+
+
 def write_report(
     settings: AprilSettings,
     *,
@@ -81,6 +131,7 @@ def write_report(
         "summary": summary,
         "phases": phases,
         "phase_statuses": phase_status_summary(phases),
+        **evolution_report_fields(phases),
         "pending_eval_cases": pending_eval_cases or 0,
         "created_at": utc_now_iso(),
     }

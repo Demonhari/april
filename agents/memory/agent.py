@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agents.base import BaseAgent, load_prompt
 from agents.schemas import AgentConfig
@@ -27,6 +27,8 @@ ArchiveMemoryKind = Literal[
 
 
 class ArchiveMemoryCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: ArchiveMemoryKind
     content: str = Field(min_length=1, max_length=1_000)
     reason: str = Field(min_length=1, max_length=500)
@@ -34,7 +36,15 @@ class ArchiveMemoryCandidate(BaseModel):
 
 
 class ArchiveCandidateEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     memories: list[ArchiveMemoryCandidate] = Field(default_factory=list, max_length=50)
+
+
+ARCHIVE_CANDIDATE_RESPONSE_FORMAT = ResponseFormat(
+    type="json_object",
+    json_schema=ArchiveCandidateEnvelope.model_json_schema(),
+)
 
 
 class ArchiveRuntimeClient(Protocol):
@@ -73,6 +83,7 @@ class ArchiveAgent:
                 ChatMessage(role="system", content=self.prompt_path.read_text(encoding="utf-8")),
                 ChatMessage(role="user", content=transcript),
             ],
+            response_format=ARCHIVE_CANDIDATE_RESPONSE_FORMAT,
             request_id=request_id,
         )
         try:

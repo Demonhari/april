@@ -123,6 +123,23 @@ def test_runtime_local_embedding_model_is_reported(tmp_path: Path) -> None:
     assert "runtime-local embedding model" in report.blockers
 
 
+def test_production_readiness_warns_without_runtime_local_embedding_role(
+    tmp_path: Path,
+) -> None:
+    home = _write_home(
+        tmp_path,
+        backend="llama_cpp",
+        extra={
+            "environment": "production",
+            "api": {"token": "prod-api-token-for-test"},
+            "runtime": {"backend": "llama_cpp", "token": "prod-runtime-token-for-test"},
+        },
+    )
+    report = build_readiness_report(home)
+    assert "runtime-local embedding hardening" in report.warnings
+    assert "embedding-role model registration" in report.warnings
+
+
 def test_readiness_reports_speaker_gate_daemon_and_sentinel_status(
     tmp_path: Path,
 ) -> None:

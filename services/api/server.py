@@ -1175,22 +1175,37 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
     configured_embedding_provider = active.settings.memory.embedding_provider
     active_embedding_provider = str(vector_health.get("embedding", "hashed-token"))
     embedding_index_compatible = bool(vector_health.get("compatible", True))
+    embedding_model_status = _embedding_model_status(active.settings)
+    fell_back_to_hashed_token = (
+        configured_embedding_provider == "runtime-local"
+        and active_embedding_provider == "hashed-token"
+    )
+    embedding_warnings: list[str] = []
+    if (
+        active.settings.environment == "production"
+        and configured_embedding_provider != "runtime-local"
+    ):
+        embedding_warnings.append(
+            "runtime-local embeddings are not configured in production-like mode"
+        )
+    if fell_back_to_hashed_token:
+        embedding_warnings.append("runtime-local embeddings fell back to hashed-token")
+    if not embedding_model_status["embedding_model_registered"]:
+        embedding_warnings.append("no embedding-role model is registered")
     embeddings = {
         "configured_provider": configured_embedding_provider,
         "active_provider": active_embedding_provider,
         "runtime_local_requested": configured_embedding_provider == "runtime-local",
-        "fell_back_to_hashed_token": (
-            configured_embedding_provider == "runtime-local"
-            and active_embedding_provider == "hashed-token"
-        ),
+        "fell_back_to_hashed_token": fell_back_to_hashed_token,
         "embedding_model_id": active.settings.memory.embedding_model_id,
         "dimensions": vector_health.get("dimensions"),
         "index_compatible": embedding_index_compatible,
         "persisted_provider": vector_health.get("persisted_provider"),
         "reindex_required": not embedding_index_compatible,
         "reindex_command": "run april memory reindex",
+        "warnings": embedding_warnings,
     }
-    embeddings.update(_embedding_model_status(active.settings))
+    embeddings.update(embedding_model_status)
     # query_audio_devices() only *enumerates* devices; it never opens the
     # microphone or starts a stream. Readiness stays inert by construction.
     devices = query_audio_devices()
@@ -1331,20 +1346,32 @@ def _embedding_model_status(settings: AprilSettings) -> dict[str, Any]:
         "embedding_model_path_exists": False,
         "embedding_model_missing_reason": None,
     }
-    if settings.memory.embedding_provider != "runtime-local":
-        status["embedding_model_missing_reason"] = "runtime-local embeddings are not configured"
-        return status
-    if not model_id:
-        status["embedding_model_missing_reason"] = "runtime-local requested without model id"
-        return status
     try:
         registry = ModelRegistry.from_file(
             settings.home / "configs" / "models.yaml",
             root=settings.home,
         )
-        model = registry.get(model_id)
     except Exception:
-        status["embedding_model_missing_reason"] = "embedding model id is not registered"
+        status["embedding_model_missing_reason"] = "model registry is unavailable"
+        return status
+    candidates = [model for model in registry.list() if model.role == "embedding"]
+    model = None
+    if model_id:
+        with contextlib.suppress(Exception):
+            candidate = registry.get(model_id)
+            if candidate.role == "embedding":
+                model = candidate
+    elif candidates:
+        model = candidates[0]
+    if model is None:
+        if settings.memory.embedding_provider == "runtime-local":
+            status["embedding_model_missing_reason"] = (
+                "runtime-local requested without a registered role=embedding model"
+                if not model_id
+                else "embedding model id is not registered with role=embedding"
+            )
+        else:
+            status["embedding_model_missing_reason"] = "no role=embedding model is registered"
         return status
     path = model.resolved_path(registry.root)
     status["embedding_model_registered"] = True

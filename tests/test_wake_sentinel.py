@@ -15,6 +15,7 @@ from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
 from services.voice.speech_to_text import FakeSpeechToText, SpeechToText
+from services.voice.text_to_speech import FakeTextToSpeech
 from services.wake.confirmer import (
     SttConfirmer,
     canonicalize_wake_word,
@@ -32,7 +33,7 @@ from services.wake.fakes import (
 )
 from services.wake.ring_buffer import AudioRingBuffer
 from services.wake.schemas import WakeEvent
-from services.wake.sentinel import MuteSwitch, Sentinel
+from services.wake.sentinel import ApiWakeDelivery, MuteSwitch, Sentinel
 from services.wake.session_manager import SessionManager
 from services.wake.wake_bus import WakeBus, send_wake_event
 
@@ -50,6 +51,36 @@ class RecordingSpeechToText(SpeechToText):
         self.paths.append(audio_path)
         self.payloads.append(audio_path.read_bytes())
         return self.text
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return self._payload
+
+
+class _FakeAsyncClient:
+    handler = None
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    async def __aenter__(self) -> _FakeAsyncClient:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def post(
+        self, url: str, *, json: dict[str, object], headers: dict[str, str]
+    ) -> _FakeHttpResponse:
+        assert _FakeAsyncClient.handler is not None
+        return await _FakeAsyncClient.handler(url, json, headers)
 
 
 def _short_socket_path() -> Path:
@@ -780,6 +811,121 @@ async def test_sentinel_follow_up_window_transcribes_same_session_command(settin
     assert delivery.events[0].text == "continue with that plan"
 
 
+async def test_api_wake_delivery_speaks_then_opens_follow_up_window(
+    settings_tmp, monkeypatch
+) -> None:
+    async def handler(url: str, payload: dict[str, object], headers: dict[str, str]):
+        assert url.endswith("/wake")
+        assert headers["Authorization"].startswith("Bearer ")
+        assert payload["source"] == "voice"
+        return _FakeHttpResponse({"result": {"final_message": "Ready for the next step."}})
+
+    monkeypatch.setattr("httpx.AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.handler = handler
+    clock = ManualClock()
+    tuned = settings_tmp.model_copy(
+        update={
+            "voice": settings_tmp.voice.model_copy(
+                update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+            )
+        }
+    )
+    delivery = RecordingDelivery()
+    player = RecordingAudioPlayer()
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([LOUD_FRAME]),
+        scorers=[ScriptedScorer([])],
+        deliver=delivery,
+        player=player,
+        mute=MuteSwitch(tuned.mute_flag_path),
+        clock=clock,
+    )
+    api_delivery = ApiWakeDelivery(
+        base_url="http://127.0.0.1:8765",
+        token="token",
+        settings=tuned,
+        tts=FakeTextToSpeech(),
+        player=player,
+        on_assistant_response_complete=sentinel.notify_assistant_response,
+    )
+
+    await api_delivery(WakeEvent(source="voice", text="start"))
+    await sentinel.run_once()
+
+    assert player.played
+    assert len(delivery.events) == 1
+    assert delivery.events[0].reason == "follow_up"
+
+
+async def test_follow_up_delivery_uses_session_hint_for_active_session(
+    settings_tmp, monkeypatch
+) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        manager = SessionManager(memory, continuity_minutes=10)
+        first = await manager.handle_wake(WakeEvent(source="terminal"))
+        resolutions: list[dict[str, object]] = []
+
+        async def handler(url: str, payload: dict[str, object], headers: dict[str, str]):
+            del url, headers
+            event = WakeEvent.model_validate(payload)
+            resolution = await manager.handle_wake(event)
+            result = resolution.model_dump()
+            resolutions.append(result)
+            return _FakeHttpResponse(
+                {**result, "result": {"final_message": "Continue when ready."}}
+            )
+
+        monkeypatch.setattr("httpx.AsyncClient", _FakeAsyncClient)
+        _FakeAsyncClient.handler = handler
+        tuned = settings_tmp.model_copy(
+            update={
+                "voice": settings_tmp.voice.model_copy(
+                    update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+                )
+            }
+        )
+        player = RecordingAudioPlayer()
+        box: dict[str, Sentinel] = {}
+
+        def response_complete() -> None:
+            box["sentinel"].notify_assistant_response()
+
+        api_delivery = ApiWakeDelivery(
+            base_url="http://127.0.0.1:8765",
+            token="token",
+            settings=tuned,
+            tts=FakeTextToSpeech(),
+            player=player,
+            on_assistant_response_complete=response_complete,
+            session_hint=first.session_id,
+        )
+        sentinel = Sentinel(
+            settings=tuned,
+            microphone=FakeFrameMicrophone([LOUD_FRAME]),
+            scorers=[ScriptedScorer([])],
+            deliver=api_delivery,
+            player=player,
+            mute=MuteSwitch(tuned.mute_flag_path),
+        )
+        box["sentinel"] = sentinel
+
+        await api_delivery(WakeEvent(source="voice", text="initial"))
+        await sentinel.run_once()
+
+        assert len(resolutions) == 2
+        assert {item["session_id"] for item in resolutions} == {first.session_id}
+        events = await memory.list_wake_events(session_id=first.session_id)
+        assert [event.session_hint for event in events if event.source == "voice"] == [
+            first.session_id,
+            first.session_id,
+        ]
+    finally:
+        _FakeAsyncClient.handler = None
+        await database.close()
+
+
 async def test_sentinel_follow_up_window_expires(settings_tmp) -> None:
     clock = ManualClock()
     tuned = settings_tmp.model_copy(
@@ -793,6 +939,37 @@ async def test_sentinel_follow_up_window_expires(settings_tmp) -> None:
     sentinel.microphone = FakeFrameMicrophone([LOUD_FRAME])
     await sentinel.run_once()
     assert delivery.events == []
+
+
+async def test_sentinel_mute_blocks_follow_up_activation(settings_tmp) -> None:
+    clock = ManualClock()
+    tuned = settings_tmp.model_copy(
+        update={
+            "voice": settings_tmp.voice.model_copy(
+                update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+            )
+        }
+    )
+    delivery = RecordingDelivery()
+    microphone = FakeFrameMicrophone([LOUD_FRAME])
+    mute = MuteSwitch(tuned.mute_flag_path)
+    mute.mute()
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=microphone,
+        scorers=[ScriptedScorer([])],
+        deliver=delivery,
+        player=RecordingAudioPlayer(),
+        mute=mute,
+        clock=clock,
+    )
+
+    sentinel.notify_assistant_response()
+    await sentinel.run_once()
+
+    assert microphone.opened_streams == 0
+    assert delivery.events == []
+    assert sentinel._follow_up_until is None
 
 
 async def test_sentinel_mute_releases_microphone(settings_tmp) -> None:

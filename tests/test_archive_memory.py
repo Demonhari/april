@@ -7,7 +7,7 @@ import pytest
 
 from agents.memory import ArchiveAgent, ArchiveMemoryCandidate
 from april_common.audit import AuditLogger
-from services.april_runtime.schemas import ChatResponse, Usage
+from services.april_runtime.schemas import ChatResponse, ResponseFormat, Usage
 from services.memory.archive import ArchiveMemoryWriter, ArchiveReflectionService
 from services.memory.database import Database
 from services.memory.embeddings import EmbeddingProvider
@@ -21,8 +21,10 @@ from services.wake.session_manager import SessionManager
 class FakeArchiveRuntime:
     def __init__(self, content: str) -> None:
         self.content = content
+        self.calls: list[dict[str, object]] = []
 
     async def chat(self, **kwargs: object) -> ChatResponse:
+        self.calls.append(kwargs)
         return ChatResponse(
             request_id="archive-test",
             model_id="april-brain",
@@ -83,7 +85,38 @@ def _candidate(
 
 @pytest.mark.asyncio
 async def test_archive_agent_requires_strict_json() -> None:
+    runtime = FakeArchiveRuntime(
+        json.dumps(
+            {
+                "memories": [
+                    {
+                        "kind": "preference",
+                        "content": "I prefer concise answers",
+                        "reason": "user said so",
+                        "confidence": 0.9,
+                    }
+                ]
+            }
+        )
+    )
     valid = ArchiveAgent(
+        runtime,
+        model_id="april-brain",
+    )
+    assert (await valid.extract("user: remember I prefer concise answers"))[0].content == (
+        "I prefer concise answers"
+    )
+    response_format = runtime.calls[0]["response_format"]
+    assert isinstance(response_format, ResponseFormat)
+    assert response_format.type == "json_object"
+    schema = response_format.json_schema
+    assert schema is not None
+    assert schema["properties"]["memories"]["type"] == "array"
+
+    invalid = ArchiveAgent(FakeArchiveRuntime("remember: concise"), model_id="april-brain")
+    assert await invalid.extract("user: remember I prefer concise answers") == []
+
+    schema_invalid = ArchiveAgent(
         FakeArchiveRuntime(
             json.dumps(
                 {
@@ -93,6 +126,7 @@ async def test_archive_agent_requires_strict_json() -> None:
                             "content": "I prefer concise answers",
                             "reason": "user said so",
                             "confidence": 0.9,
+                            "unexpected": "rejected",
                         }
                     ]
                 }
@@ -100,12 +134,7 @@ async def test_archive_agent_requires_strict_json() -> None:
         ),
         model_id="april-brain",
     )
-    assert (await valid.extract("user: remember I prefer concise answers"))[0].content == (
-        "I prefer concise answers"
-    )
-
-    invalid = ArchiveAgent(FakeArchiveRuntime("remember: concise"), model_id="april-brain")
-    assert await invalid.extract("user: remember I prefer concise answers") == []
+    assert await schema_invalid.extract("user: remember I prefer concise answers") == []
 
 
 @pytest.mark.asyncio

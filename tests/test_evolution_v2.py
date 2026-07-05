@@ -124,6 +124,8 @@ async def test_dreamer_wall_clock_budget_skips_late_phases(settings_tmp) -> None
         assert skipped, statuses
         for name in skipped:
             assert "wall clock budget" in report["phases"][name]["reason"]
+        assert {item["phase"] for item in report["skipped_phases"]} == set(skipped)
+        assert all("wall clock budget" in item["reason"] for item in report["skipped_phases"])
     finally:
         await database.close()
 
@@ -271,6 +273,13 @@ async def test_dreamer_report_includes_pending_eval_cases_and_honest_labels(
         assert "1 staged eval case(s) await review" in report["summary"]
         # Prompt evolution is heuristic and must be labelled as such.
         assert report["phases"]["evolve"]["method"] == "deterministic-heuristic"
+        assert report["candidate_generation"]["method"] == "deterministic-heuristic"
+        assert report["candidate_generation"]["deterministic_candidate_count"] == 0
+        assert report["candidate_generation"]["model_generated_candidate_count"] == 0
+        assert report["candidate_outcomes"]["discarded_count"] == 0
+        assert report["candidate_outcomes"]["approval_required_count"] == 0
+        assert report["candidate_outcomes"]["below_baseline_count"] == 0
+        assert report["skipped_phases"] == []
         # Playbook candidate/adoption counts are part of the mine payload.
         assert "adopted" in report["phases"]["mine"]
         assert "approval_required" in report["phases"]["mine"]
