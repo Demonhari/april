@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from april_common.adapter_pointer import (
+    active_adapter_path_from_pointer,  # noqa: F401 - compatibility re-export
+    adapter_pointer_path,
+    read_adapter_pointer,
+    sha256_file,
+)
 from april_common.audit import AuditLogger
 from april_common.errors import AprilError, PermissionDeniedError
 from april_common.path_security import PathPolicy, normalize_existing_path
@@ -437,51 +442,6 @@ class AdapterLifecycleManager:
                     "sha256": sha256,
                 }
             )
-
-
-def adapter_pointer_path(root: Path, model_id: str) -> Path:
-    _validate_model_id(model_id)
-    return root.resolve() / "data" / "evolution" / "adapters" / f"{model_id}.json"
-
-
-def read_adapter_pointer(root: Path, model_id: str) -> dict[str, Any] | None:
-    path = adapter_pointer_path(root, model_id)
-    if not path.exists():
-        return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"Adapter pointer for {model_id} must be a JSON object.")
-    versions = payload.get("versions")
-    if not isinstance(versions, list):
-        raise ValueError(f"Adapter pointer for {model_id} must contain a versions list.")
-    return payload
-
-
-def active_adapter_path_from_pointer(root: Path, model_id: str) -> Path | None:
-    pointer = read_adapter_pointer(root, model_id)
-    if pointer is None:
-        return None
-    active = _pointer_active_version(pointer)
-    if active is None:
-        return None
-    entry = _pointer_entry(pointer, active)
-    if entry is None:
-        raise ValueError(f"Adapter pointer for {model_id} references an unknown active version.")
-    raw_path = Path(str(entry.get("adapter_path") or ""))
-    if not str(raw_path):
-        raise ValueError(f"Adapter pointer for {model_id} has an empty adapter path.")
-    expanded = raw_path.expanduser()
-    if expanded.is_absolute():
-        return expanded.resolve(strict=False)
-    return (root / expanded).resolve(strict=False)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _empty_pointer(model_id: str) -> dict[str, Any]:

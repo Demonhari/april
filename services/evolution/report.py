@@ -70,6 +70,16 @@ def evolution_report_fields(phases: dict[str, dict[str, Any]]) -> dict[str, Any]
     candidates = evolve.get("candidates", [])
     candidate_count = len(candidates) if isinstance(candidates, list) else 0
     method = str(evolve.get("method", "none" if candidate_count == 0 else "unknown"))
+    deterministic_count = sum(
+        1
+        for candidate in candidates
+        if isinstance(candidate, dict) and candidate.get("tier", "deterministic") == "deterministic"
+    )
+    model_drafted_count = sum(
+        1
+        for candidate in candidates
+        if isinstance(candidate, dict) and candidate.get("tier") == "model_drafted"
+    )
     discarded = examine.get("discarded", [])
     approval_required = examine.get("approval_required", [])
     activated = examine.get("activated", [])
@@ -95,12 +105,8 @@ def evolution_report_fields(phases: dict[str, dict[str, Any]]) -> dict[str, Any]
     return {
         "candidate_generation": {
             "method": method,
-            "deterministic_candidate_count": (
-                candidate_count if method == "deterministic-heuristic" else 0
-            ),
-            "model_generated_candidate_count": (
-                candidate_count if method == "model-generated" else 0
-            ),
+            "deterministic_candidate_count": deterministic_count,
+            "model_generated_candidate_count": model_drafted_count,
             "candidate_count": candidate_count,
         },
         "candidate_outcomes": {

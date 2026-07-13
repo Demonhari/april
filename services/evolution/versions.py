@@ -17,6 +17,16 @@ _STRUCTURAL_OVERLAY_RE = re.compile(
     r"(?im)^\s*(tools|permissions|allowed_tools|tool_registry|permission_level)\s*:"
 )
 
+
+def prompt_overlay_rejection_reason(content: str, *, max_chars: int) -> str | None:
+    """Shared generation, approval, and load-time overlay policy check."""
+    if len(content) > max_chars:
+        return "overlay exceeds prompt_overlay_max_chars"
+    if _STRUCTURAL_OVERLAY_RE.search(content):
+        return "overlay attempts structural tool or permission changes"
+    return None
+
+
 # Header used when active overlay bytes are appended to an agent's effective
 # system prompt. Overlays are advisory prose only: they can never change tools,
 # permissions, configs, or policy, and repo prompt files are never modified.
@@ -155,7 +165,7 @@ class PromptOverlayManager:
         max_chars = self.settings.evolution.prompt_overlay_max_chars
         if max_chars > 0:
             text = text[:max_chars]
-        if _STRUCTURAL_OVERLAY_RE.search(text):
+        if prompt_overlay_rejection_reason(text, max_chars=max_chars) is not None:
             self._audit(
                 "prompt_overlay_blocked_at_load",
                 agent=agent,
@@ -221,11 +231,10 @@ class PromptOverlayManager:
 
     def rejection_reason(self, content: str) -> str | None:
         """Policy check shared by auto-apply and the user approval path."""
-        if len(content) > self.settings.evolution.prompt_overlay_max_chars:
-            return "overlay exceeds prompt_overlay_max_chars"
-        if _STRUCTURAL_OVERLAY_RE.search(content):
-            return "overlay attempts structural tool or permission changes"
-        return None
+        return prompt_overlay_rejection_reason(
+            content,
+            max_chars=self.settings.evolution.prompt_overlay_max_chars,
+        )
 
     def _audit(
         self,

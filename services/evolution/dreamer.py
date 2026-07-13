@@ -203,7 +203,12 @@ class DreamerService:
         return report, report.to_payload()
 
     async def _phase_evolve(self) -> tuple[list[OverlayCandidate], dict[str, Any]]:
-        candidates = await generate_overlay_candidates(self.memory, self.settings)
+        candidates = await generate_overlay_candidates(
+            self.memory,
+            self.settings,
+            runtime_client=self.runtime_client,
+            audit=self.audit,
+        )
         # Candidates are data only. They are persisted for review even when the
         # examine phase later discards them or holds them for approval.
         stored: list[str] = []
@@ -238,14 +243,16 @@ class DreamerService:
                 "evaluation": evaluation,
                 "method": "deterministic_feedback_nudge",
             }
+        has_model_draft = any(candidate.tier == "model_drafted" for candidate in candidates)
         payload = {
             "candidates": [candidate.to_payload() for candidate in candidates],
             "stored_paths": stored,
             "ladder_thresholds": ladder_payload,
-            # Honest labelling: overlay candidates come from deterministic
-            # templates over local feedback, not from an LLM. Any improvement
-            # claim must come from the examine-phase evals, never from here.
-            "method": "deterministic-heuristic",
+            # Improvement claims come only from examine-phase evals. This label
+            # distinguishes optional local-runtime drafting from Tier A synthesis.
+            "method": (
+                "deterministic+model-drafted" if has_model_draft else "deterministic-heuristic"
+            ),
         }
         return candidates, payload
 

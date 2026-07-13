@@ -67,6 +67,31 @@ native packaging.
   stats all write only to fenced evolution/playbook paths or allow-listed DB
   tables. Deleting `data/evolution/` restores stock prompt, ladder, and adapter
   behavior.
+- **D4 learned guidance: implemented in two guarded tiers.** Always-on Tier A
+  deterministically synthesizes advisory lines from recent Archive/Dreamer
+  correction memories, surviving facts from adjudicated contradiction pairs,
+  and negative-feedback reasons. It orders by recency/confidence, deduplicates,
+  and attributes session-backed evidence through the originating agent run.
+  Optional Tier B (`evolution.model_drafted_overlays: false` by default) lets
+  Archive request one advisory draft from the same inputs through the typed
+  local Runtime client. An unavailable Runtime is audited and skipped. Both
+  tiers keep the two-candidate cap, character budget, structural rejection at
+  generation/approval/load, D5 ratchet, and Forge/Hand approval gate.
+- **Agent identity and prompt layering: implemented and fake-verified.** Every
+  agent prompt starts with its stable call sign, mandate, and non-goals. The
+  base prompt bytes remain first and immutable; learned guidance is appended
+  after the mandate and cannot change agent config or policy.
+- **Runtime adapter boundary: enforced by import test.** Pure adapter pointer
+  readers and hashing live in `april_common.adapter_pointer` and are re-exported
+  by `services.evolution.adapters`. April Runtime imports the leaf module only,
+  keeping `services.evolution`, `services.memory`, and API SQLite code out of
+  its process import graph while preserving config-path > pointer > none
+  precedence and existing real/fake load behavior.
+- **Cold fake verification: hardened without changing scores.** The launcher
+  performs one unscored tool-routing warm-up, retries only the first scored
+  tool-routing response once when `result` is missing, and includes a bounded
+  response-body snippet if that failure persists. Unit tests exercise the
+  helper logic without starting servers.
 - **Real GGUF: not verified until you run the real-model checks.** The default
   backend is `llama_cpp`, but no GGUF is downloaded or committed. Run
   `run april readiness` to see exactly what is missing, then
@@ -107,6 +132,10 @@ native packaging.
   email, payments, automatic model downloads, telemetry, cloud APIs, or broad
   delete. The only file-removing flow is the scoped, Level-4 approval-gated
   log/cache cleanup.
+- **Deferred v2 follow-ons remain out of scope.** No speaker-verifier model is
+  present (`wake.speaker_gate` stays `off` only), LoRA training remains a
+  supervised manual runbook, Governor thread throttling is not implemented,
+  and there is no dedicated SPA adapters screen.
 
 ## Architectural Assumptions
 

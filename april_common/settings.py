@@ -201,6 +201,7 @@ class EvolutionSettings(BaseModel):
     # (architecture default: 0.5).
     archive_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     prompt_overlay_max_chars: int = Field(default=1200, ge=0, le=20_000)
+    model_drafted_overlays: bool = False
     user_model_autoapply: str = "safe_sections_only"
 
     @field_validator("window")
@@ -415,6 +416,7 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_EVOLUTION_MAX_MINUTES": ("evolution", "max_minutes"),
     "APRIL_EVOLUTION_DAILY_MEMORY_CAP": ("evolution", "daily_memory_cap"),
     "APRIL_EVOLUTION_PROMPT_OVERLAY_MAX_CHARS": ("evolution", "prompt_overlay_max_chars"),
+    "APRIL_EVOLUTION_MODEL_DRAFTED_OVERLAYS": ("evolution", "model_drafted_overlays"),
     "APRIL_DEEP_MODE_MAX_SECONDS": ("deep_mode", "max_seconds"),
     "APRIL_DEEP_MODE_COUNCIL_N": ("deep_mode", "council_n"),
     "APRIL_DEEP_MODE_COUNCIL_MODE": ("deep_mode", "council_mode"),

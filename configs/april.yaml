@@ -102,6 +102,7 @@ evolution:
   max_minutes: 90
   daily_memory_cap: 30
   prompt_overlay_max_chars: 1200
+  model_drafted_overlays: false
   user_model_autoapply: safe_sections_only
 
 # Budgets for /chat deep and council modes (intelligence ladder R3/R4).

@@ -7,9 +7,9 @@ from typing import Any, ClassVar, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from april_common.adapter_pointer import active_adapter_path_from_pointer
 from april_common.errors import ConfigError, NotFoundError
 from services.april_runtime.schemas import ModelRole
-from services.evolution.adapters import active_adapter_path_from_pointer
 
 ChatFormat = Literal["generic", "granite", "qwen"]
 

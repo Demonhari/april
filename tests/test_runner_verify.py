@@ -25,6 +25,7 @@ from apps.runner.verify import (
     WorkflowVerifier,
     brain_decision_after_marker,
     build_workflow_report,
+    chat_result_from_response,
     latest_brain_decision_marker,
     run_model_benchmark,
     run_real_model_verification,
@@ -273,6 +274,40 @@ def test_verifier_http_steps_are_deterministic(tmp_path: Path, monkeypatch) -> N
     assert verifier._audit_records() == "ok"
 
 
+def test_chat_result_helper_retries_once_and_reports_bounded_body(tmp_path, monkeypatch) -> None:
+    verifier = verifier_with_ports(monkeypatch)
+
+    class SequenceClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, path: str, json: dict[str, Any]) -> FakeResponse:
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse({"detail": "imports still loading"}, status_code=422)
+            return FakeResponse({"result": {"status": "ok", "conversation_id": "conv"}})
+
+    client = SequenceClient()
+    result = verifier._post_chat_result(
+        client,  # type: ignore[arg-type]
+        {"message": "hello"},
+        context="first scored tool-routing chat",
+        retry_missing_result=True,
+    )
+    assert result["conversation_id"] == "conv"
+    assert client.calls == 2
+
+    long_body = "x" * 400
+    missing = FakeResponse({"detail": "missing"})
+    missing.text = long_body
+    with pytest.raises(RuntimeError, match=r"missing result; body=x{20}$"):
+        chat_result_from_response(
+            missing,
+            context="repo analysis",
+            snippet_chars=20,
+        )
+
+
 def test_verifier_run_records_failures_and_stops(tmp_path: Path, monkeypatch) -> None:
     verifier = verifier_with_ports(monkeypatch)
     monkeypatch.setattr(verifier, "_prepare", lambda: None)
@@ -281,6 +316,8 @@ def test_verifier_run_records_failures_and_stops(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(verifier, "_wait_json", lambda url: {"status": "ok"})
     monkeypatch.setattr(verifier, "_check_models", lambda: "models")
     monkeypatch.setattr(verifier, "_register_project", lambda: "project")
+    warmups: list[str] = []
+    monkeypatch.setattr(verifier, "_warm_up_tool_routing", warmups.append)
     monkeypatch.setattr(verifier, "_multi_turn", lambda project_id: "conversation")
     monkeypatch.setattr(verifier, "_isolated_conversation", lambda project_id, conv: "other")
     monkeypatch.setattr(verifier, "_conversation_switch_rejected", lambda conv: "403")
@@ -302,6 +339,7 @@ def test_verifier_run_records_failures_and_stops(tmp_path: Path, monkeypatch) ->
 
     checks = verifier.run()
     assert checks
+    assert warmups == ["project"]
     assert all(isinstance(check, VerifyCheck) for check in checks)
     assert all(check.ok for check in checks)
 

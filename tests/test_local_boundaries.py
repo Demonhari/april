@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,36 @@ from skills.policy import ToolPolicy
 from skills.registry import default_registry
 from skills.reminders.create_reminder import create_reminder
 from skills.reminders.list_reminders import list_reminders
+
+
+def test_runtime_import_graph_excludes_evolution_and_memory() -> None:
+    script = """
+import importlib
+import sys
+
+for name in (
+    'services.april_runtime.model_registry',
+    'services.april_runtime.model_loader',
+    'services.april_runtime.model_lifecycle',
+    'services.april_runtime.server',
+):
+    importlib.import_module(name)
+blocked = sorted(
+    name for name in sys.modules
+    if name == 'services.evolution' or name.startswith('services.evolution.')
+    or name == 'services.memory' or name.startswith('services.memory.')
+)
+if blocked:
+    raise SystemExit(','.join(blocked))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path.cwd(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
 class FakeApiAsyncClient:

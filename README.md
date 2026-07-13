@@ -198,6 +198,8 @@ real models, live audio, or native Mac packaging.
 | Secure first-run bootstrap (`setup bootstrap`) | Implemented, tested with temp homes |
 | Interactive push-to-talk (stop-controlled capture) | Implemented, tested with fake mic + mocked input |
 | Wake feedback verbs, earcon path, and listening status | Implemented, fake-audio/API/SPA tested; live wake still requires target-Mac `verify-wake-live` |
+| Learned-guidance synthesis (deterministic Tier A; optional local model-drafted Tier B) | Implemented, fake-runtime tested; Dreamer remains off and Tier B defaults off |
+| Stable agent identity cards and base-first overlay ordering | Implemented, prompt/overlay tested |
 | LoRA adapter lifecycle (`april evolve adapter`) | Implemented, fake/mock tested; activation requires local perplexity evidence and production real-model report |
 | Ladder thresholds, gated threshold overlays, council mode, reminder reflex | Implemented, fake-backend tested |
 | Real GGUF model load/chat/stream/unload | Implemented; verified only by target-Mac `--require-real-model` reports with local GGUFs |
@@ -1481,6 +1483,24 @@ april evolve adapter rollback april-brain [--version N]
 Overlays are advisory prose only: structural tool/permission content is
 rejected at generation, at approval, and again at load. Write-capable agents
 (Forge/Hand) never auto-apply — their overlays wait in `evolve pending`.
+Tier A learned guidance is always deterministic: it combines recent
+Archive/Dreamer correction memories, the surviving facts from adjudicated
+memory contradictions, and negative-feedback reasons. Evidence is ordered by
+recency and confidence, deduplicated, and attributed to its originating agent
+run when session provenance is available (otherwise Prime/general). Optional
+Tier B is enabled only with `evolution.model_drafted_overlays: true`; Archive
+then asks the configured local Runtime for at most one advisory draft from the
+same inputs. Runtime/model failure is audited and skipped, never replaced with
+fabricated prose. Tier B uses the same structural guard, D5 eval ratchet, and
+Forge/Hand exact approval requirement as Tier A. Both tiers share the existing
+two-candidate nightly cap and `prompt_overlay_max_chars` budget.
+
+Each `agents/*/prompt.md` begins with a stable identity card (call sign,
+mandate, and non-goals): Prime/general, Forge/coding, Scout/reading,
+Muse/creative, Sage/reasoning, Hand/system action, and Archive/memory. Prompt
+assembly always preserves those base bytes first and appends `Learned guidance`
+after the base contract; active overlays never rewrite prompt files.
+
 The Dreamer may also propose a bounded, deterministic ladder-threshold overlay
 under `data/evolution/config/`; it can contain only
 `deep_confidence_threshold` and `verified_confidence_threshold`, activates only
@@ -1494,6 +1514,11 @@ resolution is `adapter_path` > active pointer file > no adapter. Activation
 requires local perplexity evidence (`adapter_ppl <= base_ppl`) and, in
 `APRIL_ENV=production`, a fresh real-model verification report that loaded the
 same adapter hash. Rollback is a pointer flip and every state change is audited.
+Runtime pointer resolution lives in the leaf-only
+`april_common.adapter_pointer` module, so importing April Runtime does not pull
+`services.evolution`, `services.memory`, or the Core API SQLite graph into the
+Runtime process. `services.evolution.adapters` re-exports the pointer helpers
+for API compatibility.
 Training and perplexity measurement remain a manual local runbook (see
 `scripts/finetune/README.md`); a configured/pointer-selected but missing adapter
 fails the model load hard instead of silently serving the base model.
@@ -1505,6 +1530,13 @@ route normally. Sentinel plays a generated short earcon on accepted wakes when
 audio dependencies are present, writes `idle | listening | muted` status under
 `data/evolution/wake/`, and the authenticated wake status plus Desktop header
 surface that state.
+
+**Cold fake verification.** `run april verify --fake` sends one unscored
+tool-routing warm-up after service readiness and project registration. The
+first scored tool-routing chat gets one bounded retry only when its response is
+missing the normal `result` envelope; all other assertions and scored totals
+are unchanged. A final missing-result failure includes a bounded response-body
+snippet for diagnosis instead of a bare key lookup error.
 
 **Ladder alignment.** `deep_mode.council_mode` defaults to the existing
 `reasoning_n` best-of-N behavior. `multi_agent` uses one responder each from the
@@ -1652,6 +1684,10 @@ milestones rather than hidden gaps:
 - cloud sync, telemetry, and any automatic model downloading
 - signed/notarized macOS application packaging and launch-at-login
 - external connectors
+- a speaker-verifier model (`wake.speaker_gate` remains `off` only)
+- automatic LoRA training (the supervised local runbook remains manual)
+- Governor thread throttling
+- a dedicated SPA adapters screen
 
 Model files are never committed to this repository and are never downloaded
 automatically; you provide them locally.

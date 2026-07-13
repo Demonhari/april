@@ -539,6 +539,13 @@ def test_active_overlay_shapes_effective_prompt_and_never_touches_policy(setting
     assert "Learned guidance" in effective.system_prompt
     assert "Prefer bullet lists for multi-step answers." in effective.system_prompt
     assert effective.system_prompt.startswith(stock_prompt)
+    assert stock_prompt == stock_prompt_bytes.decode("utf-8").strip()
+    assert effective.system_prompt.index("Call sign: Prime") < effective.system_prompt.index(
+        "Mandate:"
+    )
+    assert effective.system_prompt.index("Mandate:") < effective.system_prompt.index(
+        "Learned guidance"
+    )
     # Tool policy, memory policy, and every non-prompt field are untouched.
     assert effective.config.allowed_tools == stock_agent.config.allowed_tools
     assert effective.config.blocked_tools == stock_agent.config.blocked_tools

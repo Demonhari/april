@@ -396,6 +396,27 @@ class WorkflowVerificationReport(BaseModel):
     max_output_tokens: int | None = None
 
 
+class MissingChatResultError(RuntimeError):
+    """A /chat response completed without the scored result envelope."""
+
+
+def chat_result_from_response(
+    response: Any, *, context: str, snippet_chars: int = 240
+) -> dict[str, Any]:
+    """Validate a /chat result and retain a bounded body clue on failure."""
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        payload = None
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        raw = " ".join(str(getattr(response, "text", "")).split())
+        snippet = raw[: max(0, snippet_chars)] or "<empty body>"
+        raise MissingChatResultError(f"{context} response missing result; body={snippet}")
+    response.raise_for_status()
+    return result
+
+
 def build_workflow_report(
     checks: list[VerifyCheck],
     *,
@@ -1295,6 +1316,10 @@ class LauncherVerifier:
             self._check("core health", lambda: self._wait_json(self.api_url + "/health"))
             self._check("model listing", self._check_models)
             project_id = self._check("project registration", self._register_project)
+            # Unscored readiness warm-up: import contention can make the first
+            # tool-routing chat return before the normal result envelope exists.
+            # Its outcome is deliberately ignored and never changes totals.
+            self._warm_up_tool_routing(project_id)
             conversation_id = self._check(
                 "multi-turn conversation",
                 lambda: self._multi_turn(project_id),
@@ -1426,8 +1451,39 @@ class LauncherVerifier:
             time.sleep(0.2)
         raise RuntimeError(f"health check failed for {url}: {last}")
 
-    def _client(self) -> httpx.Client:
-        return httpx.Client(base_url=self.api_url, headers=self.headers, timeout=10.0)
+    def _client(self, *, timeout: float = 10.0) -> httpx.Client:
+        return httpx.Client(base_url=self.api_url, headers=self.headers, timeout=timeout)
+
+    def _warm_up_tool_routing(self, project_id: str) -> None:
+        try:
+            with self._client(timeout=30.0) as client:
+                client.post(
+                    "/chat",
+                    json={
+                        "message": "April, inspect this repository for a routing warm-up.",
+                        "project_id": project_id,
+                    },
+                )
+        except Exception:
+            return
+
+    def _post_chat_result(
+        self,
+        client: httpx.Client,
+        payload: dict[str, Any],
+        *,
+        context: str,
+        retry_missing_result: bool = False,
+    ) -> dict[str, Any]:
+        attempts = 2 if retry_missing_result else 1
+        for attempt in range(attempts):
+            response = client.post("/chat", json=payload)
+            try:
+                return chat_result_from_response(response, context=context)
+            except MissingChatResultError:
+                if attempt + 1 >= attempts:
+                    raise
+        raise AssertionError("unreachable")
 
     def _check_models(self) -> str:
         with self._client() as client:
@@ -1446,30 +1502,34 @@ class LauncherVerifier:
 
     def _multi_turn(self, project_id: str) -> str:
         with self._client() as client:
-            first = client.post(
-                "/chat",
-                json={"message": "April, plan my work today.", "project_id": project_id},
-            ).json()
-            conversation_id = first["result"]["conversation_id"]
-            second = client.post(
-                "/chat",
-                json={
+            first = self._post_chat_result(
+                client,
+                {"message": "April, plan my work today.", "project_id": project_id},
+                context="first scored tool-routing chat",
+                retry_missing_result=True,
+            )
+            conversation_id = first["conversation_id"]
+            second = self._post_chat_result(
+                client,
+                {
                     "message": "Use that same plan.",
                     "project_id": project_id,
                     "conversation_id": conversation_id,
                 },
-            ).json()
-        if second["result"]["status"] != "ok":
+                context="second conversation turn",
+            )
+        if second["status"] != "ok":
             raise RuntimeError("second turn failed")
         return str(conversation_id)
 
     def _isolated_conversation(self, project_id: str, existing_id: str) -> str:
         with self._client() as client:
-            other = client.post(
-                "/chat",
-                json={"message": "Start a separate plan.", "project_id": project_id},
-            ).json()
-        other_id = other["result"]["conversation_id"]
+            other = self._post_chat_result(
+                client,
+                {"message": "Start a separate plan.", "project_id": project_id},
+                context="conversation isolation chat",
+            )
+        other_id = other["conversation_id"]
         if other_id == existing_id:
             raise RuntimeError("conversation IDs overlapped")
         return str(other_id)
@@ -1491,29 +1551,30 @@ class LauncherVerifier:
 
     def _repo_analysis(self, project_id: str) -> str:
         with self._client() as client:
-            response = client.post(
-                "/chat",
-                json={
+            result = self._post_chat_result(
+                client,
+                {
                     "message": "April, check why the animation in this repository is broken.",
                     "project_id": project_id,
                 },
-            ).json()
-        if response["result"]["status"] != "ok":
+                context="read-only repo analysis",
+            )
+        if result["status"] != "ok":
             raise RuntimeError("repo analysis failed")
         return "ok"
 
     def _patch_approval(self, project_id: str) -> str:
         with self._client() as client:
-            response = client.post(
-                "/chat",
-                json={
+            result = self._post_chat_result(
+                client,
+                {
                     "message": "Apply the fix.",
                     "project_id": project_id,
                 },
-            ).json()
-        result = response["result"]
+                context="patch approval chat",
+            )
         if result["status"] != "pending_approval":
-            raise RuntimeError(str(response))
+            raise RuntimeError(str(result))
         approval = result["pending_approval"]
         if approval["metadata"].get("agent_run_id") is None:
             raise RuntimeError("approval is not bound to a structured agent run")
@@ -1528,9 +1589,10 @@ class LauncherVerifier:
                     "message": "Check animation files",
                     "project_id": project_id,
                 },
-            ).json()
-        if response["result"]["status"] != "ok":
-            raise RuntimeError(str(response))
+            )
+        result = chat_result_from_response(response, context="direct agent structured execution")
+        if result["status"] != "ok":
+            raise RuntimeError(str(result))
         return "ok"
 
     def _approve(self, approval_id: str) -> str:
