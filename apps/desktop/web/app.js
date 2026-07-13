@@ -181,7 +181,7 @@ function updateRail() {
   setRailItem("rail-backend", undefined, "backend", backend.backend + " · " + badge);
   setRailItem("rail-project", undefined, "project", selectedProject ? selectedProject.name : "no project");
   setRailItem("rail-conv", undefined, "conv", CONVERSATION_ID.slice(0, 8));
-  // Wake/mute status: booleans from /health only; "unknown" when unreported.
+  // Wake/mute/listening status from /health; "unknown" when unreported.
   const wake = state.health && state.health.wake;
   if (!wake) {
     setRailItem("rail-wake", "neutral", "wake", "unknown");
@@ -189,6 +189,10 @@ function updateRail() {
     setRailItem("rail-wake", "neutral", "wake", "off");
   } else if (wake.muted) {
     setRailItem("rail-wake", "warn", "wake", "muted");
+  } else if (wake.state === "listening") {
+    setRailItem("rail-wake", "ok", "wake", "listening");
+  } else if (wake.state === "idle") {
+    setRailItem("rail-wake", "neutral", "wake", "idle");
   } else {
     setRailItem("rail-wake", "ok", "wake", "on");
   }

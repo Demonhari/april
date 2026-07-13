@@ -42,6 +42,7 @@ from april_common.errors import ConfigError
 from april_common.settings import load_settings
 from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
 from services.brain.schemas import BrainDecision
+from services.evolution.adapters import sha256_file
 from services.voice.health import query_audio_devices, voice_doctor
 
 VerifyStatus = Literal["pass", "fail", "skip", "manual"]
@@ -248,6 +249,8 @@ def run_all_configured_models_verification(
     max_output_tokens: int = 32,
     timeout: float = 180.0,
     thresholds: ReportThresholds | None = None,
+    candidate_adapter_model_id: str | None = None,
+    candidate_adapter_path: Path | None = None,
 ) -> AllConfiguredModelsVerifier:
     verifier = AllConfiguredModelsVerifier(
         home=home,
@@ -255,6 +258,8 @@ def run_all_configured_models_verification(
         max_output_tokens=max_output_tokens,
         timeout=timeout,
         thresholds=thresholds,
+        candidate_adapter_model_id=candidate_adapter_model_id,
+        candidate_adapter_path=candidate_adapter_path,
     )
     verifier.run()
     return verifier
@@ -1714,21 +1719,31 @@ class LauncherVerifier:
 
     def _tool_call_records(self) -> str:
         database = self.temp / "data" / "april.db"
-        with sqlite3.connect(database) as conn:
-            count = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
-        if count < 1:
-            raise RuntimeError("no tool call rows found")
-        return str(count)
+        deadline = time.monotonic() + 5.0
+        last_count = 0
+        while True:
+            with sqlite3.connect(database) as conn:
+                last_count = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
+            if last_count >= 1:
+                return str(last_count)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("no tool call rows found")
+            time.sleep(0.1)
 
     def _agent_run_records(self) -> str:
         database = self.temp / "data" / "april.db"
-        with sqlite3.connect(database) as conn:
-            runs = conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
-            iterations = conn.execute("SELECT COUNT(*) FROM agent_iterations").fetchone()[0]
-            suspended = conn.execute("SELECT COUNT(*) FROM suspended_agent_runs").fetchone()[0]
-        if runs < 1 or iterations < 1 or suspended < 1:
-            raise RuntimeError(f"runs={runs}, iterations={iterations}, suspended={suspended}")
-        return f"runs={runs}, iterations={iterations}, suspended={suspended}"
+        deadline = time.monotonic() + 5.0
+        runs = iterations = suspended = 0
+        while True:
+            with sqlite3.connect(database) as conn:
+                runs = conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
+                iterations = conn.execute("SELECT COUNT(*) FROM agent_iterations").fetchone()[0]
+                suspended = conn.execute("SELECT COUNT(*) FROM suspended_agent_runs").fetchone()[0]
+            if runs >= 1 and iterations >= 1 and suspended >= 1:
+                return f"runs={runs}, iterations={iterations}, suspended={suspended}"
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"runs={runs}, iterations={iterations}, suspended={suspended}")
+            time.sleep(0.1)
 
     def _suspended_status(self, approval_id: str) -> str | None:
         database = self.temp / "data" / "april.db"
@@ -2468,6 +2483,8 @@ class AllConfiguredModelsVerifier(
         max_output_tokens: int = 32,
         timeout: float = 180.0,
         thresholds: ReportThresholds | None = None,
+        candidate_adapter_model_id: str | None = None,
+        candidate_adapter_path: Path | None = None,
     ) -> None:
         self.plan = plan_multi_model_verification(home)
         available = [entry for entry in self.plan if entry.available]
@@ -2480,6 +2497,12 @@ class AllConfiguredModelsVerifier(
         self.results: list[PerModelResult] = []
         self.specialist_switch: SpecialistSwitchReport | None = None
         self.runtime_error = False
+        self.candidate_adapter_model_id = candidate_adapter_model_id
+        self.candidate_adapter_path = (
+            candidate_adapter_path.expanduser().resolve(strict=False)
+            if candidate_adapter_path is not None
+            else None
+        )
 
     @property
     def api_headers(self) -> dict[str, str]:
@@ -2489,7 +2512,17 @@ class AllConfiguredModelsVerifier(
         # Keep the REAL configs so each role uses its own configured GGUF path.
         self.verify_home.mkdir(parents=True)
         shutil.copytree(self.repo_home / "configs", self.verify_home / "configs")
+        self._copy_adapter_pointers_for_temp_home()
         self._rewrite_relative_model_paths_for_temp_home()
+        self._inject_candidate_adapter_for_temp_home()
+
+    def _copy_adapter_pointers_for_temp_home(self) -> None:
+        source = self.repo_home / "data" / "evolution" / "adapters"
+        if not source.is_dir():
+            return
+        destination = self.verify_home / "data" / "evolution" / "adapters"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination, dirs_exist_ok=True)
 
     def _rewrite_relative_model_paths_for_temp_home(self) -> None:
         models_path = self.verify_home / "configs" / "models.yaml"
@@ -2501,16 +2534,35 @@ class AllConfiguredModelsVerifier(
         for raw_model in models.values():
             if not isinstance(raw_model, dict):
                 continue
-            raw_path = raw_model.get("path")
-            if not isinstance(raw_path, str):
-                continue
-            model_path = Path(raw_path).expanduser()
-            if model_path.is_absolute():
-                continue
-            raw_model["path"] = str((self.repo_home / model_path).resolve(strict=False))
-            changed = True
+            for key in ("path", "adapter_path"):
+                raw_path = raw_model.get(key)
+                if not isinstance(raw_path, str):
+                    continue
+                model_path = Path(raw_path).expanduser()
+                if model_path.is_absolute():
+                    continue
+                raw_model[key] = str((self.repo_home / model_path).resolve(strict=False))
+                changed = True
         if changed:
             models_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    def _inject_candidate_adapter_for_temp_home(self) -> None:
+        candidate_model_id = getattr(self, "candidate_adapter_model_id", None)
+        candidate_path = getattr(self, "candidate_adapter_path", None)
+        if candidate_model_id is None or candidate_path is None:
+            return
+        models_path = self.verify_home / "configs" / "models.yaml"
+        data = yaml.safe_load(models_path.read_text(encoding="utf-8")) or {}
+        models = data.get("models")
+        if not isinstance(models, dict):
+            return
+        for raw_model in models.values():
+            if not isinstance(raw_model, dict):
+                continue
+            if raw_model.get("id") == candidate_model_id:
+                raw_model["adapter_path"] = str(candidate_path)
+                models_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+                return
 
     def run(self) -> list[VerifyCheck]:
         for entry in self.plan:
@@ -2577,6 +2629,8 @@ class AllConfiguredModelsVerifier(
             backend=model.backend,
             path_basename=entry.path_basename,
             quantization=quantization_from_basename(entry.path_basename),
+            adapter_path_basename=self._adapter_path_basename(model),
+            adapter_sha256=self._adapter_sha256(model),
             available=True,
             context_size=model.context_size,
         )
@@ -2635,6 +2689,27 @@ class AllConfiguredModelsVerifier(
             except Exception:
                 result.unload_success = False
         return result
+
+    def _effective_adapter_path_for_report(self, model: ModelDefinition) -> Path | None:
+        if self.candidate_adapter_model_id == model.id and self.candidate_adapter_path is not None:
+            return self.candidate_adapter_path
+        try:
+            return model.resolved_adapter_path(self.repo_home)
+        except (OSError, ValueError):
+            return None
+
+    def _adapter_path_basename(self, model: ModelDefinition) -> str | None:
+        path = self._effective_adapter_path_for_report(model)
+        return path.name if path is not None else None
+
+    def _adapter_sha256(self, model: ModelDefinition) -> str | None:
+        path = self._effective_adapter_path_for_report(model)
+        if path is None or not path.exists():
+            return None
+        try:
+            return sha256_file(path)
+        except OSError:
+            return None
 
     def _specialist_smoke(
         self, model_id: str, role: str

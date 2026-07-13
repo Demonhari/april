@@ -237,7 +237,29 @@ class ModelLifecycle:
             # (readiness uses ModelDefinition.resolved_adapter_path(registry.root)).
             # A relative adapter_path must not be resolved against the process cwd.
             update: dict[str, object] = {"path": state.model.resolved_path(self.registry.root)}
-            resolved_adapter = state.model.resolved_adapter_path(self.registry.root)
+            try:
+                resolved_adapter = state.model.resolved_adapter_path(self.registry.root)
+            except (OSError, ValueError) as exc:
+                state.state = "error"
+                state.load_error = str(exc)
+                raise ModelUnavailableError(
+                    model_id,
+                    "Unable to resolve active LoRA adapter.",
+                    {"cause": str(exc)},
+                ) from exc
+            if (
+                resolved_adapter is not None
+                and self.root_backend != "fake"
+                and state.model.backend != "fake"
+                and not resolved_adapter.exists()
+            ):
+                state.state = "error"
+                state.load_error = f"LoRA adapter file is missing: {resolved_adapter}"
+                raise ModelUnavailableError(
+                    model_id,
+                    "Configured LoRA adapter path is missing.",
+                    {"adapter_path": str(resolved_adapter)},
+                )
             if resolved_adapter is not None:
                 update["adapter_path"] = resolved_adapter
             resolved_model = state.model.model_copy(update=update)

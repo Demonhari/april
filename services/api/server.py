@@ -37,6 +37,8 @@ from april_common.time import utc_now
 from services.api.auth import require_bearer_token
 from services.api.dependencies import ApiContainer, build_container
 from services.api.schemas import (
+    AdapterActivateRequest,
+    AdapterRollbackRequest,
     AgentRunRequest,
     ChatRequest,
     ChatResponse,
@@ -59,6 +61,7 @@ from services.api.schemas import (
 )
 from services.april_runtime.model_registry import ModelRegistry
 from services.april_runtime.schemas import LoadModelRequest
+from services.evolution.adapters import AdapterLifecycleManager
 from services.evolution.approval import PromptOverlayApprovalService
 from services.evolution.dataset_export import export_finetune_dataset
 from services.evolution.dreamer import latest_report
@@ -91,8 +94,10 @@ from services.voice.health import (
     voice_health,
     voice_readiness_summary,
 )
+from services.wake.feedback import WakeFeedback, classify_wake_feedback
 from services.wake.schemas import WakeEvent
 from services.wake.sentinel import MuteSwitch
+from services.wake.status import read_wake_status
 from services.wake.wake_bus import WakeBus
 from skills.playbooks import (
     PlaybookAdoptionService,
@@ -277,6 +282,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                 "wake": {
                     "enabled": active.settings.wake.enabled,
                     "muted": active.settings.mute_flag_path.exists(),
+                    "state": read_wake_status(active.settings)["state"],
                 },
                 "scheduler": {
                     "enabled": active.settings.scheduler.enabled,
@@ -467,8 +473,11 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
 
     @app.get("/wake/mute")
     async def wake_mute_status(active: ApiContainer = Depends(authorized)) -> object:
-        # Booleans only; the flag path itself is never exposed.
-        return {"muted": MuteSwitch(active.settings.mute_flag_path).is_muted()}
+        # Redacted state only; the flag/status paths themselves are never exposed.
+        return {
+            "muted": MuteSwitch(active.settings.mute_flag_path).is_muted(),
+            "state": read_wake_status(active.settings)["state"],
+        }
 
     @app.post("/wake/mute")
     async def wake_mute_set(
@@ -489,7 +498,11 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                 "muted": request.muted,
             }
         )
-        return {"muted": switch.is_muted(), "audited": True}
+        return {
+            "muted": switch.is_muted(),
+            "state": read_wake_status(active.settings)["state"],
+            "audited": True,
+        }
 
     @app.get("/sessions")
     async def sessions(
@@ -901,6 +914,51 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             payload["path"] = str(payload["path"])
         return {"rollback": payload}
 
+    @app.get("/evolution/adapters")
+    async def evolution_adapters(
+        model_id: str | None = None,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        manager = AdapterLifecycleManager(
+            active.settings,
+            active.database,
+            audit=active.approvals.audit,
+        )
+        return {"adapters": await manager.list(model_id=model_id)}
+
+    @app.post("/evolution/adapters/activate")
+    async def evolution_adapters_activate(
+        request: AdapterActivateRequest,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        manager = AdapterLifecycleManager(
+            active.settings,
+            active.database,
+            audit=active.approvals.audit,
+        )
+        result = await manager.activate(
+            model_id=request.model_id,
+            adapter_path=Path(request.adapter_path),
+            evidence_path=(Path(request.evidence_path) if request.evidence_path else None),
+            verification_report_path=(
+                Path(request.verification_report_path) if request.verification_report_path else None
+            ),
+        )
+        return {"activation": result.to_payload()}
+
+    @app.post("/evolution/adapters/rollback")
+    async def evolution_adapters_rollback(
+        request: AdapterRollbackRequest,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        manager = AdapterLifecycleManager(
+            active.settings,
+            active.database,
+            audit=active.approvals.audit,
+        )
+        result = await manager.rollback(model_id=request.model_id, version=request.version)
+        return {"rollback": result.to_payload()}
+
     @app.get("/evolution/report/latest")
     async def evolution_report_latest(active: ApiContainer = Depends(authorized)) -> object:
         return {"report": latest_report(active.settings)}
@@ -1231,6 +1289,17 @@ async def _handle_wake_event(
         **resolution.model_dump(),
     }
     if event.text:
+        feedback = classify_wake_feedback(event.text)
+        if feedback is not None:
+            payload["result"] = await _record_wake_feedback(
+                active,
+                feedback,
+                session_id=resolution.session_id,
+                conversation_id=resolution.conversation_id,
+                request_id=request_id,
+            )
+            await session_manager.touch(resolution.session_id)
+            return payload
         result = await active.orchestrator.chat(
             event.text,
             conversation_id=resolution.conversation_id,
@@ -1239,6 +1308,61 @@ async def _handle_wake_event(
         await session_manager.touch(resolution.session_id)
         payload["result"] = result.model_dump()
     return payload
+
+
+async def _record_wake_feedback(
+    active: ApiContainer,
+    feedback: WakeFeedback,
+    *,
+    session_id: str,
+    conversation_id: str | None,
+    request_id: str,
+) -> dict[str, Any]:
+    agent_run_id = await active.memory.latest_agent_run_id(conversation_id=conversation_id)
+    if agent_run_id is None:
+        active.approvals.audit.write(
+            {
+                "event_type": "wake_feedback_noop",
+                "request_id": request_id,
+                "actor": "local-user",
+                "kind": "wake_feedback",
+                "rating": feedback.rating,
+                "reason_length": len(feedback.phrase),
+                "agent_run_bound": False,
+            }
+        )
+        return {
+            "final_message": "I do not have a recent answer to attach that feedback to.",
+            "feedback_recorded": False,
+        }
+    record = await active.memory.record_feedback_event(
+        rating=feedback.rating,
+        reason=f"wake_feedback: {feedback.phrase}",
+        session_id=session_id,
+        conversation_id=conversation_id,
+        agent_run_id=agent_run_id,
+    )
+    active.approvals.audit.write(
+        {
+            "event_type": "feedback_recorded",
+            "request_id": request_id,
+            "actor": "local-user",
+            "kind": "wake_feedback",
+            "rating": record.rating,
+            "reason_length": len(record.reason or ""),
+            "agent_run_bound": True,
+        }
+    )
+    if record.rating == "bad":
+        with contextlib.suppress(Exception):
+            await stage_feedback_eval_case(
+                active.settings,
+                active.memory,
+                record,
+                kind="wake_feedback",
+                audit=active.approvals.audit,
+            )
+    return {"final_message": "Feedback recorded.", "feedback_recorded": True}
 
 
 def _redact_health_payload(value: Any) -> Any:

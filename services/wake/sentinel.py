@@ -18,6 +18,7 @@ from services.voice.vad import VoiceActivityDetector
 from services.wake.confirmer import SttConfirmer, strip_vocative
 from services.wake.ring_buffer import AudioRingBuffer
 from services.wake.schemas import WakeEvent
+from services.wake.status import WakeListeningState, write_wake_status
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class Sentinel:
         """Own the microphone until stopped. Mute fully releases the stream."""
         while not self._stopped:
             if self.mute.is_muted():
+                self._set_status("muted")
                 self._follow_up_until = None
                 await self._sleep(self.mute_poll_seconds)
                 continue
@@ -132,8 +134,10 @@ class Sentinel:
     async def run_once(self) -> None:
         """Consume one microphone stream until mute/stop/stream end."""
         if self.mute.is_muted() or self._stopped:
+            self._set_status("muted" if self.mute.is_muted() else "idle")
             self._follow_up_until = None
             return
+        self._set_status("idle")
         frame_source = self.microphone.frames()
         try:
             async for frame in frame_source:
@@ -143,6 +147,7 @@ class Sentinel:
         finally:
             # Every exit path (mute, stop, exhaustion, error) releases the mic.
             await aclose_frame_source(frame_source)
+            self._set_status("muted" if self.mute.is_muted() else "idle")
 
     async def _handle_frame(self, frame: bytes, frame_source: AsyncIterator[bytes]) -> None:
         self.ring_buffer.append(frame)
@@ -234,6 +239,15 @@ class Sentinel:
         speech_seen: bool = False,
     ) -> None:
         pre_roll = self.ring_buffer.snapshot()
+        self._set_status("listening")
+        if self.player is not None:
+            # Barge-in: the user speaking over APRIL always interrupts playback
+            # before APRIL emits the short acknowledgement earcon.
+            if self.barge_in_mode == "duck":
+                await self.player.duck()
+            else:
+                await self.player.stop()
+        await self._play_earcon()
         if self.transcriber is not None:
             text = await self._transcribe_full_utterance(
                 pre_roll,
@@ -248,18 +262,28 @@ class Sentinel:
             reset = getattr(scorer, "reset", None)
             if callable(reset):
                 reset()
-        if self.player is not None:
-            # Barge-in: the user speaking over APRIL always interrupts playback.
-            if self.barge_in_mode == "duck":
-                await self.player.duck()
-            else:
-                await self.player.stop()
         event = WakeEvent(source="voice", score=score, text=text, reason=reason)
         self.accepted_wakes += 1
         try:
             await self.deliver(event)
         except Exception as exc:  # delivery failure must not kill the mic loop
             logger.warning("Wake delivery failed: %s", exc)
+        finally:
+            self._set_status("muted" if self.mute.is_muted() else "idle")
+
+    async def _play_earcon(self) -> None:
+        if self.player is None or not self.settings.wake.earcon_enabled:
+            return
+        output_path = self.settings.audio_cache_path / f"wake-earcon-{uuid.uuid4()}.wav"
+        try:
+            frames = [_earcon_pcm(sample_rate=self.sample_rate)]
+            write_pcm_wav(output_path, frames, sample_rate=self.sample_rate)
+            await self.player.play(output_path)
+        except Exception as exc:
+            logger.debug("Wake earcon playback skipped: %s", exc)
+        finally:
+            if not self.settings.voice.retain_debug_audio:
+                output_path.unlink(missing_ok=True)
 
     async def _transcribe_full_utterance(
         self,
@@ -318,6 +342,24 @@ class Sentinel:
         self.rejected_candidates += 1
         self.last_rejection_reason = reason
         logger.debug("Wake candidate rejected (score=%.3f): %s", score, reason)
+
+    def _set_status(self, state: WakeListeningState) -> None:
+        try:
+            write_wake_status(self.settings, state)
+        except Exception as exc:
+            logger.debug("Wake status write skipped: %s", exc)
+
+
+def _earcon_pcm(*, sample_rate: int) -> bytes:
+    import numpy as np
+
+    duration_seconds = 0.15
+    frequency_hz = 660.0
+    samples = int(sample_rate * duration_seconds)
+    t = np.arange(samples, dtype=np.float32) / float(sample_rate)
+    envelope = np.linspace(1.0, 0.2, samples, dtype=np.float32)
+    wave = np.sin(2.0 * np.pi * frequency_hz * t) * envelope * 0.18
+    return np.asarray(wave * 32767, dtype=np.int16).tobytes()
 
 
 class ApiWakeDelivery:

@@ -41,6 +41,8 @@ class PerModelResult(BaseModel):
     backend: str
     path_basename: str | None = None
     quantization: str | None = None
+    adapter_path_basename: str | None = None
+    adapter_sha256: str | None = None
     available: bool = False
     skipped_reason: str | None = None
     context_size: int | None = None

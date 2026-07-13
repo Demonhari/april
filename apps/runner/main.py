@@ -2367,6 +2367,16 @@ def verify(
     min_routing_accuracy: float = typer.Option(0.90, "--min-routing-accuracy", min=0.0, max=1.0),
     max_output_tokens: int = typer.Option(32, "--max-output-tokens", min=1, max=4096),
     timeout: float = typer.Option(180.0, "--timeout", min=1.0),
+    candidate_adapter_model_id: str | None = typer.Option(
+        None,
+        "--candidate-adapter-model-id",
+        help="Temporarily verify this model with --candidate-adapter-path.",
+    ),
+    candidate_adapter_path: Path | None = typer.Option(
+        None,
+        "--candidate-adapter-path",
+        help="Temporary LoRA adapter path for all-configured-model verification.",
+    ),
 ) -> None:
     thresholds = ReportThresholds(
         min_tokens_per_second=min_tokens_per_second,
@@ -2375,6 +2385,21 @@ def verify(
         max_rss_mb=max_rss_mb,
         min_routing_accuracy=min_routing_accuracy,
     )
+    candidate_adapter_requested = (
+        candidate_adapter_model_id is not None or candidate_adapter_path is not None
+    )
+    if candidate_adapter_requested:
+        if not all_configured_models:
+            console.print(
+                "[red]Candidate adapter verification is only supported with "
+                "--all-configured-models.[/red]"
+            )
+            raise typer.Exit(1)
+        if candidate_adapter_model_id is None or candidate_adapter_path is None:
+            console.print(
+                "[red]Use both --candidate-adapter-model-id and --candidate-adapter-path.[/red]"
+            )
+            raise typer.Exit(1)
     if soak:
         soak_report = run_fake_soak(
             _manager().home,
@@ -2409,6 +2434,8 @@ def verify(
             max_output_tokens=max_output_tokens,
             timeout=timeout,
             thresholds=thresholds,
+            candidate_adapter_model_id=candidate_adapter_model_id,
+            candidate_adapter_path=candidate_adapter_path,
         )
         checks = verifier.checks
         if json_output:

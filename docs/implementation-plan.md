@@ -61,12 +61,23 @@ native packaging.
   specialist agents, the permission engine with exact-action approvals, SQLite
   memory, the scheduler, documents, and the desktop SPA all pass against
   `APRIL_RUNTIME_BACKEND=fake`.
+- **v2 control plane: implemented and fake-verified.** Sessions, explicit and
+  wake feedback, Archive reflection, Dreamer overlays, versioned prompt and
+  ladder-threshold rollback, gated LoRA adapter pointers, and named agent pool
+  stats all write only to fenced evolution/playbook paths or allow-listed DB
+  tables. Deleting `data/evolution/` restores stock prompt, ladder, and adapter
+  behavior.
 - **Real GGUF: not verified until you run the real-model checks.** The default
   backend is `llama_cpp`, but no GGUF is downloaded or committed. Run
   `run april readiness` to see exactly what is missing, then
   `run april verify --all-configured-models --require-real-model` to actually
   load/chat/stream/unload your local models. Until then, real-model readiness is
   `none`.
+- **LoRA training and adapter quality evidence: manual target-Mac work.** APRIL
+  records and gates adapter activation (`april evolve adapter ...`) but never
+  trains, scores, or downloads adapters. Activation requires an operator-created
+  perplexity evidence JSON and, in production, a fresh real-model verification
+  report that loaded the same adapter hash.
 - **Voice: code exists, live voice is unverified here.** Voice is off by default
   and requires the `.[voice]` extra plus whisper.cpp / Piper / wake-word
   binaries and models you install yourself, and macOS microphone permission.
@@ -74,6 +85,12 @@ native packaging.
   *permission/device failure* and reports push-to-talk fallback availability
   (push-to-talk needs no wake-word model). Live audio is verified only by
   `run april voice verify-live` on your Mac.
+- **Wake-word and speaker gate: separate target-Mac blockers.** Sentinel has
+  fake-tested wake routing, feedback verbs, generated earcon plumbing, and
+  `idle | listening | muted` status. Live wake-word still requires a local
+  openWakeWord ONNX and `run april voice verify-wake-live`. `wake.speaker_gate`
+  remains `off` only; enrollment records samples, but no local
+  speaker-verifier ONNX is implemented or faked.
 - **Desktop: local SPA / optional native wrapper, not signed/notarized.** The UI
   is plain static HTML/CSS/JS served over authenticated loopback. The optional
   `dist/APRIL.app` stub is a development launcher only — no signing, no
@@ -98,7 +115,7 @@ native packaging.
 - Model files are referenced only by registered model IDs from `configs/models.yaml`.
 - Tests and local development can use `APRIL_RUNTIME_BACKEND=fake`.
 - Specialist agent loops are intentionally conservative in the MVP: tool execution is deterministic and bounded, while generated responses come through the runtime client.
-- Deep reasoning (architecture mode) is functional: the Reasoning Agent defaults to the brain model and automatically upgrades to a registered `role: reasoning` model when the runtime reports one as available, failing safe to the brain model on any error.
+- Deep reasoning (architecture mode) is functional: the Reasoning Agent defaults to the brain model and automatically upgrades to a registered `role: reasoning` model when the runtime reports one as available, failing safe to the brain model on any error. Council mode defaults to the same shared-model best-of-N behavior; optional `deep_mode.council_mode=multi_agent` uses reasoning/general/creative agent model IDs only when at least two distinct models resolve, otherwise it records a fallback to best-of-N.
 - The default vector embedding is a deterministic hashed-token baseline, not a semantic local embedding model.
 
 ## Important Security Decisions

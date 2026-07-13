@@ -138,6 +138,7 @@ class WakeSettings(BaseModel):
     fuzzy_max_distance: float = Field(default=0.25, ge=0.0, le=0.5)
     ring_buffer_seconds: float = Field(default=10.0, gt=0.0, le=120.0)
     follow_up_seconds: float = Field(default=8.0, ge=0.0, le=120.0)
+    earcon_enabled: bool = True
     strict_address: bool = False
     speaker_gate: str = "off"
 
@@ -231,6 +232,20 @@ class DeepModeSettings(BaseModel):
 
     max_seconds: float = Field(default=45.0, gt=0.0, le=600.0)
     council_n: int = Field(default=3, ge=2, le=5)
+    council_mode: Literal["reasoning_n", "multi_agent"] = "reasoning_n"
+    deep_confidence_threshold: float = 0.4
+    verified_confidence_threshold: float = 0.7
+
+    @model_validator(mode="after")
+    def thresholds_are_ordered(self) -> DeepModeSettings:
+        deep = self.deep_confidence_threshold
+        verified = self.verified_confidence_threshold
+        if not (0.0 < deep < verified < 1.0):
+            raise ValueError(
+                "deep_mode thresholds must satisfy "
+                "0 < deep_confidence_threshold < verified_confidence_threshold < 1"
+            )
+        return self
 
 
 class SchedulerSettings(BaseModel):
@@ -387,6 +402,7 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_WAKE_FUZZY_MAX_DISTANCE": ("wake", "fuzzy_max_distance"),
     "APRIL_WAKE_RING_BUFFER_SECONDS": ("wake", "ring_buffer_seconds"),
     "APRIL_WAKE_FOLLOW_UP_SECONDS": ("wake", "follow_up_seconds"),
+    "APRIL_WAKE_EARCON_ENABLED": ("wake", "earcon_enabled"),
     "APRIL_WAKE_STRICT_ADDRESS": ("wake", "strict_address"),
     "APRIL_WAKE_SPEAKER_GATE": ("wake", "speaker_gate"),
     "APRIL_SESSION_CONTINUITY_MINUTES": ("session", "continuity_minutes"),
@@ -401,6 +417,15 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_EVOLUTION_PROMPT_OVERLAY_MAX_CHARS": ("evolution", "prompt_overlay_max_chars"),
     "APRIL_DEEP_MODE_MAX_SECONDS": ("deep_mode", "max_seconds"),
     "APRIL_DEEP_MODE_COUNCIL_N": ("deep_mode", "council_n"),
+    "APRIL_DEEP_MODE_COUNCIL_MODE": ("deep_mode", "council_mode"),
+    "APRIL_DEEP_MODE_DEEP_CONFIDENCE_THRESHOLD": (
+        "deep_mode",
+        "deep_confidence_threshold",
+    ),
+    "APRIL_DEEP_MODE_VERIFIED_CONFIDENCE_THRESHOLD": (
+        "deep_mode",
+        "verified_confidence_threshold",
+    ),
     "APRIL_SCHEDULER_ENABLED": ("scheduler", "enabled"),
     "APRIL_SCHEDULER_POLL_INTERVAL_SECONDS": ("scheduler", "poll_interval_seconds"),
     "APRIL_SCHEDULER_NOTIFICATION_SINK": ("scheduler", "notification_sink"),

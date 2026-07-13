@@ -25,7 +25,12 @@ from services.evolution.replay import collect_replay_samples
 from services.evolution.report import phase_status_summary, write_report
 from services.evolution.scheduler import EvolutionSchedulerGate
 from services.evolution.user_model import update_user_model
-from services.evolution.versions import PromptOverlayManager
+from services.evolution.versions import (
+    LadderThresholdOverlayManager,
+    PromptOverlayManager,
+    evaluate_ladder_threshold_candidate,
+    propose_ladder_thresholds_from_memory,
+)
 from services.evolution.write_guard import EvolutionWriteGuard
 from services.memory.sqlite_memory import SqliteMemory
 
@@ -209,9 +214,34 @@ class DreamerService:
                 / f"{candidate.agent}-{index}.overlay.txt"
             )
             stored.append(str(self.guard.write_text(path, candidate.content)))
+        ladder_payload: dict[str, Any] = {"status": "not_proposed"}
+        ladder_candidate = await propose_ladder_thresholds_from_memory(self.settings, self.memory)
+        if ladder_candidate is not None:
+            evaluation = evaluate_ladder_threshold_candidate(ladder_candidate)
+            ladder_manager = LadderThresholdOverlayManager(
+                self.settings,
+                audit=self.audit,
+                guard=self.guard,
+            )
+            result = ladder_manager.apply_candidate(
+                ladder_candidate,
+                eval_score=float(evaluation["score"]),
+                baseline_score=float(evaluation["baseline"]),
+            )
+            ladder_payload = {
+                "status": result.status,
+                "version": result.version,
+                "reason": result.reason,
+                "thresholds": (
+                    result.thresholds.to_payload() if result.thresholds is not None else None
+                ),
+                "evaluation": evaluation,
+                "method": "deterministic_feedback_nudge",
+            }
         payload = {
             "candidates": [candidate.to_payload() for candidate in candidates],
             "stored_paths": stored,
+            "ladder_thresholds": ladder_payload,
             # Honest labelling: overlay candidates come from deterministic
             # templates over local feedback, not from an LLM. Any improvement
             # claim must come from the examine-phase evals, never from here.

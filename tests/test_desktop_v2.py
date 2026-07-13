@@ -22,8 +22,8 @@ def test_nav_exposes_v2_screens() -> None:
 def test_header_shows_wake_status_from_health_booleans() -> None:
     assert 'id="rail-wake"' in INDEX
     assert "state.health.wake" in APP_JS
-    # Honest states only: off / muted / on / unknown.
-    for word in ('"off"', '"muted"', '"on"', '"unknown"'):
+    # Honest states only: off / muted / listening / idle / on / unknown.
+    for word in ('"off"', '"muted"', '"listening"', '"idle"', '"on"', '"unknown"'):
         assert word in APP_JS
 
 
@@ -62,7 +62,7 @@ def test_health_reports_wake_booleans_only(settings_tmp) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     wake = response.json()["wake"]
-    assert wake == {"enabled": False, "muted": False}
+    assert wake == {"enabled": False, "muted": False, "state": "idle"}
 
     settings_tmp.mute_flag_path.parent.mkdir(parents=True, exist_ok=True)
     settings_tmp.mute_flag_path.write_text("muted\n", encoding="utf-8")

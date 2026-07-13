@@ -35,6 +35,7 @@ from services.wake.ring_buffer import AudioRingBuffer
 from services.wake.schemas import WakeEvent
 from services.wake.sentinel import ApiWakeDelivery, MuteSwitch, Sentinel
 from services.wake.session_manager import SessionManager
+from services.wake.status import read_wake_status
 from services.wake.wake_bus import WakeBus, send_wake_event
 
 FRAME = b"\x00\x01" * 160  # quiet 16-bit PCM frame
@@ -576,6 +577,14 @@ async def test_sentinel_accepts_high_score_without_stt(settings_tmp) -> None:
     assert delivery.events[0].score == pytest.approx(0.9)
 
 
+async def test_sentinel_plays_one_earcon_per_accepted_wake(settings_tmp) -> None:
+    sentinel, _mic, delivery, player = _sentinel(settings_tmp, scores=[0.9], confirm_with_stt=False)
+    await sentinel.run_once()
+    assert len(delivery.events) == 1
+    assert len(player.played) == 1
+    assert player.played[0].name.startswith("wake-earcon-")
+
+
 async def test_sentinel_rejects_candidate_below_accept_without_stt(settings_tmp) -> None:
     sentinel, _mic, delivery, _player = _sentinel(
         settings_tmp, scores=[0.5], confirm_with_stt=False
@@ -583,6 +592,39 @@ async def test_sentinel_rejects_candidate_below_accept_without_stt(settings_tmp)
     await sentinel.run_once()
     assert delivery.events == []
     assert sentinel.rejected_candidates == 1
+
+
+async def test_sentinel_does_not_play_earcon_on_reject_or_mute(settings_tmp) -> None:
+    rejected, _mic, _delivery, reject_player = _sentinel(
+        settings_tmp, scores=[0.5], confirm_with_stt=False
+    )
+    await rejected.run_once()
+    assert reject_player.played == []
+
+    muted, _mic, _delivery, mute_player = _sentinel(
+        settings_tmp, scores=[0.9], confirm_with_stt=False
+    )
+    muted.mute.mute()
+    await muted.run_once()
+    assert mute_player.played == []
+    assert read_wake_status(settings_tmp)["state"] == "muted"
+
+
+async def test_sentinel_status_file_transitions_to_listening_then_idle(settings_tmp) -> None:
+    states_during_delivery: list[str] = []
+
+    class StatusDelivery:
+        async def __call__(self, event: WakeEvent) -> None:
+            del event
+            states_during_delivery.append(str(read_wake_status(settings_tmp)["state"]))
+
+    sentinel, _mic, _delivery, _player = _sentinel(
+        settings_tmp, scores=[0.9], confirm_with_stt=False
+    )
+    sentinel.deliver = StatusDelivery()
+    await sentinel.run_once()
+    assert states_during_delivery == ["listening"]
+    assert read_wake_status(settings_tmp)["state"] == "idle"
 
 
 async def test_sentinel_stt_confirmation_accepts_and_strips_vocative(settings_tmp) -> None:

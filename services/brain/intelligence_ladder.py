@@ -14,9 +14,12 @@ from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
 from services.brain.reasoning_resolver import resolve_reasoning_model
 from services.brain.schemas import BrainDecision
+from services.evolution.versions import active_ladder_thresholds
+from services.memory.schemas import ReminderRecord
 
 ChatMode = Literal["standard", "deep", "council"]
 LadderStatus = Literal["ok", "unavailable"]
+ReminderReflexKind = Literal["all", "today"]
 
 _MODE_ANNOUNCEMENTS: dict[int, str] = {
     0: "Mode: reflex (local deterministic answer).",
@@ -24,12 +27,6 @@ _MODE_ANNOUNCEMENTS: dict[int, str] = {
     3: "Mode: deep (local reasoning).",
     4: "Mode: council (local best-of-N).",
 }
-
-# Confidence-driven rung thresholds: routing confidence below DEEP goes to the
-# deep rung, between DEEP and VERIFIED to the verified rung, above VERIFIED to
-# the standard path. All deterministic; tool/approval paths always win.
-DEEP_CONFIDENCE_THRESHOLD = 0.4
-VERIFIED_CONFIDENCE_THRESHOLD = 0.7
 
 _DEEP_PHRASES = (
     "/deep",
@@ -56,6 +53,8 @@ _HIGH_STAKES_PHRASES = (
     "life changing",
     "life-changing",
 )
+_REMINDER_REFLEX_ALL_PHRASES = {"list my reminders", "what reminders do i have"}
+_REMINDER_REFLEX_TODAY_PHRASES = {"any reminders today"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +72,14 @@ class CouncilCandidate:
     content: str
     score: float = 0.0
     rationale: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _CouncilMember:
+    role: str
+    agent_name: str
+    system_prompt: str
+    model_id: str
 
 
 @dataclass(slots=True)
@@ -174,24 +181,21 @@ class IntelligenceLadder:
                 reason="deep-thinking phrase requested more reasoning",
                 announcement=_MODE_ANNOUNCEMENTS[3],
             )
-        if decision.confidence < DEEP_CONFIDENCE_THRESHOLD:
+        thresholds = active_ladder_thresholds(self.settings)
+        deep_threshold = thresholds["deep_confidence_threshold"]
+        verified_threshold = thresholds["verified_confidence_threshold"]
+        if decision.confidence < deep_threshold:
             return LadderSelection(
                 mode=mode,
                 rung=3,
-                reason=(
-                    f"routing confidence {decision.confidence:.2f} below "
-                    f"{DEEP_CONFIDENCE_THRESHOLD}"
-                ),
+                reason=(f"routing confidence {decision.confidence:.2f} below {deep_threshold}"),
                 announcement=_MODE_ANNOUNCEMENTS[3],
             )
-        if decision.confidence < VERIFIED_CONFIDENCE_THRESHOLD:
+        if decision.confidence < verified_threshold:
             return LadderSelection(
                 mode=mode,
                 rung=2,
-                reason=(
-                    f"routing confidence {decision.confidence:.2f} below "
-                    f"{VERIFIED_CONFIDENCE_THRESHOLD}"
-                ),
+                reason=(f"routing confidence {decision.confidence:.2f} below {verified_threshold}"),
                 announcement=_MODE_ANNOUNCEMENTS[2],
             )
         return LadderSelection(mode=mode, rung=1, reason="standard route")
@@ -202,21 +206,40 @@ class IntelligenceLadder:
         return any(phrase in normalized for phrase in _HIGH_STAKES_PHRASES)
 
     def is_reflex_query(self, message: str, decision: BrainDecision) -> bool:
-        if decision.permission_level != 0 or decision.tools_needed or decision.planned_tool_calls:
+        if not self._can_use_reflex(decision):
             return False
         normalized = _normalize(message)
-        return normalized in {
-            "what time is it",
-            "what is the time",
-            "current time",
-            "time",
-            "what day is it",
-            "what is today",
-            "today date",
-            "today's date",
-            "current date",
-            "date",
-        }
+        return (
+            normalized
+            in {
+                "what time is it",
+                "what is the time",
+                "current time",
+                "time",
+                "what day is it",
+                "what is today",
+                "today date",
+                "today's date",
+                "current date",
+                "date",
+            }
+            or self.reminder_reflex_kind(message) is not None
+        )
+
+    def reminder_reflex_kind(self, message: str) -> ReminderReflexKind | None:
+        normalized = _normalize(message)
+        if normalized in _REMINDER_REFLEX_ALL_PHRASES:
+            return "all"
+        if normalized in _REMINDER_REFLEX_TODAY_PHRASES:
+            return "today"
+        return None
+
+    def reminder_reflex_intent(
+        self, message: str, decision: BrainDecision
+    ) -> ReminderReflexKind | None:
+        if not self._can_use_reflex(decision):
+            return None
+        return self.reminder_reflex_kind(message)
 
     def memory_recall_subject(self, message: str, decision: BrainDecision) -> str | None:
         """Deterministic recall-question detection for the R0 memory reflex.
@@ -241,6 +264,19 @@ class IntelligenceLadder:
 
     def memory_reflex_answer(self, memory_content: str) -> str:
         return f"{_MODE_ANNOUNCEMENTS[0]}\n\nFrom local memory: {memory_content}"
+
+    def reminder_reflex_answer(
+        self, reminders: list[ReminderRecord], *, kind: ReminderReflexKind
+    ) -> str:
+        if not reminders:
+            scope = "today" if kind == "today" else "in local storage"
+            return f"{_MODE_ANNOUNCEMENTS[0]}\n\nNo reminders found {scope}."
+        heading = "Reminders today:" if kind == "today" else "Reminders:"
+        lines = [heading]
+        for reminder in reminders:
+            due = f" (due {reminder.due_at})" if reminder.due_at else ""
+            lines.append(f"- {reminder.content}{due}")
+        return f"{_MODE_ANNOUNCEMENTS[0]}\n\n" + "\n".join(lines)
 
     def reflex_answer(self, message: str) -> str:
         now = self.clock()
@@ -404,8 +440,10 @@ class IntelligenceLadder:
         fallback_model_id: str,
         request_id: str,
     ) -> LadderRun:
-        model_id = fallback_model_id
-        members = self._council_members()[: self.settings.deep_mode.council_n]
+        reasoning_fallback_model_id = self._agent_model_id("reasoning_agent", fallback_model_id)
+        model_id = reasoning_fallback_model_id
+        requested_council_mode = self.settings.deep_mode.council_mode
+        members: list[_CouncilMember] = []
         raw_candidates: list[CouncilCandidate] = []
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         warnings: list[str] = []
@@ -414,39 +452,70 @@ class IntelligenceLadder:
             "mode": "council",
             "intelligence_rung": 4,
             "budget_seconds": self.settings.deep_mode.max_seconds,
-            "model_resolution": _budget_unresolved_model_metadata(fallback_model_id),
+            "model_resolution": _budget_unresolved_model_metadata(reasoning_fallback_model_id),
             "candidate_count": len(raw_candidates),
-            "council_members": [role for role, _prompt in members],
+            "council_mode_requested": requested_council_mode,
+            "council_mode_effective": requested_council_mode,
+            "council_members": [],
         }
         try:
             async with asyncio.timeout(self.settings.deep_mode.max_seconds):
                 resolution = await resolve_reasoning_model(
                     runtime_client=self.runtime_client,
-                    fallback_model_id=fallback_model_id,
+                    fallback_model_id=reasoning_fallback_model_id,
                 )
                 model_id = resolution.model_id
                 metadata["model_resolution"] = resolution.metadata()
+                if requested_council_mode == "multi_agent":
+                    proposed_members = self._multi_agent_council_members(
+                        reasoning_model_id=model_id,
+                        fallback_model_id=fallback_model_id,
+                    )
+                    distinct_models = {member.model_id for member in proposed_members}
+                    if len(distinct_models) >= 2:
+                        members = proposed_members
+                    else:
+                        metadata["council_mode_effective"] = "reasoning_n"
+                        metadata["council_fallback_reason"] = (
+                            "fewer_than_two_distinct_models_resolved"
+                        )
+                        members = self._reasoning_n_council_members(model_id)[
+                            : self.settings.deep_mode.council_n
+                        ]
+                else:
+                    members = self._reasoning_n_council_members(model_id)[
+                        : self.settings.deep_mode.council_n
+                    ]
+                metadata["council_members"] = [member.role for member in members]
+                metadata["council_member_models"] = {
+                    member.role: member.model_id for member in members
+                }
+                metadata["council_member_agents"] = {
+                    member.role: member.agent_name for member in members
+                }
                 tasks = [
                     self._bounded_chat(
-                        model_id=model_id,
+                        model_id=member.model_id,
                         messages=[
-                            ChatMessage(role="system", content=system_prompt),
+                            ChatMessage(role="system", content=member.system_prompt),
                             ChatMessage(
                                 role="user",
-                                content=self._council_prompt(role, message, prompt_messages),
+                                content=self._council_prompt(member.role, message, prompt_messages),
                             ),
                         ],
-                        request_id=f"{request_id}-{role}",
+                        request_id=f"{request_id}-{member.role}",
                     )
-                    for role, system_prompt in members
+                    for member in members
                 ]
                 responses = await asyncio.gather(*tasks)
-                for (role, _prompt), response in zip(members, responses, strict=True):
+                for member, response in zip(members, responses, strict=True):
                     if response is None:
-                        warnings.append(f"Council responder {role} exceeded the local budget.")
+                        warnings.append(
+                            f"Council responder {member.role} exceeded the local budget."
+                        )
                         continue
                     raw_candidates.append(
-                        CouncilCandidate(responder_id=role, content=response.content)
+                        CouncilCandidate(responder_id=member.role, content=response.content)
                     )
                     for key, value in response.usage.model_dump().items():
                         if isinstance(value, int):
@@ -628,6 +697,11 @@ class IntelligenceLadder:
             return False
         return not decision.tools_needed and not decision.planned_tool_calls
 
+    def _can_use_reflex(self, decision: BrainDecision) -> bool:
+        if decision.permission_level != 0 or decision.needs_confirmation:
+            return False
+        return not decision.tools_needed and not decision.planned_tool_calls
+
     def _needs_verified_revision(self, message: str, decision: BrainDecision) -> bool:
         if not self._can_use_reasoning_mode(decision):
             return False
@@ -680,24 +754,62 @@ class IntelligenceLadder:
             f"User request:\n{message}\n\nPrepared local context:\n{context}"
         )
 
-    def _council_members(self) -> list[tuple[str, str]]:
-        """Council seats mapped to the architecture's agent prompts.
+    def _agent_model_id(self, agent_name: str, fallback_model_id: str) -> str:
+        agent = self.agent_registry.get(agent_name)
+        if agent is not None and agent.model_id:
+            return agent.model_id
+        return fallback_model_id
+
+    def _reasoning_n_council_members(self, model_id: str) -> list[_CouncilMember]:
+        """Council seats using the current best-of-N shared reasoning model."""
+        return [
+            _CouncilMember(
+                role=role,
+                agent_name=agent_name,
+                system_prompt=self._agent_system_prompt(agent_name),
+                model_id=model_id,
+            )
+            for role, agent_name in _COUNCIL_SEATS
+        ]
+
+    def _multi_agent_council_members(
+        self, *, reasoning_model_id: str, fallback_model_id: str
+    ) -> list[_CouncilMember]:
+        """Council seats mapped to reasoning/general/creative configured models.
 
         Prime is the general agent, Sage the reasoning agent, and Muse the
-        creative agent. Missing registry entries fall back to the reasoning
-        system prompt so the council always has its configured seat count.
+        creative agent. Missing registry entries fall back to the shared
+        reasoning prompt/model, and the caller decides whether enough distinct
+        models resolved to keep multi-agent mode.
         """
-        seats = (
-            ("prime", "general_agent"),
-            ("sage", "reasoning_agent"),
-            ("muse", "creative_agent"),
-        )
-        members: list[tuple[str, str]] = []
-        for role, agent_name in seats:
-            agent = self.agent_registry.get(agent_name)
-            prompt = agent.system_prompt if agent is not None else self._reasoning_system_prompt()
-            members.append((role, prompt))
+        members: list[_CouncilMember] = []
+        for role, agent_name in _COUNCIL_SEATS:
+            if agent_name == "reasoning_agent":
+                member_model_id = reasoning_model_id
+            else:
+                member_model_id = self._agent_model_id(agent_name, fallback_model_id)
+            members.append(
+                _CouncilMember(
+                    role=role,
+                    agent_name=agent_name,
+                    system_prompt=self._agent_system_prompt(agent_name),
+                    model_id=member_model_id,
+                )
+            )
         return members
+
+    def _agent_system_prompt(self, agent_name: str) -> str:
+        agent = self.agent_registry.get(agent_name)
+        if agent is not None:
+            return agent.system_prompt
+        return self._reasoning_system_prompt()
+
+
+_COUNCIL_SEATS: tuple[tuple[str, str], ...] = (
+    ("prime", "general_agent"),
+    ("sage", "reasoning_agent"),
+    ("muse", "creative_agent"),
+)
 
 
 def score_council_candidate(candidate: CouncilCandidate, *, question: str) -> CouncilCandidate:

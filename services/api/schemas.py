@@ -131,6 +131,22 @@ class EvolutionRollbackRequest(BaseModel):
     version: int = Field(ge=1)
 
 
+class AdapterActivateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str = Field(min_length=1, max_length=128)
+    adapter_path: str = Field(min_length=1, max_length=2_000)
+    evidence_path: str | None = Field(default=None, max_length=2_000)
+    verification_report_path: str | None = Field(default=None, max_length=2_000)
+
+
+class AdapterRollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str = Field(min_length=1, max_length=128)
+    version: int | None = Field(default=None, ge=1)
+
+
 # Eval case ids are content digests assigned at staging time. The strict
 # pattern (no separators, no dots) makes path traversal unrepresentable.
 _EVAL_CASE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"

@@ -21,16 +21,16 @@ def test_mute_route_flips_flag_and_audits(settings_tmp) -> None:
 
     status = client.get("/wake/mute", headers=headers)
     assert status.status_code == 200
-    assert status.json() == {"muted": False}
+    assert status.json() == {"muted": False, "state": "idle"}
 
     muted = client.post("/wake/mute", json={"muted": True}, headers=headers)
     assert muted.status_code == 200
-    assert muted.json() == {"muted": True, "audited": True}
+    assert muted.json() == {"muted": True, "state": "muted", "audited": True}
     assert settings_tmp.mute_flag_path.exists()
 
     unmuted = client.post("/wake/mute", json={"muted": False}, headers=headers)
     assert unmuted.status_code == 200
-    assert unmuted.json() == {"muted": False, "audited": True}
+    assert unmuted.json() == {"muted": False, "state": "idle", "audited": True}
     assert not settings_tmp.mute_flag_path.exists()
 
     audit_text = settings_tmp.audit_path.read_text(encoding="utf-8")

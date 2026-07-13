@@ -35,7 +35,7 @@ from services.evolution.feedback_eval import stage_feedback_eval_case
 from services.evolution.versions import LEARNED_GUIDANCE_HEADER, PromptOverlayManager
 from services.memory.policy import MemoryPolicy
 from services.memory.retriever import MemoryRetriever
-from services.memory.schemas import Message, Project, SearchResult
+from services.memory.schemas import Message, Project, ReminderRecord, SearchResult
 from services.memory.sqlite_memory import SqliteMemory
 from services.permissions.approvals import ApprovalStore
 from services.permissions.artifacts import (
@@ -147,6 +147,16 @@ class AprilOrchestrator:
         mode: ChatMode = "standard",
     ) -> AgentResult:
         await self._maybe_record_implicit_correction(message, conversation_id)
+        reminder_reflex = await self._maybe_direct_reminder_reflex(
+            message,
+            conversation_id=conversation_id,
+            request_id=request_id or str(uuid.uuid4()),
+            actor=actor,
+            project_id=project_id,
+            repo_path=repo_path,
+        )
+        if reminder_reflex is not None:
+            return reminder_reflex
         playbook_result = await self._maybe_run_playbook(
             message,
             conversation_id=conversation_id,
@@ -393,10 +403,25 @@ class AprilOrchestrator:
         repo_path: str | None = None,
         mode: ChatMode = "standard",
     ) -> AsyncIterator[tuple[StreamEventName, dict[str, Any]]]:
+        active_request_id = request_id or str(uuid.uuid4())
+        reminder_reflex = await self._maybe_direct_reminder_reflex(
+            message,
+            conversation_id=conversation_id,
+            request_id=active_request_id,
+            actor=actor,
+            project_id=project_id,
+            repo_path=repo_path,
+        )
+        if reminder_reflex is not None:
+            yield ("final_answer", {"message": reminder_reflex.final_message})
+            yield ("token", {"text": reminder_reflex.final_message})
+            yield ("usage", reminder_reflex.usage)
+            yield ("done", {"finish_reason": "stop"})
+            return
         playbook_result = await self._maybe_run_playbook(
             message,
             conversation_id=conversation_id,
-            request_id=request_id or str(uuid.uuid4()),
+            request_id=active_request_id,
             actor=actor,
             project_id=project_id,
         )
@@ -423,7 +448,7 @@ class AprilOrchestrator:
         prepared = await self._prepare_turn(
             message,
             conversation_id=conversation_id,
-            request_id=request_id,
+            request_id=active_request_id,
             actor=actor,
             project_id=project_id,
             repo_path=repo_path,
@@ -641,6 +666,9 @@ class AprilOrchestrator:
             if reflex_result is not None:
                 return reflex_result
         if selection.rung == 0:
+            reminder_reflex = await self._maybe_reminder_reflex(prepared, message)
+            if reminder_reflex is not None:
+                return reminder_reflex
             run = LadderRun(
                 status="ok",
                 final_message=self.intelligence_ladder.reflex_answer(message),
@@ -671,6 +699,109 @@ class AprilOrchestrator:
             )
             return await self._finish_ladder_run(prepared, run)
         return None
+
+    async def _maybe_direct_reminder_reflex(
+        self,
+        message: str,
+        *,
+        conversation_id: str | None,
+        request_id: str,
+        actor: str,
+        project_id: str | None,
+        repo_path: str | None,
+    ) -> AgentResult | None:
+        kind = self.intelligence_ladder.reminder_reflex_kind(message)
+        if kind is None:
+            return None
+        project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
+        active_conversation_id = conversation_id or await self.memory.create_conversation(
+            project_id=project.id if project else None,
+            actor=actor,
+        )
+        if conversation_id is not None:
+            await self.memory.ensure_conversation(
+                active_conversation_id,
+                project_id=project.id if project else None,
+                actor=actor,
+            )
+        await self.memory.add_message(active_conversation_id, "user", message)
+        reminders = await self._reminders_for_reflex(kind)
+        final_message = self.intelligence_ladder.reminder_reflex_answer(reminders, kind=kind)
+        await self.memory.add_message(active_conversation_id, "assistant", final_message)
+        metadata: dict[str, Any] = {
+            "chat_mode": "standard",
+            "intelligence_rung": 0,
+            "intelligence_reason": "exact reminder reflex",
+            "routing_confidence": 1.0,
+            "high_stakes": False,
+            "mode": "standard",
+            "deterministic": True,
+            "reflex": f"reminders_{kind}",
+            "routing_method": "deterministic_reflex",
+            "permission_level": 0,
+            "request_id": request_id,
+        }
+        await self.memory.record_conversation_event(
+            conversation_id=active_conversation_id,
+            event_type="reflex_decision",
+            payload=metadata,
+        )
+        await self.memory.record_agent_run(
+            conversation_id=active_conversation_id,
+            agent="general_agent",
+            status="ok",
+            model_id=None,
+            summary="Local reminder reflex",
+            metadata=metadata,
+        )
+        return AgentResult(
+            status="ok",
+            final_message=final_message,
+            conversation_id=active_conversation_id,
+            metadata=metadata,
+        )
+
+    async def _maybe_reminder_reflex(
+        self, prepared: PreparedTurn, message: str
+    ) -> AgentResult | None:
+        kind = self.intelligence_ladder.reminder_reflex_intent(message, prepared.decision)
+        if kind is None:
+            return None
+        reminders = await self._reminders_for_reflex(kind)
+        run = LadderRun(
+            status="ok",
+            final_message=self.intelligence_ladder.reminder_reflex_answer(reminders, kind=kind),
+            mode="standard",
+            rung=0,
+            model_id=prepared.model_id,
+            metadata={
+                "mode": "standard",
+                "intelligence_rung": 0,
+                "deterministic": True,
+                "reflex": f"reminders_{kind}",
+            },
+        )
+        return await self._finish_ladder_run(prepared, run)
+
+    async def _reminders_for_reflex(self, kind: str) -> list[ReminderRecord]:
+        reminders = await self.memory.list_reminders()
+        if kind != "today":
+            return reminders
+        now = self.intelligence_ladder.clock()
+        today = now.date()
+        local_tz = now.tzinfo
+        today_reminders = []
+        for reminder in reminders:
+            if reminder.due_at is None or reminder.fired_at is not None:
+                continue
+            try:
+                due = parse_utc_iso(reminder.due_at)
+            except (TypeError, ValueError):
+                continue
+            due_local = due.astimezone(local_tz) if local_tz is not None else due
+            if due_local.date() == today:
+                today_reminders.append(reminder)
+        return today_reminders
 
     async def _maybe_memory_reflex(
         self, prepared: PreparedTurn, message: str

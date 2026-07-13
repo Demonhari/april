@@ -1001,6 +1001,9 @@ def evolve_evals_reject(
 evolve_dataset_app = typer.Typer(help="Fine-tuning dataset operations (export only).")
 evolve_app.add_typer(evolve_dataset_app, name="dataset")
 
+evolve_adapter_app = typer.Typer(help="LoRA adapter lifecycle operations.")
+evolve_app.add_typer(evolve_adapter_app, name="adapter")
+
 
 @evolve_dataset_app.command("export")
 def evolve_dataset_export(
@@ -1009,6 +1012,63 @@ def evolve_dataset_export(
     """Export the reviewable JSONL fine-tune dataset under data/evolution/datasets."""
     data = run(client().post("/evolution/dataset/export", {"name": name}))
     print_jsonish(data)
+
+
+@evolve_adapter_app.command("list")
+def evolve_adapter_list(
+    model_id: str | None = typer.Option(None, "--model-id", help="Limit to one model id."),
+) -> None:
+    """List versioned LoRA adapter pointers and DB history."""
+    params = {"model_id": model_id} if model_id else None
+    print_jsonish(run(client().get("/evolution/adapters", params=params)))
+
+
+@evolve_adapter_app.command("activate")
+def evolve_adapter_activate(
+    model_id: str,
+    adapter_path: Path,
+    evidence_path: Path | None = typer.Option(
+        None,
+        "--evidence",
+        help="Perplexity evidence JSON from scripts/finetune.",
+    ),
+    verification_report_path: Path | None = typer.Option(
+        None,
+        "--verification-report",
+        help="Fresh real-model verification report required in production.",
+    ),
+) -> None:
+    """Activate a LoRA adapter after deterministic evidence gates pass."""
+    payload = {
+        "model_id": model_id,
+        "adapter_path": str(adapter_path),
+        "evidence_path": str(evidence_path) if evidence_path else None,
+        "verification_report_path": (
+            str(verification_report_path) if verification_report_path else None
+        ),
+    }
+    print_jsonish(run(client().post("/evolution/adapters/activate", payload)))
+
+
+@evolve_adapter_app.command("rollback")
+def evolve_adapter_rollback(
+    model_id: str,
+    version: int | None = typer.Option(
+        None,
+        "--version",
+        min=1,
+        help="Target version; defaults to the previous active version.",
+    ),
+) -> None:
+    """Flip the active adapter pointer back to a previous version."""
+    print_jsonish(
+        run(
+            client().post(
+                "/evolution/adapters/rollback",
+                {"model_id": model_id, "version": version},
+            )
+        )
+    )
 
 
 if __name__ == "__main__":

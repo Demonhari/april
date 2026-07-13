@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from agents.registry import default_agent_registry
+from agents.base import BaseAgent
+from agents.registry import AgentRegistry, default_agent_registry
+from agents.schemas import AgentConfig
 from services.april_runtime.schemas import ChatMessage, ChatResponse, Usage
 from services.brain.intelligence_ladder import (
     CouncilCandidate,
@@ -88,11 +91,48 @@ class LadderRuntime:
         }
 
 
-def _ladder(settings_tmp, runtime: LadderRuntime) -> IntelligenceLadder:
+def _test_agent(name: str, model_id: str | None, prompt: str) -> BaseAgent:
+    return BaseAgent(
+        AgentConfig(
+            name=name,
+            description=f"{name} test agent",
+            model_id=model_id,
+            system_prompt_path="test",
+            allowed_tools=set(),
+            blocked_tools=set(),
+            memory_access_policy="conversation_and_safe_memory",
+            maximum_tool_iterations=1,
+            system_prompt=prompt,
+        )
+    )
+
+
+def _council_registry(
+    *,
+    general_model: str,
+    reasoning_model: str,
+    creative_model: str,
+) -> AgentRegistry:
+    return AgentRegistry(
+        [
+            _test_agent("general_agent", general_model, "General test prompt."),
+            _test_agent("reasoning_agent", reasoning_model, "Reasoning test prompt."),
+            _test_agent("creative_agent", creative_model, "Creative test prompt."),
+            _test_agent("reading_agent", general_model, "Reading test prompt."),
+        ]
+    )
+
+
+def _ladder(
+    settings_tmp,
+    runtime: LadderRuntime,
+    *,
+    agent_registry: AgentRegistry | None = None,
+) -> IntelligenceLadder:
     return IntelligenceLadder(
         settings=settings_tmp,
         runtime_client=runtime,  # type: ignore[arg-type]
-        agent_registry=default_agent_registry(),
+        agent_registry=agent_registry or default_agent_registry(),
         clock=lambda: datetime(2026, 7, 3, 9, 30, tzinfo=UTC),
     )
 
@@ -106,6 +146,38 @@ def test_ladder_selects_reflex_deep_verified_and_council(settings_tmp) -> None:
             mode="standard",
         ).rung
         == 0
+    )
+    assert (
+        ladder.select(
+            message="list my reminders",
+            decision=_decision(),
+            mode="standard",
+        ).rung
+        == 0
+    )
+    assert (
+        ladder.select(
+            message="what reminders do i have?",
+            decision=_decision(),
+            mode="standard",
+        ).rung
+        == 0
+    )
+    assert (
+        ladder.select(
+            message="any reminders today",
+            decision=_decision(),
+            mode="standard",
+        ).rung
+        == 0
+    )
+    assert (
+        ladder.select(
+            message="list my reminder",
+            decision=_decision(),
+            mode="standard",
+        ).rung
+        == 1
     )
     assert (
         ladder.select(
@@ -227,6 +299,51 @@ async def test_memory_reflex_requires_unique_exact_hit(settings_tmp) -> None:
     assert "From local memory:" not in miss.final_message
 
 
+@pytest.mark.asyncio
+async def test_reminder_reflex_answers_without_model_call(settings_tmp) -> None:
+    from tests.test_core_api import make_container
+
+    container = await make_container(settings_tmp)
+    runtime = container.runtime_client
+    container.orchestrator.intelligence_ladder.clock = lambda: datetime(
+        2026, 7, 3, 9, 30, tzinfo=UTC
+    )
+    await container.memory.create_reminder("Stand up", due_at="2026-07-03T10:00:00Z")
+    await container.memory.create_reminder("Tomorrow task", due_at="2026-07-04T10:00:00Z")
+
+    listed = await container.orchestrator.chat("list my reminders", request_id="reminders-1")
+    assert listed.status == "ok"
+    assert listed.final_message.startswith("Mode: reflex")
+    assert "Stand up" in listed.final_message
+    assert "Tomorrow task" in listed.final_message
+
+    today = await container.orchestrator.chat("any reminders today", request_id="reminders-2")
+    assert "Stand up" in today.final_message
+    assert "Tomorrow task" not in today.final_message
+
+    streamed = [
+        event
+        async for event in container.orchestrator.stream_chat(
+            "what reminders do i have", request_id="reminders-3"
+        )
+    ]
+    assert streamed[-1] == ("done", {"finish_reason": "stop"})
+    assert any(
+        name == "final_answer" and "Stand up" in payload["message"] for name, payload in streamed
+    )
+    assert runtime.calls == []  # type: ignore[attr-defined]
+
+    rows = await container.database.fetchall(
+        "SELECT model_id, metadata_json FROM agent_runs WHERE summary = ? ORDER BY created_at",
+        ("Local reminder reflex",),
+    )
+    assert len(rows) == 3
+    metadata = [json.loads(row["metadata_json"]) for row in rows]
+    assert {item["reflex"] for item in metadata} == {"reminders_all", "reminders_today"}
+    assert all(item["permission_level"] == 0 for item in metadata)
+    assert all(row["model_id"] is None for row in rows)
+
+
 def test_reflex_answer_is_deterministic_local(settings_tmp) -> None:
     ladder = _ladder(settings_tmp, LadderRuntime())
     answer = ladder.reflex_answer("what time is it")
@@ -340,6 +457,87 @@ async def test_council_scout_judge_scores_and_surfaces_disagreement(settings_tmp
     assert "Council disagreement" in result.final_message
 
 
+@pytest.mark.asyncio
+async def test_multi_agent_council_uses_distinct_agent_models(settings_tmp) -> None:
+    settings = settings_tmp.model_copy(
+        update={
+            "deep_mode": settings_tmp.deep_mode.model_copy(update={"council_mode": "multi_agent"})
+        }
+    )
+    runtime = LadderRuntime()
+    ladder = _ladder(
+        settings,
+        runtime,
+        agent_registry=_council_registry(
+            general_model="april-general",
+            reasoning_model="april-reasoning-special",
+            creative_model="april-creative",
+        ),
+    )
+
+    result = await ladder.run_council(
+        message="compare local client approaches",
+        prompt_messages=[
+            ChatMessage(role="user", content="User request: compare local client approaches")
+        ],
+        fallback_model_id="april-brain",
+        request_id="r-multi",
+    )
+
+    assert result.status == "ok"
+    assert result.metadata["council_mode_requested"] == "multi_agent"
+    assert result.metadata["council_mode_effective"] == "multi_agent"
+    assert result.metadata["council_member_models"] == {
+        "prime": "april-general",
+        "sage": "april-reasoning-special",
+        "muse": "april-creative",
+    }
+    responder_calls = {
+        call["request_id"]: call["model_id"]
+        for call in runtime.calls
+        if call["request_id"] in {"r-multi-prime", "r-multi-sage", "r-multi-muse"}
+    }
+    assert responder_calls == {
+        "r-multi-prime": "april-general",
+        "r-multi-sage": "april-reasoning-special",
+        "r-multi-muse": "april-creative",
+    }
+
+
+@pytest.mark.asyncio
+async def test_multi_agent_council_falls_back_when_models_not_distinct(settings_tmp) -> None:
+    settings = settings_tmp.model_copy(
+        update={
+            "deep_mode": settings_tmp.deep_mode.model_copy(update={"council_mode": "multi_agent"})
+        }
+    )
+    runtime = LadderRuntime()
+    ladder = _ladder(
+        settings,
+        runtime,
+        agent_registry=_council_registry(
+            general_model="april-brain",
+            reasoning_model="april-brain",
+            creative_model="april-brain",
+        ),
+    )
+
+    result = await ladder.run_council(
+        message="compare local client approaches",
+        prompt_messages=[
+            ChatMessage(role="user", content="User request: compare local client approaches")
+        ],
+        fallback_model_id="april-brain",
+        request_id="r-fallback",
+    )
+
+    assert result.status == "ok"
+    assert result.metadata["council_mode_requested"] == "multi_agent"
+    assert result.metadata["council_mode_effective"] == "reasoning_n"
+    assert result.metadata["council_fallback_reason"] == ("fewer_than_two_distinct_models_resolved")
+    assert set(result.metadata["council_member_models"].values()) == {"april-brain"}
+
+
 def test_confidence_drives_rung_selection(settings_tmp) -> None:
     ladder = _ladder(settings_tmp, LadderRuntime())
     # Mid confidence escalates to verified.
@@ -383,6 +581,26 @@ def test_confidence_drives_rung_selection(settings_tmp) -> None:
             mode="standard",
         ).rung
         == 1
+    )
+
+
+def test_confidence_selection_uses_active_threshold_overlay(settings_tmp) -> None:
+    from services.evolution.versions import LadderThresholdOverlayManager, LadderThresholds
+
+    result = LadderThresholdOverlayManager(settings_tmp).apply_candidate(
+        LadderThresholds(0.5, 0.8),
+        eval_score=1.0,
+        baseline_score=1.0,
+    )
+    assert result.status == "applied"
+    ladder = _ladder(settings_tmp, LadderRuntime())
+    assert (
+        ladder.select(
+            message="what changed in the runtime design",
+            decision=_decision(confidence=0.45),
+            mode="standard",
+        ).rung
+        == 3
     )
 
 

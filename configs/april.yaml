@@ -73,6 +73,7 @@ wake:
   confirm_with_stt: true
   ring_buffer_seconds: 10
   follow_up_seconds: 8
+  earcon_enabled: true
   strict_address: false
   # Quoted so YAML keeps it a string ("off" is the only supported value today).
   speaker_gate: "off"
@@ -107,6 +108,9 @@ evolution:
 deep_mode:
   max_seconds: 45
   council_n: 3
+  council_mode: reasoning_n
+  deep_confidence_threshold: 0.4
+  verified_confidence_threshold: 0.7
 
 # Proactive scheduler. OFF by default: with these safe defaults APRIL never fires
 # reminders or daily briefings on its own. The background loop only starts when

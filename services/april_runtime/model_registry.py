@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from april_common.errors import ConfigError, NotFoundError
 from services.april_runtime.schemas import ModelRole
+from services.evolution.adapters import active_adapter_path_from_pointer
 
 ChatFormat = Literal["generic", "granite", "qwen"]
 
@@ -88,13 +89,20 @@ class ModelDefinition(BaseModel):
             return expanded.resolve(strict=False)
         return (root / expanded).resolve(strict=False)
 
-    def resolved_adapter_path(self, root: Path) -> Path | None:
+    def resolved_config_adapter_path(self, root: Path) -> Path | None:
         if self.adapter_path is None:
             return None
         expanded = self.adapter_path.expanduser()
         if expanded.is_absolute():
             return expanded.resolve(strict=False)
         return (root / expanded).resolve(strict=False)
+
+    def resolved_adapter_path(self, root: Path) -> Path | None:
+        """Effective adapter path: explicit config override, then fenced pointer."""
+        configured = self.resolved_config_adapter_path(root)
+        if configured is not None:
+            return configured
+        return active_adapter_path_from_pointer(root, self.id)
 
 
 class ModelRegistryConfig(BaseModel):

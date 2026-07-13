@@ -197,15 +197,20 @@ real models, live audio, or native Mac packaging.
 | Scoped log/cache cleanup (plan + Level 4 approved apply) | Implemented, security-tested |
 | Secure first-run bootstrap (`setup bootstrap`) | Implemented, tested with temp homes |
 | Interactive push-to-talk (stop-controlled capture) | Implemented, tested with fake mic + mocked input |
+| Wake feedback verbs, earcon path, and listening status | Implemented, fake-audio/API/SPA tested; live wake still requires target-Mac `verify-wake-live` |
+| LoRA adapter lifecycle (`april evolve adapter`) | Implemented, fake/mock tested; activation requires local perplexity evidence and production real-model report |
+| Ladder thresholds, gated threshold overlays, council mode, reminder reflex | Implemented, fake-backend tested |
 | Real GGUF model load/chat/stream/unload | Implemented; verified only by target-Mac `--require-real-model` reports with local GGUFs |
 | Live microphone, whisper.cpp, Piper, wake-word | **Not verified here** — requires your local binaries/models |
+| Speaker soft gate | **Blocked** — enrollment records samples only; needs a local speaker-verifier ONNX before `wake.speaker_gate` can support anything except `off` |
 | Real-model target-Mac acceptance report | Implemented; runs real checks only when you supply a GGUF |
 | Signed/notarized packaging, launch-at-login | Out of scope (see below) |
 
 Production blockers are explicit, not hidden by fake tests: GGUF files are not
 committed, no wake-word ONNX model ships in the repo, `wake.speaker_gate` only
-supports `off`, LoRA training remains a manual local runbook, and a fake-backend
-verification is never production readiness.
+supports `off` until a real local speaker-verifier ONNX exists, LoRA training
+remains a manual local runbook, and a fake-backend verification is never
+production readiness.
 
 CI and fake verification are not proof of real GGUF readiness. Real-model
 readiness is proven only by a target-Mac report that loads, chats, streams, and
@@ -1361,11 +1366,11 @@ standalone Sentinel loop. `april --listen` first attaches a terminal session,
 then blocks the current terminal on Sentinel with that session as a continuity
 hint; it installs no shell hooks of any kind.
 
-**Speaker gating is not implemented.** `wake.speaker_gate` accepts only `off`;
-config validation rejects anything else, so the setting cannot silently pretend
-to verify who is speaking. `april voice enroll` records local enrollment samples
-for a future soft speaker gate, but no verifier model exists yet and enrollment
-never changes wake behaviour.
+**Speaker gating is blocked on a real local verifier.** `wake.speaker_gate`
+accepts only `off`; config validation rejects anything else, so the setting
+cannot silently pretend to verify who is speaking. `april voice enroll` records
+local enrollment samples for a future soft gate, but no speaker-verifier ONNX
+exists yet and enrollment never changes wake behaviour.
 
 `run april voice verify-live` is the explicit live hardware check. It runs voice
 doctor, prints macOS microphone permission guidance, asks before recording a
@@ -1466,16 +1471,47 @@ april evolve rollback AGENT VERSION
 april evolve off               # hard kill switch (data/evolution/DISABLED)
 april evolve on                # clear the kill switch
 april evolve dataset export --name my-dataset   # reviewable JSONL (M15)
+april evolve adapter list [--model-id april-brain]
+april evolve adapter activate april-brain /absolute/path/adapter.gguf \
+  --evidence data/evolution/adapters/evidence/april-brain.json \
+  --verification-report data/verification/mac-readiness.json
+april evolve adapter rollback april-brain [--version N]
 ```
 
 Overlays are advisory prose only: structural tool/permission content is
 rejected at generation, at approval, and again at load. Write-capable agents
 (Forge/Hand) never auto-apply — their overlays wait in `evolve pending`.
-LoRA adapters can be served via `adapter_path` in `configs/models.yaml`;
-training is a manual local runbook (see `scripts/finetune/README.md`). LoRA
-serving is wired but unverified until a real adapter is trained and gated by a
-real-model verification report; a configured-but-missing adapter fails the
-model load hard instead of silently serving the base model.
+The Dreamer may also propose a bounded, deterministic ladder-threshold overlay
+under `data/evolution/config/`; it can contain only
+`deep_confidence_threshold` and `verified_confidence_threshold`, activates only
+when the routing eval score is at least the running baseline, and disappears by
+deleting `data/evolution/`.
+
+LoRA adapters can be served either by explicit `adapter_path` in
+`configs/models.yaml` (manual override) or by an active fenced pointer under
+`data/evolution/adapters/`. Runtime never opens the API SQLite database:
+resolution is `adapter_path` > active pointer file > no adapter. Activation
+requires local perplexity evidence (`adapter_ppl <= base_ppl`) and, in
+`APRIL_ENV=production`, a fresh real-model verification report that loaded the
+same adapter hash. Rollback is a pointer flip and every state change is audited.
+Training and perplexity measurement remain a manual local runbook (see
+`scripts/finetune/README.md`); a configured/pointer-selected but missing adapter
+fails the model load hard instead of silently serving the base model.
+
+**Wake feedback and state.** Exact wake feedback phrases such as "that was
+wrong" and "good job" are recorded as feedback for the latest run in that wake
+session's conversation instead of being sent to the Brain. Near misses still
+route normally. Sentinel plays a generated short earcon on accepted wakes when
+audio dependencies are present, writes `idle | listening | muted` status under
+`data/evolution/wake/`, and the authenticated wake status plus Desktop header
+surface that state.
+
+**Ladder alignment.** `deep_mode.council_mode` defaults to the existing
+`reasoning_n` best-of-N behavior. `multi_agent` uses one responder each from the
+reasoning, general, and creative agents' configured models when at least two
+distinct model IDs resolve; otherwise it falls back to `reasoning_n` and records
+that fallback in metadata. Exact reminder-list phrases are answered from the
+local reminder store at R0 without a model call.
 
 **Named agent pool.** `april agent pool` (or `GET /pool/agents`) shows each
 specialist's call sign (Prime, Sage, Muse, Scout, Forge, Hand) with honest
