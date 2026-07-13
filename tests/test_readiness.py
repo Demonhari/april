@@ -493,8 +493,22 @@ def test_speaker_gate_detail_is_honest_about_enroll(tmp_path: Path) -> None:
     gate = _check(report, "speaker gate")
     assert gate is not None
     assert gate.status == "warning"
-    assert "does not enable the gate" in gate.detail
+    assert "does not enable soft mode" in gate.detail
+    assert "never a security boundary" in gate.detail
     assert "Anyone near the microphone can wake APRIL." in gate.detail
+
+
+def test_soft_speaker_gate_reports_operator_verifier_blocker(tmp_path: Path) -> None:
+    home = _write_home(
+        tmp_path,
+        extra={"wake": {"enabled": True, "speaker_gate": "soft"}},
+    )
+    report = build_readiness_report(home)
+    gate = _check(report, "speaker gate")
+    assert gate is not None
+    assert gate.status == "warning"
+    assert "SpeakerVerifier" in gate.detail
+    assert "degrades to off" in gate.detail
 
 
 def test_missing_lora_adapter_is_a_blocker_and_present_adapter_warns(tmp_path: Path) -> None:

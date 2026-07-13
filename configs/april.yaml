@@ -75,7 +75,9 @@ wake:
   follow_up_seconds: 8
   earcon_enabled: true
   strict_address: false
-  # Quoted so YAML keeps it a string ("off" is the only supported value today).
+  # Convenience filter only, never authentication. "soft" requires an
+  # operator-provided local SpeakerVerifier model; absent one, Sentinel audits a
+  # warning once and safely behaves as "off".
   speaker_gate: "off"
 
 # Cross-surface session continuity: a wake (voice/terminal/desktop/hotkey/socket)
@@ -91,6 +93,10 @@ daemon:
 governor:
   max_resident_gb: 12
   dreamer_nice: 10
+  # llama.cpp fixes n_threads when a model instance is loaded. The governor's
+  # typed request hint therefore takes effect on the next safe model load/reload.
+  generation_threads_active: 6
+  generation_threads_idle: 8
 
 # Nightly Dreamer self-evolution. OFF by default. All writes are fenced to
 # data/evolution/, data/playbooks/, and explicitly allowed DB tables; deleting

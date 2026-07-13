@@ -354,7 +354,7 @@ def test_top_level_listen_flag_uses_terminal_session_handoff(monkeypatch) -> Non
     assert ("POST", "/sessions/session-1/close", {}) in fake.calls
 
 
-def test_speaker_gate_only_supports_off() -> None:
+def test_speaker_gate_supports_off_and_soft() -> None:
     import pytest
 
     from april_common.settings import WakeSettings
@@ -362,8 +362,9 @@ def test_speaker_gate_only_supports_off() -> None:
     assert WakeSettings().speaker_gate == "off"
     # YAML 1.1 parses an unquoted `off` as False; it must still mean "off".
     assert WakeSettings(speaker_gate=False).speaker_gate == "off"
-    with pytest.raises(ValueError, match="speaker_gate currently supports only: off"):
-        WakeSettings(speaker_gate="soft")
+    assert WakeSettings(speaker_gate="soft").speaker_gate == "soft"
+    with pytest.raises(ValueError, match="speaker_gate must be off or soft"):
+        WakeSettings(speaker_gate="hard")
 
 
 def test_voice_ptt_modes_use_capture_strategy(monkeypatch) -> None:

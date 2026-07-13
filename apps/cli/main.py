@@ -718,9 +718,9 @@ def voice_enroll(
 ) -> None:
     """Record local speaker enrollment samples under data/voice_profiles/.
 
-    Samples are stored only on this Mac for a future speaker gate. The gate
-    itself stays `wake.speaker_gate: off` until a local verifier model exists;
-    enrollment never changes wake behaviour by itself.
+    Samples are stored only on this Mac for an operator-provided local
+    ``SpeakerVerifier``. Enrollment never changes ``wake.speaker_gate`` by
+    itself, and soft mode is only a convenience filter, never authentication.
     """
     from april_common.errors import RuntimeUnavailableError
     from services.voice.microphone import SoundDeviceMicrophone
@@ -747,7 +747,10 @@ def voice_enroll(
             "enrolled_samples": recorded,
             "profile_dir": str(profile_dir),
             "speaker_gate": settings.wake.speaker_gate,
-            "note": "speaker_gate stays off until a local verifier is configured",
+            "note": (
+                "enrollment does not enable speaker_gate; soft mode requires an "
+                "operator-provided local SpeakerVerifier"
+            ),
         }
     )
 

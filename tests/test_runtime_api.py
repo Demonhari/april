@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from april_common.settings import reset_settings_cache
+from services.april_runtime.fake_backend import FakeBackend
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelRegistry
 from services.april_runtime.server import create_app
@@ -97,6 +98,45 @@ def test_runtime_normal_generation(tmp_path: Path) -> None:
         )
     assert response.status_code == 200
     assert response.json()["model_id"] == "april-brain"
+
+
+def test_runtime_load_transports_generation_threads_to_fake_backend(tmp_path: Path) -> None:
+    lifecycle = runtime_lifecycle(tmp_path)
+    with _isolated_home(tmp_path), TestClient(create_app(lifecycle)) as client:
+        response = client.post(
+            "/runtime/models/load",
+            json={"model_id": "april-brain", "generation_threads": 6},
+        )
+        assert response.status_code == 200
+        assert response.json()["generation_threads"] == 6
+        state = lifecycle.get_state("april-brain")
+        assert state.loaded_threads == 6
+        assert isinstance(state.backend, FakeBackend)
+        assert state.backend.loaded_model is not None
+        assert state.backend.loaded_model.threads == 6
+
+
+def test_runtime_defers_thread_reload_while_model_is_active(tmp_path: Path) -> None:
+    lifecycle = runtime_lifecycle(tmp_path)
+    with _isolated_home(tmp_path), TestClient(create_app(lifecycle)) as client:
+        first = client.post(
+            "/runtime/models/load",
+            json={"model_id": "april-brain", "generation_threads": 8},
+        )
+        assert first.json()["generation_threads"] == 8
+        state = lifecycle.get_state("april-brain")
+        state.active_requests = 1
+        deferred = client.post(
+            "/runtime/models/load",
+            json={"model_id": "april-brain", "generation_threads": 6},
+        )
+        assert deferred.json()["generation_threads"] == 8
+        state.active_requests = 0
+        applied = client.post(
+            "/runtime/models/load",
+            json={"model_id": "april-brain", "generation_threads": 6},
+        )
+        assert applied.json()["generation_threads"] == 6
 
 
 def test_runtime_unknown_model(tmp_path: Path) -> None:

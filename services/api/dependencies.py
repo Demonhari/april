@@ -107,10 +107,12 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
 async def _assemble_container(active_settings: AprilSettings, database: Database) -> ApiContainer:
     await run_migrations(database)
     memory = SqliteMemory(database)
+    governor = ResourceGovernor(active_settings)
     runtime_client = RuntimeClient(
         active_settings.runtime.url,
         timeout=active_settings.runtime.request_timeout_seconds,
         token=active_settings.runtime.token,
+        generation_thread_provider=governor.generation_thread_budget,
     )
     audit = AuditLogger(active_settings.audit_path)
     embedding = embedding_provider_from_config(
@@ -168,7 +170,6 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
     overlay_manager = PromptOverlayManager(active_settings, database, audit=audit)
     playbook_loader = PlaybookLoader(active_settings.playbooks_path)
     playbook_runner = PlaybookRunner(tool_executor, memory=memory)
-    governor = ResourceGovernor(active_settings)
     agent_pool = AgentPool(
         memory,
         runtime_client=runtime_client,

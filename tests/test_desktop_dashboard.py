@@ -47,6 +47,7 @@ def test_dashboard_helpers_loaded_before_app() -> None:
     # the token bridge that the SPA's boot order depends on.
     assert html.index("token_bridge.js") < html.index("dashboard_helpers.js")
     assert html.index("dashboard_helpers.js") < html.index("app.js")
+    assert html.index("adapters_helpers.js") < html.index("app.js")
 
 
 # --- no external assets / build step --------------------------------------
@@ -69,7 +70,14 @@ def test_no_external_assets_or_cdns() -> None:
         "crossorigin",
     )
     # Every served web asset, including the security-critical token bridge.
-    for name in ("index.html", "styles.css", "app.js", "dashboard_helpers.js", "token_bridge.js"):
+    for name in (
+        "index.html",
+        "styles.css",
+        "app.js",
+        "dashboard_helpers.js",
+        "adapters_helpers.js",
+        "token_bridge.js",
+    ):
         text = _read(name).lower()
         for needle in forbidden:
             assert needle not in text, f"{name} references external asset pattern {needle!r}"
@@ -199,6 +207,21 @@ def test_model_load_unload_endpoints() -> None:
     # GET/wrong-method or missing-model_id regression is caught.
     assert re.search(r'api\(\s*"POST",\s*"/runtime/models/load",\s*\{\s*model_id:\s*modelId', app)
     assert re.search(r'api\(\s*"POST",\s*"/runtime/models/unload",\s*\{\s*model_id:\s*modelId', app)
+
+
+def test_adapters_screen_uses_existing_gated_endpoints() -> None:
+    html = _read("index.html")
+    app = _read("app.js")
+    helpers = _read("adapters_helpers.js")
+    assert 'data-screen="adapters"' in html
+    assert "screens.adapters" in app
+    assert 'path: "/evolution/adapters"' in helpers
+    assert 'path: "/evolution/adapters/activate"' in helpers
+    assert 'path: "/evolution/adapters/rollback"' in helpers
+    assert app.count("window.confirm(") >= 2
+    assert 'showBanner(String(outcome["reason"] || "blocked"))' in app
+    for forbidden in ("localStorage", "sessionStorage", "document.cookie"):
+        assert forbidden not in helpers
 
 
 # --- wide cockpit layout --------------------------------------------------

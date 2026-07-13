@@ -73,6 +73,21 @@ def _pin_llama_cpp(monkeypatch: pytest.MonkeyPatch, *, available: bool) -> None:
 
 
 @pytest.fixture
+def clean_april_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove host ``APRIL_*`` overrides for config-driven builder tests.
+
+    Readiness and startup-preflight builders intentionally honour every supported
+    APRIL environment override in production. Tests that construct a temporary
+    home from copied config files must therefore clear the developer shell's
+    APRIL variables, just as the adjacent llama.cpp fixtures pin the optional
+    dependency probe instead of inheriting host state.
+    """
+    for key in tuple(os.environ):
+        if key.startswith("APRIL_"):
+            monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture
 def llama_cpp_available(monkeypatch: pytest.MonkeyPatch) -> None:
     """Report the optional ``[runtime]`` extra as installed for this test."""
     _pin_llama_cpp(monkeypatch, available=True)
@@ -304,12 +319,19 @@ class FakeRuntimeClient:
     async def health(self, *, timeout: float | None = None) -> dict[str, Any]:
         return {"status": "ok", "backend": "fake", "timeout": timeout}
 
-    async def load(self, model_id: str, *, request_id: str | None = None) -> dict[str, Any]:
+    async def load(
+        self,
+        model_id: str,
+        *,
+        request_id: str | None = None,
+        generation_threads: int | None = None,
+    ) -> dict[str, Any]:
         return {
             "request_id": request_id or "test-request",
             "model_id": model_id,
             "state": "loaded",
             "message": "loaded",
+            "generation_threads": generation_threads,
         }
 
     async def unload(self, model_id: str, *, request_id: str | None = None) -> dict[str, Any]:

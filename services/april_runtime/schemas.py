@@ -102,6 +102,9 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     options: GenerationOptions = Field(default_factory=GenerationOptions)
     response_format: ResponseFormat | None = None
+    # llama.cpp applies this when constructing the model instance. Runtime may
+    # safely reload an idle instance when the requested budget changes.
+    generation_threads: int | None = Field(default=None, ge=1, le=256)
     request_id: str | None = None
 
 
@@ -124,6 +127,7 @@ class ChatResponse(BaseModel):
 
 class LoadModelRequest(BaseModel):
     model_id: str
+    generation_threads: int | None = Field(default=None, ge=1, le=256)
     request_id: str | None = None
 
 
@@ -132,6 +136,7 @@ class ModelOperationResponse(BaseModel):
     model_id: str
     state: ModelState
     message: str
+    generation_threads: int | None = None
 
 
 class ModelInfo(BaseModel):

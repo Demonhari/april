@@ -27,7 +27,13 @@ PREWARMABLE_AGENTS = frozenset(
 
 
 class RuntimePrewarmClient(Protocol):
-    async def load(self, model_id: str, *, request_id: str | None = None) -> Any: ...
+    async def load(
+        self,
+        model_id: str,
+        *,
+        request_id: str | None = None,
+        generation_threads: int | None = None,
+    ) -> Any: ...
 
 
 class PrewarmGovernor(Protocol):
@@ -214,7 +220,12 @@ class AgentPool:
             request_id=request_id,
         )
         try:
-            await self.runtime_client.load(model_id, request_id=request_id)
+            thread_budget = self._generation_thread_budget()
+            await self.runtime_client.load(
+                model_id,
+                request_id=request_id,
+                generation_threads=thread_budget,
+            )
         except Exception as exc:
             result = AgentPrewarmResult(agent, model_id, "failed", type(exc).__name__)
             self._audit_prewarm(result, request_id=request_id)
@@ -230,6 +241,18 @@ class AgentPool:
         if callable(model_load):
             return model_load(projected_resident_gb=None)
         return self.governor.assess_resident()
+
+    def _generation_thread_budget(self) -> int | None:
+        if self.governor is None:
+            return None
+        budget = getattr(self.governor, "generation_thread_budget", None)
+        if not callable(budget):
+            return None
+        try:
+            value = int(budget())
+        except Exception:
+            return None
+        return value if value > 0 else None
 
     def _audit_prewarm(self, result: AgentPrewarmResult, *, request_id: str | None) -> None:
         if self.audit is None:

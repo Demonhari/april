@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -26,10 +26,21 @@ class RuntimeClient:
         *,
         timeout: float = 120.0,
         token: str | None = None,
+        generation_thread_provider: Callable[[], int] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.token = token
+        self.generation_thread_provider = generation_thread_provider
+
+    def _generation_threads(self) -> int | None:
+        if self.generation_thread_provider is None:
+            return None
+        try:
+            value = int(self.generation_thread_provider())
+        except Exception:
+            return None
+        return value if value > 0 else None
 
     @property
     def headers(self) -> dict[str, str] | None:
@@ -51,6 +62,7 @@ class RuntimeClient:
             messages=messages,
             options=options or GenerationOptions(),
             response_format=response_format,
+            generation_threads=self._generation_threads(),
             request_id=request_id,
         )
         try:
@@ -109,13 +121,28 @@ class RuntimeClient:
             raise RuntimeUnavailableError("April Runtime returned an error.", response.json())
         return response.json()
 
-    async def load(self, model_id: str, *, request_id: str | None = None) -> ModelOperationResponse:
-        return await self._model_operation("load", model_id, request_id=request_id)
+    async def load(
+        self,
+        model_id: str,
+        *,
+        request_id: str | None = None,
+        generation_threads: int | None = None,
+    ) -> ModelOperationResponse:
+        return await self._model_operation(
+            "load",
+            model_id,
+            request_id=request_id,
+            generation_threads=(
+                generation_threads if generation_threads is not None else self._generation_threads()
+            ),
+        )
 
     async def unload(
         self, model_id: str, *, request_id: str | None = None
     ) -> ModelOperationResponse:
-        return await self._model_operation("unload", model_id, request_id=request_id)
+        return await self._model_operation(
+            "unload", model_id, request_id=request_id, generation_threads=None
+        )
 
     async def _model_operation(
         self,
@@ -123,8 +150,13 @@ class RuntimeClient:
         model_id: str,
         *,
         request_id: str | None,
+        generation_threads: int | None,
     ) -> ModelOperationResponse:
-        request = LoadModelRequest(model_id=model_id, request_id=request_id)
+        request = LoadModelRequest(
+            model_id=model_id,
+            generation_threads=generation_threads,
+            request_id=request_id,
+        )
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
@@ -154,6 +186,7 @@ class RuntimeClient:
             messages=messages,
             options=options or GenerationOptions(),
             response_format=response_format,
+            generation_threads=self._generation_threads(),
             request_id=request_id,
         )
         try:

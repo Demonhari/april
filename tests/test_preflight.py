@@ -3,9 +3,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
 import yaml
 
 from apps.runner.preflight import build_preflight_report
+
+pytestmark = pytest.mark.usefixtures("clean_april_environment")
 
 
 def _copy_configs(home: Path) -> None:

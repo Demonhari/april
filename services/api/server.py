@@ -1582,10 +1582,14 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
                 "mode": active.settings.wake.speaker_gate,
                 "supported": False,
                 "detail": (
-                    "speaker_gate is off; no local speaker verifier is implemented in "
-                    "this build. `april voice enroll` only records samples and does "
-                    "not enable the gate. With wake enabled, anyone near the "
-                    "microphone can wake APRIL."
+                    (
+                        "speaker_gate=soft is configured, but no production local "
+                        "speaker verifier model ships with APRIL; Sentinel audits one "
+                        "warning and behaves as off."
+                        if active.settings.wake.speaker_gate == "soft"
+                        else "speaker_gate is off; enrollment does not enable it by itself."
+                    )
+                    + " It is a convenience filter, never a security boundary."
                 ),
             },
             # Single redacted enum capturing the highest voice milestone reached:

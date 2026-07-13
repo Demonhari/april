@@ -26,8 +26,10 @@ from services.wake.confirmer import (
 )
 from services.wake.fakes import (
     FakeFrameMicrophone,
+    FakeSpeakerVerifier,
     ManualClock,
     RecordingAudioPlayer,
+    RecordingAudit,
     RecordingDelivery,
     ScriptedScorer,
 )
@@ -285,6 +287,180 @@ def test_ring_buffer_snapshot_preserves_wake_onset() -> None:
     for frame in onset:
         buffer.append(frame)
     assert buffer.snapshot() == onset
+
+
+# ---------------------------------------------------------------------------
+# Soft speaker gate (convenience filter, never authentication)
+# ---------------------------------------------------------------------------
+
+
+async def test_soft_speaker_gate_drops_nonmatching_confirmed_wake(settings_tmp) -> None:
+    tuned = settings_tmp.model_copy(
+        update={
+            "wake": settings_tmp.wake.model_copy(
+                update={
+                    "enabled": True,
+                    "confirm_with_stt": False,
+                    "speaker_gate": "soft",
+                }
+            )
+        }
+    )
+    verifier = FakeSpeakerVerifier(0.2)
+    audit = RecordingAudit()
+    delivery = RecordingDelivery()
+    player = RecordingAudioPlayer()
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([FRAME]),
+        scorers=[ScriptedScorer([0.9])],
+        deliver=delivery,
+        player=player,
+        mute=MuteSwitch(tuned.mute_flag_path),
+        speaker_verifier=verifier,
+        audit=audit,
+    )
+
+    await sentinel.run_once()
+
+    assert delivery.events == []
+    assert len(verifier.calls) == 1
+    assert verifier.calls[0][1] == FRAME
+    assert sentinel.last_rejection_reason == "speaker_gate"
+    assert player.played == []
+    dropped = next(record for record in audit.records if record["event_type"] == "wake_dropped")
+    assert dropped["reason"] == "speaker_gate"
+
+
+async def test_soft_speaker_gate_passes_matching_confirmed_wake(settings_tmp) -> None:
+    tuned = settings_tmp.model_copy(
+        update={
+            "wake": settings_tmp.wake.model_copy(
+                update={
+                    "enabled": True,
+                    "confirm_with_stt": False,
+                    "speaker_gate": "soft",
+                }
+            )
+        }
+    )
+    verifier = FakeSpeakerVerifier(0.8)
+    delivery = RecordingDelivery()
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([FRAME]),
+        scorers=[ScriptedScorer([0.9])],
+        deliver=delivery,
+        player=RecordingAudioPlayer(),
+        mute=MuteSwitch(tuned.mute_flag_path),
+        speaker_verifier=verifier,
+        audit=RecordingAudit(),
+    )
+
+    await sentinel.run_once()
+
+    assert len(delivery.events) == 1
+    assert len(verifier.calls) == 1
+
+
+async def test_soft_speaker_enrollment_rejects_symlink_escape(settings_tmp) -> None:
+    profile = settings_tmp.resolve_path(Path("data/voice_profiles"))
+    profile.mkdir(parents=True)
+    enrolled = profile / "enroll-01.wav"
+    enrolled.write_bytes(b"RIFF enrolled")
+    outside = settings_tmp.home.parent / "outside.wav"
+    outside.write_bytes(b"RIFF outside")
+    (profile / "enroll-02.wav").symlink_to(outside)
+    tuned = settings_tmp.model_copy(
+        update={
+            "wake": settings_tmp.wake.model_copy(
+                update={
+                    "enabled": True,
+                    "confirm_with_stt": False,
+                    "speaker_gate": "soft",
+                }
+            )
+        }
+    )
+    verifier = FakeSpeakerVerifier(0.8)
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([FRAME]),
+        scorers=[ScriptedScorer([0.9])],
+        deliver=RecordingDelivery(),
+        mute=MuteSwitch(tuned.mute_flag_path),
+        speaker_verifier=verifier,
+        audit=RecordingAudit(),
+    )
+
+    await sentinel.run_once()
+
+    assert verifier.calls[0][0] == (enrolled.resolve(),)
+
+
+async def test_off_speaker_gate_never_consults_verifier(settings_tmp) -> None:
+    tuned = settings_tmp.model_copy(
+        update={
+            "wake": settings_tmp.wake.model_copy(
+                update={"enabled": True, "confirm_with_stt": False, "speaker_gate": "off"}
+            )
+        }
+    )
+    verifier = FakeSpeakerVerifier(0.0)
+    delivery = RecordingDelivery()
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([FRAME]),
+        scorers=[ScriptedScorer([0.9])],
+        deliver=delivery,
+        mute=MuteSwitch(tuned.mute_flag_path),
+        speaker_verifier=verifier,
+        audit=RecordingAudit(),
+    )
+
+    await sentinel.run_once()
+
+    assert len(delivery.events) == 1
+    assert verifier.calls == []
+
+
+async def test_soft_speaker_gate_missing_model_degrades_once_and_never_blocks(
+    settings_tmp,
+) -> None:
+    tuned = settings_tmp.model_copy(
+        update={
+            "wake": settings_tmp.wake.model_copy(
+                update={
+                    "enabled": True,
+                    "confirm_with_stt": False,
+                    "speaker_gate": "soft",
+                }
+            )
+        }
+    )
+    audit = RecordingAudit()
+    delivery = RecordingDelivery()
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([FRAME]),
+        scorers=[ScriptedScorer([0.9])],
+        deliver=delivery,
+        mute=MuteSwitch(tuned.mute_flag_path),
+        speaker_verifier=None,
+        audit=audit,
+    )
+
+    await sentinel.run_once()
+    sentinel.microphone = FakeFrameMicrophone([])
+    await sentinel.run_once()
+
+    assert len(delivery.events) == 1
+    warnings = [
+        record for record in audit.records if record["event_type"] == "speaker_gate_degraded"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["status"] == "warning"
+    assert warnings[0]["reason"] == "speaker_gate"
 
 
 # ---------------------------------------------------------------------------

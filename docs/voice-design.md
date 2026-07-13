@@ -90,14 +90,31 @@ downloads or trains one, and `voice doctor` says so explicitly. These paths are
 verified with synthetic PCM, a fake microphone, and mocked input only; a live
 microphone, whisper.cpp, Piper, and openWakeWord are not exercised here.
 
-## Speaker gate (not implemented)
+## Speaker gate (soft interface; real model operator blocker)
 
-`wake.speaker_gate` supports only `off`. A "soft" speaker gate (biasing wake
-acceptance toward an enrolled voice) requires a real local speaker-verification
-model; APRIL does not fake one. Config validation rejects any other value, and
-readiness reports the gate as an explicit production blocker for deployments
-that require speaker identification. Do not advertise speaker identification
-as implemented until a local verifier is integrated and live-verified.
+`wake.speaker_gate` accepts `off | soft` and defaults to `off`. Soft mode is a
+convenience filter after wake confirmation and before earcon/delivery. It is
+never authentication, never establishes identity, and never grants access or
+changes APRIL's deterministic permission decisions.
+
+The integration boundary is `services.wake.speaker.SpeakerVerifier`:
+
+```python
+def score(enrollment: Sequence[Path], utterance: bytes) -> float: ...
+```
+
+`enrollment` contains operator-owned WAV samples under `data/voice_profiles/`;
+`utterance` is bounded 16-bit mono PCM from Sentinel's existing ring buffer. A
+score of at least 0.5 passes. Tests inject the deterministic
+`FakeSpeakerVerifier`; production code does not import that fake.
+
+APRIL does not ship, download, or pretend to provide a speaker-embedding ONNX.
+An operator must supply a genuinely local verifier adapter/model and validate it
+on the target Mac. Until then, configuring `soft` causes Sentinel to write one
+audited startup warning and behave as `off`, without crashing or blocking wake.
+A verifier error degrades the same way. A real non-match is dropped silently and
+audited with `reason: speaker_gate`. `april voice enroll` only records samples;
+it never enables the gate or claims that a verifier model exists.
 
 ## Live verification
 

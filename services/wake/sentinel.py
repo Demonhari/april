@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from april_common.settings import AprilSettings
 from services.voice.audio_player import AudioPlayer
@@ -18,11 +19,16 @@ from services.voice.vad import VoiceActivityDetector
 from services.wake.confirmer import SttConfirmer, strip_vocative
 from services.wake.ring_buffer import AudioRingBuffer
 from services.wake.schemas import WakeEvent
+from services.wake.speaker import SPEAKER_MATCH_THRESHOLD, SpeakerVerifier
 from services.wake.status import WakeListeningState, write_wake_status
 
 logger = logging.getLogger(__name__)
 
 WakeDelivery = Callable[[WakeEvent], Awaitable[None]]
+
+
+class AuditSink(Protocol):
+    def write(self, payload: dict[str, Any]) -> None: ...
 
 
 class WakeScorer(Protocol):
@@ -60,7 +66,9 @@ class Sentinel:
     otherwise scores at or above ``candidate_threshold`` are confirmed by local
     STT over the ring-buffer capture. STT never opens its own microphone stream.
     Accepted wakes are delivered as :class:`WakeEvent` (source ``voice``) and
-    interrupt any assistant speech via ``AudioPlayer.stop()``/``duck()``.
+    interrupt any assistant speech via ``AudioPlayer.stop()``/``duck()``. A soft
+    speaker verifier may suppress delivery as a convenience filter only. It is
+    never authentication and never affects APRIL permissions.
     """
 
     def __init__(
@@ -75,6 +83,9 @@ class Sentinel:
         player: AudioPlayer | None = None,
         vad: VoiceActivityDetector | None = None,
         mute: MuteSwitch | None = None,
+        speaker_verifier: SpeakerVerifier | None = None,
+        speaker_enrollment: Sequence[Path] | None = None,
+        audit: AuditSink | None = None,
         wake_word: str = "april",
         sample_rate: int = 16_000,
         clock: Callable[[], float] = time.monotonic,
@@ -96,6 +107,13 @@ class Sentinel:
             required_frames=settings.voice.vad_required_frames,
         )
         self.mute = mute or MuteSwitch(settings.mute_flag_path)
+        self.speaker_verifier = speaker_verifier
+        self.speaker_enrollment = tuple(
+            speaker_enrollment
+            if speaker_enrollment is not None
+            else _speaker_enrollment_paths(settings)
+        )
+        self.audit = audit
         self.clock = clock
         self._sleep = sleep or asyncio.sleep
         self.barge_in_mode = barge_in_mode
@@ -107,6 +125,8 @@ class Sentinel:
         self.accepted_wakes = 0
         self.rejected_candidates = 0
         self.last_rejection_reason: str | None = None
+        self._speaker_gate_started = False
+        self._speaker_gate_degraded = False
 
     def stop(self) -> None:
         self._stopped = True
@@ -123,6 +143,7 @@ class Sentinel:
 
     async def run(self) -> None:
         """Own the microphone until stopped. Mute fully releases the stream."""
+        self._start_speaker_gate()
         while not self._stopped:
             if self.mute.is_muted():
                 self._set_status("muted")
@@ -133,6 +154,7 @@ class Sentinel:
 
     async def run_once(self) -> None:
         """Consume one microphone stream until mute/stop/stream end."""
+        self._start_speaker_gate()
         if self.mute.is_muted() or self._stopped:
             self._set_status("muted" if self.mute.is_muted() else "idle")
             self._follow_up_until = None
@@ -240,6 +262,19 @@ class Sentinel:
     ) -> None:
         pre_roll = self.ring_buffer.snapshot()
         self._set_status("listening")
+        if not self._speaker_allowed(pre_roll):
+            self._cooldown_until = self.clock() + self.settings.voice.wake_word_cooldown_seconds
+            self._reset_detection_state()
+            self._reject(score or 0.0, "speaker_gate")
+            self._audit(
+                {
+                    "event_type": "wake_dropped",
+                    "actor": "sentinel",
+                    "reason": "speaker_gate",
+                }
+            )
+            self._set_status("muted" if self.mute.is_muted() else "idle")
+            return
         if self.player is not None:
             # Barge-in: the user speaking over APRIL always interrupts playback
             # before APRIL emits the short acknowledgement earcon.
@@ -256,12 +291,7 @@ class Sentinel:
                 speech_seen=speech_seen,
             )
         self._cooldown_until = self.clock() + self.settings.voice.wake_word_cooldown_seconds
-        self.ring_buffer.clear()
-        self.vad.reset()
-        for scorer in self.scorers:
-            reset = getattr(scorer, "reset", None)
-            if callable(reset):
-                reset()
+        self._reset_detection_state()
         event = WakeEvent(source="voice", score=score, text=text, reason=reason)
         self.accepted_wakes += 1
         try:
@@ -270,6 +300,61 @@ class Sentinel:
             logger.warning("Wake delivery failed: %s", exc)
         finally:
             self._set_status("muted" if self.mute.is_muted() else "idle")
+
+    def _start_speaker_gate(self) -> None:
+        if self._speaker_gate_started:
+            return
+        self._speaker_gate_started = True
+        if self.settings.wake.speaker_gate == "soft" and self.speaker_verifier is None:
+            self._degrade_speaker_gate("local_verifier_unavailable")
+
+    def _degrade_speaker_gate(self, detail: str) -> None:
+        if self._speaker_gate_degraded:
+            return
+        self._speaker_gate_degraded = True
+        self._audit(
+            {
+                "event_type": "speaker_gate_degraded",
+                "actor": "sentinel",
+                "status": "warning",
+                "reason": "speaker_gate",
+                "detail": detail,
+            }
+        )
+
+    def _speaker_allowed(self, frames: Sequence[bytes]) -> bool:
+        if self.settings.wake.speaker_gate != "soft" or self._speaker_gate_degraded:
+            return True
+        verifier = self.speaker_verifier
+        if verifier is None:
+            return True
+        try:
+            match_score = float(verifier.score(self.speaker_enrollment, b"".join(frames)))
+            if not math.isfinite(match_score) or not 0.0 <= match_score <= 1.0:
+                raise ValueError("speaker verifier score must be between 0 and 1")
+        except Exception as exc:
+            logger.warning("Speaker verifier unavailable; soft gate disabled: %s", exc)
+            self._degrade_speaker_gate("local_verifier_failed")
+            return True
+        return match_score >= SPEAKER_MATCH_THRESHOLD
+
+    def _reset_detection_state(self) -> None:
+        self.ring_buffer.clear()
+        self.vad.reset()
+        for scorer in self.scorers:
+            reset = getattr(scorer, "reset", None)
+            if callable(reset):
+                reset()
+
+    def _audit(self, payload: dict[str, Any]) -> None:
+        if self.audit is None:
+            return
+        try:
+            self.audit.write(payload)
+        except Exception as exc:
+            # Speaker verification is explicitly a convenience feature. Audit
+            # trouble must not turn it into a wake availability/security gate.
+            logger.warning("Speaker-gate audit write failed: %s", exc)
 
     async def _play_earcon(self) -> None:
         if self.player is None or not self.settings.wake.earcon_enabled:
@@ -360,6 +445,24 @@ def _earcon_pcm(*, sample_rate: int) -> bytes:
     envelope = np.linspace(1.0, 0.2, samples, dtype=np.float32)
     wave = np.sin(2.0 * np.pi * frequency_hz * t) * envelope * 0.18
     return np.asarray(wave * 32767, dtype=np.int16).tobytes()
+
+
+def _speaker_enrollment_paths(settings: AprilSettings) -> tuple[Path, ...]:
+    """Return regular enrollment WAVs fenced inside APRIL's profile directory."""
+    profile_dir = settings.resolve_path(Path("data/voice_profiles"))
+    try:
+        root = profile_dir.resolve(strict=False)
+    except OSError:
+        return ()
+    enrollment: list[Path] = []
+    for candidate in sorted(profile_dir.glob("*.wav")):
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.is_relative_to(root) and resolved.is_file():
+            enrollment.append(resolved)
+    return tuple(enrollment)
 
 
 class ApiWakeDelivery:
@@ -455,6 +558,7 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
     Requires ``voice.enabled`` and ``wake.enabled`` plus at least one wake model.
     Raises rather than pretending to listen when prerequisites are missing.
     """
+    from april_common.audit import AuditLogger
     from april_common.errors import RuntimeUnavailableError
     from services.voice.audio_player import SoundDeviceAudioPlayer
     from services.voice.microphone import SoundDeviceMicrophone
@@ -516,6 +620,11 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
         confirmer=confirmer,
         transcriber=stt,
         player=player,
+        # No production verifier model ships with APRIL. In soft mode Sentinel
+        # records one degraded warning and behaves as off until an operator
+        # supplies a local adapter implementing SpeakerVerifier.
+        speaker_verifier=None,
+        audit=AuditLogger(settings.audit_path),
     )
     sentinel_ref = sentinel
     with contextlib.suppress(KeyboardInterrupt):

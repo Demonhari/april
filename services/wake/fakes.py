@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Sequence
 from pathlib import Path
 
 from services.voice.audio_player import AudioPlayer
@@ -49,6 +49,28 @@ class ScriptedScorer:
 
     def reset(self) -> None:
         self.reset_calls += 1
+
+
+class FakeSpeakerVerifier:
+    """Deterministic test-only speaker verifier with a fixed local score."""
+
+    def __init__(self, score: float) -> None:
+        self.fixed_score = score
+        self.calls: list[tuple[tuple[Path, ...], bytes]] = []
+
+    def score(self, enrollment: Sequence[Path], utterance: bytes) -> float:
+        self.calls.append((tuple(enrollment), utterance))
+        return self.fixed_score
+
+
+class RecordingAudit:
+    """In-memory audit sink for wake tests."""
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+
+    def write(self, payload: dict[str, object]) -> None:
+        self.records.append(dict(payload))
 
 
 class RecordingAudioPlayer(AudioPlayer):

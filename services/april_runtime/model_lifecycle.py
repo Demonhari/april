@@ -62,6 +62,7 @@ class ModelRuntimeState:
     unloaded_at: str | None = None
     load_duration_ms: float | None = None
     last_used_monotonic: float = 0.0
+    loaded_threads: int | None = None
 
 
 class ModelLifecycle:
@@ -147,7 +148,7 @@ class ModelLifecycle:
             load_duration_ms=state.load_duration_ms,
             idle_unload_seconds=state.model.idle_unload_seconds,
             priority=state.model.priority,
-            threads=state.model.threads,
+            threads=state.loaded_threads or state.model.threads,
             n_batch=state.model.n_batch,
             n_ubatch=state.model.n_ubatch,
             n_gpu_layers=state.model.n_gpu_layers,
@@ -213,14 +214,28 @@ class ModelLifecycle:
         # without claiming to be an exact memory profiler.
         return max(0.25, size_gb * 1.25)
 
-    async def load_model(self, model_id: str) -> ModelRuntimeState:
+    async def load_model(
+        self, model_id: str, *, generation_threads: int | None = None
+    ) -> ModelRuntimeState:
         state = self.get_state(model_id)
+        if generation_threads is not None and generation_threads < 1:
+            raise ValueError("generation_threads must be positive")
         if self._is_specialist(state.model):
             self._check_resource_gate(state)
             await self._enforce_lifecycle(target_model_id=model_id)
         async with state.lifecycle_lock:
             if state.state == "loaded":
-                return state
+                if generation_threads is None or state.loaded_threads == generation_threads:
+                    return state
+                # llama.cpp fixes n_threads at construction. Do not disrupt a
+                # request already using this instance; the new hint will apply
+                # on a later safe load/reload.
+                if state.active_requests > 0 or state.backend is None:
+                    return state
+                await state.backend.unload()
+                state.backend = None
+                state.state = "unloaded"
+                state.loaded_threads = None
             if state.state == "loading":
                 return state
             if state.state == "unavailable" and self.root_backend != "fake":
@@ -237,6 +252,8 @@ class ModelLifecycle:
             # (readiness uses ModelDefinition.resolved_adapter_path(registry.root)).
             # A relative adapter_path must not be resolved against the process cwd.
             update: dict[str, object] = {"path": state.model.resolved_path(self.registry.root)}
+            if generation_threads is not None:
+                update["threads"] = generation_threads
             try:
                 resolved_adapter = state.model.resolved_adapter_path(self.registry.root)
             except (OSError, ValueError) as exc:
@@ -276,6 +293,7 @@ class ModelLifecycle:
                 ) from exc
             state.backend = backend
             state.state = "loaded"
+            state.loaded_threads = resolved_model.threads
             state.loaded_at = utc_now_iso()
             state.load_duration_ms = (time.monotonic() - started) * 1000
             state.unloaded_at = None
@@ -302,6 +320,7 @@ class ModelLifecycle:
             finally:
                 state.backend = None
                 state.state = self._initial_state(state.model)
+                state.loaded_threads = None
                 state.unloaded_at = utc_now_iso()
             return state
 
@@ -311,18 +330,28 @@ class ModelLifecycle:
 
     async def generate(self, request: ChatRequest) -> ChatResponse:
         request_id = request.request_id or str(uuid.uuid4())
-        state = await self.load_model(request.model_id)
+        state = await self.load_model(
+            request.model_id, generation_threads=request.generation_threads
+        )
         if state.backend is None:
             raise ModelUnavailableError(request.model_id, "Model backend is not available.")
-        options = effective_generation_options(state.model, request.options)
-        metadata = state.backend.prompt_metadata()
-        context = await self.context_manager.fit(
-            model=state.model,
-            backend=state.backend,
-            messages=request.messages,
-            max_output_tokens=options.max_output_tokens,
-            metadata=metadata,
-        )
+        # Reserve the loaded instance before the first await after load_model.
+        # A thread-budget change may reload an idle model, so context preparation
+        # must count as active use just like backend generation does.
+        state.active_requests += 1
+        try:
+            options = effective_generation_options(state.model, request.options)
+            metadata = state.backend.prompt_metadata()
+            context = await self.context_manager.fit(
+                model=state.model,
+                backend=state.backend,
+                messages=request.messages,
+                max_output_tokens=options.max_output_tokens,
+                metadata=metadata,
+            )
+        except BaseException:
+            state.active_requests = max(0, state.active_requests - 1)
+            raise
         prompt = render_prompt(state.model, context.messages, metadata=metadata)
         lock = (
             state.generation_lock
@@ -332,7 +361,6 @@ class ModelLifecycle:
         async with lock:
             start = time.monotonic()
             try:
-                state.active_requests += 1
                 result = await state.backend.generate_messages(
                     prompt,
                     messages=context.messages,
@@ -427,18 +455,25 @@ class ModelLifecycle:
     async def stream(
         self, request: ChatRequest
     ) -> AsyncIterator[tuple[RuntimeStreamEventName, dict[str, object]]]:
-        state = await self.load_model(request.model_id)
+        state = await self.load_model(
+            request.model_id, generation_threads=request.generation_threads
+        )
         if state.backend is None:
             raise ModelUnavailableError(request.model_id, "Model backend is not available.")
-        options = effective_generation_options(state.model, request.options)
-        metadata = state.backend.prompt_metadata()
-        context = await self.context_manager.fit(
-            model=state.model,
-            backend=state.backend,
-            messages=request.messages,
-            max_output_tokens=options.max_output_tokens,
-            metadata=metadata,
-        )
+        state.active_requests += 1
+        try:
+            options = effective_generation_options(state.model, request.options)
+            metadata = state.backend.prompt_metadata()
+            context = await self.context_manager.fit(
+                model=state.model,
+                backend=state.backend,
+                messages=request.messages,
+                max_output_tokens=options.max_output_tokens,
+                metadata=metadata,
+            )
+        except BaseException:
+            state.active_requests = max(0, state.active_requests - 1)
+            raise
         prompt = render_prompt(state.model, context.messages, metadata=metadata)
         input_tokens = context.input_tokens
         output_tokens = 0
@@ -449,7 +484,6 @@ class ModelLifecycle:
             else _NoopLock()
         )
         async with lock:
-            state.active_requests += 1
             yield (
                 "meta",
                 {"context_truncated": context.truncated, "context_budget": context.metadata()},

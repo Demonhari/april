@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 import pytest
 
+from april_common.settings import GovernorSettings
 from services.pool.governor import (
     LocalResourceSignalProvider,
     ResourceGovernor,
@@ -88,6 +89,52 @@ def test_local_provider_non_macos_reports_unknown_sources() -> None:
     signals = provider.sample()
     assert signals.power_source == "unknown"
     assert signals.idle_source == "unknown"
+
+
+def test_generation_threads_active_user_uses_smaller_budget(settings_tmp) -> None:
+    governor = ResourceGovernor(
+        settings_tmp,
+        provider=FixedSignals(
+            ResourceSignals(
+                ram_headroom_gb=16.0,
+                cpu_load_percent=5.0,
+                on_ac_power=True,
+                user_idle_seconds=10.0,
+            )
+        ),
+    )
+    assert governor.generation_thread_budget() == 6
+
+
+def test_generation_threads_idle_user_uses_larger_budget(settings_tmp) -> None:
+    governor = ResourceGovernor(
+        settings_tmp,
+        provider=FixedSignals(
+            ResourceSignals(
+                ram_headroom_gb=16.0,
+                cpu_load_percent=5.0,
+                on_ac_power=True,
+                user_idle_seconds=600.0,
+            )
+        ),
+    )
+    assert governor.generation_thread_budget() == 8
+
+
+def test_generation_threads_degraded_idle_probe_uses_safe_default(settings_tmp) -> None:
+    governor = ResourceGovernor(
+        settings_tmp,
+        provider=LocalResourceSignalProvider(
+            runner=_failing_runner,
+            platform_system=lambda: "Darwin",
+        ),
+    )
+    assert governor.generation_thread_budget() == 6
+
+
+def test_generation_thread_settings_require_active_budget_not_above_idle() -> None:
+    with pytest.raises(ValueError, match="generation_threads_active"):
+        GovernorSettings(generation_threads_active=9, generation_threads_idle=8)
 
 
 def test_background_allowed_with_injected_ac_idle_signals(settings_tmp) -> None:

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -66,6 +67,27 @@ if blocked:
         text=True,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
+def test_only_llama_cpp_backend_imports_llama_cpp() -> None:
+    root = Path.cwd()
+    allowed = Path("services/april_runtime/llama_cpp_backend.py")
+    violations: list[str] = []
+    for package in ("april_common", "apps", "services", "agents", "skills"):
+        for path in (root / package).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imports_llama_cpp = any(
+                (
+                    isinstance(node, ast.Import)
+                    and any(alias.name == "llama_cpp" for alias in node.names)
+                )
+                or (isinstance(node, ast.ImportFrom) and node.module == "llama_cpp")
+                for node in ast.walk(tree)
+            )
+            relative = path.relative_to(root)
+            if imports_llama_cpp and relative != allowed:
+                violations.append(str(relative))
+    assert violations == []
 
 
 class FakeApiAsyncClient:
@@ -131,6 +153,8 @@ class FakeRuntimeStream:
 
 
 class FakeRuntimeAsyncClient:
+    posted: ClassVar[list[tuple[str, dict[str, Any]]]] = []
+
     def __init__(self, *, timeout: float) -> None:
         self.timeout = timeout
 
@@ -154,6 +178,7 @@ class FakeRuntimeAsyncClient:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         self.last_headers = headers
+        self.posted.append((url, dict(json)))
         if url.endswith("/runtime/chat"):
             return httpx.Response(
                 200,
@@ -189,7 +214,8 @@ class FakeRuntimeAsyncClient:
 @pytest.mark.asyncio
 async def test_runtime_client_methods_and_stream(monkeypatch) -> None:
     monkeypatch.setattr("services.april_runtime.client.httpx.AsyncClient", FakeRuntimeAsyncClient)
-    client = RuntimeClient("http://127.0.0.1:2")
+    FakeRuntimeAsyncClient.posted = []
+    client = RuntimeClient("http://127.0.0.1:2", generation_thread_provider=lambda: 6)
     response = await client.chat(
         model_id="april-brain",
         messages=[ChatMessage(role="user", content="hello")],
@@ -203,6 +229,16 @@ async def test_runtime_client_methods_and_stream(monkeypatch) -> None:
     assert [line async for line in client.stream(model_id="april-brain", messages=[])] == [
         '{"token":"ok"}'
     ]
+    chat_payload = next(
+        payload for url, payload in FakeRuntimeAsyncClient.posted if url.endswith("/runtime/chat")
+    )
+    load_payload = next(
+        payload
+        for url, payload in FakeRuntimeAsyncClient.posted
+        if url.endswith("/runtime/models/load")
+    )
+    assert chat_payload["generation_threads"] == 6
+    assert load_payload["generation_threads"] == 6
 
 
 def test_runner_install_main_uninstall_verify_and_shell_paths(tmp_path: Path, monkeypatch) -> None:

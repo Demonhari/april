@@ -113,9 +113,21 @@ native packaging.
 - **Wake-word and speaker gate: separate target-Mac blockers.** Sentinel has
   fake-tested wake routing, feedback verbs, generated earcon plumbing, and
   `idle | listening | muted` status. Live wake-word still requires a local
-  openWakeWord ONNX and `run april voice verify-wake-live`. `wake.speaker_gate`
-  remains `off` only; enrollment records samples, but no local
-  speaker-verifier ONNX is implemented or faked.
+  openWakeWord ONNX and `run april voice verify-wake-live`. The speaker gate
+  accepts `off | soft`; soft mode is fake-tested through the local
+  `SpeakerVerifier` protocol, silently drops non-matches with an audit event,
+  and degrades to off with one audited startup warning when no verifier is
+  available. No real verifier model ships with APRIL, so operator-provided local
+  speaker embeddings remain a target-Mac blocker. This filter is convenience
+  only, never authentication or a permission boundary.
+- **Governor generation threads: implemented at model-load granularity.** The
+  injected activity/idle policy selects 6 threads for an active or unknown user
+  signal and 8 for a trusted idle signal. Core orchestration transports the
+  budget through typed Runtime requests; Runtime alone applies it as
+  `llama_cpp.Llama(n_threads=...)`, and the fake backend records the effective
+  model definition. `llama-cpp-python` fixes `n_threads` at model construction,
+  so a changed budget takes effect on the next safe model load/reload rather
+  than changing an in-flight generation.
 - **Desktop: local SPA / optional native wrapper, not signed/notarized.** The UI
   is plain static HTML/CSS/JS served over authenticated loopback. The optional
   `dist/APRIL.app` stub is a development launcher only — no signing, no
@@ -132,10 +144,11 @@ native packaging.
   email, payments, automatic model downloads, telemetry, cloud APIs, or broad
   delete. The only file-removing flow is the scoped, Level-4 approval-gated
   log/cache cleanup.
-- **Deferred v2 follow-ons remain out of scope.** No speaker-verifier model is
-  present (`wake.speaker_gate` stays `off` only), LoRA training remains a
-  supervised manual runbook, Governor thread throttling is not implemented,
-  and there is no dedicated SPA adapters screen.
+- **Remaining v2 operator blockers are explicit.** No production
+  speaker-verifier model is present (soft-mode interface/fallback is implemented
+  and fake-tested), and LoRA training remains a supervised manual runbook.
+  Governor load-time thread throttling and the dedicated SPA Adapters screen are
+  implemented; neither claims target-Mac model quality or hardware validation.
 
 ## Architectural Assumptions
 

@@ -111,12 +111,15 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
     @app.post("/runtime/models/load")
     async def load_model(request: LoadModelRequest) -> ModelOperationResponse:
         request_id = request.request_id or str(uuid.uuid4())
-        state = await active_lifecycle.load_model(request.model_id)
+        state = await active_lifecycle.load_model(
+            request.model_id, generation_threads=request.generation_threads
+        )
         return ModelOperationResponse(
             request_id=request_id,
             model_id=request.model_id,
             state=state.state,
             message="loaded",
+            generation_threads=state.loaded_threads,
         )
 
     @app.post("/runtime/models/unload")
@@ -128,6 +131,7 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
             model_id=request.model_id,
             state=state.state,
             message="unloaded",
+            generation_threads=None,
         )
 
     @app.get("/runtime/models")

@@ -153,14 +153,8 @@ class WakeSettings(BaseModel):
     @field_validator("speaker_gate")
     @classmethod
     def validate_speaker_gate(cls, value: str) -> str:
-        if value not in {"off"}:
-            raise ValueError(
-                "speaker_gate currently supports only: off. No local speaker "
-                "verifier is implemented, so 'soft' would be a fake gate; "
-                "`april voice enroll` records samples only and does not enable "
-                "speaker verification. With wake enabled and speaker_gate off, "
-                "anyone near the microphone can wake APRIL."
-            )
+        if value not in {"off", "soft"}:
+            raise ValueError("speaker_gate must be off or soft")
         return value
 
     @model_validator(mode="after")
@@ -187,6 +181,16 @@ class GovernorSettings(BaseModel):
 
     max_resident_gb: float = Field(default=12.0, gt=0.0)
     dreamer_nice: int = Field(default=10, ge=0, le=20)
+    generation_threads_active: int = Field(default=6, ge=1, le=256)
+    generation_threads_idle: int = Field(default=8, ge=1, le=256)
+
+    @model_validator(mode="after")
+    def generation_thread_budgets_are_ordered(self) -> GovernorSettings:
+        if self.generation_threads_active > self.generation_threads_idle:
+            raise ValueError(
+                "governor.generation_threads_active must be <= generation_threads_idle"
+            )
+        return self
 
 
 class EvolutionSettings(BaseModel):
@@ -410,6 +414,14 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_DAEMON_AUTOSTART_ON_CLI": ("daemon", "autostart_on_cli"),
     "APRIL_GOVERNOR_MAX_RESIDENT_GB": ("governor", "max_resident_gb"),
     "APRIL_GOVERNOR_DREAMER_NICE": ("governor", "dreamer_nice"),
+    "APRIL_GOVERNOR_GENERATION_THREADS_ACTIVE": (
+        "governor",
+        "generation_threads_active",
+    ),
+    "APRIL_GOVERNOR_GENERATION_THREADS_IDLE": (
+        "governor",
+        "generation_threads_idle",
+    ),
     "APRIL_EVOLUTION_ENABLED": ("evolution", "enabled"),
     "APRIL_EVOLUTION_WINDOW": ("evolution", "window"),
     "APRIL_EVOLUTION_REQUIRE_AC_POWER": ("evolution", "require_ac_power"),

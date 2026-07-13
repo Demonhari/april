@@ -19,6 +19,7 @@
 let TOKEN = "";
 
 const D = window.AprilDashboard;
+const A = window.AprilAdapters;
 const BASE = window.location.origin;
 const CONVERSATION_ID = (crypto.randomUUID && crypto.randomUUID()) ||
   String(Date.now()) + "-" + Math.random().toString(16).slice(2);
@@ -1126,6 +1127,87 @@ screens.evolution = async function () {
     versionsCard.appendChild(item);
   }
   screenEl.appendChild(versionsCard);
+};
+
+screens.adapters = async function () {
+  screenEl.appendChild(screenHeader(
+    "Adapters",
+    "Versioned local LoRA pointers. Activation keeps the API's perplexity and real-verification gates intact."
+  ));
+
+  const activation = card(
+    "<div class='panel-title'>Activate adapter</div>" +
+    "<div class='adapter-form'>" +
+    "<label>Model id<input id='adapter-model-id' placeholder='april-brain' /></label>" +
+    "<label>Adapter path<input id='adapter-path' placeholder='/absolute/path/adapter.gguf' /></label>" +
+    "<label>Perplexity evidence<input id='adapter-evidence' placeholder='/absolute/path/evidence.json' /></label>" +
+    "<label>Real verification report (production)<input id='adapter-report' placeholder='/absolute/path/report.json' /></label>" +
+    "</div><div class='row'><button class='btn' id='adapter-activate'>Review & activate</button></div>" +
+    "<div class='kv warn'>Activation is explicit and remains blocked when the API lacks perplexity evidence or required real-model verification.</div>"
+  );
+  screenEl.appendChild(activation);
+  $("#adapter-activate").addEventListener("click", async () => {
+    const spec = A.activateRequest({
+      model_id: $("#adapter-model-id").value,
+      adapter_path: $("#adapter-path").value,
+      evidence_path: $("#adapter-evidence").value,
+      verification_report_path: $("#adapter-report").value,
+    });
+    if (!spec.body.model_id || !spec.body.adapter_path) {
+      showBanner("Model id and adapter path are required.");
+      return;
+    }
+    if (!window.confirm(
+      "Activate adapter for " + spec.body.model_id + "? The API will enforce all evidence gates."
+    )) return;
+    const data = await A.request(api, spec);
+    const outcome = data && data.activation;
+    if (outcome && outcome.status === "blocked") {
+      showBanner(String(outcome["reason"] || "blocked"));
+      return;
+    }
+    showBannerInfo("Adapter activated.");
+    navigate("adapters");
+  });
+
+  const data = await A.request(api, A.listRequest());
+  const adapters = (data && Array.isArray(data.adapters)) ? data.adapters : [];
+  const wrap = card("<div class='panel-title'>Registered adapters</div>");
+  if (!adapters.length) {
+    wrap.innerHTML += "<span class='muted'>No adapter history recorded.</span>";
+  }
+  adapters.forEach((item) => {
+    const view = A.adapterView(item);
+    const node = el("div", "list-item");
+    let versions = "<span class='muted'>No versions.</span>";
+    if (view.versions.length) {
+      versions = view.versions.map((version) =>
+        "<div class='kv'>v" + esc(version.version) + " · " + esc(version.basename) +
+        (version.active ? " · active" : "") + "</div>"
+      ).join("");
+    }
+    node.innerHTML =
+      "<div class='row'><strong>" + esc(view.modelId) + "</strong>" +
+      "<span class='pill " + (view.activeVersion !== null ? "ok" : "") + "'>active " +
+      esc(view.activeVersion === null ? "none" : "v" + view.activeVersion) + "</span>" +
+      "<span class='grow'></span><button class='btn secondary' data-act='adapter-rollback'>Rollback</button></div>" +
+      "<div class='kv'>history rows: " + esc(view.historyCount) + "</div>" + versions;
+    node.querySelector("[data-act='adapter-rollback']").addEventListener("click", async () => {
+      if (!window.confirm(
+        "Rollback " + view.modelId + " to its previous adapter version?"
+      )) return;
+      const result = await A.request(api, A.rollbackRequest(view.modelId, null));
+      const outcome = result && result.rollback;
+      if (outcome && outcome.status === "blocked") {
+        showBanner(String(outcome["reason"] || "blocked"));
+        return;
+      }
+      showBannerInfo("Adapter rolled back.");
+      navigate("adapters");
+    });
+    wrap.appendChild(node);
+  });
+  screenEl.appendChild(wrap);
 };
 
 screens.approvals = async function () {

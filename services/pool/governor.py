@@ -166,6 +166,25 @@ class ResourceGovernor:
             require_ac_power_for_background=settings.evolution.require_ac_power,
         )
 
+    def generation_thread_budget(self) -> int:
+        """Return the load-time generation thread budget for current activity.
+
+        A trusted idle signal unlocks the idle budget. An active user, an
+        unavailable idle probe, or a probe exception receives the smaller active
+        budget. This is a performance policy only; Runtime remains the sole layer
+        that applies the returned value to a model backend.
+        """
+        safe_default = self.settings.governor.generation_threads_active
+        try:
+            signals = self.provider.sample()
+        except Exception:
+            return safe_default
+        if signals.idle_source == SIGNAL_SOURCE_UNKNOWN:
+            return safe_default
+        if signals.user_idle_seconds < self.policy.min_idle_seconds_for_background:
+            return safe_default
+        return self.settings.governor.generation_threads_idle
+
     def assess_resident(self) -> GovernorDecision:
         """Gate always-on resident services such as Runtime/API/Sentinel."""
         signals = self.provider.sample()

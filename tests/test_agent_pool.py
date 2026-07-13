@@ -17,10 +17,16 @@ class RecordingRuntime(FakeRuntimeClient):
     def __init__(self, *, fail_load: bool = False) -> None:
         super().__init__()
         self.fail_load = fail_load
-        self.loads: list[tuple[str, str | None]] = []
+        self.loads: list[tuple[str, str | None, int | None]] = []
 
-    async def load(self, model_id: str, *, request_id: str | None = None) -> dict[str, object]:
-        self.loads.append((model_id, request_id))
+    async def load(
+        self,
+        model_id: str,
+        *,
+        request_id: str | None = None,
+        generation_threads: int | None = None,
+    ) -> dict[str, object]:
+        self.loads.append((model_id, request_id, generation_threads))
         if self.fail_load:
             raise RuntimeError("load failed")
         return {
@@ -32,9 +38,16 @@ class RecordingRuntime(FakeRuntimeClient):
 
 
 class FixedGovernor:
-    def __init__(self, *, allowed: bool, reasons: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        allowed: bool,
+        reasons: tuple[str, ...] = (),
+        generation_threads: int = 6,
+    ) -> None:
         self.allowed = allowed
         self.reasons = reasons
+        self.generation_threads = generation_threads
 
     def assess_model_load(self, *, projected_resident_gb: float | None = None) -> object:
         del projected_resident_gb
@@ -43,6 +56,9 @@ class FixedGovernor:
             (),
             {"allowed": self.allowed, "reasons": self.reasons},
         )()
+
+    def generation_thread_budget(self) -> int:
+        return self.generation_threads
 
 
 class RecordingAudit:
@@ -189,11 +205,12 @@ async def test_prewarm_requests_selected_specialist_models(settings_tmp) -> None
                 request_id=f"req-{agent}",
             )
             assert result.status == "loaded"
-        assert [model for model, _request_id in runtime.loads] == [
+        assert [model for model, _request_id, _threads in runtime.loads] == [
             "april-coding",
             "april-reading",
             "april-brain",
         ]
+        assert {threads for _model, _request_id, threads in runtime.loads} == {6}
         assert [record["status"] for record in audit.records if record["status"] == "loaded"] == [
             "loaded",
             "loaded",

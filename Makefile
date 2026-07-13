@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: install install-dev test coverage lint format format-check typecheck check ci run-runtime run-api cli install-global install-global-path install-global-force install-global-force-path verify-global uninstall-global
+.PHONY: install install-dev test coverage lint format format-check typecheck desktop-js check ci run-runtime run-api cli install-global install-global-path install-global-force install-global-force-path verify-global uninstall-global
 
 install:
 	$(PYTHON) -m venv $(VENV)
@@ -31,28 +31,32 @@ format-check:
 typecheck:
 	$(PY) -m mypy april_common apps services agents skills
 
+desktop-js:
+	@if command -v node >/dev/null 2>&1; then \
+		node tests/js/desktop_token_bridge.test.cjs; \
+		node tests/js/desktop_dashboard.test.cjs; \
+		node tests/js/desktop_adapters.test.cjs; \
+		node --check apps/desktop/web/app.js; \
+		node --check apps/desktop/web/token_bridge.js; \
+		node --check apps/desktop/web/dashboard_helpers.js; \
+		node --check apps/desktop/web/adapters_helpers.js; \
+	else \
+		echo "Skipping desktop JS checks: node not found."; \
+	fi
+
 # Mirror the important CI quality gates: lint, format check, type check, tests.
 check: lint format-check typecheck test
 
 # Full CI-equivalent gate, including compile, regular pytest, coverage threshold,
 # ResourceWarning-visible pytest, config validation, fake verification, and
 # desktop static checks when Node is available locally.
-ci: lint format-check typecheck
+ci: lint format-check typecheck desktop-js
 	$(PY) -m compileall -q april_common apps services agents skills tests
 	$(PY) -m pytest -q -ra
 	$(PY) -m pytest --cov=april_common --cov=apps --cov=services --cov=agents --cov=skills --cov-report=term-missing --cov-fail-under=85
 	$(PY) -W default::ResourceWarning -m pytest -q -ra
 	$(PY) -m apps.runner.main april config validate
 	APRIL_RUNTIME_BACKEND=fake $(PY) -m apps.runner.main april verify --fake
-	@if command -v node >/dev/null 2>&1; then \
-		node tests/js/desktop_token_bridge.test.cjs; \
-		node tests/js/desktop_dashboard.test.cjs; \
-		node --check apps/desktop/web/app.js; \
-		node --check apps/desktop/web/token_bridge.js; \
-		node --check apps/desktop/web/dashboard_helpers.js; \
-	else \
-		echo "Skipping desktop JS checks: node not found."; \
-	fi
 
 run-runtime:
 	$(PY) -m services.april_runtime.server

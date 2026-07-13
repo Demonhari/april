@@ -535,16 +535,24 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         checks.append(check)
 
     wake_enabled = settings.wake.enabled
+    speaker_soft = settings.wake.speaker_gate == "soft"
     checks.append(
         ReadinessCheck(
             name="speaker gate",
-            # With wake enabled this is an explicit production limitation, not
-            # a silent skip: no local speaker verification exists in this build.
+            # The control path exists, but a real local verifier model remains an
+            # operator-provided blocker. Soft mode fails open by design because
+            # it is only a convenience filter, never authentication.
             status="warning" if wake_enabled else "skipped",
             detail=(
-                "speaker_gate is off; no local speaker verifier is implemented in this "
-                "build (speaker_gate=soft stays unsupported until one exists). "
-                "`april voice enroll` only records samples and does not enable the gate."
+                (
+                    "speaker_gate=soft is configured, but no production local speaker "
+                    "verifier model ships with APRIL. Sentinel degrades to off with one "
+                    "audited warning until an operator supplies SpeakerVerifier."
+                    if speaker_soft
+                    else "speaker_gate is off. `april voice enroll` records local samples "
+                    "but does not enable soft mode by itself."
+                )
+                + " The speaker gate is a convenience filter, never a security boundary."
                 + (" Anyone near the microphone can wake APRIL." if wake_enabled else "")
             ),
         )

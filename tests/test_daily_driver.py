@@ -5,11 +5,14 @@ import shutil
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
 import yaml
 
 from apps.runner.daily_driver import build_daily_driver_report
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.time import utc_now
+
+pytestmark = pytest.mark.usefixtures("clean_april_environment")
 
 
 def _copy_configs(home: Path) -> None:
