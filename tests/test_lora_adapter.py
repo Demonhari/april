@@ -107,6 +107,44 @@ async def test_backend_omits_lora_path_without_adapter(tmp_path: Path, fake_llam
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_resolves_relative_adapter_against_registry_root(
+    tmp_path: Path, fake_llama_module
+) -> None:
+    """A relative adapter_path is resolved against the model registry root (the
+    same path readiness validates), not the process cwd, before it reaches
+    llama_cpp as an absolute lora_path."""
+    from services.april_runtime.model_lifecycle import ModelLifecycle
+
+    base = tmp_path / "brain.gguf"
+    base.write_bytes(b"GGUF")
+    adapter = tmp_path / "models" / "adapters" / "brain-lora.gguf"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_bytes(b"GGUF")
+
+    registry = ModelRegistry.from_dict(
+        {
+            "models": {
+                "brain": _model_data(
+                    tmp_path,
+                    path="brain.gguf",
+                    adapter_path="models/adapters/brain-lora.gguf",
+                )
+            }
+        },
+        root=tmp_path,
+    )
+    backend = LlamaCppBackend()
+    lifecycle = ModelLifecycle(registry, backend_factory=lambda model: backend)
+    await lifecycle.load_model("april-brain")
+
+    expected = str(registry.get("april-brain").resolved_adapter_path(registry.root))
+    assert _RecordingLlama.last_kwargs["lora_path"] == expected
+    assert Path(expected).is_absolute()
+    # Also proves the base GGUF path is resolved against the registry root.
+    assert _RecordingLlama.last_kwargs["model_path"] == str(base.resolve())
+
+
+@pytest.mark.asyncio
 async def test_dataset_export_excludes_rejected_and_unsafe_rows(settings_tmp) -> None:
     """M15 export: bad-feedback conversations, sensitive pairs, and superseded
     memories never reach the fine-tune dataset."""

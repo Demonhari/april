@@ -6,6 +6,11 @@ from pathlib import Path
 
 from april_common.settings import AprilSettings
 
+# Final APRIL product LaunchAgent label. The vendor prefix is the project name
+# ("april"), not the developer's personal handle, so the daemon identity is
+# stable across machines and users. Some early architecture notes referred to a
+# "com.hari.apriald" placeholder; "com.april.apriald" is the authoritative label
+# used by the installer, the plist filename, and the daemon tests.
 LABEL = "com.april.apriald"
 
 

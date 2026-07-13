@@ -231,9 +231,16 @@ class ModelLifecycle:
                 )
             state.state = "loading"
             state.load_error = None
-            resolved_model = state.model.model_copy(
-                update={"path": state.model.resolved_path(self.registry.root)}
-            )
+            # Resolve both the base GGUF path and any LoRA adapter path against
+            # the registry root before handing the model to the backend, so the
+            # backend loads the exact same absolute paths readiness validates
+            # (readiness uses ModelDefinition.resolved_adapter_path(registry.root)).
+            # A relative adapter_path must not be resolved against the process cwd.
+            update: dict[str, object] = {"path": state.model.resolved_path(self.registry.root)}
+            resolved_adapter = state.model.resolved_adapter_path(self.registry.root)
+            if resolved_adapter is not None:
+                update["adapter_path"] = resolved_adapter
+            resolved_model = state.model.model_copy(update=update)
             backend = self._backend_factory(resolved_model)
             started = time.monotonic()
             try:
