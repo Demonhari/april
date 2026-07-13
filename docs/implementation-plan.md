@@ -50,6 +50,34 @@
      mutate config.
    - Tests run on the fake backend with no GGUF/network/microphone: the static mount returns `index.html`, `/diagnostics/activity` requires auth and is redacted, report history is sanitized, and the `desktop` subcommand resolves config and target URL without launching a real browser.
 
+9. Sentinel wake and sessions
+   - Add the single-owner Sentinel microphone loop with local two-stage wake detection, ring-buffer STT confirmation, mute release, follow-up capture, earcons, and soft speaker-gate fallback.
+   - Add the local Unix-socket wake bus, cross-surface session continuity, explicit session close/reflection, and persisted wake feedback without transcript leakage.
+
+10. apriald and resource governor
+   - Add the single-instance `apriald` supervisor for Runtime, Core API, and explicitly enabled Sentinel, with health status, bounded restart backoff, and user LaunchAgent support.
+   - Add local RAM, CPU, power, and idle policy gates for resident/background work, model prewarming, and load-time generation thread budgets.
+
+11. Archive memory evolution
+   - Add session-close Archive reflection with strict local JSON, sensitivity and confidence filtering, duplicate consolidation, contradiction tracking, bounded machine-memory decay, and inspectable user-model guidance.
+   - Add deterministic two-stage retrieval with an optional typed local Runtime reranker and audited fallback.
+
+12. Playbooks
+   - Add deterministic mining of repeated successful tool sequences into fenced playbook candidates, with safe-trigger checks and permission-derived adoption gates.
+   - Add exact-action approval for Level 3+ adoption and bounded execution through the trusted tool context.
+
+13. Dreamer
+   - Add the off-by-default nightly D1-D6 replay, distill, mine, evolve, examine, and report pipeline behind scheduler, resource, kill-switch, time, and write-fence gates.
+   - Add disarmed phase execution, deterministic reports, eval staging, prompt-overlay ratchets, exact-hash approval, versioning, and rollback.
+
+14. Intelligence ladder
+   - Add deterministic reflex, normal, deep, verified, and council rungs with confidence thresholds, whole-rung budgets, local model selection, and safe fallback.
+   - Add fenced, ratcheted, versioned ladder-threshold overlays with rollback and stock restoration.
+
+15. LoRA adapter lifecycle
+   - Add fenced adapter evidence, hash-bound activation pointers, perplexity and production real-model verification gates, version history, and rollback.
+   - Keep adapter training and quality evaluation operator-supervised; APRIL never downloads, trains, or silently activates an adapter.
+
 ## Current Status (honest)
 
 This is the candid state of the MVP. A large, green automated suite verifies

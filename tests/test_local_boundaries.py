@@ -10,9 +10,11 @@ import httpx
 import pytest
 
 from apps.cli.client import ApiOfflineError, AprilApiClient
+from apps.daemon.apriald import daemon_lock_path, daemon_pid_path, daemon_status_path
 from apps.runner import install as runner_install
 from april_common.errors import PermissionDeniedError, RuntimeUnavailableError
 from april_common.logging import JsonFormatter, configure_logging
+from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.health import ProcessMemoryMetrics, runtime_health
 from services.april_runtime.model_lifecycle import ModelLifecycle
@@ -37,6 +39,73 @@ from skills.policy import ToolPolicy
 from skills.registry import default_registry
 from skills.reminders.create_reminder import create_reminder
 from skills.reminders.list_reminders import list_reminders
+
+
+def test_v2_runtime_artifacts_are_ignored_in_scratch_checkout(tmp_path: Path) -> None:
+    root = Path.cwd()
+    settings = AprilSettings(home=root)
+    gitignore_text = (root / ".gitignore").read_text(encoding="utf-8")
+    entries = {
+        line.strip()
+        for line in gitignore_text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    runtime_paths = {
+        "data/evolution/",
+        "data/playbooks/",
+        "data/wake.sock",
+        "data/voice.mute",
+        "data/apriald.lock",
+        "data/apriald.pid",
+        "data/apriald.status.json",
+    }
+    derived_runtime_paths = {
+        f"{settings.evolution_path.relative_to(root).as_posix()}/",
+        f"{settings.playbooks_path.relative_to(root).as_posix()}/",
+        settings.wake_socket_path.relative_to(root).as_posix(),
+        settings.mute_flag_path.relative_to(root).as_posix(),
+        daemon_lock_path(settings).relative_to(root).as_posix(),
+        daemon_pid_path(settings).relative_to(root).as_posix(),
+        daemon_status_path(settings).relative_to(root).as_posix(),
+    }
+    assert derived_runtime_paths == runtime_paths
+    assert runtime_paths <= entries
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".gitignore").write_text(gitignore_text, encoding="utf-8")
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    git("init", "--quiet")
+    git("add", ".gitignore")
+    git(
+        "-c",
+        "user.name=APRIL Tests",
+        "-c",
+        "user.email=tests@localhost",
+        "commit",
+        "--quiet",
+        "-m",
+        "baseline",
+    )
+    for runtime_path in runtime_paths:
+        artifact = checkout / runtime_path
+        if runtime_path.endswith("/"):
+            artifact.mkdir(parents=True)
+            (artifact / "runtime-artifact").write_text("generated\n", encoding="utf-8")
+        else:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("generated\n", encoding="utf-8")
+
+    assert git("status", "--porcelain").stdout == ""
 
 
 def test_runtime_import_graph_excludes_evolution_and_memory() -> None:

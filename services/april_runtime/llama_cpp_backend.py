@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable, Iterator
-from typing import Any, cast
+from typing import Any
 
 from april_common.errors import RuntimeUnavailableError
 from services.april_runtime.backend import BackendHealth, GenerationResult, RuntimeBackend
@@ -496,8 +496,12 @@ class LlamaCppBackend(RuntimeBackend):
         return str(delta.get("content") or message.get("content") or choice.get("text") or "")
 
     def _finish_reason(self, raw: object) -> FinishReason:
-        if raw in {"stop", "length", "error", "cancelled"}:
-            return cast(FinishReason, raw)
+        if raw == "length":
+            return "length"
+        if raw == "error":
+            return "error"
+        if raw == "cancelled":
+            return "cancelled"
         return "stop"
 
 

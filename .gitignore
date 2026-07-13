@@ -8,6 +8,13 @@ data/audio_cache/
 data/verification/
 data/run/
 data/voice_artifacts/
+data/evolution/
+data/playbooks/
+data/wake.sock
+data/voice.mute
+data/apriald.lock
+data/apriald.pid
+data/apriald.status.json
 logs/*.log
 logs/*.jsonl
 models/*.gguf

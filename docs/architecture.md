@@ -71,6 +71,57 @@ and writes service logs under `logs/`. It does not start desktop UI or
 background microphone capture. Voice starts only through explicit `voice`
 commands.
 
+## Wake layer
+
+`services/wake/sentinel.py` is the sole microphone owner. Sentinel scores local
+audio with the configured wake models, retains bounded pre-roll in
+`services/wake/ring_buffer.py`, and hands those buffered frames to local STT
+confirmation; the confirmer never opens another microphone stream. The
+file-backed mute switch closes the active stream and prevents capture until it
+is cleared. Wake and voice remain off by default.
+
+Accepted events use `services/wake/schemas.py` and enter session continuity
+through `services/wake/session_manager.py`. Other local surfaces can submit the
+same bounded event over the owner-only Unix socket in
+`services/wake/wake_bus.py`. The optional soft speaker gate is a convenience
+filter, not authentication or a permission boundary, and degrades to off with
+an audited warning when no local verifier is available.
+
+## Resident daemon and governor
+
+`apps/daemon/apriald.py` is a single-instance local supervisor. It starts and
+health-checks April Runtime and Core API, adds Sentinel only when both voice and
+wake are explicitly enabled, restarts failed children with bounded exponential
+backoff, and records owner-local lock, PID, and JSON status artifacts under
+`data/`. Its launchd integration is a per-user LaunchAgent and never requires
+root privileges.
+
+`services/pool/governor.py` samples local RAM and CPU for resident work and adds
+power and trusted-idle requirements for background Dreamer work. Unknown power
+or idle signals fail closed for background work. Interactive model loads are
+not blocked merely because the Mac is on battery or the user is active; the
+governor instead supplies the smaller active-user generation-thread budget,
+which April Runtime applies at the next safe model load or reload.
+
+## Evolution pipeline
+
+`services/memory/archive.py` reflects closed sessions into bounded,
+machine-written memories after confidence and sensitivity checks. Retrieved
+memory is labelled as context, never instructions. `services/evolution/dreamer.py`
+runs the gated D1-D6 replay, distill, playbook-mine, evolve, examine, and report
+phases. D1-D5 run inside the disarmed context in
+`services/evolution/disarm.py`, so the normal tool-execution service refuses
+even read-only tool calls from a Dreamer phase.
+
+`services/evolution/write_guard.py` fences filesystem artifacts to
+`data/evolution/` and `data/playbooks/` and database mutations to its explicit
+table allow-list. Prompt guidance is appended after immutable base agent
+prompts; tool and permission policy still comes from typed configuration, not
+prompt text. Prompt and ladder-threshold overlays and LoRA adapter pointers use
+baseline/evidence gates, audit records, immutable versions, and rollback.
+Deleting `data/evolution/` restores stock prompt, ladder-threshold, and adapter
+behavior; learned playbooks are separately removable under `data/playbooks/`.
+
 Desktop is a static HTML/CSS/vanilla JS SPA served by the Core API. Its
 Readiness screen calls authenticated sanitized endpoints only:
 `GET /readiness`, `GET /verification/report/latest`, and
