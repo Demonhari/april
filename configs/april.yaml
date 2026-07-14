@@ -55,6 +55,11 @@ voice:
   retain_debug_audio: false
   whisper_binary_path: null
   whisper_model_path: null
+  # Optional two-stage overrides. Null inherits the two legacy paths above.
+  wake_confirmation_whisper_binary_path: null
+  wake_confirmation_whisper_model_path: null
+  transcription_whisper_binary_path: null
+  transcription_whisper_model_path: null
   piper_binary_path: null
   piper_model_path: null
   wake_word_model_path: null
@@ -88,6 +93,12 @@ session:
 # apriald supervisor (installed as a user LaunchAgent; never sudo).
 daemon:
   autostart_on_cli: true
+  startup_timeout_seconds: 15.0
+  shutdown_timeout_seconds: 5.0
+  health_poll_seconds: 0.2
+  child_startup_grace_seconds: 10.0
+  child_health_failure_threshold: 3
+  child_crash_loop_threshold: 5
 
 # Resource Governor budgets. Consulted by Sentinel/Dreamer/model prewarm.
 governor:
@@ -118,6 +129,12 @@ deep_mode:
   council_mode: reasoning_n
   deep_confidence_threshold: 0.4
   verified_confidence_threshold: 0.7
+  verified_draft_tokens: 1024
+  verified_critique_tokens: 512
+  verified_revision_tokens: 1024
+  deep_tokens: 1536
+  council_candidate_tokens: 1024
+  council_judge_tokens: 512
 
 # Proactive scheduler. OFF by default: with these safe defaults APRIL never fires
 # reminders or daily briefings on its own. The background loop only starts when

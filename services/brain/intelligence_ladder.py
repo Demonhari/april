@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from agents.registry import AgentRegistry
+from april_common.errors import AprilError
 from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
@@ -52,6 +53,25 @@ _HIGH_STAKES_PHRASES = (
     "irreversible",
     "life changing",
     "life-changing",
+)
+_HIGH_STAKES_CONTEXT_PATTERNS = (
+    re.compile(
+        r"\b(?:transfer|send|pay|invest|borrow|loan|mortgage)\b.{0,60}\b(?:money|cash|funds?|dollars?|rupees?)\b"
+    ),
+    re.compile(
+        r"\b(?:delete|drop|destroy|wipe|purge)\b.{0,60}\b(?:database|production|backup|account|keys?)\b"
+    ),
+    re.compile(
+        r"\b(?:rotate|revoke|publish|expose|share)\b.{0,60}\b(?:credentials?|tokens?|secrets?|keys?)\b"
+    ),
+    re.compile(
+        r"\b(?:security|privacy)\b.{0,60}\b"
+        r"(?:incident|breach|vulnerability|credentials?|personal data)\b"
+    ),
+    re.compile(
+        r"\b(?:irreversible|one-way|cannot be undone)\b.{0,80}\b"
+        r"(?:migration|architecture|change|decision)\b"
+    ),
 )
 _REMINDER_REFLEX_ALL_PHRASES = {"list my reminders", "what reminders do i have"}
 _REMINDER_REFLEX_TODAY_PHRASES = {"any reminders today"}
@@ -118,7 +138,9 @@ class IntelligenceLadder:
         decision: BrainDecision,
         mode: ChatMode,
     ) -> LadderSelection:
-        high_stakes = self.is_high_stakes(message)
+        # The model may recommend escalation, but can never lower the bounded
+        # deterministic classification.
+        high_stakes = decision.high_stakes or self.is_high_stakes(message)
         if self.is_reflex_query(message, decision):
             return LadderSelection(
                 mode=mode,
@@ -201,9 +223,11 @@ class IntelligenceLadder:
         return LadderSelection(mode=mode, rung=1, reason="standard route")
 
     def is_high_stakes(self, message: str) -> bool:
-        """Deterministic high-stakes tagging from explicit phrases only."""
+        """Bounded deterministic stakes tagging with contextual action pairs."""
         normalized = _normalize(message)
-        return any(phrase in normalized for phrase in _HIGH_STAKES_PHRASES)
+        return any(phrase in normalized for phrase in _HIGH_STAKES_PHRASES) or any(
+            pattern.search(normalized) is not None for pattern in _HIGH_STAKES_CONTEXT_PATTERNS
+        )
 
     def is_reflex_query(self, message: str, decision: BrainDecision) -> bool:
         if not self._can_use_reflex(decision):
@@ -323,8 +347,9 @@ class IntelligenceLadder:
                         ChatMessage(role="user", content=user_prompt),
                     ],
                     request_id=request_id,
+                    max_output_tokens=self.settings.deep_mode.deep_tokens,
                 )
-        except TimeoutError:
+        except (TimeoutError, AprilError, OSError):
             response = None
         if response is None:
             return LadderRun(
@@ -358,78 +383,114 @@ class IntelligenceLadder:
         model_id: str,
         request_id: str,
     ) -> LadderRun:
-        response = await self._bounded_chat(
-            model_id=model_id,
-            messages=[
-                ChatMessage(
-                    role="system",
-                    content=(
-                        "You are APRIL's local verifier. Return exactly one JSON object. "
-                        "Do not include hidden reasoning."
-                    ),
-                ),
-                ChatMessage(
-                    role="user",
-                    content=(
-                        "Check the assistant answer for correctness, unsupported claims, "
-                        "and missing caveats. Return "
-                        '{"needs_revision": boolean, "final_answer": string, "reason": string}.\n'
-                        f"User request:\n{message}\n\nAssistant answer:\n{initial_answer}"
-                    ),
-                ),
-            ],
-            request_id=request_id,
-            response_format=ResponseFormat(
-                type="json_object",
-                json_schema={
-                    "type": "object",
-                    "properties": {
-                        "needs_revision": {"type": "boolean"},
-                        "final_answer": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["needs_revision", "final_answer", "reason"],
-                },
-            ),
-        )
         metadata = {
             "mode": "standard",
             "intelligence_rung": 2,
             "budget_seconds": self.settings.deep_mode.max_seconds,
+            "draft_token_budget": self.settings.deep_mode.verified_draft_tokens,
+            "critique_token_budget": self.settings.deep_mode.verified_critique_tokens,
+            "revision_token_budget": self.settings.deep_mode.verified_revision_tokens,
         }
-        if response is None:
-            return LadderRun(
-                status="ok",
-                final_message=initial_answer,
-                mode="standard",
-                rung=2,
-                model_id=model_id,
-                warnings=["Verification exceeded its configured local budget."],
-                metadata=metadata,
-            )
         try:
-            payload = json.loads(response.content)
-        except json.JSONDecodeError:
+            async with asyncio.timeout(self.settings.deep_mode.max_seconds):
+                critique = await self._bounded_chat(
+                    model_id=model_id,
+                    messages=[
+                        ChatMessage(
+                            role="system",
+                            content=(
+                                "You are APRIL's local verifier. Return exactly one JSON "
+                                "object. Do not include hidden reasoning."
+                            ),
+                        ),
+                        ChatMessage(
+                            role="user",
+                            content=(
+                                "Check the answer for correctness, unsupported claims, and "
+                                "missing caveats. Return "
+                                '{"needs_revision": boolean, "critique": string}.\n'
+                                f"User request:\n{message}\n\nAssistant answer:\n{initial_answer}"
+                            ),
+                        ),
+                    ],
+                    request_id=f"{request_id}-critique",
+                    response_format=ResponseFormat(
+                        type="json_object",
+                        json_schema={
+                            "type": "object",
+                            "properties": {
+                                "needs_revision": {"type": "boolean"},
+                                "critique": {"type": "string"},
+                            },
+                            "required": ["needs_revision", "critique"],
+                        },
+                    ),
+                    max_output_tokens=self.settings.deep_mode.verified_critique_tokens,
+                )
+                if critique is None:
+                    raise TimeoutError
+                payload = json.loads(critique.content)
+                needs_revision = payload.get("needs_revision") is True
+                critique_text = str(payload.get("critique") or "")[:2000]
+                if not needs_revision:
+                    return LadderRun(
+                        status="ok",
+                        final_message=f"{_MODE_ANNOUNCEMENTS[2]}\n\n{initial_answer}",
+                        mode="standard",
+                        rung=2,
+                        model_id=model_id,
+                        usage=critique.usage.model_dump(),
+                        warnings=critique.warnings,
+                        metadata={**metadata, "verification_reason": critique_text},
+                    )
+                revision = await self._bounded_chat(
+                    model_id=model_id,
+                    messages=[
+                        ChatMessage(
+                            role="system",
+                            content=(
+                                "Revise the answer using the bounded critique. Return only "
+                                "the final user-facing answer; do not expose hidden reasoning."
+                            ),
+                        ),
+                        ChatMessage(
+                            role="user",
+                            content=(
+                                f"User request:\n{message}\n\nDraft:\n{initial_answer}\n\n"
+                                f"Critique:\n{critique_text}"
+                            ),
+                        ),
+                    ],
+                    request_id=f"{request_id}-revision",
+                    max_output_tokens=self.settings.deep_mode.verified_revision_tokens,
+                )
+                if revision is None:
+                    raise TimeoutError
+        except (TimeoutError, AprilError, OSError, json.JSONDecodeError, TypeError):
             return LadderRun(
                 status="ok",
                 final_message=initial_answer,
                 mode="standard",
                 rung=2,
                 model_id=model_id,
-                usage=response.usage.model_dump(),
-                warnings=["Verification returned invalid JSON; kept the original answer."],
+                warnings=["Verification was unavailable or invalid; kept the original answer."],
                 metadata=metadata,
             )
-        final_answer = str(payload.get("final_answer") or initial_answer)
+        final_answer = revision.content.strip() or initial_answer
+        usage = {
+            key: int(critique.usage.model_dump().get(key, 0))
+            + int(revision.usage.model_dump().get(key, 0))
+            for key in {"input_tokens", "output_tokens", "total_tokens"}
+        }
         return LadderRun(
             status="ok",
             final_message=f"{_MODE_ANNOUNCEMENTS[2]}\n\n{final_answer}",
             mode="standard",
             rung=2,
             model_id=model_id,
-            usage=response.usage.model_dump(),
-            warnings=response.warnings,
-            metadata={**metadata, "verification_reason": str(payload.get("reason") or "")},
+            usage=usage,
+            warnings=[*critique.warnings, *revision.warnings],
+            metadata={**metadata, "verification_reason": critique_text},
         )
 
     async def run_council(
@@ -504,6 +565,7 @@ class IntelligenceLadder:
                             ),
                         ],
                         request_id=f"{request_id}-{member.role}",
+                        max_output_tokens=self.settings.deep_mode.council_candidate_tokens,
                     )
                     for member in members
                 ]
@@ -529,7 +591,7 @@ class IntelligenceLadder:
                         model_id=model_id,
                         request_id=request_id,
                     )
-        except TimeoutError:
+        except (TimeoutError, AprilError, OSError):
             warnings.append("Council mode exceeded its whole-rung local budget.")
         if not raw_candidates:
             return LadderRun(
@@ -633,6 +695,7 @@ class IntelligenceLadder:
                     "required": ["scores"],
                 },
             ),
+            max_output_tokens=self.settings.deep_mode.council_judge_tokens,
         )
         if response is None:
             return None
@@ -677,19 +740,20 @@ class IntelligenceLadder:
         messages: list[ChatMessage],
         request_id: str,
         response_format: ResponseFormat | None = None,
+        max_output_tokens: int,
     ) -> Any | None:
         try:
             return await asyncio.wait_for(
                 self.runtime_client.chat(
                     model_id=model_id,
                     messages=messages,
-                    options=GenerationOptions(max_output_tokens=1536),
+                    options=GenerationOptions(max_output_tokens=max_output_tokens),
                     response_format=response_format,
                     request_id=request_id,
                 ),
                 timeout=self.settings.deep_mode.max_seconds,
             )
-        except TimeoutError:
+        except (TimeoutError, AprilError, OSError):
             return None
 
     def _can_use_reasoning_mode(self, decision: BrainDecision) -> bool:

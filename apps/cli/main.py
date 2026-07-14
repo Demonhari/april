@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 import uuid
 from collections.abc import Coroutine
@@ -757,22 +758,25 @@ def voice_enroll(
 
 @voice_app.command("listen")
 def voice_listen() -> None:
-    _run_voice_listen()
+    _terminal_voice_listen()
 
 
 def _run_voice_listen(*, session_hint: str | None = None) -> None:
-    from april_common.errors import RuntimeUnavailableError
-    from services.voice.health import voice_health
-    from services.wake.sentinel import run_sentinel
+    if session_hint is None:
+        raise typer.BadParameter("resident voice attachment requires a session")
+    from services.wake.control import attach_resident_sentinel
 
-    settings = get_settings()
-    health_report = voice_health(settings)
-    if health_report.status == "degraded":
-        console.print(health_report.model_dump())
     try:
-        run(run_sentinel(settings, session_hint=session_hint))
-    except RuntimeUnavailableError as exc:
-        console.print(f"[red]{exc}[/red]")
+        with attach_resident_sentinel(get_settings(), session_hint=session_hint) as attachment:
+            print_jsonish(attachment.status)
+            console.print("Attached to resident Sentinel. Press Enter or Ctrl-D to stop.")
+            with contextlib.suppress(EOFError):
+                input()
+    except (OSError, RuntimeError) as exc:
+        console.print(
+            "[red]Resident Sentinel is unavailable or degraded: "
+            f"{exc}. Check `run april daemon status` and `run april voice health`.[/red]"
+        )
         raise typer.Exit(1) from exc
 
 
@@ -790,30 +794,57 @@ def _terminal_voice_listen() -> None:
 def daemon_install() -> None:
     from apps.daemon.launchd import LaunchdManager
 
-    path = LaunchdManager(get_settings()).install()
-    print_jsonish({"installed": True, "plist_path": str(path)})
+    manager = LaunchdManager(get_settings())
+    path = manager.install()
+    print_jsonish({"installed": True, "plist_path": str(path), "load": manager.bootstrap()})
 
 
 @daemon_app.command("uninstall")
 def daemon_uninstall() -> None:
     from apps.daemon.launchd import LaunchdManager
 
-    removed = LaunchdManager(get_settings()).uninstall()
-    print_jsonish({"removed": removed})
+    manager = LaunchdManager(get_settings())
+    unload = manager.bootout()
+    removed = manager.uninstall()
+    print_jsonish({"removed": removed, "unload": unload})
 
 
 @daemon_app.command("start")
 def daemon_start() -> None:
-    from apps.daemon.apriald import start_daemon_background
+    from apps.daemon.apriald import start_daemon_background, wait_for_core_health
+    from apps.daemon.launchd import LaunchdManager
 
-    print_jsonish(start_daemon_background(get_settings()))
+    settings = get_settings()
+    manager = LaunchdManager(settings)
+    launchd = manager.status()
+    if launchd.get("supported") is True and launchd.get("installed") is True:
+        action = manager.kickstart() if launchd.get("loaded") is True else manager.bootstrap()
+        if action.get("loaded") is True or action.get("started") is True:
+            health = wait_for_core_health(settings)
+            print_jsonish({"status": "running", "launchd": action, "health": health})
+            return
+        print_jsonish({"status": "degraded", "launchd": action})
+        raise typer.Exit(1)
+    print_jsonish(start_daemon_background(settings))
 
 
 @daemon_app.command("stop")
 def daemon_stop() -> None:
     from apps.daemon.apriald import stop_daemon
+    from apps.daemon.launchd import LaunchdManager
 
-    print_jsonish(stop_daemon(get_settings()))
+    settings = get_settings()
+    manager = LaunchdManager(settings)
+    launchd = manager.status()
+    if launchd.get("supported") is True and launchd.get("loaded") is True:
+        result = manager.bootout()
+        print_jsonish(
+            {"status": "stopped" if result.get("changed") else "degraded", "launchd": result}
+        )
+        if not result.get("changed"):
+            raise typer.Exit(1)
+        return
+    print_jsonish(stop_daemon(settings))
 
 
 @daemon_app.command("status")

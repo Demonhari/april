@@ -672,10 +672,15 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 else "skipped"
             ),
             detail=(
-                "Production overlay activation requires deterministic fixture pass plus "
-                "a real-runtime llama_cpp eval; offline readiness does not run model evals."
+                "Overlay activation requires baseline-versus-candidate behavioral A/B "
+                "evaluation. Production additionally requires real-runtime llama_cpp "
+                "evidence; offline readiness does not run model evals."
                 if production_real_runtime_eval_required
-                else "Development/test overlay approval uses deterministic fixture checks only."
+                else (
+                    "Overlay activation requires baseline-versus-candidate behavioral A/B "
+                    "evaluation. Injected deterministic clients may test the machinery, but "
+                    "their evidence is not production evidence."
+                )
             ),
             action=_VERIFY_REAL if production_real_runtime_eval_required else None,
         )

@@ -14,16 +14,15 @@ from april_common.settings import AprilSettings, project_root
 from services.evolution.eval_review import list_reviewed_eval_cases
 from services.evolution.write_guard import EvolutionWriteGuard
 
-# Deterministic eval fixtures for overlay candidates. The baseline is fixed;
-# a candidate must clear every check to score above it. No model call is
-# involved, so the same candidate always evaluates identically. These are
-# offline/deterministic checks only — they are labelled as such in every
-# payload and are never presented as a real-model evaluation.
+# Deterministic safety fixtures for overlay candidates. No model call is
+# involved, so these checks can reject unsafe or malformed content but cannot
+# establish a behavioral improvement. Passing them is a prerequisite for an
+# A/B evaluation, never activation evidence by itself.
 BASELINE_SCORE = 0.5
 PASSING_SCORE = 0.8
 FAILING_SCORE = 0.2
 
-DETERMINISTIC_EVAL_KIND = "deterministic_fixture"
+DETERMINISTIC_EVAL_KIND = "structural_safety_gate"
 
 _STRUCTURAL_RE = re.compile(
     r"(?im)^\s*(tools|permissions|allowed_tools|tool_registry|permission_level)\s*:"
@@ -49,13 +48,13 @@ class OverlayEvaluation:
     def to_payload(self) -> dict[str, Any]:
         return {
             "agent": self.agent,
-            # Honest labelling: this is an offline deterministic fixture check,
-            # never a real-model evaluation.
+            # Honest labelling: this is an offline structural safety check,
+            # never a behavioral or real-model quality evaluation.
             "eval_kind": DETERMINISTIC_EVAL_KIND,
             "score": self.score,
             "baseline": self.baseline,
             "passed": self.passed,
-            "deterministic_fixture_passed": self.passed,
+            "structural_safety_passed": self.passed,
             "checks": self.checks,
         }
 
@@ -63,7 +62,7 @@ class OverlayEvaluation:
 def evaluate_overlay_candidate(
     *, agent: str, content: str, settings: AprilSettings
 ) -> OverlayEvaluation:
-    """D5 fixture eval: deterministic safety and quality checks for one overlay."""
+    """D5 deterministic structural safety gate for one overlay."""
     max_chars = settings.evolution.prompt_overlay_max_chars
     fixture_checks = _fixture_eval_checks(settings)
     checks = {
@@ -111,6 +110,8 @@ class RealRuntimeEvaluation:
     blockers: list[str] = field(default_factory=list)
     cases_run: int = 0
     cases_passed: int = 0
+    baseline_cases_passed: int = 0
+    case_outcomes: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -130,6 +131,8 @@ class RealRuntimeEvaluation:
             "blockers": list(self.blockers),
             "cases_run": self.cases_run,
             "cases_passed": self.cases_passed,
+            "baseline_cases_passed": self.baseline_cases_passed,
+            "case_outcomes": self.case_outcomes,
         }
 
 
@@ -144,6 +147,8 @@ async def evaluate_overlay_candidate_real_runtime(
     settings: AprilSettings,
     runtime_client: RuntimeEvalClient | None,
     model_id: str | None = None,
+    baseline_content: str = "",
+    judge_model_id: str | None = None,
 ) -> RealRuntimeEvaluation:
     """Production-capable D5 eval through the real local runtime.
 
@@ -182,10 +187,18 @@ async def evaluate_overlay_candidate_real_runtime(
     blockers: list[str] = []
     cases_run = 0
     cases_passed = 0
-    for case in replay_cases:
+    baseline_cases_passed = 0
+    case_outcomes: list[dict[str, Any]] = []
+    for index, case in enumerate(replay_cases):
         cases_run += 1
         try:
-            ok = await _run_replay_case_real(
+            baseline_ok = await _run_replay_case_real(
+                case,
+                overlay_content=baseline_content,
+                runtime_client=runtime_client,
+                model_id=active_model_id,
+            )
+            candidate_ok = await _run_replay_case_real(
                 case,
                 overlay_content=content,
                 runtime_client=runtime_client,
@@ -199,18 +212,49 @@ async def evaluate_overlay_candidate_real_runtime(
                 cases_run=cases_run,
                 cases_passed=cases_passed,
             )
-        if ok:
+        if baseline_ok:
+            baseline_cases_passed += 1
+        if candidate_ok:
             cases_passed += 1
         else:
             blockers.append("replay fixture expectation not met by real model output")
-    for case in reviewed_cases:
+        case_outcomes.append(
+            {
+                "case_id": str(case.get("id", f"replay-{index}")),
+                "required": True,
+                "baseline_passed": baseline_ok,
+                "candidate_passed": candidate_ok,
+                "regression": baseline_ok and not candidate_ok,
+            }
+        )
+    for index, case in enumerate(reviewed_cases):
         cases_run += 1
+        if judge_model_id is None or judge_model_id == active_model_id:
+            blockers.append("reviewed case requires an independent configured judge model")
+            case_outcomes.append(
+                {
+                    "case_id": str(case.get("case_id", f"reviewed-{index}")),
+                    "required": True,
+                    "baseline_passed": False,
+                    "candidate_passed": False,
+                    "regression": False,
+                }
+            )
+            continue
         try:
-            ok = await _run_reviewed_case_real(
+            baseline_ok = await _run_reviewed_case_real(
+                case,
+                overlay_content=baseline_content,
+                runtime_client=runtime_client,
+                model_id=active_model_id,
+                judge_model_id=judge_model_id,
+            )
+            candidate_ok = await _run_reviewed_case_real(
                 case,
                 overlay_content=content,
                 runtime_client=runtime_client,
                 model_id=active_model_id,
+                judge_model_id=judge_model_id,
             )
         except (AprilError, OSError) as exc:
             return RealRuntimeEvaluation(
@@ -220,16 +264,31 @@ async def evaluate_overlay_candidate_real_runtime(
                 cases_run=cases_run,
                 cases_passed=cases_passed,
             )
-        if ok:
+        if baseline_ok:
+            baseline_cases_passed += 1
+        if candidate_ok:
             cases_passed += 1
         else:
             blockers.append(
                 f"reviewed eval case {case.get('case_id', 'unknown')} "
                 "did not meet its human-supplied expectation"
             )
+        case_outcomes.append(
+            {
+                "case_id": str(case.get("case_id", f"reviewed-{index}")),
+                "required": True,
+                "baseline_passed": baseline_ok,
+                "candidate_passed": candidate_ok,
+                "regression": baseline_ok and not candidate_ok,
+            }
+        )
+    has_regression = any(bool(item["regression"]) for item in case_outcomes)
     status: RealRuntimeEvalStatus = (
         "real_runtime_eval_passed"
-        if cases_run > 0 and cases_passed == cases_run
+        if cases_run > 0
+        and cases_passed == cases_run
+        and not has_regression
+        and cases_passed >= baseline_cases_passed
         else "real_runtime_eval_failed"
     )
     return RealRuntimeEvaluation(
@@ -238,6 +297,8 @@ async def evaluate_overlay_candidate_real_runtime(
         blockers=blockers,
         cases_run=cases_run,
         cases_passed=cases_passed,
+        baseline_cases_passed=baseline_cases_passed,
+        case_outcomes=case_outcomes,
     )
 
 
@@ -290,6 +351,7 @@ async def _run_reviewed_case_real(
     overlay_content: str,
     runtime_client: RuntimeEvalClient,
     model_id: str,
+    judge_model_id: str,
 ) -> bool:
     """Replay one human-reviewed case and judge it against the human expectation.
 
@@ -314,7 +376,7 @@ async def _run_reviewed_case_real(
     if not answer_text:
         return False
     judge = await runtime_client.chat(
-        model_id=model_id,
+        model_id=judge_model_id,
         messages=[
             ChatMessage(
                 role="system",

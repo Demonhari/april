@@ -4,11 +4,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from april_common.audit import AuditLogger
 from april_common.errors import PermissionDeniedError
 from april_common.settings import get_settings
+from services.april_runtime.client import RuntimeClient
 from services.memory.database import Database
+from services.memory.embeddings import embedding_provider_from_config
 from services.memory.migrations import run_migrations
+from services.memory.repository import MemoryRepository
 from services.memory.sqlite_memory import SqliteMemory
+from services.memory.vector_memory import VectorMemory
 from services.memory.writer import MemoryWriter
 from skills.base import timed_tool
 from skills.schemas import ToolDefinition, ToolResult
@@ -68,7 +73,24 @@ async def remember_memory(args: dict[str, Any]) -> ToolResult:
                             "memory_project_id": request.project_id,
                         },
                     )
-            writer = MemoryWriter(memory)
+            runtime_client = RuntimeClient(
+                settings.runtime.url,
+                timeout=settings.runtime.request_timeout_seconds,
+                token=settings.runtime.token,
+            )
+            audit = AuditLogger(settings.audit_path)
+            embedding = embedding_provider_from_config(
+                settings.memory.embedding_provider,
+                model_id=settings.memory.embedding_model_id,
+                runtime_client=runtime_client,
+                audit=audit,
+            )
+            repository = MemoryRepository(
+                memory,
+                VectorMemory(settings.vector_index_path, embedding=embedding),
+                audit=audit,
+            )
+            writer = MemoryWriter(repository)
             record = await writer.write(
                 request.content,
                 reason=request.reason,
@@ -76,6 +98,11 @@ async def remember_memory(args: dict[str, Any]) -> ToolResult:
                 requested_by_user=True,
                 project_id=request.project_id,
             )
+            await repository.set_provenance(
+                record.id,
+                source_conversation_id=request.source_conversation_id,
+            )
+            index_health = await repository.health()
             return ToolResult(
                 ok=True,
                 stdout=f"Stored {record.kind} memory.",
@@ -84,6 +111,7 @@ async def remember_memory(args: dict[str, Any]) -> ToolResult:
                     "memory_type": record.kind,
                     "project_id": record.project_id,
                     "content_length": len(record.content),
+                    "index_repair_required": index_health.repair_required,
                 },
                 risk_level="safe_write",
                 permission_level=2,

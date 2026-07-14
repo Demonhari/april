@@ -6,6 +6,7 @@ from datetime import timedelta
 from typing import Any, Literal, Protocol
 
 from april_common.time import utc_now
+from services.april_runtime.model_registry import ModelRegistry
 from services.memory.sqlite_memory import SqliteMemory
 
 # Display call signs for the named agent pool. These are presentation
@@ -61,6 +62,9 @@ class AgentScorecard:
     pending_runs: int
     feedback_good: int
     feedback_bad: int
+    average_latency_ms: float | None
+    escalation_count: int
+    escalation_rate: float
     last_run_at: str | None
 
     def to_payload(self) -> dict[str, Any]:
@@ -75,6 +79,9 @@ class AgentScorecard:
             "pending_runs": self.pending_runs,
             "feedback_good": self.feedback_good,
             "feedback_bad": self.feedback_bad,
+            "average_latency_ms": self.average_latency_ms,
+            "escalation_count": self.escalation_count,
+            "escalation_rate": self.escalation_rate,
             "last_run_at": self.last_run_at,
         }
 
@@ -103,12 +110,14 @@ class AgentPool:
         runtime_client: RuntimePrewarmClient | None = None,
         governor: PrewarmGovernor | None = None,
         audit: AuditSink | None = None,
+        model_registry: ModelRegistry | None = None,
     ) -> None:
         self.memory = memory
         self.known_agents = known_agents if known_agents is not None else list(CALL_SIGNS)
         self.runtime_client = runtime_client
         self.governor = governor
         self.audit = audit
+        self.model_registry = model_registry
 
     async def scorecards(self) -> list[AgentScorecard]:
         window_start = (
@@ -124,6 +133,16 @@ class AgentPool:
                 SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS error_runs,
                 SUM(CASE WHEN status = 'pending_approval' THEN 1 ELSE 0 END)
                     AS pending_runs,
+                AVG(
+                    CASE WHEN completed_at IS NOT NULL THEN
+                        (julianday(completed_at) - julianday(created_at)) * 86400000.0
+                    END
+                ) AS average_latency_ms,
+                SUM(
+                    CASE WHEN CAST(
+                        json_extract(metadata_json, '$.intelligence_rung') AS INTEGER
+                    ) >= 2 THEN 1 ELSE 0 END
+                ) AS escalation_count,
                 MAX(created_at) AS last_run_at
             FROM agent_runs
             GROUP BY agent
@@ -148,17 +167,26 @@ class AgentPool:
         for agent in agents:
             run = runs_by_agent.get(agent)
             feedback = feedback_by_agent.get(agent)
+            total_runs = int(run["total_runs"]) if run else 0
+            escalation_count = int(run["escalation_count"] or 0) if run else 0
             cards.append(
                 AgentScorecard(
                     agent=agent,
                     call_sign=CALL_SIGNS.get(agent, agent),
-                    total_runs=int(run["total_runs"]) if run else 0,
+                    total_runs=total_runs,
                     recent_runs=int(run["recent_runs"] or 0) if run else 0,
                     ok_runs=int(run["ok_runs"] or 0) if run else 0,
                     error_runs=int(run["error_runs"] or 0) if run else 0,
                     pending_runs=int(run["pending_runs"] or 0) if run else 0,
                     feedback_good=int(feedback["good"] or 0) if feedback else 0,
                     feedback_bad=int(feedback["bad"] or 0) if feedback else 0,
+                    average_latency_ms=(
+                        float(run["average_latency_ms"])
+                        if run and run["average_latency_ms"] is not None
+                        else None
+                    ),
+                    escalation_count=escalation_count,
+                    escalation_rate=(escalation_count / total_runs if total_runs else 0.0),
                     last_run_at=str(run["last_run_at"]) if run and run["last_run_at"] else None,
                 )
             )
@@ -203,7 +231,7 @@ class AgentPool:
             result = AgentPrewarmResult(agent, model_id, "skipped", "runtime_client_unavailable")
             self._audit_prewarm(result, request_id=request_id)
             return result
-        governor_decision = self._governor_decision()
+        governor_decision = self._governor_decision(model_id)
         if governor_decision is not None and not getattr(governor_decision, "allowed", True):
             reasons = tuple(getattr(governor_decision, "reasons", ()) or ())
             result = AgentPrewarmResult(
@@ -234,12 +262,23 @@ class AgentPool:
         self._audit_prewarm(result, request_id=request_id)
         return result
 
-    def _governor_decision(self) -> Any | None:
+    def _governor_decision(self, model_id: str) -> Any | None:
         if self.governor is None:
             return None
         model_load = getattr(self.governor, "assess_model_load", None)
         if callable(model_load):
-            return model_load(projected_resident_gb=None)
+            projected = None
+            if self.model_registry is not None and self.model_registry.exists(model_id):
+                projected = self.model_registry.get(model_id).projected_resident_gb(
+                    self.model_registry.root
+                )
+            try:
+                return model_load(projected_resident_gb=projected, speculative=True)
+            except TypeError:
+                # Backward-compatible injected test/local governors may expose
+                # the pre-v14 protocol; production ResourceGovernor accepts the
+                # explicit speculative flag and fails unknown estimates closed.
+                return model_load(projected_resident_gb=projected)
         return self.governor.assess_resident()
 
     def _generation_thread_budget(self) -> int | None:

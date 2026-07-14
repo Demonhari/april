@@ -23,6 +23,7 @@ from services.permissions.cleanup import (
 )
 from services.permissions.engine import PermissionEngine
 from services.permissions.schemas import ApprovalRequest, ApprovalResponse, PermissionDecision
+from services.permissions.tool_status import ToolCallStatus
 from skills.registry import ToolRegistry
 from skills.schemas import ToolResult
 
@@ -504,7 +505,7 @@ class ToolExecutionService:
         await self.memory.record_tool_call(
             tool=tool,
             args=self._sanitize_tool_args(tool, args),
-            status="ok" if result.ok else "failed",
+            status=(ToolCallStatus.EXECUTED.value if result.ok else ToolCallStatus.FAILED.value),
             permission_level=permission.permission_level,
             risk_level=permission.risk_level,
             result=self._sanitize_result(result),

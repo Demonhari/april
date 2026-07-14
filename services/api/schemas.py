@@ -124,6 +124,12 @@ class PlaybookRunRequest(BaseModel):
     project_id: str | None = None
 
 
+class PlaybookResumeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: str = Field(min_length=1, max_length=128)
+
+
 class EvolutionRollbackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

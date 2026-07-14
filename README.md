@@ -1287,6 +1287,13 @@ Piper, optional `sounddevice`, and optional openWakeWord model paths in
 `configs/april.yaml` or environment variables. No voice model, speech model,
 wake-word model, or binary is downloaded by APRIL.
 
+Sentinel supports separate local whisper.cpp adapters for wake confirmation and
+full utterance transcription via
+`voice.wake_confirmation_whisper_{binary,model}_path` and
+`voice.transcription_whisper_{binary,model}_path`. Existing configurations that
+set only `voice.whisper_binary_path` and `voice.whisper_model_path` remain valid:
+those legacy paths are used for both stages.
+
 ```bash
 .venv/bin/python -m pip install -e '.[voice,dev,runtime]' -c constraints-dev.txt
 .venv/bin/python -m pip install piper-tts
@@ -1341,6 +1348,10 @@ model, missing Piper binary, missing Piper voice model, the **openWakeWord engin
 model** being missing. It then reports three escalating, redaction-safe readiness
 verdicts (also surfaced on the Desktop Readiness screen via `/readiness`):
 
+- `text_voice_input_ready` — microphone and transcription STT are usable; this
+  remains true when Piper is missing, so text/API delivery can continue.
+- `wake_input_ready` — text voice input plus confirmation STT, openWakeWord, and
+  a configured wake model; spoken output is not required for this rung.
 - `push_to_talk_ready` — a usable microphone plus whisper.cpp (STT) and Piper
   (TTS). **It passes without any wake-word model.**
 - `wake_word_ready` — everything push-to-talk needs **plus** the openWakeWord
@@ -1363,16 +1374,19 @@ Until that real ONNX model exists and the live wake check passes,
 `wake_word_live_verified` remains false.
 
 Push-to-talk starts only from explicit CLI invocation. API, Runtime, desktop, and
-normal CLI startup never activate the microphone. `april voice listen` starts the
-standalone Sentinel loop. `april --listen` first attaches a terminal session,
-then blocks the current terminal on Sentinel with that session as a continuity
-hint; it installs no shell hooks of any kind.
+normal CLI startup never activate the microphone. `apriald` is the sole owner of
+the resident Sentinel and its microphone. `april voice listen` and `april
+--listen` attach a terminal session over the owner-only local control socket;
+they never instantiate a second Sentinel or silently open another microphone.
+Only one terminal controller lease is accepted at a time. If autostart is
+enabled, attachment waits for bounded Core API health and reports the daemon log
+and status paths on timeout.
 
 **Speaker gating is blocked on a real local verifier.** `wake.speaker_gate`
-accepts only `off`; config validation rejects anything else, so the setting
-cannot silently pretend to verify who is speaking. `april voice enroll` records
-local enrollment samples for a future soft gate, but no speaker-verifier ONNX
-exists yet and enrollment never changes wake behaviour.
+accepts `off` and `soft`, but `soft` truthfully remains degraded/blocked because
+no production local verifier or verifier model ships with APRIL. `april voice
+enroll` records local enrollment samples for a future soft gate; samples are not
+a voiceprint, and enrollment never claims verification or changes wake behavior.
 
 `run april voice verify-live` is the explicit live hardware check. It runs voice
 doctor, prints macOS microphone permission guidance, asks before recording a

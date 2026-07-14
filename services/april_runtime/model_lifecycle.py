@@ -38,7 +38,13 @@ class ResourceLoadGate(Protocol):
     def assess_resident(self) -> Any: ...  # GovernorDecision-shaped
 
     def assess_model_load(
-        self, *, projected_resident_gb: float | None = None
+        self,
+        *,
+        projected_resident_gb: float | None = None,
+        current_resident_gb: float = 0.0,
+        loaded_specialist_count: int = 0,
+        max_loaded_specialist_count: int | None = None,
+        speculative: bool = False,
     ) -> Any: ...  # GovernorDecision-shaped
 
 
@@ -186,7 +192,10 @@ class ModelLifecycle:
             assess_model_load = getattr(self.governor, "assess_model_load", None)
             if callable(assess_model_load):
                 decision = assess_model_load(
-                    projected_resident_gb=self._projected_model_load_gb(state)
+                    projected_resident_gb=self._projected_model_load_gb(state),
+                    current_resident_gb=self._current_projected_resident_gb(),
+                    loaded_specialist_count=self._loaded_specialist_count(),
+                    max_loaded_specialist_count=self.max_loaded_specialist_models,
                 )
             else:
                 decision = self.governor.assess_resident()
@@ -202,17 +211,23 @@ class ModelLifecycle:
         )
 
     def _projected_model_load_gb(self, state: ModelRuntimeState) -> float | None:
-        if self.root_backend == "fake" or state.model.backend == "fake":
+        if self.root_backend == "fake":
             return 0.0
-        path = state.model.resolved_path(self.registry.root)
-        try:
-            size_gb = path.stat().st_size / (1024**3)
-        except OSError:
-            return None
-        # GGUF resident usage is at least the mapped file and commonly includes
-        # allocator/KV overhead. This conservative projection gates preloads
-        # without claiming to be an exact memory profiler.
-        return max(0.25, size_gb * 1.25)
+        return state.model.projected_resident_gb(self.registry.root)
+
+    def _current_projected_resident_gb(self) -> float:
+        return sum(
+            self._projected_model_load_gb(state) or 0.0
+            for state in self._states.values()
+            if state.state == "loaded"
+        )
+
+    def _loaded_specialist_count(self) -> int:
+        return sum(
+            1
+            for state in self._states.values()
+            if state.state == "loaded" and self._is_specialist(state.model)
+        )
 
     async def load_model(
         self, model_id: str, *, generation_threads: int | None = None

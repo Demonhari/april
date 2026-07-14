@@ -78,9 +78,7 @@ def _field(report: Mapping[str, object], phase: Mapping[str, object], key: str) 
     return phase.get(key)
 
 
-def _learned_memory_part(
-    report: Mapping[str, object], distill: Mapping[str, object]
-) -> str | None:
+def _learned_memory_part(report: Mapping[str, object], distill: Mapping[str, object]) -> str | None:
     raw = _field(report, distill, "memories_learned")
     total = _count(raw)
     breakdown_raw: object | None = None
@@ -158,9 +156,7 @@ def format_evolution_report(evolution_report: Mapping[str, object]) -> str:
     baseline = _number(routing_eval.get("baseline"))
     if score is not None and baseline is not None:
         delta = score - baseline
-        parts.append(
-            f"routing-eval score {score:g} ({delta:+g} vs baseline {baseline:g})"
-        )
+        parts.append(f"routing-eval score {score:g} ({delta:+g} vs baseline {baseline:g})")
 
     candidate_outcomes = _mapping(evolution_report.get("candidate_outcomes"))
     awaiting = _count(candidate_outcomes.get("approval_required_count"))

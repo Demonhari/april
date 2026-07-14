@@ -322,36 +322,59 @@ def test_cli_announces_slow_modes_before_waiting(monkeypatch) -> None:
     assert "Council mode" not in standard.output
 
 
-def test_voice_listen_uses_sentinel(monkeypatch) -> None:
-    import services.wake.sentinel as sentinel_module
-
+def test_voice_listen_attaches_to_resident_sentinel(monkeypatch) -> None:
     called: dict[str, object] = {}
 
-    async def fake_run_sentinel(settings: object, *, session_hint: str | None = None) -> None:
+    class Attachment:
+        def __init__(self) -> None:
+            self.status = {"ok": True, "state": "listening"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            called["closed"] = True
+
+    def fake_attach(settings: object, *, session_hint: str):
         called["settings"] = settings
         called["session_hint"] = session_hint
+        return Attachment()
 
-    monkeypatch.setattr(sentinel_module, "run_sentinel", fake_run_sentinel)
+    fake = FakeApiClient()
+    monkeypatch.setattr("apps.cli.main.client", lambda: fake)
+    monkeypatch.setattr("apps.cli.main._maybe_autostart_daemon", lambda: None)
+    monkeypatch.setattr("services.wake.control.attach_resident_sentinel", fake_attach)
+    monkeypatch.setattr("builtins.input", lambda: "")
     runner = CliRunner()
     result = runner.invoke(app, ["voice", "listen"])
     assert result.exit_code == 0, result.output
-    assert "settings" in called
-    assert called["session_hint"] is None
+    assert called["session_hint"] == "session-1"
+    assert called["closed"] is True
 
 
 def test_top_level_listen_flag_uses_terminal_session_handoff(monkeypatch) -> None:
-    import services.wake.sentinel as sentinel_module
-
     fake = FakeApiClient()
     called: dict[str, object] = {}
 
-    async def fake_run_sentinel(settings: object, *, session_hint: str | None = None) -> None:
+    class Attachment:
+        def __init__(self) -> None:
+            self.status = {"ok": True, "state": "listening"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_attach(settings: object, *, session_hint: str):
         called["settings"] = settings
         called["session_hint"] = session_hint
+        return Attachment()
 
     monkeypatch.setattr("apps.cli.main.client", lambda: fake)
     monkeypatch.setattr("apps.cli.main._maybe_autostart_daemon", lambda: None)
-    monkeypatch.setattr(sentinel_module, "run_sentinel", fake_run_sentinel)
+    monkeypatch.setattr("services.wake.control.attach_resident_sentinel", fake_attach)
+    monkeypatch.setattr("builtins.input", lambda: "")
     result = CliRunner().invoke(app, ["--listen"])
     assert result.exit_code == 0, result.output
     assert "settings" in called

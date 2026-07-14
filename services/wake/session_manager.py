@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 from april_common.audit import AuditLogger
@@ -33,6 +35,8 @@ class SessionManager:
         self.clock = clock or utc_now
         self.on_close = on_close
         self.audit = audit
+        self._state_lock = asyncio.Lock()
+        self._active_interactions: dict[str, int] = {}
 
     async def handle_wake(self, event: WakeEvent) -> WakeResolution:
         now = self.clock()
@@ -60,6 +64,47 @@ class SessionManager:
         now_iso = self.clock().isoformat().replace("+00:00", "Z")
         await self.memory.touch_session(session_id, at=now_iso)
 
+    async def touch_conversation(self, conversation_id: str) -> str | None:
+        """Touch the open session for a conversation without fabricating one."""
+        async with self._state_lock:
+            session = await self.memory.open_session_for_conversation(conversation_id)
+            if session is None:
+                return None
+            await self.touch(session.id)
+            return session.id
+
+    @asynccontextmanager
+    async def interaction(self, conversation_id: str | None) -> AsyncIterator[str | None]:
+        """Keep a conversation's session active for one accepted interaction.
+
+        Activity is refreshed on entry and exit (including failures).  The
+        in-flight counter is protected by the same lock used by idle closing,
+        so a long stream cannot be closed between its initial touch and final
+        touch. Unknown conversation ids degrade to no session and create
+        nothing.
+        """
+        session_id: str | None = None
+        if conversation_id is not None:
+            async with self._state_lock:
+                session = await self.memory.open_session_for_conversation(conversation_id)
+                if session is not None:
+                    session_id = session.id
+                    self._active_interactions[session_id] = (
+                        self._active_interactions.get(session_id, 0) + 1
+                    )
+                    await self.touch(session_id)
+        try:
+            yield session_id
+        finally:
+            if session_id is not None:
+                async with self._state_lock:
+                    await self.touch(session_id)
+                    remaining = self._active_interactions.get(session_id, 1) - 1
+                    if remaining > 0:
+                        self._active_interactions[session_id] = remaining
+                    else:
+                        self._active_interactions.pop(session_id, None)
+
     async def close(self, session_id: str) -> bool:
         now_iso = self.clock().isoformat().replace("+00:00", "Z")
         closed = await self.memory.close_session(session_id, at=now_iso)
@@ -79,11 +124,14 @@ class SessionManager:
         """
         now = self.clock()
         closed: list[str] = []
-        for session in await self.memory.list_open_sessions():
-            if self._within_continuity(session, now):
-                continue
-            if await self.close(session.id):
-                closed.append(session.id)
+        async with self._state_lock:
+            for session in await self.memory.list_open_sessions():
+                if self._active_interactions.get(session.id, 0) > 0:
+                    continue
+                if self._within_continuity(session, now):
+                    continue
+                if await self.close(session.id):
+                    closed.append(session.id)
         return closed
 
     async def _resolve_session(

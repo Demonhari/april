@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
+from services.permissions.tool_status import is_successful_tool_call_status
 from skills.playbooks.schema import PlaybookDefinition, PlaybookStep
 
 # Bounds keep subsequence enumeration cheap and candidates reviewable.
@@ -35,7 +36,7 @@ class PlaybookMiner:
         successful = [
             call
             for call in tool_calls
-            if call.get("status") in {"executed", "ok", "success"}
+            if is_successful_tool_call_status(call.get("status"))
             and isinstance(call.get("tool"), str)
             and isinstance(call.get("args"), dict)
         ]
@@ -202,7 +203,7 @@ def _successful_calls(
     for call in tool_calls:
         tool = call.get("tool")
         args = call.get("args")
-        if call.get("status") not in {"executed", "ok", "success"}:
+        if not is_successful_tool_call_status(call.get("status")):
             continue
         if not isinstance(tool, str) or not isinstance(args, dict):
             continue

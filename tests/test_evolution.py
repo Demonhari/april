@@ -15,7 +15,7 @@ from services.evolution.evaluator import evaluate_overlay_candidate, write_pendi
 from services.evolution.prompt_evolver import OverlayCandidate
 from services.evolution.scheduler import EvolutionSchedulerGate
 from services.evolution.versions import PromptOverlayManager
-from services.evolution.write_guard import EvolutionWriteGuard
+from services.evolution.write_guard import EvolutionDatabaseWriter, EvolutionWriteGuard
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
@@ -47,7 +47,36 @@ async def test_evolution_write_guard_fences_paths_and_audits(settings_tmp) -> No
     assert allowed.exists()
     with pytest.raises(PermissionError):
         guard.write_text(settings_tmp.home / "README.md", "bad")
+    outside = settings_tmp.home / "outside-evolution.txt"
+    outside.write_text("unchanged", encoding="utf-8")
+    settings_tmp.evolution_path.mkdir(parents=True, exist_ok=True)
+    escape = settings_tmp.evolution_path / "escape.txt"
+    escape.symlink_to(outside)
+    with pytest.raises(PermissionError):
+        guard.write_text(escape, "bad")
+    assert outside.read_text(encoding="utf-8") == "unchanged"
     assert "evolution_write_guard_violation" in settings_tmp.audit_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_evolution_database_writer_rejects_unexpected_table(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    writer = EvolutionDatabaseWriter(
+        database, EvolutionWriteGuard(settings_tmp, audit=AuditLogger(settings_tmp.audit_path))
+    )
+    try:
+        with pytest.raises(PermissionError, match="does not match"):
+            await writer.execute(
+                "playbooks", "UPDATE approvals SET status = 'approved' WHERE id = 'forged'"
+            )
+        with pytest.raises(PermissionError, match="approved tables"):
+            await writer.execute(
+                "approvals", "UPDATE approvals SET status = 'approved' WHERE id = 'forged'"
+            )
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio
@@ -312,21 +341,19 @@ async def test_dreamer_full_fixture_cycle_produces_deterministic_report(settings
         assert mined_path.is_relative_to(enabled.playbooks_path)
         assert "status: candidate" in mined_path.read_text(encoding="utf-8")
 
-        # D4/D5: the feedback-derived overlay passed the fixture eval and is
-        # active for the safe general agent.
-        assert report["phases"]["examine"]["activated"] == [
-            {"agent": "general_agent", "version": 1}
-        ]
+        # D4/D5: structural safety alone is not improvement evidence. Without
+        # a real local runtime, the candidate remains pending A/B evaluation.
+        assert report["phases"]["examine"]["activated"] == []
+        assert len(report["phases"]["examine"]["pending_real_runtime"]) == 1
         manager = PromptOverlayManager(enabled, database)
         overlay = await manager.active_overlay_text("general_agent")
-        assert overlay is not None
-        assert "answer ignored my timezone" in overlay
+        assert overlay is None
 
         # D6: evolution_runs recorded, briefing summary present.
         rows = await database.fetchall("SELECT * FROM evolution_runs")
         assert len(rows) == 1
         assert report["summary"] != "no evolution candidates were produced"
-        assert "activated 1 heuristic prompt overlay(s)" in report["summary"]
+        assert "pending real-runtime evaluation" in report["summary"]
 
         # Determinism: the same fixtures produce the same phase payloads.
         gate2 = EvolutionSchedulerGate(enabled, memory, governor=_permissive_governor(enabled))
@@ -444,9 +471,11 @@ async def test_dreamer_write_capable_agent_overlay_requires_approval(settings_tm
         assert result.report_path is not None
         report = jsonlib.loads(Path(result.report_path).read_text(encoding="utf-8"))
         awaiting = report["phases"]["examine"]["approval_required"]
-        assert len(awaiting) == 1
-        assert awaiting[0]["agent"] == "coding_agent"
-        assert report["candidate_outcomes"]["approval_required_count"] == 1
+        assert awaiting == []
+        pending = report["phases"]["examine"]["pending_real_runtime"]
+        assert len(pending) == 1
+        assert pending[0]["agent"] == "coding_agent"
+        assert report["candidate_outcomes"]["approval_required_count"] == 0
         assert report["candidate_outcomes"]["discarded_count"] == 0
         manager = PromptOverlayManager(enabled, database)
         assert await manager.active_overlay("coding_agent") is None

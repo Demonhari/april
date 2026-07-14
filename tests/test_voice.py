@@ -29,6 +29,32 @@ from services.voice.vad import VoiceActivityDetector, pcm16le_rms
 from services.voice.wake_word import OpenWakeWordDetector
 
 
+def test_two_stage_whisper_paths_fall_back_to_legacy_config(settings_tmp, tmp_path) -> None:
+    legacy_binary = tmp_path / "whisper-legacy"
+    legacy_model = tmp_path / "legacy.bin"
+    legacy = settings_tmp.voice.model_copy(
+        update={
+            "whisper_binary_path": legacy_binary,
+            "whisper_model_path": legacy_model,
+        }
+    )
+    assert legacy.effective_confirmation_whisper_binary_path == legacy_binary
+    assert legacy.effective_confirmation_whisper_model_path == legacy_model
+    assert legacy.effective_transcription_whisper_binary_path == legacy_binary
+    assert legacy.effective_transcription_whisper_model_path == legacy_model
+
+    confirm_model = tmp_path / "tiny.bin"
+    transcript_model = tmp_path / "large.bin"
+    separate = legacy.model_copy(
+        update={
+            "wake_confirmation_whisper_model_path": confirm_model,
+            "transcription_whisper_model_path": transcript_model,
+        }
+    )
+    assert separate.effective_confirmation_whisper_model_path == confirm_model
+    assert separate.effective_transcription_whisper_model_path == transcript_model
+
+
 class FakeApi:
     def __init__(self) -> None:
         self.payloads: list[dict[str, str]] = []
@@ -261,6 +287,24 @@ def test_voice_doctor_wake_word_ready_with_engine_and_model(
     assert report["wake_word_ready"] is True
     assert report["full_voice_loop_ready"] is True
     assert report["voice_readiness"]["wake_word_blocked_by"] == []
+
+
+def test_missing_piper_keeps_wake_and_text_delivery_input_ready(
+    settings_tmp, tmp_path: Path, monkeypatch
+) -> None:
+    _stub_mic_and_speaker(monkeypatch)
+    monkeypatch.setattr("services.voice.health.openwakeword_available", lambda: True)
+    settings = _voice_settings_with_artifacts(settings_tmp, tmp_path, wake_word=True)
+    assert settings.voice.piper_binary_path is not None
+    assert settings.voice.piper_model_path is not None
+    settings.voice.piper_binary_path.unlink()
+    settings.voice.piper_model_path.unlink()
+
+    report = voice_doctor(settings)
+    assert report["text_voice_input_ready"] is True
+    assert report["wake_input_ready"] is True
+    assert report["push_to_talk_ready"] is False
+    assert "piper binary" in report["voice_readiness"]["push_to_talk_blocked_by"]
 
 
 def test_voice_doctor_distinguishes_missing_openwakeword_engine_from_model(

@@ -246,11 +246,7 @@ async def test_briefing_completed_evolution_report_golden(settings_tmp: AprilSet
                     "contradictions_resolved": 1,
                 },
                 "mine": {"adopted": ["morning-plan", "repo-review"]},
-                "evolve": {
-                    "ladder_thresholds": {
-                        "evaluation": {"score": 0.92, "baseline": 0.85}
-                    }
-                },
+                "evolve": {"ladder_thresholds": {"evaluation": {"score": 0.92, "baseline": 0.85}}},
             },
             "candidate_outcomes": {"approval_required_count": 3},
         },

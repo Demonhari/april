@@ -12,10 +12,11 @@ from april_common.time import utc_now
 from services.evolution.write_guard import EvolutionWriteGuard
 from services.memory.policy import MemoryPolicy
 from services.memory.sqlite_memory import SqliteMemory
+from services.permissions.tool_status import HISTORICAL_SUCCESS_STATUSES
 from skills.playbooks.loader import PlaybookLoader
 from skills.playbooks.miner import PlaybookMiner
 from skills.playbooks.schema import PlaybookDefinition
-from skills.registry import default_registry
+from skills.registry import ToolRegistry, default_registry
 
 # Trigger suggestions come only from short, non-sensitive user messages.
 _MAX_TRIGGER_CHARS = 120
@@ -54,6 +55,7 @@ async def mine_playbook_candidates(
     lookback_days: int = 14,
     max_conversations: int = 500,
     auto_adopt: bool = True,
+    tool_registry: ToolRegistry | None = None,
 ) -> MiningReport:
     """D3: mine playbook candidates from successful local tool sequences.
 
@@ -77,11 +79,11 @@ async def mine_playbook_candidates(
         SELECT conversation_id, tool, args_json, status
         FROM tool_calls
         WHERE conversation_id IS NOT NULL
-          AND status = 'executed'
+          AND status IN (?, ?, ?)
           AND created_at >= ?
         ORDER BY conversation_id, created_at
         """,
-        (since,),
+        (*HISTORICAL_SUCCESS_STATUSES, since),
     )
     by_conversation: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -98,7 +100,7 @@ async def mine_playbook_candidates(
     conversation_ids = sorted(by_conversation)[:max_conversations]
     sequences = [by_conversation[conversation_id] for conversation_id in conversation_ids]
     existing_ids = await _existing_playbook_ids(memory, settings)
-    registry = default_registry()
+    registry = tool_registry or default_registry()
     known_tools = {definition.name for definition in registry.list()}
     mined = miner.mine_frequent_detailed(
         sequences,

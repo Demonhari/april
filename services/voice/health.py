@@ -97,12 +97,52 @@ def voice_health(settings: AprilSettings) -> VoiceHealth:
     if not settings.voice.enabled:
         return VoiceHealth(status="disabled", components=[])
     components = [
-        _configured_path_health("whisper.cpp", settings, settings.voice.whisper_binary_path),
-        _configured_path_health("whisper model", settings, settings.voice.whisper_model_path),
+        _configured_path_health(
+            "wake confirmation whisper.cpp",
+            settings,
+            settings.voice.effective_confirmation_whisper_binary_path,
+        ),
+        _configured_path_health(
+            "wake confirmation whisper model",
+            settings,
+            settings.voice.effective_confirmation_whisper_model_path,
+        ),
+        _configured_path_health(
+            "transcription whisper.cpp",
+            settings,
+            settings.voice.effective_transcription_whisper_binary_path,
+        ),
+        _configured_path_health(
+            "transcription whisper model",
+            settings,
+            settings.voice.effective_transcription_whisper_model_path,
+        ),
         _configured_path_health("piper", settings, settings.voice.piper_binary_path),
         _configured_path_health("piper model", settings, settings.voice.piper_model_path),
-        _configured_path_health("wake word model", settings, settings.voice.wake_word_model_path),
+        *[
+            _configured_path_health(f"wake word model {index}", settings, path)
+            for index, path in enumerate(settings.voice.effective_wake_word_model_paths, start=1)
+        ],
     ]
+    if not settings.voice.effective_wake_word_model_paths:
+        components.append(
+            VoiceComponentHealth(
+                name="wake word model",
+                status="degraded",
+                message="No path configured.",
+            )
+        )
+    if settings.wake.speaker_gate == "soft":
+        components.append(
+            VoiceComponentHealth(
+                name="speaker verifier",
+                status="degraded",
+                message=(
+                    "No production local verifier/model is configured; enrollment samples "
+                    "do not constitute a voiceprint."
+                ),
+            )
+        )
     status = "ok" if all(component.status == "ok" for component in components) else "degraded"
     return VoiceHealth(status=status, components=components)
 
@@ -228,32 +268,51 @@ def _voice_readiness(
     * ``full_voice_loop_ready`` — wake-word readiness plus an output device for the
       hands-free wake → listen → respond → speak loop.
     """
-    whisper_ready = _path_present(settings, settings.voice.whisper_binary_path) and _path_present(
-        settings, settings.voice.whisper_model_path
-    )
+    whisper_ready = _path_present(
+        settings, settings.voice.effective_transcription_whisper_binary_path
+    ) and _path_present(settings, settings.voice.effective_transcription_whisper_model_path)
     piper_ready = _path_present(settings, settings.voice.piper_binary_path) and _path_present(
         settings, settings.voice.piper_model_path
     )
-    wake_model_present = _path_present(settings, settings.voice.wake_word_model_path)
+    wake_model_present = any(
+        _path_present(settings, path) for path in settings.voice.effective_wake_word_model_paths
+    )
 
-    ptt_missing: list[str] = []
+    input_missing: list[str] = []
     if not push_to_talk_available:
-        ptt_missing.append("microphone")
-    if not _path_present(settings, settings.voice.whisper_binary_path):
-        ptt_missing.append("whisper.cpp binary")
-    if not _path_present(settings, settings.voice.whisper_model_path):
-        ptt_missing.append("whisper model")
+        input_missing.append("microphone")
+    if not _path_present(settings, settings.voice.effective_transcription_whisper_binary_path):
+        input_missing.append("transcription whisper.cpp binary")
+    if not _path_present(settings, settings.voice.effective_transcription_whisper_model_path):
+        input_missing.append("transcription whisper model")
+    text_voice_input_ready = not input_missing
+
+    ptt_missing = list(input_missing)
     if not _path_present(settings, settings.voice.piper_binary_path):
         ptt_missing.append("piper binary")
     if not _path_present(settings, settings.voice.piper_model_path):
         ptt_missing.append("piper voice model")
     push_to_talk_ready = not ptt_missing
 
-    wake_missing = list(ptt_missing)
+    wake_input_missing = list(input_missing)
+    if not _path_present(settings, settings.voice.effective_confirmation_whisper_binary_path):
+        wake_input_missing.append("wake confirmation whisper.cpp binary")
+    if not _path_present(settings, settings.voice.effective_confirmation_whisper_model_path):
+        wake_input_missing.append("wake confirmation whisper model")
     if not openwakeword:
-        wake_missing.append("openWakeWord package")
+        wake_input_missing.append("openWakeWord package")
     if not wake_model_present:
-        wake_missing.append("wake-word model")
+        wake_input_missing.append("wake-word model")
+    wake_input_ready = not wake_input_missing
+
+    # Preserve the historical hands-free readiness rung, which includes spoken
+    # output, while exposing the input/delivery rung separately so missing Piper
+    # never falsely marks Sentinel listening itself unusable.
+    wake_missing = [*wake_input_missing]
+    if not _path_present(settings, settings.voice.piper_binary_path):
+        wake_missing.append("piper binary")
+    if not _path_present(settings, settings.voice.piper_model_path):
+        wake_missing.append("piper voice model")
     wake_word_ready = not wake_missing
 
     loop_missing = list(wake_missing)
@@ -264,8 +323,12 @@ def _voice_readiness(
     return {
         "push_to_talk_ready": push_to_talk_ready,
         "push_to_talk_blocked_by": ptt_missing,
+        "text_voice_input_ready": text_voice_input_ready,
+        "text_voice_input_blocked_by": input_missing,
         "wake_word_ready": wake_word_ready,
         "wake_word_blocked_by": wake_missing,
+        "wake_input_ready": wake_input_ready,
+        "wake_input_blocked_by": wake_input_missing,
         "full_voice_loop_ready": full_voice_loop_ready,
         "full_voice_loop_blocked_by": loop_missing,
         "whisper_ready": whisper_ready,
@@ -328,7 +391,7 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
     # but no wake-word model. Wake-word listening is the only thing that requires
     # the openWakeWord engine and model.
     push_to_talk_available = bool(devices["sounddevice_installed"] and devices["input_devices"])
-    wake_word_configured = settings.voice.wake_word_model_path is not None
+    wake_word_configured = bool(settings.voice.effective_wake_word_model_paths)
     openwakeword = openwakeword_available()
     readiness = _voice_readiness(
         settings,
@@ -363,12 +426,33 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
             status="ok" if devices["output_devices"] else "degraded",
             message=str(len(devices["output_devices"])),
         ),
-        _configured_path_health("whisper binary", settings, settings.voice.whisper_binary_path),
-        _configured_path_health("whisper model", settings, settings.voice.whisper_model_path),
+        _configured_path_health(
+            "wake confirmation whisper binary",
+            settings,
+            settings.voice.effective_confirmation_whisper_binary_path,
+        ),
+        _configured_path_health(
+            "wake confirmation whisper model",
+            settings,
+            settings.voice.effective_confirmation_whisper_model_path,
+        ),
+        _configured_path_health(
+            "transcription whisper binary",
+            settings,
+            settings.voice.effective_transcription_whisper_binary_path,
+        ),
+        _configured_path_health(
+            "transcription whisper model",
+            settings,
+            settings.voice.effective_transcription_whisper_model_path,
+        ),
         _configured_path_health("piper binary", settings, settings.voice.piper_binary_path),
         _configured_path_health("piper model", settings, settings.voice.piper_model_path),
         _openwakeword_health(openwakeword, wake_word_configured=wake_word_configured),
-        _configured_path_health("wake-word model", settings, settings.voice.wake_word_model_path),
+        *[
+            _configured_path_health(f"wake-word model {index}", settings, path)
+            for index, path in enumerate(settings.voice.effective_wake_word_model_paths, start=1)
+        ],
         VoiceComponentHealth(
             name="push-to-talk fallback",
             status="ok" if push_to_talk_available else "degraded",
@@ -380,6 +464,25 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         ),
         _audio_cache_health(settings),
     ]
+    if not settings.voice.effective_wake_word_model_paths:
+        components.append(
+            VoiceComponentHealth(
+                name="wake-word model",
+                status="degraded",
+                message="No path configured.",
+            )
+        )
+    if settings.wake.speaker_gate == "soft":
+        components.append(
+            VoiceComponentHealth(
+                name="speaker verifier",
+                status="degraded",
+                message=(
+                    "No production local verifier/model is configured; enrollment "
+                    "samples are not a voiceprint."
+                ),
+            )
+        )
     degraded = [component for component in components if component.status == "degraded"]
     return {
         "status": "degraded" if degraded else "ok",
@@ -394,6 +497,8 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         # Composite, escalating readiness verdicts. push_to_talk_ready never
         # requires a wake-word model; wake_word_ready always does.
         "push_to_talk_ready": readiness["push_to_talk_ready"],
+        "text_voice_input_ready": readiness["text_voice_input_ready"],
+        "wake_input_ready": readiness["wake_input_ready"],
         "wake_word_ready": readiness["wake_word_ready"],
         "full_voice_loop_ready": readiness["full_voice_loop_ready"],
         "voice_readiness": readiness,

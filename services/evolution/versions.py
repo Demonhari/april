@@ -10,7 +10,7 @@ from typing import Any, Literal
 from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
-from services.evolution.write_guard import EvolutionWriteGuard
+from services.evolution.write_guard import EvolutionDatabaseWriter, EvolutionWriteGuard
 from services.memory.database import Database
 
 _STRUCTURAL_OVERLAY_RE = re.compile(
@@ -81,6 +81,7 @@ class PromptOverlayManager:
         self.database = database
         self.audit = audit
         self.guard = guard or EvolutionWriteGuard(settings, audit=audit)
+        self.writer = EvolutionDatabaseWriter(database, self.guard)
 
     async def apply_candidate(
         self,
@@ -110,8 +111,7 @@ class PromptOverlayManager:
         path = self.settings.evolution_path / "prompts" / agent / f"v{version}.overlay.txt"
         written = self.guard.write_text(path, content)
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        self.guard.validate_table("prompt_versions")
-        async with self.database.transaction() as conn:
+        async with self.writer.transaction("prompt_versions") as conn:
             await conn.execute("UPDATE prompt_versions SET active = 0 WHERE agent = ?", (agent,))
             await conn.execute(
                 """
@@ -208,8 +208,7 @@ class PromptOverlayManager:
         path = Path(str(row["overlay_path"]))
         if not path.exists():
             return OverlayApplyResult("discarded", agent, reason="overlay bytes missing")
-        self.guard.validate_table("prompt_versions")
-        async with self.database.transaction() as conn:
+        async with self.writer.transaction("prompt_versions") as conn:
             await conn.execute("UPDATE prompt_versions SET active = 0 WHERE agent = ?", (agent,))
             await conn.execute(
                 "UPDATE prompt_versions SET active = 1 WHERE agent = ? AND version = ?",
@@ -444,13 +443,83 @@ def bounded_ladder_threshold_nudge(
 def evaluate_ladder_threshold_candidate(
     candidate: LadderThresholds,
     *,
-    baseline_score: float = 1.0,
-) -> dict[str, float | str]:
+    baseline_score: float | None = None,
+) -> dict[str, Any]:
     validate_ladder_threshold_overlay(candidate.to_payload())
+    baseline = LadderThresholds(
+        deep_confidence_threshold=0.4,
+        verified_confidence_threshold=0.7,
+    )
+    fixtures = [
+        ("standard_high_confidence", 0.90, None, False, False, False, 1, 1.0),
+        ("verified_medium_confidence", 0.55, None, False, False, False, 2, 1.0),
+        ("deep_low_confidence", 0.20, None, False, False, False, 3, 1.0),
+        ("explicit_deep", 0.95, "deep", False, False, False, 3, 2.0),
+        ("explicit_council", 0.95, "council", False, False, False, 4, 2.0),
+        ("high_stakes", 0.95, None, True, False, False, 4, 3.0),
+        ("tool_approval_path", 0.10, None, True, True, False, 1, 3.0),
+        ("reflex", 0.95, None, False, False, True, 0, 1.0),
+    ]
+
+    def route(thresholds: LadderThresholds, fixture: tuple[Any, ...]) -> int:
+        _name, confidence, explicit, high_stakes, tool_path, reflex, _expected, _weight = fixture
+        if reflex:
+            return 0
+        if tool_path:
+            return 1
+        if explicit == "deep":
+            return 3
+        if explicit == "council" or high_stakes:
+            return 4
+        if confidence < thresholds.deep_confidence_threshold:
+            return 3
+        if confidence < thresholds.verified_confidence_threshold:
+            return 2
+        return 1
+
+    def evaluate(thresholds: LadderThresholds) -> tuple[float, list[dict[str, Any]]]:
+        earned = 0.0
+        possible = 0.0
+        outcomes: list[dict[str, Any]] = []
+        for fixture in fixtures:
+            name, _confidence, _explicit, _stakes, _tools, _reflex, expected, weight = fixture
+            actual = route(thresholds, fixture)
+            possible += float(weight)
+            if actual == expected:
+                case_score = float(weight)
+                earned += case_score
+                difference = "match"
+            elif actual < expected:
+                # Missing a required escalation costs more than conservative
+                # over-escalation, but either is a regression.
+                case_score = -2.0 * float(weight)
+                earned += case_score
+                difference = "missed_escalation"
+            else:
+                case_score = -0.5 * float(weight)
+                earned += case_score
+                difference = "unnecessary_escalation"
+            outcomes.append(
+                {
+                    "case": name,
+                    "expected_rung": expected,
+                    "actual_rung": actual,
+                    "weight": weight,
+                    "difference": difference,
+                }
+            )
+        return max(0.0, earned / possible), outcomes
+
+    computed_baseline, baseline_cases = evaluate(baseline)
+    candidate_score, candidate_cases = evaluate(candidate)
     return {
         "eval_kind": "deterministic_routing_fixture",
-        "score": 1.0,
-        "baseline": baseline_score,
+        "score": candidate_score,
+        "baseline": computed_baseline if baseline_score is None else baseline_score,
+        "passed": candidate_score
+        >= (computed_baseline if baseline_score is None else baseline_score),
+        "baseline_cases": baseline_cases,
+        "candidate_cases": candidate_cases,
     }
 
 

@@ -611,12 +611,13 @@ def test_pending_overlay_listing_and_approval_api(settings_tmp) -> None:
     )
     assert approve.status_code == 200
     result = approve.json()["approval"]
-    assert result["status"] == "applied"
-    assert result["version"] == 1
+    assert result["status"] == "pending_real_runtime"
+    assert "behavioral A/B evaluation required" in result["reason"]
 
-    # Approved candidates disappear from the pending list.
+    # Human approval cannot replace missing behavioral evidence, so the exact
+    # candidate remains pending.
     after = client.get("/evolution/overlays/pending", headers=headers)
-    assert after.json()["pending"] == []
+    assert len(after.json()["pending"]) == 1
 
 
 def test_malicious_pending_overlay_cannot_change_policy(settings_tmp) -> None:

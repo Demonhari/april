@@ -5,7 +5,7 @@ import pytest
 from april_common.audit import AuditLogger
 from april_common.errors import PermissionDeniedError
 from services.memory.database import Database
-from services.memory.migrations import run_migrations
+from services.memory.migrations import SCHEMA_VERSION, run_migrations
 from services.memory.policy import MemoryPolicy
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.writer import MemoryWriter
@@ -24,6 +24,84 @@ async def test_migrations_write_read_delete_and_export(settings_tmp) -> None:
     assert (await memory.search_memories("local"))[0].id == record.id
     assert await memory.delete_memory(record.id)
     assert "memories" in await memory.export_memories()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_v13_style_database_migrates_idempotently_and_preserves_rows(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await database.connection.executescript(
+        """
+        CREATE TABLE playbooks (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'candidate',
+            trigger_examples_json TEXT NOT NULL DEFAULT '[]',
+            steps_json TEXT NOT NULL DEFAULT '[]',
+            required_permission_level INTEGER NOT NULL DEFAULT 1,
+            stats_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE playbook_runs (
+            id TEXT PRIMARY KEY,
+            playbook_id TEXT NOT NULL REFERENCES playbooks(id),
+            conversation_id TEXT,
+            status TEXT NOT NULL,
+            steps_completed INTEGER NOT NULL DEFAULT 0,
+            detail TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+        CREATE TABLE approvals (
+            id TEXT PRIMARY KEY,
+            tool TEXT NOT NULL,
+            args_json TEXT NOT NULL,
+            canonical_hash TEXT NOT NULL,
+            permission_level INTEGER NOT NULL,
+            risk_level TEXT NOT NULL,
+            status TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            consumed_at TEXT,
+            result_json TEXT
+        );
+        INSERT INTO playbooks(
+            id, name, source, status, steps_json, created_at, updated_at
+        ) VALUES('pb-old', 'Old playbook', 'manual', 'active', '[]', '2026-01-01', '2026-01-01');
+        INSERT INTO playbook_runs(
+            id, playbook_id, status, created_at
+        ) VALUES('run-old', 'pb-old', 'pending_approval', '2026-01-01');
+        INSERT INTO approvals(
+            id, tool, args_json, canonical_hash, permission_level, risk_level,
+            status, expires_at, created_at
+        ) VALUES(
+            'approval-old', 'write_file', '{}', 'legacy', 3, 'code_write',
+            'pending', '2099-01-01', '2026-01-01'
+        );
+        """
+    )
+    await database.connection.commit()
+
+    await run_migrations(database)
+    await run_migrations(database)
+
+    run = await database.fetchone("SELECT * FROM playbook_runs WHERE id = 'run-old'")
+    assert run is not None
+    assert run["status"] == "failed"
+    assert run["snapshot_hash"] is None
+    assert run["completed_at"] is not None
+    approval = await database.fetchone("SELECT * FROM approvals WHERE id = 'approval-old'")
+    assert approval is not None
+    assert approval["status"] == "expired"
+    playbook = await database.fetchone("SELECT * FROM playbooks WHERE id = 'pb-old'")
+    assert playbook is not None
+    versions = await database.fetchall(
+        "SELECT version FROM schema_migrations WHERE version = ?", (SCHEMA_VERSION,)
+    )
+    assert len(versions) == 1
     await database.close()
 
 

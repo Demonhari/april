@@ -12,6 +12,7 @@ from services.api.dependencies import ApiContainer
 from services.api.server import create_app
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
+from services.memory.repository import MemoryRepository
 from services.memory.retriever import MemoryRetriever
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
@@ -33,6 +34,9 @@ async def make_container(
     memory = SqliteMemory(database)
     vector_memory = VectorMemory(settings_tmp.vector_index_path)
     memory_retriever = MemoryRetriever(memory, vector_memory)
+    memory_repository = MemoryRepository(
+        memory, vector_memory, audit=AuditLogger(settings_tmp.audit_path)
+    )
     runtime_client = runtime_client or FakeRuntimeClient()
     approvals = ApprovalStore(
         database,
@@ -71,6 +75,7 @@ async def make_container(
         memory=memory,
         vector_memory=vector_memory,
         memory_retriever=memory_retriever,
+        memory_repository=memory_repository,
         runtime_client=runtime_client,  # type: ignore[arg-type]
         tool_registry=registry,
         permission_engine=permission_engine,

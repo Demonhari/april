@@ -50,6 +50,7 @@ from services.api.schemas import (
     FeedbackRequest,
     MemoryCreateRequest,
     OverlayApprovalRequest,
+    PlaybookResumeRequest,
     PlaybookRunRequest,
     ProjectCreateRequest,
     ReminderCreateRequest,
@@ -261,6 +262,9 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.get("/health")
     async def health(active: ApiContainer = Depends(get_container)) -> object:
         status = "ok"
+        memory_index = await active.memory_repository.health()
+        if memory_index.repair_required:
+            status = "degraded"
         try:
             runtime = await active.runtime_client.health(timeout=1.0)
             if str(runtime.get("status", "ok")) not in {"ok", "degraded"}:
@@ -276,6 +280,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                     "path": str(active.database.path),
                 },
                 "vector_index": active.vector_memory.health(),
+                "memory_index": asdict(memory_index),
                 "voice": voice_health(active.settings).model_dump(),
                 # Booleans only: wake configuration + the local hard-mute flag.
                 # No paths or scores are ever exposed here.
@@ -303,6 +308,9 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.get("/diagnostics")
     async def diagnostics(active: ApiContainer = Depends(authorized)) -> object:
         diagnostic_status = "ok"
+        memory_index = await active.memory_repository.health()
+        if memory_index.repair_required:
+            diagnostic_status = "degraded"
         try:
             runtime = await active.runtime_client.health(timeout=1.0)
             if str(runtime.get("status", "ok")) not in {"ok", "degraded"}:
@@ -314,6 +322,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             "status": diagnostic_status,
             "database": {"ok": active.database.path.exists(), "path": str(active.database.path)},
             "vector_index": active.vector_memory.health(),
+            "memory_index": asdict(memory_index),
             "voice": voice_health(active.settings).model_dump(),
             "scheduler": {
                 "enabled": active.settings.scheduler.enabled,
@@ -407,14 +416,15 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         x_request_id: str | None = Header(default=None),
     ) -> ChatResponse:
         request_id = x_request_id or str(uuid.uuid4())
-        result = await active.orchestrator.chat(
-            request.message,
-            conversation_id=request.conversation_id,
-            request_id=request_id,
-            project_id=request.project_id,
-            repo_path=request.repo_path,
-            mode=request.mode,
-        )
+        async with active.require_session_manager().interaction(request.conversation_id):
+            result = await active.orchestrator.chat(
+                request.message,
+                conversation_id=request.conversation_id,
+                request_id=request_id,
+                project_id=request.project_id,
+                repo_path=request.repo_path,
+                mode=request.mode,
+            )
         return ChatResponse(request_id=request_id, result=result)
 
     @app.post("/chat/stream")
@@ -424,17 +434,24 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         x_request_id: str | None = Header(default=None),
     ) -> StreamingResponse:
         request_id = x_request_id or str(uuid.uuid4())
+        interaction = active.require_session_manager().interaction(request.conversation_id)
+        # Enter before returning the response: request acceptance itself is
+        # activity, even if streaming later fails or the client disconnects.
+        await interaction.__aenter__()
 
         async def events() -> AsyncIterator[str]:
-            async for event_name, payload in active.orchestrator.stream_chat(
-                request.message,
-                conversation_id=request.conversation_id,
-                request_id=request_id,
-                project_id=request.project_id,
-                repo_path=request.repo_path,
-                mode=request.mode,
-            ):
-                yield _sse_event(event_name, request_id, payload)
+            try:
+                async for event_name, payload in active.orchestrator.stream_chat(
+                    request.message,
+                    conversation_id=request.conversation_id,
+                    request_id=request_id,
+                    project_id=request.project_id,
+                    repo_path=request.repo_path,
+                    mode=request.mode,
+                ):
+                    yield _sse_event(event_name, request_id, payload)
+            finally:
+                await interaction.__aexit__(None, None, None)
 
         return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -444,14 +461,15 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         active: ApiContainer = Depends(authorized),
     ) -> ChatResponse:
         request_id = str(uuid.uuid4())
-        result = await active.orchestrator.chat(
-            request.message,
-            conversation_id=request.conversation_id,
-            request_id=request_id,
-            project_id=request.project_id,
-            repo_path=request.repo_path,
-            mode=request.mode,
-        )
+        async with active.require_session_manager().interaction(request.conversation_id):
+            result = await active.orchestrator.chat(
+                request.message,
+                conversation_id=request.conversation_id,
+                request_id=request_id,
+                project_id=request.project_id,
+                repo_path=request.repo_path,
+                mode=request.mode,
+            )
         return ChatResponse(request_id=request_id, result=result)
 
     @app.post("/wake")
@@ -557,14 +575,15 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                 "Direct agent runs only support structured execution.",
                 {"agent": request.agent},
             )
-        result = await active.orchestrator.run_agent(
-            agent_id=request.agent,
-            message=request.message,
-            conversation_id=request.conversation_id,
-            request_id=request_id,
-            project_id=request.project_id,
-            repo_path=request.repo_path,
-        )
+        async with active.require_session_manager().interaction(request.conversation_id):
+            result = await active.orchestrator.run_agent(
+                agent_id=request.agent,
+                message=request.message,
+                conversation_id=request.conversation_id,
+                request_id=request_id,
+                project_id=request.project_id,
+                repo_path=request.repo_path,
+            )
         return ChatResponse(request_id=request_id, result=result)
 
     @app.post("/tools/request")
@@ -597,6 +616,19 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         x_request_id: str | None = Header(default=None),
     ) -> object:
         request_id = x_request_id or str(uuid.uuid4())
+        approval = await active.approvals.get(request.approval_id)
+        playbook_run_id = approval.metadata.get("playbook_run_id")
+        if isinstance(playbook_run_id, str):
+            if request.tool is not None:
+                raise PermissionDeniedError(
+                    "Playbook approvals resume only their persisted exact action."
+                )
+            result = await PlaybookRunner(active.tool_executor, memory=active.memory).resume(
+                playbook_run_id,
+                approval_id=request.approval_id,
+                actor="local-user",
+            )
+            return {"playbook_run": asdict(result)}
         return await active.orchestrator.approve_tool(
             approval_id=request.approval_id,
             actor="local-user",
@@ -611,11 +643,19 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         active: ApiContainer = Depends(authorized),
         x_request_id: str | None = Header(default=None),
     ) -> object:
-        return await active.orchestrator.deny_tool(
+        approval = await active.approvals.get(request.approval_id)
+        result = await active.orchestrator.deny_tool(
             approval_id=request.approval_id,
             actor="local-user",
             request_id=x_request_id or str(uuid.uuid4()),
         )
+        playbook_run_id = approval.metadata.get("playbook_run_id")
+        if isinstance(playbook_run_id, str):
+            playbook = await PlaybookRunner(active.tool_executor, memory=active.memory).mark_denied(
+                playbook_run_id, approval_id=request.approval_id
+            )
+            return {"approval": result, "playbook_run": asdict(playbook)}
+        return result
 
     @app.get("/approvals")
     async def approvals(active: ApiContainer = Depends(authorized)) -> object:
@@ -653,7 +693,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
                     },
                 )
 
-        writer = MemoryWriter(active.memory)
+        writer = MemoryWriter(active.memory_repository)
         record = await writer.write(
             request.content,
             reason=request.reason,
@@ -661,6 +701,11 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             requested_by_user=True,
             project_id=request.project_id,
         )
+        await active.memory_repository.set_provenance(
+            record.id,
+            source_conversation_id=request.source_conversation_id,
+        )
+        index_health = await active.memory_repository.health()
         active.approvals.audit.write(
             {
                 "event_type": "memory_written",
@@ -677,6 +722,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         return {
             "memory": record.model_dump(),
             "stored": f"Stored {record.kind} memory.",
+            "index_repair_required": index_health.repair_required,
         }
 
     @app.get("/memory/search")
@@ -694,7 +740,12 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
 
     @app.delete("/memory/{memory_id}")
     async def memory_delete(memory_id: str, active: ApiContainer = Depends(authorized)) -> object:
-        return {"deleted": await active.memory.delete_memory(memory_id)}
+        deleted = await active.memory_repository.delete_memory(memory_id)
+        index_health = await active.memory_repository.health()
+        return {
+            "deleted": deleted,
+            "index_repair_required": index_health.repair_required,
+        }
 
     @app.get("/memory/inspect")
     async def memory_inspect(
@@ -723,7 +774,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
 
     @app.post("/memory/reindex")
     async def memory_reindex(active: ApiContainer = Depends(authorized)) -> object:
-        reindexed = active.vector_memory.reindex()
+        reindexed = await active.memory_repository.rebuild()
         configured_provider = active.settings.memory.embedding_provider
         active_provider = active.vector_memory.embedding.name
         vector_health = active.vector_memory.health()
@@ -870,11 +921,12 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         playbook = loader.get(playbook_id)
         if playbook is None:
             raise HTTPException(status_code=404, detail="playbook not found")
-        result = await PlaybookRunner(active.tool_executor, memory=active.memory).run(
-            playbook,
-            conversation_id=request.conversation_id,
-            project_id=request.project_id,
-        )
+        async with active.require_session_manager().interaction(request.conversation_id):
+            result = await PlaybookRunner(active.tool_executor, memory=active.memory).run(
+                playbook,
+                conversation_id=request.conversation_id,
+                project_id=request.project_id,
+            )
         return {"run": asdict(result)}
 
     @app.get("/playbooks/{playbook_id}/runs")
@@ -885,6 +937,24 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     ) -> object:
         runs = await active.memory.list_playbook_runs(playbook_id=playbook_id, limit=limit)
         return {"runs": runs}
+
+    @app.post("/playbooks/runs/{run_id}/resume")
+    async def playbook_resume(
+        run_id: str,
+        request: PlaybookResumeRequest,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        row = await active.memory.get_playbook_run(run_id)
+        conversation_id = (
+            str(row["conversation_id"])
+            if row is not None and row["conversation_id"] is not None
+            else None
+        )
+        async with active.require_session_manager().interaction(conversation_id):
+            result = await PlaybookRunner(active.tool_executor, memory=active.memory).resume(
+                run_id, approval_id=request.approval_id
+            )
+        return {"run": asdict(result)}
 
     @app.get("/evolution/versions")
     async def evolution_versions(
@@ -1300,12 +1370,12 @@ async def _handle_wake_event(
             )
             await session_manager.touch(resolution.session_id)
             return payload
-        result = await active.orchestrator.chat(
-            event.text,
-            conversation_id=resolution.conversation_id,
-            request_id=request_id,
-        )
-        await session_manager.touch(resolution.session_id)
+        async with session_manager.interaction(resolution.conversation_id):
+            result = await active.orchestrator.chat(
+                event.text,
+                conversation_id=resolution.conversation_id,
+                request_id=request_id,
+            )
         payload["result"] = result.model_dump()
     return payload
 
@@ -1409,6 +1479,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         ]
 
     vector_health = active.vector_memory.health()
+    memory_index_health = await active.memory_repository.health()
     vector = _redact_health_payload(vector_health)
     # The embedding provider is a first-class readiness axis: hashed-token is the
     # safe/offline default, runtime-local is the recommended hardened path. The
@@ -1465,9 +1536,25 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             voice_milestone = "live_verified"
     voice_artifacts = [
         _voice_artifact(
-            active.settings, "whisper binary", active.settings.voice.whisper_binary_path
+            active.settings,
+            "wake confirmation whisper binary",
+            active.settings.voice.effective_confirmation_whisper_binary_path,
         ),
-        _voice_artifact(active.settings, "whisper model", active.settings.voice.whisper_model_path),
+        _voice_artifact(
+            active.settings,
+            "wake confirmation whisper model",
+            active.settings.voice.effective_confirmation_whisper_model_path,
+        ),
+        _voice_artifact(
+            active.settings,
+            "transcription whisper binary",
+            active.settings.voice.effective_transcription_whisper_binary_path,
+        ),
+        _voice_artifact(
+            active.settings,
+            "transcription whisper model",
+            active.settings.voice.effective_transcription_whisper_model_path,
+        ),
         _voice_artifact(active.settings, "piper binary", active.settings.voice.piper_binary_path),
         _voice_artifact(active.settings, "piper model", active.settings.voice.piper_model_path),
     ]
@@ -1481,6 +1568,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         str(runtime_status) not in {"ok", "degraded"}
         or not active.database.path.exists()
         or runtime_simulated is True
+        or memory_index_health.repair_required
     )
     overlay_approval_service = PromptOverlayApprovalService(
         active.settings,
@@ -1509,6 +1597,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
                 "briefing_enabled": active.settings.scheduler.briefing_enabled,
             },
         },
+        "memory_index": asdict(memory_index_health),
         "models": {
             "llama_cpp_python_available": importlib.util.find_spec("llama_cpp") is not None,
             "registered": models,

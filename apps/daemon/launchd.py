@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 import plistlib
+import subprocess
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from april_common.settings import AprilSettings
@@ -15,9 +18,20 @@ LABEL = "com.april.apriald"
 
 
 class LaunchdManager:
-    def __init__(self, settings: AprilSettings, *, user_home: Path | None = None) -> None:
+    def __init__(
+        self,
+        settings: AprilSettings,
+        *,
+        user_home: Path | None = None,
+        runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None,
+        platform: str | None = None,
+        uid: int | None = None,
+    ) -> None:
         self.settings = settings
         self.user_home = (user_home or Path.home()).expanduser().resolve()
+        self.runner = runner or self._run
+        self.platform = platform or sys.platform
+        self.uid = os.getuid() if uid is None else uid
 
     @property
     def launch_agents_dir(self) -> Path:
@@ -58,7 +72,96 @@ class LaunchdManager:
     def status(self) -> dict[str, object]:
         path = self.plist_path
         self._validate_path(path)
-        return {"installed": path.exists(), "plist_path": str(path)}
+        installed = path.exists()
+        if self.platform != "darwin":
+            return {
+                "supported": False,
+                "installed": installed,
+                "loaded": False,
+                "plist_path": str(path),
+                "detail": "launchd is supported only on macOS",
+            }
+        result = self.runner(["launchctl", "print", self.service_target])
+        return {
+            "supported": True,
+            "installed": installed,
+            "loaded": result.returncode == 0,
+            "plist_path": str(path),
+        }
+
+    @property
+    def domain_target(self) -> str:
+        return f"gui/{self.uid}"
+
+    @property
+    def service_target(self) -> str:
+        return f"{self.domain_target}/{LABEL}"
+
+    def bootstrap(self) -> dict[str, object]:
+        if self.platform != "darwin":
+            return self._unsupported()
+        if bool(self.status()["loaded"]):
+            return {"supported": True, "loaded": True, "changed": False}
+        if not self.plist_path.exists():
+            return {
+                "supported": True,
+                "loaded": False,
+                "changed": False,
+                "error": "LaunchAgent plist is not installed",
+            }
+        result = self.runner(["launchctl", "bootstrap", self.domain_target, str(self.plist_path)])
+        return {
+            "supported": True,
+            "loaded": result.returncode == 0,
+            "changed": result.returncode == 0,
+            "returncode": result.returncode,
+        }
+
+    def bootout(self) -> dict[str, object]:
+        if self.platform != "darwin":
+            return self._unsupported()
+        if not bool(self.status()["loaded"]):
+            return {"supported": True, "loaded": False, "changed": False}
+        result = self.runner(["launchctl", "bootout", self.service_target])
+        return {
+            "supported": True,
+            "loaded": result.returncode != 0,
+            "changed": result.returncode == 0,
+            "returncode": result.returncode,
+        }
+
+    def kickstart(self) -> dict[str, object]:
+        if self.platform != "darwin":
+            return self._unsupported()
+        if not bool(self.status()["loaded"]):
+            return {
+                "supported": True,
+                "started": False,
+                "error": "LaunchAgent is not loaded",
+            }
+        result = self.runner(["launchctl", "kickstart", "-k", self.service_target])
+        return {
+            "supported": True,
+            "started": result.returncode == 0,
+            "returncode": result.returncode,
+        }
+
+    def _unsupported(self) -> dict[str, object]:
+        return {
+            "supported": False,
+            "changed": False,
+            "detail": "launchd is supported only on macOS",
+        }
+
+    @staticmethod
+    def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            list(argv),
+            check=False,
+            capture_output=True,
+            text=True,
+            shell=False,
+        )
 
     def _validate_path(self, path: Path) -> None:
         expected_dir = self.launch_agents_dir.resolve(strict=False)

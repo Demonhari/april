@@ -17,7 +17,7 @@ from april_common.project_scope import normalize_project_child, validate_patch_t
 from april_common.settings import AprilSettings
 from april_common.time import parse_utc_iso, utc_now
 from services.april_runtime.client import RuntimeClient
-from services.april_runtime.schemas import ChatMessage
+from services.april_runtime.schemas import ChatMessage, GenerationOptions
 from services.brain.agent_loop import StructuredAgentLoop
 from services.brain.feedback_classifier import classify_implicit_correction
 from services.brain.intelligence_ladder import (
@@ -361,6 +361,9 @@ class AprilOrchestrator:
         response = await self.runtime_client.chat(
             model_id=prepared.model_id,
             messages=prepared.messages,
+            options=GenerationOptions(
+                max_output_tokens=self.settings.deep_mode.verified_draft_tokens
+            ),
             request_id=prepared.request_id,
         )
         verified = await self.intelligence_ladder.verify_and_revise(

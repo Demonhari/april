@@ -132,8 +132,7 @@ def vm_stat_available_ram_gb(runner: CommandRunner = _run_command) -> float | No
     try:
         page_size = int(page_size_match.group(1).replace(",", ""))
         counts = {
-            name: int(value.replace(",", ""))
-            for name, value in _VM_STAT_PAGE_RE.findall(output)
+            name: int(value.replace(",", "")) for name, value in _VM_STAT_PAGE_RE.findall(output)
         }
     except ValueError:
         return None
@@ -276,7 +275,15 @@ class ResourceGovernor:
             advisories=resident.advisories,
         )
 
-    def assess_model_load(self, *, projected_resident_gb: float | None = None) -> GovernorDecision:
+    def assess_model_load(
+        self,
+        *,
+        projected_resident_gb: float | None = None,
+        current_resident_gb: float = 0.0,
+        loaded_specialist_count: int = 0,
+        max_loaded_specialist_count: int | None = None,
+        speculative: bool = False,
+    ) -> GovernorDecision:
         """Gate a new interactive model load with projected resident memory.
 
         Power and idle state deliberately do not block an interactive user turn.
@@ -288,11 +295,23 @@ class ResourceGovernor:
         reasons: list[str] = []
         advisories: list[str] = []
         if projected_resident_gb is None:
-            projected = self.policy.default_projected_model_load_gb
-            advisories.append("projected_model_memory_defaulted")
+            if speculative:
+                projected = 0.0
+                reasons.append("projected_model_memory_unknown")
+            else:
+                projected = self.policy.default_projected_model_load_gb
+                advisories.append("projected_model_memory_defaulted")
         else:
             projected = max(0.0, projected_resident_gb)
         required_headroom = self.policy.min_ram_headroom_gb + projected
+        projected_total = max(0.0, current_resident_gb) + projected
+        if projected_total > self.settings.governor.max_resident_gb:
+            reasons.append("max_resident_budget_exceeded")
+        if (
+            max_loaded_specialist_count is not None
+            and loaded_specialist_count >= max_loaded_specialist_count
+        ):
+            reasons.append("max_loaded_specialist_count_reached")
         if signals.ram_source == SIGNAL_SOURCE_UNKNOWN:
             advisories.append("ram_signal_unavailable")
         else:

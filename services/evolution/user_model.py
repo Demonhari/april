@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -10,6 +11,8 @@ from services.memory.sqlite_memory import SqliteMemory
 
 USER_MODEL_FILENAME = "user_model.md"
 USER_MODEL_PENDING_FILENAME = "user_model.pending.md"
+_MANAGED_START = "<!-- APRIL:MANAGED:START -->"
+_MANAGED_END = "<!-- APRIL:MANAGED:END -->"
 _MAX_ITEMS_PER_SECTION = 12
 _MAX_LINE_CHARS = 220
 _HIGH_IMPACT_MARKERS = (
@@ -159,7 +162,15 @@ async def update_user_model(
             source_counts=draft.source_counts,
         )
 
-    path = active_guard.write_text(target, draft.content)
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    merged = _merge_managed_section(existing, draft.content)
+    if existing and existing != merged:
+        digest = hashlib.sha256(existing.encode("utf-8")).hexdigest()[:12]
+        active_guard.write_text(
+            settings.evolution_path / "user_model_versions" / f"{digest}.md",
+            existing,
+        )
+    path = active_guard.write_text(target, merged)
     pending_path: str | None = None
     status: Literal["applied", "applied_with_pending_review"] = "applied"
     if draft.skipped_source_count:
@@ -209,3 +220,29 @@ def _dedupe(items: list[str]) -> list[str]:
         seen.add(key)
         deduped.append(item)
     return deduped
+
+
+def _merge_managed_section(existing: str, generated: str) -> str:
+    managed = f"{_MANAGED_START}\n{generated.rstrip()}\n{_MANAGED_END}"
+    start = existing.find(_MANAGED_START)
+    end = existing.find(_MANAGED_END)
+    if start >= 0 and end >= start:
+        end += len(_MANAGED_END)
+        return existing[:start] + managed + existing[end:]
+    if existing.strip():
+        # A pre-v14/manual file is user-owned in full. Add APRIL's section
+        # after it instead of replacing a single byte.
+        return existing.rstrip() + "\n\n" + managed + "\n"
+    return managed + "\n"
+
+
+def rollback_user_model(settings: AprilSettings, version: str) -> str:
+    """Restore one APRIL-owned version byte-for-byte within the evolution fence."""
+    guard = EvolutionWriteGuard(settings)
+    versions = settings.evolution_path / "user_model_versions"
+    source = guard.validate_path(versions / f"{version}.md")
+    if not source.is_file():
+        raise FileNotFoundError("user model version does not exist")
+    target = settings.evolution_path / USER_MODEL_FILENAME
+    restored = guard.write_text(target, source.read_text(encoding="utf-8"))
+    return str(restored)

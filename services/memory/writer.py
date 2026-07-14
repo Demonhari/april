@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+from typing import Protocol
+
 from april_common.errors import PermissionDeniedError
 from services.memory.policy import MemoryPolicy
 from services.memory.schemas import MemoryRecord
 from services.memory.sqlite_memory import SqliteMemory
 
 
+class MemoryPersistence(Protocol):
+    memory: SqliteMemory
+
+    async def create_memory(self, content: str, **kwargs: object) -> MemoryRecord: ...
+
+
 class MemoryWriter:
-    def __init__(self, memory: SqliteMemory, policy: MemoryPolicy | None = None) -> None:
-        self.memory = memory
+    def __init__(
+        self, memory: SqliteMemory | MemoryPersistence, policy: MemoryPolicy | None = None
+    ) -> None:
+        self.persistence = memory
+        self.memory = memory.memory if hasattr(memory, "memory") else memory
         self.policy = policy or MemoryPolicy()
 
     async def write(
@@ -32,7 +43,7 @@ class MemoryWriter:
         )
         if duplicate is not None:
             return duplicate
-        return await self.memory.create_memory(
+        return await self.persistence.create_memory(
             content,
             kind=memory_type,
             reason=reason or decision.reason,

@@ -7,11 +7,14 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings, get_settings
 from april_common.time import utc_now_iso
 from services.pool.governor import GovernorDecision, ResourceGovernor
@@ -36,6 +39,8 @@ class ChildRuntime:
     last_started_at: float | None = None
     paused_reason: str | None = None
     last_exit_code: int | None = None
+    health_failures: int = 0
+    crash_loop_suppressed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +133,7 @@ class AprialdSupervisor:
         sleep: Sleep = asyncio.sleep,
         clock: Clock = time.monotonic,
         stable_after_seconds: float = 30.0,
+        audit: AuditLogger | None = None,
     ) -> None:
         self.settings = settings
         self.process_factory = process_factory or self._spawn_process
@@ -136,6 +142,7 @@ class AprialdSupervisor:
         self.sleep = sleep
         self.clock = clock
         self.stable_after_seconds = stable_after_seconds
+        self.audit = audit or AuditLogger(settings.audit_path)
         self.lock = DaemonLock(daemon_lock_path(settings))
         self.children: dict[str, ChildRuntime] = {
             spec.name: ChildRuntime(spec=spec) for spec in default_child_specs(settings)
@@ -145,8 +152,18 @@ class AprialdSupervisor:
     async def start(self) -> None:
         self.lock.acquire()
         _write_pid_file(self.settings, os.getpid())
+        self._audit("daemon_start")
         for runtime in self.children.values():
             await self._ensure_child(runtime)
+            if runtime.paused_reason is not None:
+                continue
+            if not await self._wait_child_ready(runtime):
+                self._audit(
+                    "daemon_child_dependency_blocked",
+                    child=runtime.spec.name,
+                    detail="startup health did not become ready",
+                )
+                break
         self._write_status(await self.health())
 
     async def run_forever(self, *, interval_seconds: float = 2.0) -> None:
@@ -161,6 +178,10 @@ class AprialdSupervisor:
     async def supervise_once(self) -> DaemonHealth:
         for runtime in self.children.values():
             await self._ensure_child(runtime)
+            if runtime.paused_reason is not None:
+                continue
+            if not await self._dependency_ready(runtime):
+                break
         health = await self.health()
         self._write_status(health)
         return health
@@ -193,9 +214,11 @@ class AprialdSupervisor:
             except TimeoutError:
                 process.kill()
                 await process.wait()
+            self._audit("daemon_child_exit", child=runtime.spec.name)
         daemon_pid_path(self.settings).unlink(missing_ok=True)
         self._write_stopped_status()
         self.lock.release()
+        self._audit("daemon_stop")
 
     async def _ensure_child(self, runtime: ChildRuntime) -> None:
         decision = self.governor.assess_resident()
@@ -205,6 +228,9 @@ class AprialdSupervisor:
         runtime.paused_reason = None
         process = runtime.process
         if process is not None and process.returncode is None:
+            await self._track_live_health(runtime)
+            if process.returncode is not None:
+                return
             if (
                 runtime.consecutive_failures > 0
                 and runtime.last_started_at is not None
@@ -226,6 +252,11 @@ class AprialdSupervisor:
                     runtime.spec.max_restart_backoff_seconds,
                 )
                 runtime.next_restart_at = self.clock() + delay
+                self._audit(
+                    "daemon_child_backoff",
+                    child=runtime.spec.name,
+                    detail=f"failures={runtime.consecutive_failures}",
+                )
                 return
             if self.clock() < runtime.next_restart_at:
                 return
@@ -233,6 +264,62 @@ class AprialdSupervisor:
         runtime.process = await self.process_factory(runtime.spec)
         runtime.last_started_at = self.clock()
         runtime.next_restart_at = None
+        self._audit("daemon_child_start", child=runtime.spec.name)
+
+    async def _wait_child_ready(self, runtime: ChildRuntime) -> bool:
+        """Bound startup verification before a dependent child is launched."""
+        if runtime.spec.health_url is None:
+            return True
+        timeout = self.settings.daemon.startup_timeout_seconds
+        poll = max(0.01, self.settings.daemon.health_poll_seconds)
+        attempts = max(1, int(timeout / poll) + 1)
+        for attempt in range(attempts):
+            process = runtime.process
+            if process is None or process.returncode is not None:
+                return False
+            if await self.health_checker(runtime.spec):
+                return True
+            if attempt + 1 < attempts:
+                await self.sleep(poll)
+        return False
+
+    async def _dependency_ready(self, runtime: ChildRuntime) -> bool:
+        process = runtime.process
+        if process is None or process.returncode is not None:
+            return False
+        if runtime.spec.health_url is None:
+            return True
+        return await self.health_checker(runtime.spec)
+
+    async def _track_live_health(self, runtime: ChildRuntime) -> None:
+        if runtime.spec.health_url is None or runtime.process is None:
+            return
+        if (
+            runtime.last_started_at is not None
+            and self.clock() - runtime.last_started_at
+            < self.settings.daemon.child_startup_grace_seconds
+        ):
+            return
+        healthy = await self.health_checker(runtime.spec)
+        if healthy:
+            if runtime.health_failures or runtime.crash_loop_suppressed:
+                self._audit("daemon_child_recovered", child=runtime.spec.name)
+            runtime.health_failures = 0
+            runtime.crash_loop_suppressed = False
+            return
+        runtime.health_failures += 1
+        self._audit(
+            "daemon_child_health_failure",
+            child=runtime.spec.name,
+            detail=f"consecutive={runtime.health_failures}",
+        )
+        if runtime.health_failures < self.settings.daemon.child_health_failure_threshold:
+            return
+        if runtime.restarts >= self.settings.daemon.child_crash_loop_threshold:
+            runtime.crash_loop_suppressed = True
+            self._audit("daemon_child_crash_loop_suppressed", child=runtime.spec.name)
+            return
+        runtime.process.terminate()
 
     async def _child_health(self, runtime: ChildRuntime) -> ChildHealth:
         process = runtime.process
@@ -261,6 +348,14 @@ class AprialdSupervisor:
                 runtime.restarts,
                 last_exit_code=process.returncode,
                 detail=detail,
+            )
+        if runtime.crash_loop_suppressed:
+            return ChildHealth(
+                runtime.spec.name,
+                "degraded",
+                process.pid,
+                runtime.restarts,
+                detail="crash_loop_suppressed",
             )
         if runtime.spec.health_url is not None and not await self.health_checker(runtime.spec):
             return ChildHealth(
@@ -304,12 +399,29 @@ class AprialdSupervisor:
     async def _spawn_process(self, spec: ChildSpec) -> ProcessHandle:
         env = os.environ.copy()
         env["APRIL_HOME"] = str(self.settings.home)
-        return await asyncio.create_subprocess_exec(
-            *spec.argv,
-            cwd=str(self.settings.home),
-            env=env,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+        # Passing asyncio.subprocess.DEVNULL asks asyncio to create parent-side
+        # file objects whose cleanup otherwise depends on transport GC on some
+        # supported Python/macOS combinations. Own the handle explicitly so
+        # every spawn has deterministic resource lifetime.
+        with Path(os.devnull).open("wb") as devnull:
+            return await asyncio.create_subprocess_exec(
+                *spec.argv,
+                cwd=str(self.settings.home),
+                env=env,
+                stdout=devnull,
+                stderr=devnull,
+            )
+
+    def _audit(
+        self, event_type: str, *, child: str | None = None, detail: str | None = None
+    ) -> None:
+        self.audit.write(
+            {
+                "event_type": event_type,
+                "actor": "apriald",
+                "child": child,
+                "detail": detail,
+            }
         )
 
 
@@ -331,11 +443,13 @@ def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
     # voice or wake disabled would only crash-loop (run_sentinel raises), so the
     # default safe config supervises runtime and API only.
     if settings.voice.enabled and settings.wake.enabled:
+        from services.wake.control import sentinel_control_path
+
         specs.append(
             ChildSpec(
                 name="sentinel",
                 argv=(python, "-m", "services.wake.sentinel"),
-                health_url=None,
+                health_url=f"sentinel-control://{sentinel_control_path(settings)}",
             )
         )
     return tuple(specs)
@@ -344,6 +458,17 @@ def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
 async def _loopback_health_check(spec: ChildSpec) -> bool:
     if spec.health_url is None:
         return True
+    if spec.health_url.startswith("sentinel-control://"):
+        try:
+            from services.wake.control import sentinel_status_at_path
+
+            # The IPC reports actual Sentinel state, including mute/listener and
+            # degraded voice output; process existence alone is insufficient.
+            path = Path(spec.health_url.removeprefix("sentinel-control://"))
+            status = await asyncio.to_thread(sentinel_status_at_path, path)
+            return status.get("state") in {"listening", "muted"}
+        except (OSError, RuntimeError, ValueError):
+            return False
     try:
         import httpx
 
@@ -370,6 +495,9 @@ def read_daemon_status(settings: AprilSettings) -> dict[str, object]:
             payload=status_payload,
         )
     if not _pid_alive(pid):
+        # Only the stale ownership hint is removed; historical status remains
+        # available for diagnosis and the next start can proceed safely.
+        pid_path.unlink(missing_ok=True)
         return _merge_daemon_status(
             base={
                 "status": "stale",
@@ -386,45 +514,137 @@ def read_daemon_status(settings: AprilSettings) -> dict[str, object]:
     )
 
 
-def start_daemon_background(settings: AprilSettings) -> dict[str, object]:
+def wait_for_core_health(
+    settings: AprilSettings,
+    *,
+    timeout_seconds: float | None = None,
+    probe: Callable[[str], bool] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, object]:
+    """Boundedly wait for the loopback Core API used by every startup path."""
+    url = f"http://{settings.api.host}:{settings.api.port}/health"
+    if settings.api.host not in {"127.0.0.1", "localhost"}:
+        raise RuntimeError("Daemon health polling is restricted to loopback.")
+    active_probe = probe or _sync_health_probe
+    timeout = timeout_seconds or settings.daemon.startup_timeout_seconds
+    deadline = clock() + timeout
+    while True:
+        if active_probe(url):
+            return {"status": "running", "health_url": url}
+        if clock() >= deadline:
+            log_path = settings.logs_path / "apriald.log"
+            raise RuntimeError(
+                f"APRIL Core API did not become healthy within {timeout:.1f}s; "
+                f"inspect {log_path} and {daemon_status_path(settings)}"
+            )
+        sleep(min(settings.daemon.health_poll_seconds, max(0.0, deadline - clock())))
+
+
+def start_daemon_background(
+    settings: AprilSettings,
+    *,
+    health_probe: Callable[[str], bool] | None = None,
+) -> dict[str, object]:
     current = read_daemon_status(settings)
-    if current["status"] == "running":
+    current_pid = current.get("pid")
+    if isinstance(current_pid, int) and _pid_alive(current_pid):
+        wait_for_core_health(settings, probe=health_probe)
         return current
     settings.logs_path.mkdir(parents=True, exist_ok=True)
     log_path = settings.logs_path / "apriald.log"
-    log_file = log_path.open("ab")
     env = os.environ.copy()
     env["APRIL_HOME"] = str(settings.home)
-    try:
+    with log_path.open("ab") as log_file, Path(os.devnull).open("rb") as devnull:
         process = subprocess.Popen(
             [sys.executable, "-m", "apps.daemon.apriald"],
             cwd=str(settings.home),
             env=env,
-            stdin=subprocess.DEVNULL,
+            stdin=devnull,
             stdout=log_file,
             stderr=log_file,
             start_new_session=True,
         )
-    finally:
-        log_file.close()
     _write_pid_file(settings, process.pid)
-    return {"status": "starting", "pid": process.pid, "log_path": str(log_path)}
+    try:
+        wait_for_core_health(settings, probe=health_probe)
+    except Exception:
+        _write_status_payload(
+            settings,
+            {
+                "schema_version": 1,
+                "status": "degraded",
+                "pid": process.pid,
+                "generated_at": utc_now_iso(),
+                "children": [],
+                "governor": {"allowed": None, "reasons": []},
+            },
+        )
+        raise
+    return {"status": "running", "pid": process.pid, "log_path": str(log_path)}
 
 
-def stop_daemon(settings: AprilSettings) -> dict[str, object]:
+def stop_daemon(
+    settings: AprilSettings,
+    *,
+    kill: Callable[[int, int], None] = os.kill,
+    pid_alive: Callable[[int], bool] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, object]:
+    active_pid_alive = pid_alive or _pid_alive
+    pid_path = daemon_pid_path(settings)
+    if not pid_path.exists():
+        return {"status": "stopped", "pid": None}
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid_path.unlink(missing_ok=True)
+        return {"status": "stale", "pid": None, "detail": "invalid pid file removed"}
+    if not active_pid_alive(pid):
+        pid_path.unlink(missing_ok=True)
+        return {"status": "stopped", "pid": None}
+    try:
+        kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pid_path.unlink(missing_ok=True)
+        return {"status": "stopped", "pid": None}
+    except PermissionError:
+        return {"status": "degraded", "pid": pid, "detail": "permission denied stopping PID"}
+    deadline = clock() + settings.daemon.shutdown_timeout_seconds
+    while active_pid_alive(pid) and clock() < deadline:
+        sleep(min(0.1, max(0.0, deadline - clock())))
+    if active_pid_alive(pid):
+        # Local documented fallback after the bounded graceful period.
+        try:
+            kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return {
+                "status": "degraded",
+                "pid": pid,
+                "detail": "permission denied forcing stopped PID",
+            }
+    pid_path.unlink(missing_ok=True)
+    return {"status": "stopped", "pid": None}
+
+
+def autostart_if_needed(settings: AprilSettings) -> dict[str, object]:
     status = read_daemon_status(settings)
     pid = status.get("pid")
-    if not isinstance(pid, int):
+    if isinstance(pid, int) and _pid_alive(pid):
+        wait_for_core_health(settings)
         return status
-    if status["status"] == "running":
-        os.kill(pid, signal.SIGTERM)
-    daemon_pid_path(settings).unlink(missing_ok=True)
-    return {"status": "stopping", "pid": pid}
+    return start_daemon_background(settings)
 
 
-def autostart_if_needed(settings: AprilSettings) -> None:
-    if read_daemon_status(settings)["status"] != "running":
-        start_daemon_background(settings)
+def _sync_health_probe(url: str) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=1.0) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError):
+        return False
 
 
 def _write_pid_file(settings: AprilSettings, pid: int) -> None:

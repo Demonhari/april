@@ -103,6 +103,12 @@ class VoiceSettings(BaseModel):
     wake_pre_roll_frames: int = 8
     whisper_binary_path: Path | None = None
     whisper_model_path: Path | None = None
+    # Optional two-stage STT paths. Missing values inherit the legacy Whisper
+    # paths so existing configurations keep identical behaviour.
+    wake_confirmation_whisper_binary_path: Path | None = None
+    wake_confirmation_whisper_model_path: Path | None = None
+    transcription_whisper_binary_path: Path | None = None
+    transcription_whisper_model_path: Path | None = None
     piper_binary_path: Path | None = None
     piper_model_path: Path | None = None
     wake_word_model_path: Path | None = None
@@ -110,6 +116,22 @@ class VoiceSettings(BaseModel):
     # wake_word_model_path stays honoured; effective_wake_word_model_paths merges
     # both without duplicates so old configs keep working unchanged.
     wake_word_model_paths: list[Path] = Field(default_factory=list)
+
+    @property
+    def effective_confirmation_whisper_binary_path(self) -> Path | None:
+        return self.wake_confirmation_whisper_binary_path or self.whisper_binary_path
+
+    @property
+    def effective_confirmation_whisper_model_path(self) -> Path | None:
+        return self.wake_confirmation_whisper_model_path or self.whisper_model_path
+
+    @property
+    def effective_transcription_whisper_binary_path(self) -> Path | None:
+        return self.transcription_whisper_binary_path or self.whisper_binary_path
+
+    @property
+    def effective_transcription_whisper_model_path(self) -> Path | None:
+        return self.transcription_whisper_model_path or self.whisper_model_path
 
     @property
     def effective_wake_word_model_paths(self) -> list[Path]:
@@ -174,6 +196,12 @@ class DaemonSettings(BaseModel):
     """apriald supervisor behaviour."""
 
     autostart_on_cli: bool = True
+    startup_timeout_seconds: float = Field(default=15.0, gt=0.0, le=300.0)
+    shutdown_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
+    health_poll_seconds: float = Field(default=0.2, gt=0.0, le=5.0)
+    child_startup_grace_seconds: float = Field(default=10.0, ge=0.0, le=300.0)
+    child_health_failure_threshold: int = Field(default=3, ge=2, le=20)
+    child_crash_loop_threshold: int = Field(default=5, ge=1, le=50)
 
 
 class GovernorSettings(BaseModel):
@@ -240,6 +268,12 @@ class DeepModeSettings(BaseModel):
     council_mode: Literal["reasoning_n", "multi_agent"] = "reasoning_n"
     deep_confidence_threshold: float = 0.4
     verified_confidence_threshold: float = 0.7
+    verified_draft_tokens: int = Field(default=1024, ge=64, le=8192)
+    verified_critique_tokens: int = Field(default=512, ge=64, le=8192)
+    verified_revision_tokens: int = Field(default=1024, ge=64, le=8192)
+    deep_tokens: int = Field(default=1536, ge=64, le=16384)
+    council_candidate_tokens: int = Field(default=1024, ge=64, le=8192)
+    council_judge_tokens: int = Field(default=512, ge=64, le=4096)
 
     @model_validator(mode="after")
     def thresholds_are_ordered(self) -> DeepModeSettings:
@@ -395,6 +429,22 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_VOICE_MAX_RECORD_SECONDS": ("voice", "max_record_seconds"),
     "APRIL_WHISPER_BINARY_PATH": ("voice", "whisper_binary_path"),
     "APRIL_WHISPER_MODEL_PATH": ("voice", "whisper_model_path"),
+    "APRIL_WAKE_CONFIRMATION_WHISPER_BINARY_PATH": (
+        "voice",
+        "wake_confirmation_whisper_binary_path",
+    ),
+    "APRIL_WAKE_CONFIRMATION_WHISPER_MODEL_PATH": (
+        "voice",
+        "wake_confirmation_whisper_model_path",
+    ),
+    "APRIL_TRANSCRIPTION_WHISPER_BINARY_PATH": (
+        "voice",
+        "transcription_whisper_binary_path",
+    ),
+    "APRIL_TRANSCRIPTION_WHISPER_MODEL_PATH": (
+        "voice",
+        "transcription_whisper_model_path",
+    ),
     "APRIL_PIPER_BINARY_PATH": ("voice", "piper_binary_path"),
     "APRIL_PIPER_MODEL_PATH": ("voice", "piper_model_path"),
     "APRIL_WAKE_WORD_MODEL_PATH": ("voice", "wake_word_model_path"),

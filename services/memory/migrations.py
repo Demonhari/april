@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 async def run_migrations(database: Database) -> None:
@@ -260,6 +260,21 @@ async def run_migrations(database: Database) -> None:
             completed_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS memory_index_repairs (
+            memory_id TEXT PRIMARY KEY,
+            operation TEXT NOT NULL,
+            error_type TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_provenance (
+            memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+            source_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+            source_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+            source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS evolution_runs (
             id TEXT PRIMARY KEY,
             date TEXT NOT NULL,
@@ -381,6 +396,37 @@ async def run_migrations(database: Database) -> None:
     for column, definition in repo_index_column_defs.items():
         if column not in repo_index_columns:
             await conn.execute(f"ALTER TABLE repo_indexes ADD COLUMN {column} {definition}")
+    columns = await conn.execute("PRAGMA table_info(playbook_runs)")
+    playbook_run_columns = {row[1] for row in await columns.fetchall()}
+    playbook_run_column_defs = {
+        "current_step_index": "INTEGER NOT NULL DEFAULT 0",
+        "expanded_steps_json": "TEXT NOT NULL DEFAULT '[]'",
+        "snapshot_hash": "TEXT",
+        "step_states_json": "TEXT NOT NULL DEFAULT '[]'",
+        "pending_approval_id": "TEXT",
+        "pending_action_hash": "TEXT",
+        "updated_at": "TEXT",
+        "error_json": "TEXT",
+        "duration_ms": "REAL",
+        "agent_id": "TEXT NOT NULL DEFAULT 'general_agent'",
+    }
+    for column, definition in playbook_run_column_defs.items():
+        if column not in playbook_run_columns:
+            await conn.execute(f"ALTER TABLE playbook_runs ADD COLUMN {column} {definition}")
+    await conn.execute("UPDATE playbook_runs SET updated_at = created_at WHERE updated_at IS NULL")
+    # Pre-v14 pending runs have no immutable expanded-step snapshot and cannot
+    # be resumed safely. Close them explicitly instead of guessing what to run.
+    await conn.execute(
+        """
+        UPDATE playbook_runs
+        SET status = 'failed',
+            detail = COALESCE(detail, 'Legacy pending run cannot be resumed safely.'),
+            completed_at = COALESCE(completed_at, datetime('now')),
+            updated_at = datetime('now')
+        WHERE status = 'pending_approval'
+          AND (snapshot_hash IS NULL OR expanded_steps_json = '[]')
+        """
+    )
     await conn.execute(
         """
         UPDATE approvals

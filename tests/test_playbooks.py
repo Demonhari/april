@@ -122,6 +122,77 @@ async def test_playbook_runner_pauses_for_l3_approval(settings_tmp) -> None:
         assert len(runs) == 1
         assert runs[0]["status"] == "pending_approval"
         assert "exact-action approval" in (runs[0]["detail"] or "")
+        assert runs[0]["completed_at"] is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_playbook_approval_resume_is_durable_and_idempotent(settings_tmp) -> None:
+    database, memory, executor = await _tool_executor(settings_tmp)
+    try:
+        runner = PlaybookRunner(executor, memory=memory)
+        pending = await runner.run(_playbook("echo", "dangerous", "echo"))
+        assert pending.status == "pending_approval"
+        assert pending.steps_completed == 1
+        assert pending.run_id is not None
+        approval = pending.steps[-1].approval
+        assert approval is not None
+
+        # A fresh runner models process restart between request and approval.
+        resumed = await PlaybookRunner(executor, memory=memory).resume(
+            pending.run_id,
+            approval_id=str(approval["approval_id"]),
+        )
+        assert resumed.status == "completed"
+        assert resumed.steps_completed == 3
+        calls = await database.fetchall("SELECT tool, status FROM tool_calls ORDER BY created_at")
+        assert [(row["tool"], row["status"]) for row in calls] == [
+            ("echo", "executed"),
+            ("dangerous", "executed"),
+            ("echo", "executed"),
+        ]
+
+        duplicate = await runner.resume(
+            pending.run_id,
+            approval_id=str(approval["approval_id"]),
+        )
+        assert duplicate.status == "completed"
+        assert len(await database.fetchall("SELECT id FROM tool_calls")) == 3
+        playbook = await database.fetchone(
+            "SELECT stats_json FROM playbooks WHERE id = ?", (pending.playbook_id,)
+        )
+        assert playbook is not None
+        import json
+
+        stats = json.loads(playbook["stats_json"])
+        assert stats["runs"] == 1
+        assert stats["success"] == 1
+        assert stats["steps_completed"] == 3
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_forged_playbook_approval_cannot_resume(settings_tmp) -> None:
+    database, memory, executor = await _tool_executor(settings_tmp)
+    try:
+        runner = PlaybookRunner(executor, memory=memory)
+        first = await runner.run(_playbook("dangerous"))
+        second = await runner.run(
+            _playbook("dangerous").model_copy(
+                update={"id": "second-playbook", "name": "Second playbook"}
+            )
+        )
+        assert first.run_id is not None
+        second_approval = second.steps[0].approval
+        assert second_approval is not None
+        with pytest.raises(Exception, match="does not belong"):
+            await runner.resume(
+                first.run_id,
+                approval_id=str(second_approval["approval_id"]),
+            )
+        assert await database.fetchall("SELECT id FROM tool_calls") == []
     finally:
         await database.close()
 
@@ -221,6 +292,43 @@ async def test_playbook_mining_service_emits_supported_candidate(settings_tmp) -
         assert loaded.status == "candidate"
         assert [step.tool for step in loaded.steps] == ["search_files", "read_file"]
         assert report.support[loaded.id] == 3
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_production_tool_execution_status_is_mined_without_manual_status_insert(
+    settings_tmp,
+) -> None:
+    database, memory, executor = await _tool_executor(settings_tmp)
+    try:
+        for sequence_index in range(3):
+            conversation_id = await memory.create_conversation()
+            for value in ("first", "second"):
+                context = await executor.context(
+                    request_id=f"mine-{sequence_index}-{value}",
+                    actor="local-user",
+                    agent_id="playbook_agent",
+                    source="api",
+                    conversation_id=conversation_id,
+                )
+                outcome = await executor.request_or_execute(
+                    tool="echo",
+                    args={"value": value},
+                    context=context,
+                )
+                assert outcome.status == "executed"
+
+        report = await mine_playbook_candidates(
+            memory,
+            settings_tmp,
+            guard=EvolutionWriteGuard(settings_tmp),
+            support_threshold=3,
+            tool_registry=executor.tool_registry,
+        )
+        assert len(report.candidate_ids) == 1
+        rows = await database.fetchall("SELECT DISTINCT status FROM tool_calls")
+        assert [row["status"] for row in rows] == ["executed"]
     finally:
         await database.close()
 

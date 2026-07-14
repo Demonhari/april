@@ -142,6 +142,39 @@ async def test_close_idle_sessions_triggers_reflection(settings_tmp) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inflight_interaction_cannot_be_closed_idle_and_unknown_is_not_created(
+    settings_tmp,
+) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        now = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+        reflection = FakeReflection()
+        manager = SessionManager(
+            memory,
+            continuity_minutes=10.0,
+            clock=lambda: now,
+            on_close=reflection.reflect_session,
+        )
+        resolution = await manager.handle_wake(WakeEvent(source="voice"))
+        session_count = len(await memory.list_sessions())
+        assert await manager.touch_conversation("unknown-conversation") is None
+        assert len(await memory.list_sessions()) == session_count
+
+        async with manager.interaction(resolution.conversation_id):
+            now = datetime(2026, 7, 3, 12, 30, tzinfo=UTC)
+            assert await manager.close_idle_sessions() == []
+            active = await memory.get_session(resolution.session_id)
+            assert active is not None
+            assert active.closed_at is None
+
+        now = datetime(2026, 7, 3, 13, 0, tzinfo=UTC)
+        assert await manager.close_idle_sessions() == [resolution.session_id]
+        assert reflection.sessions == [resolution.session_id]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_stale_session_wake_continues_when_reflection_fails(settings_tmp) -> None:
     database, memory = await _memory(settings_tmp)
     try:
@@ -202,7 +235,9 @@ async def test_scheduler_tick_closes_idle_sessions(settings_tmp) -> None:
         resolution = await manager.handle_wake(WakeEvent(source="terminal"))
         audit = RecordingAudit()
         service = SchedulerService(
-            settings=settings_tmp,
+            settings=settings_tmp.model_copy(
+                update={"scheduler": settings_tmp.scheduler.model_copy(update={"enabled": True})}
+            ),
             memory=memory,
             audit=audit,  # type: ignore[arg-type]
             sink=FakeNotificationSink(),
@@ -292,7 +327,6 @@ def test_cli_attach_closes_session_on_interrupt(monkeypatch) -> None:
 
 def test_cli_terminal_listen_hands_session_hint_to_sentinel(monkeypatch) -> None:
     import apps.cli.main as cli_main
-    import services.wake.sentinel as sentinel_module
 
     class FakeClient:
         def __init__(self) -> None:
@@ -313,13 +347,25 @@ def test_cli_terminal_listen_hands_session_hint_to_sentinel(monkeypatch) -> None
     fake = FakeClient()
     called: dict[str, object] = {}
 
-    async def fake_run_sentinel(settings: object, *, session_hint: str | None = None) -> None:
+    class Attachment:
+        def __init__(self) -> None:
+            self.status = {"ok": True, "state": "listening"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_attach(settings: object, *, session_hint: str) -> Attachment:
         called["settings"] = settings
         called["session_hint"] = session_hint
+        return Attachment()
 
     monkeypatch.setattr(cli_main, "client", lambda: fake)
     monkeypatch.setattr(cli_main, "_maybe_autostart_daemon", lambda: None)
-    monkeypatch.setattr(sentinel_module, "run_sentinel", fake_run_sentinel)
+    monkeypatch.setattr("services.wake.control.attach_resident_sentinel", fake_attach)
+    monkeypatch.setattr("builtins.input", lambda: "")
 
     cli_main._terminal_voice_listen()
 

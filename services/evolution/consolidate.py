@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from services.evolution.write_guard import EvolutionWriteGuard
+from services.memory.repository import MemoryRepository
 from services.memory.sqlite_memory import SqliteMemory
 
 
@@ -26,7 +27,10 @@ def _normalized(value: str) -> str:
 
 
 async def consolidate_memories(
-    memory: SqliteMemory, *, guard: EvolutionWriteGuard
+    memory: SqliteMemory,
+    *,
+    guard: EvolutionWriteGuard,
+    repository: MemoryRepository | None = None,
 ) -> ConsolidationReport:
     """D2: merge duplicate memories and adjudicate flagged contradictions.
 
@@ -53,10 +57,19 @@ async def consolidate_memories(
         keeper = ordered[0]
         best_confidence = max(record.confidence for record in ordered)
         for duplicate in ordered[1:]:
-            if await memory.supersede_memory(duplicate.id, superseded_by=keeper.id):
+            changed = await (
+                repository.supersede_memory(duplicate.id, superseded_by=keeper.id)
+                if repository is not None
+                else memory.supersede_memory(duplicate.id, superseded_by=keeper.id)
+            )
+            if changed:
                 report.duplicates_merged += 1
                 report.details.append(f"merged duplicate {duplicate.id} into {keeper.id}")
-        await memory.refresh_memory(keeper.id, confidence=best_confidence)
+        await (
+            repository.refresh_memory(keeper.id, confidence=best_confidence)
+            if repository is not None
+            else memory.refresh_memory(keeper.id, confidence=best_confidence)
+        )
 
     # Contradiction adjudication: higher confidence wins; ties go to the newer
     # statement. The loser is superseded, both rows stay.
@@ -83,7 +96,11 @@ async def consolidate_memories(
                 (first, second) if first.created_at >= second.created_at else (second, first)
             )
             rule = "newer statement on equal confidence"
-        await memory.supersede_memory(loser.id, superseded_by=winner.id)
+        await (
+            repository.supersede_memory(loser.id, superseded_by=winner.id)
+            if repository is not None
+            else memory.supersede_memory(loser.id, superseded_by=winner.id)
+        )
         await memory.resolve_memory_contradiction(
             pair.id, resolution=f"winner={winner.id} rule={rule}"
         )

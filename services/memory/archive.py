@@ -10,6 +10,7 @@ from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
 from services.memory.policy import MemoryPolicy
+from services.memory.repository import MemoryRepository
 from services.memory.schemas import MemoryRecord, Message, VectorMetadata
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
@@ -48,6 +49,7 @@ class ArchiveMemoryWriter:
         memory: SqliteMemory,
         *,
         vector_memory: VectorMemory | None = None,
+        repository: MemoryRepository | None = None,
         audit: AuditLogger | None = None,
         min_confidence: float = MIN_ARCHIVE_CONFIDENCE,
         daily_cap: int = 30,
@@ -55,6 +57,7 @@ class ArchiveMemoryWriter:
     ) -> None:
         self.memory = memory
         self.vector_memory = vector_memory
+        self.repository = repository
         self.audit = audit
         self.min_confidence = min_confidence
         self.daily_cap = daily_cap
@@ -101,8 +104,10 @@ class ArchiveMemoryWriter:
             existing, how = duplicate
             # Duplicates merge instead of piling up: the existing row's usage is
             # refreshed and its confidence keeps the maximum of both statements.
-            refreshed = await self.memory.refresh_memory(
-                existing.id, confidence=candidate.confidence
+            refreshed = await (
+                self.repository.refresh_memory(existing.id, confidence=candidate.confidence)
+                if self.repository is not None
+                else self.memory.refresh_memory(existing.id, confidence=candidate.confidence)
             )
             self._audit(
                 "archive_memory_duplicate",
@@ -116,7 +121,12 @@ class ArchiveMemoryWriter:
             )
         contradiction = await self._contradiction(candidate, project_id=project_id)
         reason = f"{candidate.reason} (source_session={source_session_id})"
-        record = await self.memory.create_memory(
+        create = (
+            self.repository.create_memory
+            if self.repository is not None
+            else self.memory.create_memory
+        )
+        record = await create(
             candidate.content,
             kind=candidate.kind,
             reason=reason,
@@ -124,7 +134,21 @@ class ArchiveMemoryWriter:
             confidence=candidate.confidence,
             source=ARCHIVE_SOURCE,
         )
-        self._index_memory(record)
+        if self.repository is None:
+            self._index_memory(record)
+        else:
+            session = await self.memory.get_session(source_session_id)
+            messages = (
+                await self.memory.recent_messages(session.conversation_id, limit=200)
+                if session is not None and session.conversation_id is not None
+                else []
+            )
+            await self.repository.set_provenance(
+                record.id,
+                source_session_id=source_session_id,
+                source_conversation_id=(session.conversation_id if session is not None else None),
+                source_message_ids=[message.id for message in messages],
+            )
         if contradiction is not None:
             # Keep both statements and flag the pair; the Dreamer adjudicates
             # later instead of the writer silently discarding the candidate.
@@ -274,6 +298,7 @@ class ArchiveReflectionService:
         archive_agent: ArchiveAgent | None = None,
         archive_model_id: str | None = None,
         writer: ArchiveMemoryWriter | None = None,
+        repository: MemoryRepository | None = None,
     ) -> None:
         self.settings = settings
         self.memory = memory
@@ -284,6 +309,7 @@ class ArchiveReflectionService:
         self.writer = writer or ArchiveMemoryWriter(
             memory,
             vector_memory=vector_memory,
+            repository=repository,
             audit=audit,
             min_confidence=settings.evolution.archive_min_confidence,
             daily_cap=settings.evolution.daily_memory_cap,

@@ -17,6 +17,7 @@ from services.voice.speech_to_text import SpeechToText
 from services.voice.text_to_speech import TextToSpeech
 from services.voice.vad import VoiceActivityDetector
 from services.wake.confirmer import SttConfirmer, strip_vocative
+from services.wake.control import SentinelControlServer, sentinel_control_path
 from services.wake.ring_buffer import AudioRingBuffer
 from services.wake.schemas import WakeEvent
 from services.wake.speaker import SPEAKER_MATCH_THRESHOLD, SpeakerVerifier
@@ -187,8 +188,16 @@ class Sentinel:
         if self._in_cooldown(now):
             return
         score = 0.0
+        scorer_succeeded = False
         for scorer in self.scorers:
-            score = max(score, float(scorer.score(frame)))
+            try:
+                score = max(score, float(scorer.score(frame)))
+                scorer_succeeded = True
+            except Exception as exc:
+                self._audit_adapter_failure("wake_scorer", exc)
+        if not scorer_succeeded:
+            self._reset_detection_state()
+            return
         wake = self.settings.wake
         if score < wake.candidate_threshold:
             return
@@ -226,7 +235,13 @@ class Sentinel:
             else:
                 self._reject(score, "no STT confirmer available")
             return
-        confirmation = await self.confirmer.confirm(self.ring_buffer.snapshot())
+        try:
+            confirmation = await self.confirmer.confirm(self.ring_buffer.snapshot())
+        except Exception as exc:
+            self._audit_adapter_failure("wake_confirmation_stt", exc)
+            self._reset_detection_state()
+            self._set_status("muted" if self.mute.is_muted() else "idle")
+            return
         if confirmation.accepted:
             await self._accept(
                 score=score,
@@ -356,6 +371,17 @@ class Sentinel:
             # trouble must not turn it into a wake availability/security gate.
             logger.warning("Speaker-gate audit write failed: %s", exc)
 
+    def _audit_adapter_failure(self, adapter: str, exc: Exception) -> None:
+        logger.warning("Sentinel %s failed: %s", adapter, type(exc).__name__)
+        self._audit(
+            {
+                "event_type": "sentinel_adapter_failed",
+                "actor": "sentinel",
+                "adapter": adapter,
+                "error_type": type(exc).__name__,
+            }
+        )
+
     async def _play_earcon(self) -> None:
         if self.player is None or not self.settings.wake.earcon_enabled:
             return
@@ -386,11 +412,11 @@ class Sentinel:
         if not frames:
             return fallback_text
         capture_path = self.settings.audio_cache_path / f"wake-utterance-{uuid.uuid4()}.wav"
-        write_pcm_wav(capture_path, frames, sample_rate=self.sample_rate)
         try:
+            write_pcm_wav(capture_path, frames, sample_rate=self.sample_rate)
             transcript = await transcriber.transcribe(capture_path)
         except Exception as exc:
-            logger.warning("Full wake utterance transcription failed: %s", exc)
+            self._audit_adapter_failure("utterance_transcription_stt", exc)
             return fallback_text
         finally:
             if not self.settings.voice.retain_debug_audio:
@@ -570,33 +596,59 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
     scorers = build_scorers(settings)
     if not scorers:
         raise RuntimeUnavailableError("Sentinel requires at least one wake-word model path.")
-    stt: WhisperCppSpeechToText | None = None
-    if settings.voice.whisper_binary_path is None or settings.voice.whisper_model_path is None:
+    transcription_binary = settings.voice.effective_transcription_whisper_binary_path
+    transcription_model = settings.voice.effective_transcription_whisper_model_path
+    if transcription_binary is None or transcription_model is None:
         raise RuntimeUnavailableError(
             "Sentinel full utterance capture requires whisper.cpp binary and model paths."
         )
     stt = WhisperCppSpeechToText(
-        settings.voice.whisper_binary_path,
-        settings.voice.whisper_model_path,
+        settings.resolve_path(transcription_binary),
+        settings.resolve_path(transcription_model),
     )
-    if settings.voice.piper_binary_path is None or settings.voice.piper_model_path is None:
-        raise RuntimeUnavailableError(
-            "Sentinel hands-free replies require Piper binary and model paths."
-        )
-    tts = PiperTextToSpeech(
-        settings.voice.piper_binary_path,
-        settings.voice.piper_model_path,
+    piper_binary = (
+        settings.resolve_path(settings.voice.piper_binary_path)
+        if settings.voice.piper_binary_path is not None
+        else None
+    )
+    piper_model = (
+        settings.resolve_path(settings.voice.piper_model_path)
+        if settings.voice.piper_model_path is not None
+        else None
+    )
+    tts = (
+        PiperTextToSpeech(piper_binary, piper_model)
+        if piper_binary is not None
+        and piper_model is not None
+        and piper_binary.is_file()
+        and piper_model.is_file()
+        else None
     )
     confirmer: SttConfirmer | None = None
     if settings.wake.confirm_with_stt:
+        confirmation_binary = settings.voice.effective_confirmation_whisper_binary_path
+        confirmation_model = settings.voice.effective_confirmation_whisper_model_path
+        if confirmation_binary is None or confirmation_model is None:
+            raise RuntimeUnavailableError(
+                "Wake confirmation requires whisper.cpp binary and model paths."
+            )
+        confirmation_stt = WhisperCppSpeechToText(
+            settings.resolve_path(confirmation_binary),
+            settings.resolve_path(confirmation_model),
+        )
         confirmer = SttConfirmer(
-            stt,
+            confirmation_stt,
             audio_cache_path=settings.audio_cache_path,
             strict_address=settings.wake.strict_address,
             retain_debug_audio=settings.voice.retain_debug_audio,
             fuzzy_max_distance=settings.wake.fuzzy_max_distance,
         )
-    player = SoundDeviceAudioPlayer(device=settings.voice.output_device)
+    # A player is active only when a real TTS path exists. Missing Piper keeps
+    # wake/STT/API delivery usable in truthful text-only mode and disables
+    # earcons/barge-in rather than reporting fake playback success.
+    player = (
+        SoundDeviceAudioPlayer(device=settings.voice.output_device) if tts is not None else None
+    )
     sentinel_ref: Sentinel | None = None
 
     def assistant_response_complete() -> None:
@@ -626,9 +678,29 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
         speaker_verifier=None,
         audit=AuditLogger(settings.audit_path),
     )
+    if tts is None:
+        sentinel._audit(
+            {
+                "event_type": "sentinel_voice_output_degraded",
+                "actor": "sentinel",
+                "reason": "piper_binary_or_model_missing",
+            }
+        )
     sentinel_ref = sentinel
-    with contextlib.suppress(KeyboardInterrupt):
-        await sentinel.run()
+    control = SentinelControlServer(
+        sentinel_control_path(settings),
+        set_session_hint=lambda value: setattr(delivery, "session_hint", value),
+        status=lambda: {
+            "state": "muted" if sentinel.mute.is_muted() else "listening",
+            "voice_output": "available" if tts is not None else "degraded",
+        },
+    )
+    try:
+        await control.start()
+        with contextlib.suppress(KeyboardInterrupt):
+            await sentinel.run()
+    finally:
+        await control.close()
 
 
 def main() -> None:

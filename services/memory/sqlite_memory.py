@@ -683,7 +683,6 @@ class SqliteMemory:
                 trigger_examples_json = excluded.trigger_examples_json,
                 steps_json = excluded.steps_json,
                 required_permission_level = excluded.required_permission_level,
-                stats_json = excluded.stats_json,
                 updated_at = excluded.updated_at
             """,
             (
@@ -706,6 +705,9 @@ class SqliteMemory:
         playbook_id: str,
         conversation_id: str | None = None,
         status: str = "running",
+        expanded_steps: list[dict[str, Any]] | None = None,
+        snapshot_hash: str | None = None,
+        agent_id: str = "general_agent",
     ) -> str:
         run_id = str(uuid.uuid4())
         if conversation_id is not None and await self.get_conversation(conversation_id) is None:
@@ -714,13 +716,62 @@ class SqliteMemory:
         await self.database.execute(
             """
             INSERT INTO playbook_runs(
-                id, playbook_id, conversation_id, status, steps_completed, created_at
+                id, playbook_id, conversation_id, status, steps_completed,
+                current_step_index, expanded_steps_json, snapshot_hash,
+                step_states_json, agent_id, created_at, updated_at
             )
-            VALUES(?, ?, ?, ?, 0, ?)
+            VALUES(?, ?, ?, ?, 0, 0, ?, ?, '[]', ?, ?, ?)
             """,
-            (run_id, playbook_id, conversation_id, status, utc_now_iso()),
+            (
+                run_id,
+                playbook_id,
+                conversation_id,
+                status,
+                json.dumps(expanded_steps or [], sort_keys=True),
+                snapshot_hash,
+                agent_id,
+                utc_now_iso(),
+                utc_now_iso(),
+            ),
         )
         return run_id
+
+    async def get_playbook_run(self, run_id: str) -> dict[str, Any] | None:
+        row = await self.database.fetchone("SELECT * FROM playbook_runs WHERE id = ?", (run_id,))
+        return dict(row) if row is not None else None
+
+    async def update_playbook_run_progress(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        current_step_index: int,
+        steps_completed: int,
+        step_states: list[dict[str, Any]],
+        detail: str | None = None,
+        pending_approval_id: str | None = None,
+        pending_action_hash: str | None = None,
+    ) -> None:
+        await self.database.execute(
+            """
+            UPDATE playbook_runs
+            SET status = ?, current_step_index = ?, steps_completed = ?,
+                step_states_json = ?, detail = ?, pending_approval_id = ?,
+                pending_action_hash = ?, updated_at = ?
+            WHERE id = ? AND completed_at IS NULL
+            """,
+            (
+                status,
+                current_step_index,
+                steps_completed,
+                json.dumps(step_states, sort_keys=True),
+                detail,
+                pending_approval_id,
+                pending_action_hash,
+                utc_now_iso(),
+                run_id,
+            ),
+        )
 
     async def finish_playbook_run(
         self,
@@ -730,14 +781,72 @@ class SqliteMemory:
         steps_completed: int,
         detail: str | None = None,
     ) -> None:
-        await self.database.execute(
-            """
-            UPDATE playbook_runs
-            SET status = ?, steps_completed = ?, detail = ?, completed_at = ?
-            WHERE id = ?
-            """,
-            (status, steps_completed, detail, utc_now_iso(), run_id),
-        )
+        terminal = status in {"completed", "failed", "denied", "expired", "cancelled"}
+        if not terminal:
+            await self.update_playbook_run_progress(
+                run_id,
+                status=status,
+                current_step_index=steps_completed,
+                steps_completed=steps_completed,
+                step_states=[],
+                detail=detail,
+            )
+            return
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            cursor = await conn.execute("SELECT * FROM playbook_runs WHERE id = ?", (run_id,))
+            run = await cursor.fetchone()
+            if run is None or run["completed_at"] is not None:
+                return
+            from april_common.time import parse_utc_iso
+
+            duration_ms = max(
+                0.0,
+                (parse_utc_iso(now) - parse_utc_iso(str(run["created_at"]))).total_seconds()
+                * 1000.0,
+            )
+            await conn.execute(
+                """
+                UPDATE playbook_runs
+                SET status = ?, steps_completed = ?, current_step_index = ?,
+                    detail = ?, pending_approval_id = NULL,
+                    pending_action_hash = NULL, updated_at = ?, completed_at = ?,
+                    duration_ms = ?
+                WHERE id = ? AND completed_at IS NULL
+                """,
+                (status, steps_completed, steps_completed, detail, now, now, duration_ms, run_id),
+            )
+            cursor = await conn.execute(
+                "SELECT stats_json FROM playbooks WHERE id = ?", (run["playbook_id"],)
+            )
+            playbook = await cursor.fetchone()
+            if playbook is None:
+                return
+            try:
+                stats = json.loads(playbook["stats_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                stats = {}
+            previous_runs = int(stats.get("runs", 0))
+            previous_average = float(stats.get("average_duration_ms", 0.0))
+            runs = previous_runs + 1
+            stats.update(
+                {
+                    "runs": runs,
+                    "success": int(stats.get("success", 0)) + (1 if status == "completed" else 0),
+                    "failures": int(stats.get("failures", 0))
+                    + (1 if status in {"failed", "cancelled"} else 0),
+                    "denials": int(stats.get("denials", 0))
+                    + (1 if status in {"denied", "expired"} else 0),
+                    "steps_completed": int(stats.get("steps_completed", 0)) + steps_completed,
+                    "average_duration_ms": ((previous_average * previous_runs) + duration_ms)
+                    / runs,
+                    "last_run": now,
+                }
+            )
+            await conn.execute(
+                "UPDATE playbooks SET stats_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(stats, sort_keys=True), now, run["playbook_id"]),
+            )
 
     async def list_playbook_runs(
         self, *, playbook_id: str | None = None, limit: int = 100
@@ -1044,6 +1153,26 @@ class SqliteMemory:
             ORDER BY last_activity_at DESC
             LIMIT 1
             """
+        )
+        if row is None:
+            return None
+        return self._session_from_row(row)
+
+    async def open_session_for_conversation(self, conversation_id: str) -> SessionRecord | None:
+        """Return the one open session bound to ``conversation_id``.
+
+        Conversation ids are accepted by every legacy chat surface, so this is
+        the authoritative bridge from those requests to session activity.  It
+        never creates a session for an unknown conversation.
+        """
+        row = await self.database.fetchone(
+            """
+            SELECT * FROM sessions
+            WHERE conversation_id = ? AND closed_at IS NULL
+            ORDER BY last_activity_at DESC
+            LIMIT 1
+            """,
+            (conversation_id,),
         )
         if row is None:
             return None

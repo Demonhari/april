@@ -232,8 +232,8 @@ def test_unknown_ram_only_advises_resident_and_model_load(settings_tmp) -> None:
     assert resident.advisories == ("ram_signal_unavailable",)
 
     model_load = governor.assess_model_load(projected_resident_gb=128.0)
-    assert model_load.allowed
-    assert model_load.reasons == ()
+    assert model_load.allowed is False
+    assert model_load.reasons == ("max_resident_budget_exceeded",)
     assert model_load.advisories == ("ram_signal_unavailable",)
 
 

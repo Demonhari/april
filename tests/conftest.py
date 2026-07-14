@@ -4,18 +4,55 @@ import importlib.util
 import json
 import os
 import re
+import sys
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
+from starlette.testclient import TestClient
 
 from april_common.errors import ModelUnavailableError
 from april_common.settings import AprilSettings, load_settings, reset_settings_cache
 from services.april_runtime.fake_backend import FakeBackend
 from services.april_runtime.schemas import ChatMessage, ChatResponse, Usage
 from services.memory.database import Database
+
+
+def pytest_sessionfinish() -> None:
+    """Close two process-global handles owned by optional llama-cpp-python.
+
+    ``llama_cpp._utils`` opens these at import time and does not register
+    cleanup. APRIL cannot close them during normal runtime because later model
+    loads reuse them. Test-session cleanup is therefore intentionally limited
+    to these two documented third-party globals.
+    """
+    module = sys.modules.get("llama_cpp._utils")
+    if module is None:
+        return
+    for name in ("outnull_file", "errnull_file"):
+        handle = getattr(module, name, None)
+        if handle is not None and not getattr(handle, "closed", True):
+            handle.close()
+
+
+@pytest.fixture(autouse=True)
+def _close_tracked_test_clients(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Close every TestClient deterministically, including legacy direct uses."""
+    tracked: list[TestClient] = []
+    original_init = TestClient.__init__
+
+    def _tracking_init(self: TestClient, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        tracked.append(self)
+
+    monkeypatch.setattr(TestClient, "__init__", _tracking_init)
+    try:
+        yield
+    finally:
+        for client in reversed(tracked):
+            client.close()
 
 
 @pytest.fixture(autouse=True)

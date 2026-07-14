@@ -49,15 +49,11 @@ def _assistant_index_for_run(
         for index, message in enumerate(messages)
         if message["role"] == "assistant" and message["created_at"] <= feedback_created_at
     ]
-    following = [
-        index for index, message in assistants if message["created_at"] >= run_created_at
-    ]
+    following = [index for index, message in assistants if message["created_at"] >= run_created_at]
     if following:
         # Structured agent runs are recorded before their reply.
         return following[0]
-    preceding = [
-        index for index, message in assistants if message["created_at"] <= run_created_at
-    ]
+    preceding = [index for index, message in assistants if message["created_at"] <= run_created_at]
     # Standard runs are recorded immediately after their reply.
     return preceding[-1] if preceding else None
 
@@ -156,9 +152,7 @@ async def _rated_replies(
     return rated, messages_by_conversation
 
 
-async def _preference_rows(
-    memory: SqliteMemory, policy: MemoryPolicy
-) -> list[dict[str, str]]:
+async def _preference_rows(memory: SqliteMemory, policy: MemoryPolicy) -> list[dict[str, str]]:
     rated, messages_by_conversation = await _rated_replies(memory)
     good_by_prompt: dict[str, list[_RatedReply]] = {}
     for item in rated:
@@ -266,9 +260,7 @@ async def export_finetune_dataset(
                 previous_user = None
 
     preferences = await _preference_rows(memory, policy)
-    lines.extend(
-        json.dumps(row, sort_keys=True, ensure_ascii=False) for row in preferences
-    )
+    lines.extend(json.dumps(row, sort_keys=True, ensure_ascii=False) for row in preferences)
 
     memory_count = 0
     # list_memories already excludes superseded and expired rows; deleted rows

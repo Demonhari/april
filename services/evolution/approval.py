@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from april_common.audit import AuditLogger
+from april_common.effective_config import load_agents_file
 from april_common.settings import AprilSettings
 from services.evolution.evaluator import (
     RuntimeEvalClient,
@@ -124,15 +125,21 @@ class PromptOverlayApprovalService:
             evaluation.baseline,
             active_score if active_score is not None else evaluation.baseline,
         )
-        if evaluation.score >= apply_baseline and self.settings.environment == "production":
+        if evaluation.score >= apply_baseline:
+            agents = load_agents_file(self.settings.home).agents
+            target = agents.get(agent)
+            judge = agents.get("reading_agent")
             real_eval = await evaluate_overlay_candidate_real_runtime(
                 agent=agent,
                 content=content,
                 settings=self.settings,
                 runtime_client=self.runtime_client,
+                model_id=(target.model_id if target is not None else None),
+                baseline_content=(await self.manager.active_overlay_text(agent)) or "",
+                judge_model_id=(judge.model_id if judge is not None else None),
             )
             if not real_eval.passed:
-                reason = "real-runtime evaluation required before production activation: " + (
+                reason = "behavioral A/B evaluation required before activation: " + (
                     "; ".join(real_eval.blockers) if real_eval.blockers else real_eval.status
                 )
                 self._audit(

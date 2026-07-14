@@ -55,7 +55,7 @@ ROUTER_SYSTEM_PROMPT = (
     "Return exactly one compact JSON object. No markdown, no prose, no chain-of-thought.\n"
     "Required keys: intent, agent, model_id, permission_level, risk_level, "
     "needs_confirmation, decision_summary.\n"
-    "Optional keys: confidence (0.0-1.0), tools_needed, planned_tool_calls, "
+    "Optional keys: confidence (0.0-1.0), high_stakes (boolean), tools_needed, planned_tool_calls, "
     "memory_queries, task_steps.\n"
     "Allowed agents (use exactly one): " + _ALLOWED_AGENTS + ".\n"
     "Allowed risk_level: none, read_only, safe_write, code_write, system_action, "
@@ -77,6 +77,8 @@ ROUTER_SYSTEM_PROMPT = (
     "package install) -> permission_level 5, risk external_action, and they are "
     "unavailable unless local policy enables them.\n"
     "- Add memory_queries when the user's own history or project facts are relevant.\n"
+    "- Set high_stakes true for consequential financial, security, privacy, destructive, "
+    "or irreversible decisions; ordinary harmless mentions are false.\n"
     "\n"
     "Constraints:\n"
     "- The deterministic tool policy and permission engine are authoritative; a "
@@ -148,5 +150,5 @@ class BrainRouter:
                 return repaired.content
 
             return await parse_with_repair(response.content, repair)
-        except AprilError:
+        except (AprilError, TimeoutError, OSError):
             return self.fallback.route(routing_input)

@@ -20,6 +20,10 @@ class PlaybookStats(BaseModel):
 
     runs: int = Field(default=0, ge=0)
     success: int = Field(default=0, ge=0)
+    failures: int = Field(default=0, ge=0)
+    denials: int = Field(default=0, ge=0)
+    steps_completed: int = Field(default=0, ge=0)
+    average_duration_ms: float = Field(default=0.0, ge=0.0)
     last_run: str | None = None
 
 

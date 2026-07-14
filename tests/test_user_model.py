@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
-from services.evolution.user_model import update_user_model
+from services.evolution.user_model import rollback_user_model, update_user_model
 from services.evolution.write_guard import EvolutionWriteGuard
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
@@ -80,5 +82,31 @@ async def test_user_model_autoapply_off_stages_for_review(settings_tmp) -> None:
         assert report.status == "pending_review"
         assert not (settings.evolution_path / "user_model.md").exists()
         assert (settings.evolution_path / "user_model.pending.md").exists()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_user_model_text_survives_repeated_updates_and_rollback(settings_tmp) -> None:
+    database, memory = await _memory(settings_tmp)
+    try:
+        target = settings_tmp.evolution_path / "user_model.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        manual = "# My Notes\n\nNever overwrite this user-owned paragraph.\n"
+        target.write_text(manual, encoding="utf-8")
+        await memory.create_memory("I prefer compact status lines", reason="test")
+
+        await update_user_model(memory, settings_tmp, guard=EvolutionWriteGuard(settings_tmp))
+        first = target.read_bytes()
+        assert manual.encode() in first
+        await memory.create_memory("My editor preference is Vim", reason="test")
+        await update_user_model(memory, settings_tmp, guard=EvolutionWriteGuard(settings_tmp))
+        second = target.read_bytes()
+        assert manual.encode() in second
+        assert b"My editor preference is Vim" in second
+
+        version = hashlib.sha256(first).hexdigest()[:12]
+        rollback_user_model(settings_tmp, version)
+        assert target.read_bytes() == first
     finally:
         await database.close()

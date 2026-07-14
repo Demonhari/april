@@ -77,7 +77,9 @@ class SchedulerService:
         return local or UTC
 
     async def start(self) -> None:
-        if not self.settings.scheduler.enabled or self.running:
+        if (
+            not self.settings.scheduler.enabled and not self.settings.evolution.enabled
+        ) or self.running:
             return
         self._task = asyncio.create_task(self._run())
 
@@ -109,22 +111,24 @@ class SchedulerService:
         Reminders and briefings are processed independently: if one path raises it is
         audited and the other still runs. The outer _run() loop guards the whole tick.
         """
-        try:
-            await self._fire_due_reminders()
-        except Exception as exc:
-            self.audit.write({"event": "scheduler.reminder_error", "error": str(exc)})
-        try:
-            await self._maybe_fire_briefing()
-        except Exception as exc:
-            self.audit.write({"event": "scheduler.briefing_error", "error": str(exc)})
+        if self.settings.scheduler.enabled:
+            try:
+                await self._fire_due_reminders()
+            except Exception as exc:
+                self.audit.write({"event": "scheduler.reminder_error", "error": str(exc)})
+            try:
+                await self._maybe_fire_briefing()
+            except Exception as exc:
+                self.audit.write({"event": "scheduler.briefing_error", "error": str(exc)})
         try:
             await self._maybe_run_dreamer()
         except Exception as exc:
             self.audit.write({"event": "scheduler.dreamer_error", "error": str(exc)})
-        try:
-            await self._close_idle_sessions()
-        except Exception as exc:
-            self.audit.write({"event": "scheduler.idle_session_error", "error": str(exc)})
+        if self.settings.scheduler.enabled:
+            try:
+                await self._close_idle_sessions()
+            except Exception as exc:
+                self.audit.write({"event": "scheduler.idle_session_error", "error": str(exc)})
 
     async def _fire_due_reminders(self) -> None:
         now_iso = self._now_iso()
@@ -180,7 +184,7 @@ class SchedulerService:
         self._fired_briefings += 1
 
     async def _maybe_run_dreamer(self) -> None:
-        if self.dreamer is None:
+        if self.dreamer is None or not self.settings.evolution.enabled:
             return
         result = await self.dreamer.run_once(self.clock.now())
         if result.status == "completed":

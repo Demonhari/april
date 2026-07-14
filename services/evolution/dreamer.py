@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
+from agents.registry import AgentRegistry
 from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
@@ -31,7 +33,8 @@ from services.evolution.versions import (
     evaluate_ladder_threshold_candidate,
     propose_ladder_thresholds_from_memory,
 )
-from services.evolution.write_guard import EvolutionWriteGuard
+from services.evolution.write_guard import EvolutionDatabaseWriter, EvolutionWriteGuard
+from services.memory.repository import MemoryRepository
 from services.memory.sqlite_memory import SqliteMemory
 
 DREAMER_PHASES = ("replay", "distill", "mine", "evolve", "examine", "report")
@@ -67,12 +70,15 @@ class DreamerService:
         clock: Callable[[], float] = time.monotonic,
         nice_applier: Callable[[int], str | None] | None = None,
         runtime_client: RuntimeEvalClient | None = None,
+        memory_repository: MemoryRepository | None = None,
+        agent_registry: AgentRegistry | None = None,
     ) -> None:
         self.settings = settings
         self.memory = memory
         self.gate = gate
         self.audit = audit
         self.guard = guard or EvolutionWriteGuard(settings, audit=audit)
+        self.database_writer = EvolutionDatabaseWriter(memory.database, self.guard)
         self.overlay_manager = overlay_manager or PromptOverlayManager(
             settings, memory.database, audit=audit, guard=self.guard
         )
@@ -80,6 +86,9 @@ class DreamerService:
         # Optional local runtime handle for production real-runtime evals; when
         # absent, production candidates stay pending with an explicit blocker.
         self.runtime_client = runtime_client
+        self.memory_repository = memory_repository
+        self.agent_registry = agent_registry
+        self._cleanup_models: set[str] = set()
         # Renicing is process-wide and irreversible for an unprivileged process,
         # so it is only applied when a dedicated dreamer worker injects an
         # applier (see run_standalone). The in-process scheduler path must never
@@ -90,14 +99,17 @@ class DreamerService:
         decision = await self.gate.should_run(now)
         if not decision.allowed:
             return DreamerRunResult("skipped", decision.reason)
-        self._apply_nice()
         run_id = str(uuid.uuid4())
+        try:
+            return await self._run_allowed(now, run_id=run_id)
+        finally:
+            await self._cleanup_run(run_id)
+
+    async def _run_allowed(self, now: datetime, *, run_id: str) -> DreamerRunResult:
+        self._apply_nice()
         started = self.clock()
         budget_seconds = float(self.settings.evolution.max_minutes) * 60.0
         phases: dict[str, dict[str, Any]] = {}
-
-        def budget_left() -> bool:
-            return (self.clock() - started) < budget_seconds
 
         candidates: list[OverlayCandidate] | None = []
         work_phases: list[tuple[str, Callable[[], Any]]] = [
@@ -111,7 +123,8 @@ class DreamerService:
             ),
         ]
         for name, phase_factory in work_phases:
-            if not budget_left():
+            elapsed = self.clock() - started
+            if elapsed >= budget_seconds:
                 # The wall-clock budget is enforced between phases: a phase in
                 # flight finishes, later phases are skipped and say why.
                 phases[name] = {
@@ -121,7 +134,14 @@ class DreamerService:
                 }
                 self._audit("dreamer_phase_skipped_budget", run_id=run_id, detail=name)
                 continue
-            result = await self._run_phase(phases, name, phase_factory())
+            remaining = max(0.0, budget_seconds - elapsed)
+            result = await self._run_phase(
+                phases,
+                name,
+                phase_factory(),
+                run_id=run_id,
+                timeout_seconds=remaining,
+            )
             if name == "evolve":
                 candidates = result
 
@@ -133,8 +153,8 @@ class DreamerService:
             pending_eval_cases=count_pending_eval_cases(self.settings),
         )
         phases["report"] = {"status": "completed", "path": str(report_path)}
-        self.guard.validate_table("evolution_runs")
-        await self.memory.database.execute(
+        await self.database_writer.execute(
+            "evolution_runs",
             """
             INSERT INTO evolution_runs(
                 id, date, status, phases_json, report_path, created_at, completed_at
@@ -159,7 +179,15 @@ class DreamerService:
         )
         return DreamerRunResult("completed", "completed", report_path=str(report_path))
 
-    async def _run_phase(self, phases: dict[str, dict[str, Any]], name: str, coroutine: Any) -> Any:
+    async def _run_phase(
+        self,
+        phases: dict[str, dict[str, Any]],
+        name: str,
+        coroutine: Any,
+        *,
+        run_id: str,
+        timeout_seconds: float,
+    ) -> Any:
         """Run one phase in isolation: a failure is recorded, never propagated.
 
         Every phase runs disarmed: normal Level >= 1 tool execution routed
@@ -167,10 +195,15 @@ class DreamerService:
         """
         try:
             with disarmed_execution(name):
-                result, payload = await coroutine
+                async with asyncio.timeout(timeout_seconds):
+                    result, payload = await coroutine
+        except TimeoutError:
+            phases[name] = {"status": "failed", "error": "wall clock budget exhausted"}
+            self._audit("dreamer_phase_timed_out", run_id=run_id, detail=name)
+            return None
         except Exception as exc:
             phases[name] = {"status": "failed", "error": str(exc)[:500]}
-            self._audit("dreamer_phase_failed", run_id=None, detail=f"{name}: {exc}")
+            self._audit("dreamer_phase_failed", run_id=run_id, detail=f"{name}: {exc}")
             return None
         phases[name] = {"status": "completed", **payload}
         return result
@@ -181,7 +214,9 @@ class DreamerService:
         return report, report.to_payload()
 
     async def _phase_distill(self) -> tuple[Any, dict[str, Any]]:
-        report = await consolidate_memories(self.memory, guard=self.guard)
+        report = await consolidate_memories(
+            self.memory, guard=self.guard, repository=self.memory_repository
+        )
         # Deterministic decay/fading of stale machine memories runs with the
         # same fence; nothing is ever deleted, fading rows stay inspectable.
         from services.memory.decay import apply_memory_decay
@@ -282,45 +317,64 @@ class DreamerService:
                 reason = "below current baseline" if active_score is not None else "below baseline"
                 discarded.append({"agent": candidate.agent, "reason": reason})
                 continue
-            if require_real_runtime:
-                # Production never activates an overlay on deterministic/fake
-                # replay alone: a real local-runtime eval must pass, otherwise
-                # the candidate stays pending with an explicit reason.
-                real_eval = await evaluate_overlay_candidate_real_runtime(
-                    agent=candidate.agent,
-                    content=candidate.content,
-                    settings=self.settings,
-                    runtime_client=self.runtime_client,
-                )
-                evaluation_payload["real_runtime"] = real_eval.to_payload()
-                evaluations.append(evaluation_payload)
-                if real_eval.passed:
-                    real_runtime_counts["passed"] += 1
-                elif real_eval.skipped:
-                    real_runtime_counts["skipped"] += 1
-                else:
-                    real_runtime_counts["failed"] += 1
-                if not real_eval.passed:
-                    blockers.extend(real_eval.blockers)
-                    pending_real_runtime.append(
-                        {
-                            "agent": candidate.agent,
-                            "status": real_eval.status,
-                            "reason": (
-                                "; ".join(real_eval.blockers)
-                                if real_eval.blockers
-                                else "real-runtime evaluation did not pass"
-                            ),
-                        }
-                    )
-                    self._audit(
-                        "dreamer_overlay_pending_real_runtime",
-                        run_id=run_id,
-                        detail=f"{candidate.agent}: {real_eval.status}",
-                    )
-                    continue
+            # Structural checks can reject a candidate, but can never prove it
+            # improves behavior. Every activation therefore requires a frozen
+            # baseline-versus-candidate A/B run. In production the evaluator
+            # additionally requires a genuine llama.cpp backend; fake or absent
+            # runtimes leave the candidate pending in every environment.
+            active_overlay = await self.overlay_manager.active_overlay_text(candidate.agent)
+            agent = (
+                self.agent_registry.get(candidate.agent)
+                if self.agent_registry is not None
+                else None
+            )
+            judge = (
+                self.agent_registry.get("reading_agent")
+                if self.agent_registry is not None
+                else None
+            )
+            for model_id in (
+                agent.model_id if agent is not None else None,
+                judge.model_id if judge is not None else None,
+            ):
+                if model_id and model_id != self.settings.brain.model_id:
+                    self._cleanup_models.add(model_id)
+            real_eval = await evaluate_overlay_candidate_real_runtime(
+                agent=candidate.agent,
+                content=candidate.content,
+                settings=self.settings,
+                runtime_client=self.runtime_client,
+                model_id=(agent.model_id if agent is not None else None),
+                baseline_content=active_overlay or "",
+                judge_model_id=(judge.model_id if judge is not None else None),
+            )
+            evaluation_payload["behavioral_evaluation"] = real_eval.to_payload()
+            evaluations.append(evaluation_payload)
+            if real_eval.passed:
+                real_runtime_counts["passed"] += 1
+            elif real_eval.skipped:
+                real_runtime_counts["skipped"] += 1
             else:
-                evaluations.append(evaluation_payload)
+                real_runtime_counts["failed"] += 1
+            if not real_eval.passed:
+                blockers.extend(real_eval.blockers)
+                pending_real_runtime.append(
+                    {
+                        "agent": candidate.agent,
+                        "status": real_eval.status,
+                        "reason": (
+                            "; ".join(real_eval.blockers)
+                            if real_eval.blockers
+                            else "behavioral A/B evaluation did not pass"
+                        ),
+                    }
+                )
+                self._audit(
+                    "dreamer_overlay_pending_behavioral_evaluation",
+                    run_id=run_id,
+                    detail=f"{candidate.agent}: {real_eval.status}",
+                )
+                continue
             result = await self.overlay_manager.apply_candidate(
                 agent=candidate.agent,
                 content=candidate.content,
@@ -344,8 +398,8 @@ class DreamerService:
             "eval_modes": {
                 "environment": self.settings.environment,
                 "real_runtime_required": require_real_runtime,
-                "deterministic_fixture_passed": sum(
-                    1 for item in evaluations if item.get("deterministic_fixture_passed") is True
+                "structural_safety_passed": sum(
+                    1 for item in evaluations if item.get("structural_safety_passed") is True
                 ),
                 "real_runtime_eval_passed": real_runtime_counts["passed"],
                 "real_runtime_eval_failed": real_runtime_counts["failed"],
@@ -354,6 +408,29 @@ class DreamerService:
             },
         }
         return payload, payload
+
+    async def _cleanup_run(self, run_id: str) -> None:
+        """Release optional models used by D5 without masking the run result."""
+        client = self.runtime_client
+        unload = getattr(client, "unload", None) if client is not None else None
+        for model_id in sorted(self._cleanup_models):
+            if not callable(unload):
+                self._audit(
+                    "dreamer_cleanup_skipped",
+                    run_id=run_id,
+                    detail=f"runtime has no unload capability for {model_id}",
+                )
+                continue
+            try:
+                await unload(model_id, request_id=f"dreamer-cleanup-{run_id}")
+                self._audit("dreamer_model_released", run_id=run_id, detail=model_id)
+            except Exception as exc:
+                self._audit(
+                    "dreamer_cleanup_failed",
+                    run_id=run_id,
+                    detail=f"{model_id}: {type(exc).__name__}",
+                )
+        self._cleanup_models.clear()
 
     def _apply_nice(self) -> None:
         """Lower this process's priority when a dedicated worker asked for it."""

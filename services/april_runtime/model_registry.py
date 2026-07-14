@@ -68,6 +68,9 @@ class ModelDefinition(BaseModel):
     # Optional local LoRA adapter (M15). Applied on top of the base GGUF at
     # load time by the llama_cpp backend; never downloaded automatically.
     adapter_path: Path | None = None
+    # Optional operator-supplied conservative resident estimate. When absent,
+    # local GGUF bytes are projected with overhead; missing files remain unknown.
+    resident_gb: float | None = Field(default=None, gt=0.0)
 
     @field_validator("backend")
     @classmethod
@@ -103,6 +106,17 @@ class ModelDefinition(BaseModel):
         if configured is not None:
             return configured
         return active_adapter_path_from_pointer(root, self.id)
+
+    def projected_resident_gb(self, root: Path, *, overhead_factor: float = 1.25) -> float | None:
+        if self.resident_gb is not None:
+            return self.resident_gb
+        if self.backend == "fake":
+            return 0.0
+        try:
+            size_gb = self.resolved_path(root).stat().st_size / (1024**3)
+        except OSError:
+            return None
+        return max(0.25, size_gb * overhead_factor)
 
 
 class ModelRegistryConfig(BaseModel):

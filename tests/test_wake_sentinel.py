@@ -24,6 +24,12 @@ from services.wake.confirmer import (
     normalized_edit_distance,
     strip_vocative,
 )
+from services.wake.control import (
+    SentinelControlServer,
+    attach_resident_sentinel,
+    resident_sentinel_status,
+    sentinel_control_path,
+)
 from services.wake.fakes import (
     FakeFrameMicrophone,
     FakeSpeakerVerifier,
@@ -88,6 +94,42 @@ class _FakeAsyncClient:
 
 def _short_socket_path() -> Path:
     return Path(tempfile.gettempdir()).resolve() / f"aw-{os.getpid()}-{uuid.uuid4().hex[:8]}.sock"
+
+
+@pytest.mark.asyncio
+async def test_resident_sentinel_control_has_single_live_controller(settings_tmp) -> None:
+    short_home = Path("/tmp") / f"ac-{uuid.uuid4().hex[:8]}"
+    settings = settings_tmp.model_copy(update={"home": short_home})
+    hints: list[str | None] = []
+    server = SentinelControlServer(
+        sentinel_control_path(settings),
+        set_session_hint=hints.append,
+        status=lambda: {"state": "listening", "voice_output": "degraded"},
+    )
+    await server.start()
+    first = None
+    try:
+        status = await asyncio.to_thread(resident_sentinel_status, settings)
+        assert status["state"] == "listening"
+        assert status["controlled"] is False
+        first = await asyncio.to_thread(
+            attach_resident_sentinel, settings, session_hint="session-one"
+        )
+        assert first.status["attached"] is True
+        assert hints[-1] == "session-one"
+        with pytest.raises(RuntimeError, match="already controlled"):
+            await asyncio.to_thread(attach_resident_sentinel, settings, session_hint="session-two")
+        first.close()
+        first = None
+        await asyncio.sleep(0)
+        second = await asyncio.to_thread(
+            attach_resident_sentinel, settings, session_hint="session-three"
+        )
+        second.close()
+    finally:
+        if first is not None:
+            first.close()
+        await server.close()
 
 
 async def _memory(settings_tmp) -> tuple[Database, SqliteMemory]:
@@ -287,6 +329,14 @@ def test_ring_buffer_snapshot_preserves_wake_onset() -> None:
     for frame in onset:
         buffer.append(frame)
     assert buffer.snapshot() == onset
+
+
+def test_ring_buffer_truncates_one_oversized_frame_to_newest_audio() -> None:
+    buffer = AudioRingBuffer(seconds=1.0, sample_rate=4, bytes_per_sample=1)
+    buffer.append(b"old")
+    buffer.append(b"0123456789")
+    assert buffer.total_bytes == buffer.capacity_bytes == 4
+    assert buffer.snapshot() == [b"6789"]
 
 
 # ---------------------------------------------------------------------------

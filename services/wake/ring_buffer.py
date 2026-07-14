@@ -32,6 +32,14 @@ class AudioRingBuffer:
     def append(self, frame: bytes) -> None:
         if not frame:
             return
+        if len(frame) >= self.capacity_bytes:
+            # A device/backend may occasionally hand us one unusually large
+            # chunk. Keep only its newest bounded tail; never exceed capacity.
+            newest = frame[-self.capacity_bytes :]
+            self._frames.clear()
+            self._frames.append(newest)
+            self._total_bytes = len(newest)
+            return
         self._frames.append(frame)
         self._total_bytes += len(frame)
         while self._total_bytes > self.capacity_bytes and len(self._frames) > 1:

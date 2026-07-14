@@ -22,6 +22,7 @@ from services.memory.archive import ArchiveReflectionService
 from services.memory.database import Database
 from services.memory.embeddings import embedding_provider_from_config
 from services.memory.migrations import run_migrations
+from services.memory.repository import MemoryRepository
 from services.memory.retriever import MemoryRetriever, RuntimeMemoryReranker
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
@@ -43,6 +44,7 @@ class ApiContainer:
     memory: SqliteMemory
     vector_memory: VectorMemory
     memory_retriever: MemoryRetriever
+    memory_repository: MemoryRepository
     runtime_client: RuntimeClient
     tool_registry: ToolRegistry
     permission_engine: PermissionEngine
@@ -122,6 +124,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         audit=audit,
     )
     vector_memory = VectorMemory(active_settings.vector_index_path, embedding=embedding)
+    memory_repository = MemoryRepository(memory, vector_memory, audit=audit)
     model_registry = ModelRegistry.from_file(
         active_settings.home / "configs" / "models.yaml",
         root=active_settings.home,
@@ -175,6 +178,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         runtime_client=runtime_client,
         governor=governor,
         audit=audit,
+        model_registry=model_registry,
     )
     orchestrator = AprilOrchestrator(
         settings=active_settings,
@@ -197,6 +201,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         memory=memory,
         runtime_client=runtime_client,
         vector_memory=vector_memory,
+        repository=memory_repository,
         audit=audit,
         archive_model_id=archive_model_id,
     )
@@ -207,6 +212,8 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         gate=EvolutionSchedulerGate(active_settings, memory, governor=governor),
         audit=audit,
         runtime_client=runtime_client,
+        memory_repository=memory_repository,
+        agent_registry=agent_registry,
     )
     session_manager = SessionManager(
         memory,
@@ -228,6 +235,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         memory=memory,
         vector_memory=vector_memory,
         memory_retriever=memory_retriever,
+        memory_repository=memory_repository,
         runtime_client=runtime_client,
         tool_registry=tool_registry,
         permission_engine=permission_engine,

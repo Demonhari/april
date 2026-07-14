@@ -307,6 +307,47 @@ class VectorMemory:
                 progress(index, total)
         return total
 
+    def rebuild_memory_namespace(
+        self,
+        items: list[tuple[str, str, VectorMetadata]],
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> int:
+        """Replace memory vectors from SQLite while preserving other namespaces.
+
+        Existing document/repository records are re-embedded as well when the
+        provider fingerprint changed, so incompatible vectors are never mixed.
+        The replacement is written only after every embedding succeeds.
+        """
+        with self._locked():
+            records, _vectors = self._read_index_unlocked()
+        preserved = [
+            (
+                str(record["id"]),
+                str(record["content"]),
+                VectorMetadata.model_validate(record["metadata"]),
+            )
+            for record in records
+            if record.get("metadata", {}).get("source_type") != "memory"
+        ]
+        combined = [*preserved, *items]
+        new_records: list[dict[str, Any]] = []
+        new_vectors: list[np.ndarray] = []
+        total = len(combined)
+        for index, (record_id, content, metadata) in enumerate(combined, start=1):
+            new_records.append(
+                {"id": record_id, "content": content, "metadata": metadata.model_dump()}
+            )
+            new_vectors.append(self.embedding.embed(content).astype(np.float32))
+            if progress is not None:
+                progress(index, total)
+        with self._locked():
+            self._write_index_unlocked(
+                new_records,
+                _matrix(new_vectors, self.embedding.dimensions),
+            )
+        return len(items)
+
     def _read_index(self) -> tuple[list[dict[str, Any]], np.ndarray]:
         with self._locked():
             return self._read_index_unlocked()

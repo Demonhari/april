@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import signal
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,8 @@ from apps.daemon.apriald import (
     daemon_pid_path,
     daemon_status_path,
     read_daemon_status,
+    stop_daemon,
+    wait_for_core_health,
 )
 from apps.daemon.launchd import LaunchdManager
 from services.pool.governor import ResourceGovernor, ResourcePolicy, ResourceSignals
@@ -370,6 +374,98 @@ async def test_supervisor_backoff_is_exponential_capped_and_resets(settings_tmp)
         await supervisor.stop()
 
 
+@pytest.mark.asyncio
+async def test_supervisor_health_gates_dependent_children(settings_tmp) -> None:
+    factory = FakeFactory()
+
+    async def unhealthy_runtime(spec) -> bool:
+        return spec.name != "runtime"
+
+    supervisor = AprialdSupervisor(
+        settings_tmp.model_copy(
+            update={
+                "daemon": settings_tmp.daemon.model_copy(
+                    update={"startup_timeout_seconds": 0.01, "health_poll_seconds": 0.01}
+                )
+            }
+        ),
+        process_factory=factory,
+        health_checker=unhealthy_runtime,
+        governor=_permissive_governor(settings_tmp),
+        sleep=_no_sleep,
+        clock=ManualClock(),
+    )
+    await supervisor.start()
+    try:
+        assert factory.started == ["runtime"]
+        assert supervisor.children["api"].process is None
+    finally:
+        await supervisor.stop()
+
+
+def test_stop_daemon_stops_any_live_status_and_handles_stale_and_permission(
+    settings_tmp,
+) -> None:
+    pid_path = daemon_pid_path(settings_tmp)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("4242\n", encoding="utf-8")
+    alive = {4242: True}
+    signals: list[int] = []
+
+    def kill(pid: int, sig: int) -> None:
+        assert pid == 4242
+        signals.append(sig)
+        alive[pid] = False
+
+    stopped = stop_daemon(
+        settings_tmp,
+        kill=kill,
+        pid_alive=lambda pid: alive.get(pid, False),
+    )
+    assert stopped == {"status": "stopped", "pid": None}
+    assert signals == [signal.SIGTERM]
+
+    pid_path.write_text("4243\n", encoding="utf-8")
+    assert stop_daemon(settings_tmp, pid_alive=lambda _pid: False)["status"] == "stopped"
+    assert not pid_path.exists()
+
+    pid_path.write_text("4244\n", encoding="utf-8")
+
+    def denied(_pid: int, _sig: int) -> None:
+        raise PermissionError
+
+    denied_result = stop_daemon(
+        settings_tmp,
+        kill=denied,
+        pid_alive=lambda _pid: True,
+    )
+    assert denied_result["status"] == "degraded"
+    assert denied_result["pid"] == 4244
+    assert pid_path.exists()
+
+
+def test_wait_for_core_health_is_bounded_and_actionable(settings_tmp) -> None:
+    clock = ManualClock()
+
+    def advance(seconds: float) -> None:
+        clock.advance(seconds)
+
+    with pytest.raises(RuntimeError, match=r"apriald\.status\.json"):
+        wait_for_core_health(
+            settings_tmp,
+            timeout_seconds=0.2,
+            probe=lambda _url: False,
+            sleep=advance,
+            clock=clock,
+        )
+    assert (
+        wait_for_core_health(settings_tmp, probe=lambda _url: True, sleep=advance, clock=clock)[
+            "status"
+        ]
+        == "running"
+    )
+
+
 def test_resource_governor_uses_fake_signals(settings_tmp) -> None:
     governor = ResourceGovernor(
         settings_tmp,
@@ -416,3 +512,47 @@ def test_launchd_install_writes_only_user_launch_agents(settings_tmp, tmp_path: 
 
     assert manager.uninstall() is True
     assert manager.status()["installed"] is False
+
+
+def test_launchd_argv_lifecycle_is_idempotent_and_truthful(settings_tmp, tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    loaded = False
+
+    def runner(argv) -> subprocess.CompletedProcess[str]:
+        nonlocal loaded
+        args = list(argv)
+        calls.append(args)
+        if args[1] == "print":
+            return subprocess.CompletedProcess(args, 0 if loaded else 113, "", "")
+        if args[1] == "bootstrap":
+            loaded = True
+        elif args[1] == "bootout":
+            loaded = False
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    manager = LaunchdManager(
+        settings_tmp,
+        user_home=tmp_path / "user",
+        runner=runner,
+        platform="darwin",
+        uid=501,
+    )
+    assert manager.bootstrap()["error"] == "LaunchAgent plist is not installed"
+    manager.install()
+    assert manager.bootstrap()["changed"] is True
+    assert manager.bootstrap()["changed"] is False
+    assert manager.kickstart()["started"] is True
+    assert manager.bootout()["changed"] is True
+    assert manager.bootout()["changed"] is False
+    mutation_calls = [call for call in calls if call[1] != "print"]
+    assert mutation_calls == [
+        ["launchctl", "bootstrap", "gui/501", str(manager.plist_path)],
+        ["launchctl", "kickstart", "-k", "gui/501/com.april.apriald"],
+        ["launchctl", "bootout", "gui/501/com.april.apriald"],
+    ]
+
+    unsupported = LaunchdManager(
+        settings_tmp, user_home=tmp_path / "linux", platform="linux", runner=runner
+    )
+    assert unsupported.status()["supported"] is False
+    assert unsupported.bootstrap()["supported"] is False

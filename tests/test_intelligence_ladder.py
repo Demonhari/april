@@ -634,6 +634,47 @@ def test_deep_phrases_and_high_stakes_select_rungs(settings_tmp) -> None:
     )
     assert gated.rung == 1
     assert gated.high_stakes is True
+    assert ladder.is_high_stakes("How much money is in a standard Monopoly set?") is False
+    model_only = ladder.select(
+        message="Compare two harmless color palettes",
+        decision=_decision(high_stakes=True),
+        mode="standard",
+    )
+    assert model_only.rung == 4
+    assert model_only.high_stakes is True
+
+
+@pytest.mark.asyncio
+async def test_verified_rung_enforces_draft_critique_and_revision_budgets(settings_tmp) -> None:
+    class VerifiedRuntime(LadderRuntime):
+        async def chat(self, **kwargs: Any) -> ChatResponse:
+            self.calls.append(kwargs)
+            joined = "\n".join(message.content for message in kwargs["messages"])
+            content = (
+                '{"needs_revision":true,"critique":"Add the missing caveat."}'
+                if "Check the answer" in joined
+                else "Revised answer with the caveat."
+            )
+            return ChatResponse(
+                request_id=kwargs.get("request_id") or "r",
+                model_id=kwargs["model_id"],
+                content=content,
+                usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+
+    runtime = VerifiedRuntime()
+    ladder = _ladder(settings_tmp, runtime)
+    result = await ladder.verify_and_revise(
+        message="double check this",
+        initial_answer="Draft answer.",
+        model_id="april-brain",
+        request_id="verified-budget",
+    )
+    assert result.final_message.endswith("Revised answer with the caveat.")
+    assert [call["options"].max_output_tokens for call in runtime.calls] == [
+        settings_tmp.deep_mode.verified_critique_tokens,
+        settings_tmp.deep_mode.verified_revision_tokens,
+    ]
 
 
 def test_council_rubric_scores_and_selects_candidate() -> None:

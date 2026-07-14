@@ -41,12 +41,13 @@ def build_briefing_summary(
     examine = phases.get("examine", {})
     activated = examine.get("activated", [])
     awaiting = examine.get("approval_required", [])
+    pending_behavioral = examine.get("pending_real_runtime", [])
     if activated:
-        # Overlay generation is heuristic; activation only means it passed the
-        # deterministic eval gate, not that intelligence improved.
-        parts.append(f"activated {len(activated)} heuristic prompt overlay(s)")
+        parts.append(f"activated {len(activated)} A/B-evaluated prompt overlay(s)")
     if awaiting:
         parts.append(f"{len(awaiting)} overlay(s) await approval")
+    if pending_behavioral:
+        parts.append(f"{len(pending_behavioral)} overlay(s) pending real-runtime evaluation")
     if pending_eval_cases:
         parts.append(f"{pending_eval_cases} staged eval case(s) await review")
     skipped = [
@@ -82,6 +83,7 @@ def evolution_report_fields(phases: dict[str, dict[str, Any]]) -> dict[str, Any]
     )
     discarded = examine.get("discarded", [])
     approval_required = examine.get("approval_required", [])
+    pending_behavioral = examine.get("pending_real_runtime", [])
     activated = examine.get("activated", [])
     evaluations = examine.get("evaluations", [])
     if not isinstance(discarded, list):
@@ -90,6 +92,8 @@ def evolution_report_fields(phases: dict[str, dict[str, Any]]) -> dict[str, Any]
         approval_required = []
     if not isinstance(activated, list):
         activated = []
+    if not isinstance(pending_behavioral, list):
+        pending_behavioral = []
     if not isinstance(evaluations, list):
         evaluations = []
     below_baseline = [
@@ -114,6 +118,7 @@ def evolution_report_fields(phases: dict[str, dict[str, Any]]) -> dict[str, Any]
             "activated_count": len(activated),
             "discarded_count": len(discarded),
             "approval_required_count": len(approval_required),
+            "pending_behavioral_evaluation_count": len(pending_behavioral),
             "below_baseline_count": len(below_baseline),
         },
         "skipped_phases": skipped,

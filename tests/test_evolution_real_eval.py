@@ -85,12 +85,12 @@ class FakeRealRuntimeClient:
         )
 
 
-def test_deterministic_eval_is_labelled_as_fixture_check(settings_tmp) -> None:
+def test_deterministic_eval_is_labelled_as_structural_safety_gate(settings_tmp) -> None:
     payload = evaluate_overlay_candidate(
         agent="general_agent", content=_OVERLAY, settings=settings_tmp
     ).to_payload()
-    assert payload["eval_kind"] == "deterministic_fixture"
-    assert payload["deterministic_fixture_passed"] is True
+    assert payload["eval_kind"] == "structural_safety_gate"
+    assert payload["structural_safety_passed"] is True
 
 
 @pytest.mark.asyncio
@@ -172,6 +172,7 @@ async def test_real_eval_includes_promoted_cases_and_respects_judge(settings_tmp
         content=_OVERLAY,
         settings=settings_tmp,
         runtime_client=FakeRealRuntimeClient(judge_verdict=True),
+        judge_model_id="april-scout",
     )
     assert accepted.status == "real_runtime_eval_passed"
 
@@ -180,6 +181,7 @@ async def test_real_eval_includes_promoted_cases_and_respects_judge(settings_tmp
         content=_OVERLAY,
         settings=settings_tmp,
         runtime_client=FakeRealRuntimeClient(judge_verdict=False),
+        judge_model_id="april-scout",
     )
     assert judged_bad.status == "real_runtime_eval_failed"
     assert any(case_id in blocker for blocker in judged_bad.blockers)
@@ -300,7 +302,7 @@ async def test_production_manual_approval_applies_after_passing_real_eval(settin
 
 
 @pytest.mark.asyncio
-async def test_development_manual_approval_keeps_deterministic_fixture_behavior(
+async def test_development_manual_approval_requires_behavioral_evidence(
     settings_tmp,
 ) -> None:
     content_hash = _seed_pending_overlay(settings_tmp, _OVERLAY)
@@ -308,9 +310,10 @@ async def test_development_manual_approval_keeps_deterministic_fixture_behavior(
     try:
         service = PromptOverlayApprovalService(settings_tmp, database, runtime_client=None)
         result = await service.approve(agent="coding_agent", content_hash=content_hash)
-        assert result.status == "applied"
+        assert result.status == "pending_real_runtime"
+        assert "behavioral A/B evaluation required" in (result.reason or "")
         manager = PromptOverlayManager(settings_tmp, database)
-        assert await manager.active_overlay_text("coding_agent") == _OVERLAY
+        assert await manager.active_overlay_text("coding_agent") is None
     finally:
         await database.close()
 
@@ -355,7 +358,7 @@ async def test_production_dreamer_holds_candidates_without_real_runtime(settings
         assert "no local runtime client" in pending["reason"]
         modes = examine["eval_modes"]
         assert modes["real_runtime_required"] is True
-        assert modes["deterministic_fixture_passed"] == 1
+        assert modes["structural_safety_passed"] == 1
         assert modes["real_runtime_eval_skipped"] == 1
         assert modes["real_runtime_eval_passed"] == 0
         assert modes["blockers"]
@@ -391,14 +394,14 @@ async def test_production_dreamer_activates_only_on_real_runtime_pass(settings_t
         assert modes["real_runtime_eval_passed"] == 1
         assert modes["real_runtime_eval_skipped"] == 0
         evaluation = examine["evaluations"][0]
-        assert evaluation["eval_kind"] == "deterministic_fixture"
-        assert evaluation["real_runtime"]["status"] == "real_runtime_eval_passed"
+        assert evaluation["eval_kind"] == "structural_safety_gate"
+        assert evaluation["behavioral_evaluation"]["status"] == "real_runtime_eval_passed"
     finally:
         await database.close()
 
 
 @pytest.mark.asyncio
-async def test_development_dreamer_keeps_test_only_activation(settings_tmp) -> None:
+async def test_development_dreamer_keeps_structural_only_candidate_pending(settings_tmp) -> None:
     enabled = _enabled_settings(settings_tmp)
     assert enabled.environment != "production"
     database, memory = await _memory(enabled)
@@ -412,9 +415,8 @@ async def test_development_dreamer_keeps_test_only_activation(settings_tmp) -> N
 
         report = json.loads(Path(result.report_path).read_text(encoding="utf-8"))
         examine = report["phases"]["examine"]
-        # Development/fake-backend behaviour is unchanged: the deterministic
-        # fixture pass allows the (test-only) activation.
-        assert examine["activated"] == [{"agent": "general_agent", "version": 1}]
+        assert examine["activated"] == []
+        assert len(examine["pending_real_runtime"]) == 1
         assert examine["eval_modes"]["real_runtime_required"] is False
     finally:
         await database.close()
