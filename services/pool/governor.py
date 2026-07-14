@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-import platform
 import re
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -17,12 +17,23 @@ POWER_SOURCE_AC = "ac"
 POWER_SOURCE_BATTERY = "battery"
 SIGNAL_SOURCE_UNKNOWN = "unknown"
 IDLE_SOURCE_HID = "hid"
+RAM_SOURCE_VM_STAT = "vm_stat"
+RAM_SOURCE_SYSCONF = "sysconf"
 
 _PMSET_AC_RE = re.compile(r"'AC Power'")
 _PMSET_BATTERY_RE = re.compile(r"'Battery Power'")
 _HID_IDLE_RE = re.compile(r'"HIDIdleTime"\s*=\s*(\d+)')
+_VM_STAT_PAGE_SIZE_RE = re.compile(r"page size of ([\d,]+) bytes")
+_VM_STAT_PAGE_RE = re.compile(
+    r"^Pages (free|inactive|purgeable|speculative):\s*([\d,]+)\.\s*$",
+    re.MULTILINE,
+)
 
 CommandRunner = Callable[[Sequence[str]], str]
+
+
+def _platform_name() -> str:
+    return sys.platform
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,13 +42,14 @@ class ResourceSignals:
     cpu_load_percent: float
     on_ac_power: bool
     user_idle_seconds: float
-    # Where the power/idle values came from. "unknown" marks a degraded probe
+    # Where the power/idle/RAM values came from. "unknown" marks a degraded probe
     # (non-macOS host, command failure, unparseable output); the governor then
     # refuses background work with an explicit reason instead of guessing.
     # When omitted, the values are treated as directly measured/injected
     # (fake providers in tests stay trusted).
     power_source: str = ""
     idle_source: str = ""
+    ram_source: str = ""
 
     def __post_init__(self) -> None:
         if not self.power_source:
@@ -45,6 +57,8 @@ class ResourceSignals:
             object.__setattr__(self, "power_source", derived)
         if not self.idle_source:
             object.__setattr__(self, "idle_source", IDLE_SOURCE_HID)
+        if not self.ram_source:
+            object.__setattr__(self, "ram_source", RAM_SOURCE_SYSCONF)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,23 +120,47 @@ def ioreg_user_idle_seconds(runner: CommandRunner = _run_command) -> float | Non
     return int(match.group(1)) / 1_000_000_000.0
 
 
+def vm_stat_available_ram_gb(runner: CommandRunner = _run_command) -> float | None:
+    """Available RAM from macOS ``vm_stat`` output, or None on any failure."""
+    try:
+        output = runner(("vm_stat",))
+    except Exception:
+        return None
+    page_size_match = _VM_STAT_PAGE_SIZE_RE.search(output)
+    if page_size_match is None:
+        return None
+    try:
+        page_size = int(page_size_match.group(1).replace(",", ""))
+        counts = {
+            name: int(value.replace(",", ""))
+            for name, value in _VM_STAT_PAGE_RE.findall(output)
+        }
+    except ValueError:
+        return None
+    required = {"free", "inactive", "purgeable"}
+    if page_size <= 0 or not required.issubset(counts):
+        return None
+    available_pages = sum(counts[name] for name in required)
+    available_pages += counts.get("speculative", 0)
+    return float(page_size * available_pages) / (1024**3)
+
+
 class LocalResourceSignalProvider:
     """Best-effort local-only host signals.
 
-    RAM headroom and CPU load come from POSIX APIs everywhere. On macOS the
-    power source is probed with `pmset -g batt` and user idle seconds with
-    `ioreg` HIDIdleTime. On other platforms, or when either local command
-    fails, the corresponding source is reported as "unknown" and the value
-    falls back to a conservative default (battery / zero idle) so background
-    work is refused with an explicit reason instead of silently running.
-    No network is ever touched; both probes are local argv subprocesses.
+    On macOS RAM headroom is probed with ``vm_stat``, the power source with
+    ``pmset -g batt``, and user idle seconds with ``ioreg`` HIDIdleTime. Other
+    platforms retain the POSIX sysconf RAM probe. An unavailable probe is
+    reported as "unknown" so policy can degrade explicitly instead of treating
+    a fabricated value as measured. No network is ever touched; command probes
+    are local argv subprocesses.
     """
 
     def __init__(
         self,
         *,
         runner: CommandRunner = _run_command,
-        platform_system: Callable[[], str] = platform.system,
+        platform_system: Callable[[], str] = _platform_name,
     ) -> None:
         self.runner = runner
         self.platform_system = platform_system
@@ -130,16 +168,27 @@ class LocalResourceSignalProvider:
     def sample(self) -> ResourceSignals:
         on_ac: bool | None = None
         idle_seconds: float | None = None
-        if self.platform_system() == "Darwin":
+        ram_headroom: float | None
+        ram_source = SIGNAL_SOURCE_UNKNOWN
+        if self.platform_system().casefold() == "darwin":
+            ram_headroom = vm_stat_available_ram_gb(self.runner)
+            if ram_headroom is not None:
+                ram_source = RAM_SOURCE_VM_STAT
             on_ac = pmset_on_ac_power(self.runner)
             idle_seconds = ioreg_user_idle_seconds(self.runner)
+        else:
+            ram_headroom = _available_ram_gb()
+            if ram_headroom is not None:
+                ram_source = RAM_SOURCE_SYSCONF
         power_source = SIGNAL_SOURCE_UNKNOWN
         if on_ac is True:
             power_source = POWER_SOURCE_AC
         elif on_ac is False:
             power_source = POWER_SOURCE_BATTERY
         return ResourceSignals(
-            ram_headroom_gb=_available_ram_gb(),
+            # The value is ignored whenever ram_source is unknown; zero is only
+            # the dataclass-compatible carrier for that explicitly degraded state.
+            ram_headroom_gb=ram_headroom if ram_headroom is not None else 0.0,
             cpu_load_percent=_cpu_load_percent(),
             # Conservative fallbacks: unknown power reads as "not on AC" and
             # unknown idle reads as "user active", so unknown never unlocks
@@ -148,6 +197,7 @@ class LocalResourceSignalProvider:
             user_idle_seconds=idle_seconds if idle_seconds is not None else 0.0,
             power_source=power_source,
             idle_source=IDLE_SOURCE_HID if idle_seconds is not None else SIGNAL_SOURCE_UNKNOWN,
+            ram_source=ram_source,
         )
 
 
@@ -189,17 +239,27 @@ class ResourceGovernor:
         """Gate always-on resident services such as Runtime/API/Sentinel."""
         signals = self.provider.sample()
         reasons: list[str] = []
-        if signals.ram_headroom_gb < self.policy.min_ram_headroom_gb:
+        advisories: list[str] = []
+        if signals.ram_source == SIGNAL_SOURCE_UNKNOWN:
+            advisories.append("ram_signal_unavailable")
+        elif signals.ram_headroom_gb < self.policy.min_ram_headroom_gb:
             reasons.append("ram_headroom_below_policy")
         if signals.cpu_load_percent > self.policy.max_cpu_load_percent:
             reasons.append("cpu_load_above_policy")
-        return GovernorDecision(allowed=not reasons, reasons=tuple(reasons), signals=signals)
+        return GovernorDecision(
+            allowed=not reasons,
+            reasons=tuple(reasons),
+            signals=signals,
+            advisories=tuple(advisories),
+        )
 
     def assess_background(self) -> GovernorDecision:
         """Gate idle/background work such as Dreamer evolution."""
         resident = self.assess_resident()
         reasons = list(resident.reasons)
         signals = resident.signals
+        if signals.ram_source == SIGNAL_SOURCE_UNKNOWN:
+            reasons.append("ram_signal_unavailable")
         if self.policy.require_ac_power_for_background:
             if signals.power_source == SIGNAL_SOURCE_UNKNOWN:
                 reasons.append("power_signal_unavailable")
@@ -233,10 +293,13 @@ class ResourceGovernor:
         else:
             projected = max(0.0, projected_resident_gb)
         required_headroom = self.policy.min_ram_headroom_gb + projected
-        if signals.ram_headroom_gb < self.policy.min_ram_headroom_gb:
-            reasons.append("ram_headroom_below_policy")
-        elif signals.ram_headroom_gb < required_headroom:
-            reasons.append("projected_ram_headroom_below_policy")
+        if signals.ram_source == SIGNAL_SOURCE_UNKNOWN:
+            advisories.append("ram_signal_unavailable")
+        else:
+            if signals.ram_headroom_gb < self.policy.min_ram_headroom_gb:
+                reasons.append("ram_headroom_below_policy")
+            elif signals.ram_headroom_gb < required_headroom:
+                reasons.append("projected_ram_headroom_below_policy")
         if signals.cpu_load_percent > self.policy.max_cpu_load_percent:
             reasons.append("cpu_load_above_policy")
         return GovernorDecision(
@@ -247,12 +310,12 @@ class ResourceGovernor:
         )
 
 
-def _available_ram_gb() -> float:
+def _available_ram_gb() -> float | None:
     try:
         page_size = os.sysconf("SC_PAGE_SIZE")
         available_pages = os.sysconf("SC_AVPHYS_PAGES")
     except (AttributeError, OSError, ValueError):
-        return 999.0
+        return None
     return float(page_size * available_pages) / (1024**3)
 
 

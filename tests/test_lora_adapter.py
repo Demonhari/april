@@ -188,6 +188,7 @@ async def test_dataset_export_excludes_rejected_and_unsafe_rows(settings_tmp) ->
 
         result = await export_finetune_dataset(memory, settings_tmp, dataset_name="exclusions")
         assert result.chat_pairs == 1
+        assert result.preference_pairs == 0
         assert result.excluded_conversations == 1
         assert result.memories == 1
         rows = [

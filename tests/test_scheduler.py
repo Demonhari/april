@@ -227,6 +227,87 @@ async def test_briefing_composition_filters(settings_tmp: AprilSettings) -> None
     await database.close()
 
 
+async def test_briefing_completed_evolution_report_golden(settings_tmp: AprilSettings) -> None:
+    database, memory = await _memory(settings_tmp)
+    notification = await compose_briefing(
+        memory,
+        now_iso="2026-06-21T08:00:00Z",
+        until_iso="2026-06-22T08:00:00Z",
+        evolution_report={
+            "status": "completed",
+            "memories_learned": {
+                "total": 6,
+                "by_kind": {"preference": 1, "fact": 3, "correction": 2},
+            },
+            "phases": {
+                "distill": {
+                    "duplicates_merged": 2,
+                    "memories_fading": 1,
+                    "contradictions_resolved": 1,
+                },
+                "mine": {"adopted": ["morning-plan", "repo-review"]},
+                "evolve": {
+                    "ladder_thresholds": {
+                        "evaluation": {"score": 0.92, "baseline": 0.85}
+                    }
+                },
+            },
+            "candidate_outcomes": {"approval_required_count": 3},
+        },
+    )
+    assert notification.body == (
+        "Nothing scheduled. No open tasks or upcoming reminders.\n\n"
+        "Overnight: learned 6 memories (correction 2, fact 3, preference 1); "
+        "merged 2 duplicates; 1 memory fading; resolved 1 contradiction; adopted 2 "
+        "playbooks; routing-eval score 0.92 (+0.07 vs baseline 0.85); 3 overlay candidates "
+        "awaiting approval."
+    )
+    await database.close()
+
+
+async def test_briefing_skipped_evolution_report_golden(settings_tmp: AprilSettings) -> None:
+    database, memory = await _memory(settings_tmp)
+    notification = await compose_briefing(
+        memory,
+        now_iso="2026-06-21T08:00:00Z",
+        until_iso="2026-06-22T08:00:00Z",
+        evolution_report={"status": "skipped", "reason": "AC power required"},
+    )
+    assert notification.body.endswith("\n\nDreamer: skipped (AC power required)")
+    await database.close()
+
+
+async def test_briefing_completed_report_omits_missing_fields(
+    settings_tmp: AprilSettings,
+) -> None:
+    database, memory = await _memory(settings_tmp)
+    notification = await compose_briefing(
+        memory,
+        now_iso="2026-06-21T08:00:00Z",
+        until_iso="2026-06-22T08:00:00Z",
+        evolution_report={
+            "status": "completed",
+            "phases": {"distill": {"duplicates_merged": 4}},
+        },
+    )
+    assert notification.body.endswith("\n\nOvernight: merged 4 duplicates.")
+    await database.close()
+
+
+async def test_briefing_without_evolution_report_has_no_overnight_paragraph(
+    settings_tmp: AprilSettings,
+) -> None:
+    database, memory = await _memory(settings_tmp)
+    notification = await compose_briefing(
+        memory,
+        now_iso="2026-06-21T08:00:00Z",
+        until_iso="2026-06-22T08:00:00Z",
+    )
+    assert "Overnight:" not in notification.body
+    assert "Dreamer:" not in notification.body
+    await database.close()
+
+
 async def test_reminder_and_briefing_paths_are_independent(
     settings_tmp: AprilSettings,
 ) -> None:

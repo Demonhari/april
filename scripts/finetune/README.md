@@ -13,9 +13,12 @@ April Runtime, and states honestly which steps are automated and which are not.
    # → data/evolution/datasets/my-dataset.jsonl
    ```
 
-   The export is a reviewable JSONL file of chat prompt/response pairs and
-   durable memories. Conversations containing any negative feedback are
-   excluded entirely; deleted/superseded/expired memories and
+   The export is a reviewable JSONL file of chat prompt/response pairs, durable
+   memories, and preference pairs (`prompt`, `chosen`, `rejected`) when a
+   bad-rated reply has a real correction reply or a good-rated counterpart to
+   the same prompt. Negative-feedback conversations remain excluded from chat
+   rows; they contribute a preference row only when both sides exist. No chosen
+   response is fabricated. Deleted/superseded/expired memories and
    sensitive-looking content (tokens, keys, passwords) are never exported.
    **Review the file manually before training on it.**
 
@@ -58,10 +61,12 @@ Training does not run inside APRIL: there is no local training loop, no GPU
 assumption, and no network download. On an Intel MacBook Pro the practical
 path is CPU-only and slow — budget hours, not minutes, even for small models.
 
-1. **Convert the dataset** to your trainer's format. The export rows look like
-   `{"type": "chat", "prompt": ..., "response": ...}` — most trainers want a
-   `{"text": "<prompt>\n<response>"}` or chat-template format. Write your own
-   small converter; keep it outside APRIL's runtime.
+1. **Convert the dataset** to your trainer's format. Chat rows look like
+   `{"type": "chat", "prompt": ..., "response": ...}`; preference rows use
+   `{"type": "preference", "prompt": ..., "chosen": ..., "rejected": ...}`.
+   Most supervised trainers want a `{"text": "<prompt>\n<response>"}` or
+   chat-template format, while preference trainers have their own pair schema.
+   Write your own small converter; keep it outside APRIL's runtime.
 
 2. **Train a LoRA adapter** with an external, locally-installed tool.
    Two realistic CPU-only options:

@@ -12,6 +12,7 @@ from services.pool.governor import (
     ResourceSignals,
     ioreg_user_idle_seconds,
     pmset_on_ac_power,
+    vm_stat_available_ram_gb,
 )
 
 PMSET_AC = (
@@ -23,6 +24,15 @@ PMSET_BATTERY = (
     " -InternalBattery-0 (id=1234567)\t93%; discharging; 4:12 remaining present: true\n"
 )
 IOREG_IDLE = '  | |   "HIDParameters" = {"stuff"=1}\n  | |   "HIDIdleTime" = 4500000000\n'
+VM_STAT = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               12,345.
+Pages active:                            98,765.
+Pages inactive:                          23,456.
+Pages speculative:                        1,234.
+Pages throttled:                              0.
+Pages wired down:                        45,678.
+Pages purgeable:                          3,210.
+"""
 
 
 class FixedSignals:
@@ -57,9 +67,22 @@ def test_ioreg_parses_hid_idle_nanoseconds() -> None:
     assert ioreg_user_idle_seconds(_failing_runner) is None
 
 
+def test_vm_stat_parses_apple_silicon_page_size_and_grouped_counts() -> None:
+    expected_pages = 12_345 + 23_456 + 3_210 + 1_234
+    assert vm_stat_available_ram_gb(_fixed_runner({"vm_stat": VM_STAT})) == pytest.approx(
+        (16_384 * expected_pages) / (1024**3)
+    )
+
+
+def test_vm_stat_returns_none_for_malformed_or_failing_probe() -> None:
+    malformed = "Mach Virtual Memory Statistics: (page size unknown)\nPages free: 1.\n"
+    assert vm_stat_available_ram_gb(_fixed_runner({"vm_stat": malformed})) is None
+    assert vm_stat_available_ram_gb(_failing_runner) is None
+
+
 def test_local_provider_darwin_uses_real_probes() -> None:
     provider = LocalResourceSignalProvider(
-        runner=_fixed_runner({"pmset": PMSET_AC, "ioreg": IOREG_IDLE}),
+        runner=_fixed_runner({"vm_stat": VM_STAT, "pmset": PMSET_AC, "ioreg": IOREG_IDLE}),
         platform_system=lambda: "Darwin",
     )
     signals = provider.sample()
@@ -67,6 +90,7 @@ def test_local_provider_darwin_uses_real_probes() -> None:
     assert signals.power_source == "ac"
     assert signals.user_idle_seconds == 4.5
     assert signals.idle_source == "hid"
+    assert signals.ram_source == "vm_stat"
 
 
 def test_local_provider_degrades_safely_on_probe_failure() -> None:
@@ -79,6 +103,7 @@ def test_local_provider_degrades_safely_on_probe_failure() -> None:
     assert signals.power_source == "unknown"
     assert signals.user_idle_seconds == 0.0
     assert signals.idle_source == "unknown"
+    assert signals.ram_source == "unknown"
 
 
 def test_local_provider_non_macos_reports_unknown_sources() -> None:
@@ -187,6 +212,29 @@ def test_background_refused_when_signals_unknown(settings_tmp) -> None:
     assert not decision.allowed
     assert "power_signal_unavailable" in decision.reasons
     assert "idle_signal_unavailable" in decision.reasons
+    assert "ram_signal_unavailable" in decision.reasons
+
+
+def test_unknown_ram_only_advises_resident_and_model_load(settings_tmp) -> None:
+    provider = LocalResourceSignalProvider(
+        runner=_failing_runner,
+        platform_system=lambda: "Darwin",
+    )
+    governor = ResourceGovernor(
+        settings_tmp,
+        provider=provider,
+        policy=ResourcePolicy(min_ram_headroom_gb=64.0, max_cpu_load_percent=100.0),
+    )
+
+    resident = governor.assess_resident()
+    assert resident.allowed
+    assert resident.reasons == ()
+    assert resident.advisories == ("ram_signal_unavailable",)
+
+    model_load = governor.assess_model_load(projected_resident_gb=128.0)
+    assert model_load.allowed
+    assert model_load.reasons == ()
+    assert model_load.advisories == ("ram_signal_unavailable",)
 
 
 def test_resident_ignores_power_and_idle(settings_tmp) -> None:

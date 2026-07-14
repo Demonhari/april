@@ -385,6 +385,7 @@ def test_dataset_export_api_writes_into_fence(settings_tmp) -> None:
     assert response.status_code == 200
     export = response.json()["export"]
     assert export["chat_pairs"] == 0
+    assert export["preference_pairs"] == 0
     exported_path = settings_tmp.evolution_path / "datasets" / "test-dataset.jsonl"
     assert str(exported_path) == export["path"]
     assert exported_path.exists()
@@ -424,6 +425,160 @@ async def test_dataset_export_excludes_negative_and_inactive_rows(settings_tmp) 
         memory_rows = [line for line in lines if line["type"] == "memory"]
         assert [row["memory_id"] for row in memory_rows] == [kept_memory.id]
         assert result.path.resolve().is_relative_to(settings_tmp.evolution_path.resolve())
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dataset_export_builds_preference_pair_from_correction(settings_tmp) -> None:
+    from services.evolution.dataset_export import export_finetune_dataset
+
+    database, memory = await _memory(settings_tmp)
+    try:
+        conversation_id = await memory.create_conversation()
+        await memory.add_message(conversation_id, "user", "What timezone am I in?")
+        await memory.add_message(conversation_id, "assistant", "You are in UTC.")
+        run_id = await memory.record_agent_run(
+            conversation_id=conversation_id,
+            agent="general_agent",
+            status="ok",
+            model_id="april-brain",
+            summary="timezone answer",
+        )
+        await memory.record_feedback_event(
+            rating="bad", conversation_id=conversation_id, agent_run_id=run_id
+        )
+        await memory.add_message(conversation_id, "user", "No, use my local timezone.")
+        await memory.add_message(
+            conversation_id, "assistant", "You are in Asia/Kolkata (UTC+05:30)."
+        )
+
+        result = await export_finetune_dataset(
+            memory, settings_tmp, dataset_name="preference-correction"
+        )
+        rows = [json.loads(line) for line in result.path.read_text(encoding="utf-8").splitlines()]
+        preferences = [row for row in rows if row["type"] == "preference"]
+        assert result.preference_pairs == 1
+        assert preferences == [
+            {
+                "type": "preference",
+                "conversation_id": conversation_id,
+                "prompt": "What timezone am I in?",
+                "chosen": "You are in Asia/Kolkata (UTC+05:30).",
+                "rejected": "You are in UTC.",
+            }
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dataset_export_excludes_sensitive_preference_pair(settings_tmp) -> None:
+    from services.evolution.dataset_export import export_finetune_dataset
+
+    database, memory = await _memory(settings_tmp)
+    try:
+        conversation_id = await memory.create_conversation()
+        await memory.add_message(conversation_id, "user", "My password is hunter2")
+        await memory.add_message(conversation_id, "assistant", "I will remember hunter2.")
+        run_id = await memory.record_agent_run(
+            conversation_id=conversation_id,
+            agent="general_agent",
+            status="ok",
+            model_id="april-brain",
+            summary="unsafe answer",
+        )
+        await memory.record_feedback_event(
+            rating="bad", conversation_id=conversation_id, agent_run_id=run_id
+        )
+        await memory.add_message(conversation_id, "user", "Do not retain it.")
+        await memory.add_message(conversation_id, "assistant", "I will not retain it.")
+
+        result = await export_finetune_dataset(
+            memory, settings_tmp, dataset_name="sensitive-preference"
+        )
+        assert result.preference_pairs == 0
+        assert "hunter2" not in result.path.read_text(encoding="utf-8")
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dataset_export_omits_bad_reply_without_chosen_side(settings_tmp) -> None:
+    from services.evolution.dataset_export import export_finetune_dataset
+
+    database, memory = await _memory(settings_tmp)
+    try:
+        conversation_id = await memory.create_conversation()
+        await memory.add_message(conversation_id, "user", "Summarize this.")
+        await memory.add_message(conversation_id, "assistant", "Incorrect summary.")
+        run_id = await memory.record_agent_run(
+            conversation_id=conversation_id,
+            agent="general_agent",
+            status="ok",
+            model_id="april-brain",
+            summary="summary answer",
+        )
+        await memory.record_feedback_event(
+            rating="bad", conversation_id=conversation_id, agent_run_id=run_id
+        )
+
+        result = await export_finetune_dataset(
+            memory, settings_tmp, dataset_name="no-chosen-preference"
+        )
+        assert result.preference_pairs == 0
+        assert result.path.read_text(encoding="utf-8") == ""
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dataset_export_pairs_same_prompt_good_reply(settings_tmp) -> None:
+    from services.evolution.dataset_export import export_finetune_dataset
+
+    database, memory = await _memory(settings_tmp)
+    try:
+        bad_conversation = await memory.create_conversation()
+        await memory.add_message(bad_conversation, "user", "Give me a concise plan.")
+        await memory.add_message(bad_conversation, "assistant", "A long, incorrect plan.")
+        bad_run = await memory.record_agent_run(
+            conversation_id=bad_conversation,
+            agent="general_agent",
+            status="ok",
+            model_id="april-brain",
+            summary="bad plan",
+        )
+        await memory.record_feedback_event(
+            rating="bad", conversation_id=bad_conversation, agent_run_id=bad_run
+        )
+
+        good_conversation = await memory.create_conversation()
+        await memory.add_message(good_conversation, "user", "Give me a concise plan.")
+        await memory.add_message(good_conversation, "assistant", "1. Focus. 2. Review.")
+        good_run = await memory.record_agent_run(
+            conversation_id=good_conversation,
+            agent="general_agent",
+            status="ok",
+            model_id="april-brain",
+            summary="good plan",
+        )
+        await memory.record_feedback_event(
+            rating="good", conversation_id=good_conversation, agent_run_id=good_run
+        )
+
+        result = await export_finetune_dataset(
+            memory, settings_tmp, dataset_name="same-prompt-preference"
+        )
+        rows = [json.loads(line) for line in result.path.read_text(encoding="utf-8").splitlines()]
+        assert [row for row in rows if row["type"] == "preference"] == [
+            {
+                "type": "preference",
+                "conversation_id": bad_conversation,
+                "prompt": "Give me a concise plan.",
+                "chosen": "1. Focus. 2. Review.",
+                "rejected": "A long, incorrect plan.",
+            }
+        ]
     finally:
         await database.close()
 

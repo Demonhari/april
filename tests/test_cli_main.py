@@ -96,7 +96,13 @@ class FakeApiClient:
         if path == "/evolution/on":
             return {"kill_switch_active": False}
         if path == "/evolution/dataset/export":
-            return {"export": {"path": "dataset.jsonl", "chat_pairs": 0}}
+            return {
+                "export": {
+                    "path": "dataset.jsonl",
+                    "chat_pairs": 0,
+                    "preference_pairs": 0,
+                }
+            }
         if path == "/evolution/overlays/approve":
             return {"approval": {"status": "applied", **payload}}
         if path == "/evolution/evals/promote":
