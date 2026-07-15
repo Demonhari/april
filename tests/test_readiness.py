@@ -498,7 +498,7 @@ def test_speaker_gate_detail_is_honest_about_enroll(tmp_path: Path) -> None:
     assert "Anyone near the microphone can wake APRIL." in gate.detail
 
 
-def test_soft_speaker_gate_reports_operator_verifier_blocker(tmp_path: Path) -> None:
+def test_soft_speaker_gate_reports_operator_model_blocker(tmp_path: Path) -> None:
     home = _write_home(
         tmp_path,
         extra={"wake": {"enabled": True, "speaker_gate": "soft"}},
@@ -507,8 +507,38 @@ def test_soft_speaker_gate_reports_operator_verifier_blocker(tmp_path: Path) -> 
     gate = _check(report, "speaker gate")
     assert gate is not None
     assert gate.status == "warning"
-    assert "SpeakerVerifier" in gate.detail
+    assert "wake.speaker_verifier_model_path" in gate.detail
+    assert "scripts/speaker_verifier/README.md" in gate.detail
     assert "degrades to off" in gate.detail
+
+
+def test_soft_speaker_gate_supported_only_with_model_and_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "models" / "speaker-model.stub"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"test stub, readiness never loads it")
+    home = _write_home(
+        tmp_path,
+        extra={
+            "wake": {
+                "enabled": True,
+                "speaker_gate": "soft",
+                "speaker_verifier_model_path": "models/speaker-model.stub",
+            }
+        },
+    )
+    monkeypatch.setattr("services.wake.speaker.onnxruntime_importable", lambda: True)
+
+    supported = build_readiness_report(home)
+
+    assert supported.speaker_gate_supported is True
+    assert _check(supported, "speaker gate").status == "ok"
+
+    monkeypatch.setattr("services.wake.speaker.onnxruntime_importable", lambda: False)
+    unsupported = build_readiness_report(home)
+    assert unsupported.speaker_gate_supported is False
+    assert "onnxruntime" in _check(unsupported, "speaker gate").detail
 
 
 def test_missing_lora_adapter_is_a_blocker_and_present_adapter_warns(tmp_path: Path) -> None:

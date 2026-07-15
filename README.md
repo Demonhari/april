@@ -204,13 +204,13 @@ real models, live audio, or native Mac packaging.
 | Ladder thresholds, gated threshold overlays, council mode, reminder reflex | Implemented, fake-backend tested |
 | Real GGUF model load/chat/stream/unload | Implemented; verified only by target-Mac `--require-real-model` reports with local GGUFs |
 | Live microphone, whisper.cpp, Piper, wake-word | **Not verified here** — requires your local binaries/models |
-| Speaker soft gate | **Blocked** — enrollment records samples only; needs a local speaker-verifier ONNX before `wake.speaker_gate` can support anything except `off` |
+| Speaker soft gate | Adapter/runbook implemented; target Mac still needs an operator-supplied local speaker-embedding ONNX |
 | Real-model target-Mac acceptance report | Implemented; runs real checks only when you supply a GGUF |
 | Signed/notarized packaging, launch-at-login | Out of scope (see below) |
 
 Production blockers are explicit, not hidden by fake tests: GGUF files are not
-committed, no wake-word ONNX model ships in the repo, `wake.speaker_gate` only
-supports `off` until a real local speaker-verifier ONNX exists, LoRA training
+committed, no wake-word or speaker-embedding ONNX model ships in the repo,
+`wake.speaker_gate: soft` degrades to off until its configured local model loads, LoRA training
 remains a manual local runbook, and a fake-backend verification is never
 production readiness.
 
@@ -1382,11 +1382,12 @@ Only one terminal controller lease is accepted at a time. If autostart is
 enabled, attachment waits for bounded Core API health and reports the daemon log
 and status paths on timeout.
 
-**Speaker gating is blocked on a real local verifier.** `wake.speaker_gate`
-accepts `off` and `soft`, but `soft` truthfully remains degraded/blocked because
-no production local verifier or verifier model ships with APRIL. `april voice
-enroll` records local enrollment samples for a future soft gate; samples are not
-a voiceprint, and enrollment never claims verification or changes wake behavior.
+**Speaker gating needs an operator-supplied local model.** `wake.speaker_gate`
+accepts `off` and `soft`, and APRIL ships the bounded local ONNX adapter plus
+`scripts/speaker_verifier/README.md`. No embedding model ships with APRIL. Until
+`wake.speaker_verifier_model_path` names a compatible model, soft mode emits one
+audited degradation and behaves as off. `april voice enroll` records local
+samples; enrollment alone never claims verification or changes wake behavior.
 
 `run april voice verify-live` is the explicit live hardware check. It runs voice
 doctor, prints macOS microphone permission guidance, asks before recording a
@@ -1474,7 +1475,8 @@ unused (confidence shrinks; low-confidence rows start *fading* with a future
 **Self-evolution (Dreamer) controls.** The nightly Dreamer stays OFF by default
 and is additionally gated by AC power (`pmset`), user idleness (`ioreg`
 HIDIdleTime), a wall-clock budget (`evolution.max_minutes`), and a local kill
-switch:
+switch. By default, the same governor is rechecked between phases; if the Mac
+becomes busy, remaining work phases pause while D6 still records the reason:
 
 ```bash
 april evolve status            # enabled, kill switch, last run, overlay counts
@@ -1698,7 +1700,8 @@ milestones rather than hidden gaps:
 - cloud sync, telemetry, and any automatic model downloading
 - signed/notarized macOS application packaging and launch-at-login
 - external connectors
-- a speaker-verifier model (`wake.speaker_gate` remains `off` only)
+- a target-Mac speaker-embedding model (the adapter/runbook ship; soft mode
+  degrades to off until the operator supplies and validates the model)
 - automatic LoRA training (the supervised local runbook remains manual)
 - Governor thread throttling
 - a dedicated SPA adapters screen

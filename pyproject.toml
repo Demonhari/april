@@ -31,6 +31,8 @@ desktop = ["pywebview>=5.0"]
 voice = [
   "sounddevice>=0.4.7",
   "openwakeword>=0.6.0",
+  # Needed only for the optional local speaker gate.
+  "onnxruntime>=1.18.0",
 ]
 dev = [
   "pytest>=8.3.0",

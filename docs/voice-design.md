@@ -90,7 +90,7 @@ downloads or trains one, and `voice doctor` says so explicitly. These paths are
 verified with synthetic PCM, a fake microphone, and mocked input only; a live
 microphone, whisper.cpp, Piper, and openWakeWord are not exercised here.
 
-## Speaker gate (soft interface; real model operator blocker)
+## Speaker gate (local adapter; real model operator blocker)
 
 `wake.speaker_gate` accepts `off | soft` and defaults to `off`. Soft mode is a
 convenience filter after wake confirmation and before earcon/delivery. It is
@@ -106,15 +106,20 @@ def score(enrollment: Sequence[Path], utterance: bytes) -> float: ...
 `enrollment` contains operator-owned WAV samples under `data/voice_profiles/`;
 `utterance` is bounded 16-bit mono PCM from Sentinel's existing ring buffer. A
 score of at least 0.5 passes. Tests inject the deterministic
-`FakeSpeakerVerifier`; production code does not import that fake.
+`FakeSpeakerVerifier`; production code does not import that fake. The shipped
+`OnnxSpeakerVerifier` accepts a configured raw-waveform embedding ONNX, compares
+the utterance with the mean enrollment embedding by cosine similarity, and maps
+the result to `[0, 1]`.
 
 APRIL does not ship, download, or pretend to provide a speaker-embedding ONNX.
-An operator must supply a genuinely local verifier adapter/model and validate it
-on the target Mac. Until then, configuring `soft` causes Sentinel to write one
-audited startup warning and behave as `off`, without crashing or blocking wake.
-A verifier error degrades the same way. A real non-match is dropped silently and
-audited with `reason: speaker_gate`. `april voice enroll` only records samples;
-it never enables the gate or claims that a verifier model exists.
+An operator must supply a genuinely local model through
+`wake.speaker_verifier_model_path` and validate it on the target Mac; the manual
+steps and model contract are in `scripts/speaker_verifier/README.md`. Until then,
+configuring `soft` causes Sentinel to write one audited startup warning and
+behave as `off`, without crashing or blocking wake. A verifier error degrades the
+same way. A real non-match is dropped silently and audited with
+`reason: speaker_gate`. `april voice enroll` only records samples; it never
+enables the gate or claims that a verifier model exists.
 
 ## Live verification
 

@@ -386,12 +386,14 @@ def test_top_level_listen_flag_uses_terminal_session_handoff(monkeypatch) -> Non
 def test_speaker_gate_supports_off_and_soft() -> None:
     import pytest
 
-    from april_common.settings import WakeSettings
+    from april_common.settings import EvolutionSettings, WakeSettings
 
     assert WakeSettings().speaker_gate == "off"
     # YAML 1.1 parses an unquoted `off` as False; it must still mean "off".
     assert WakeSettings(speaker_gate=False).speaker_gate == "off"
     assert WakeSettings(speaker_gate="soft").speaker_gate == "soft"
+    assert WakeSettings().speaker_verifier_model_path is None
+    assert EvolutionSettings().recheck_governor_between_phases is True
     with pytest.raises(ValueError, match="speaker_gate must be off or soft"):
         WakeSettings(speaker_gate="hard")
 

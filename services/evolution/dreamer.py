@@ -36,6 +36,7 @@ from services.evolution.versions import (
 from services.evolution.write_guard import EvolutionDatabaseWriter, EvolutionWriteGuard
 from services.memory.repository import MemoryRepository
 from services.memory.sqlite_memory import SqliteMemory
+from services.pool.governor import ResourceGovernor
 
 DREAMER_PHASES = ("replay", "distill", "mine", "evolve", "examine", "report")
 
@@ -64,6 +65,7 @@ class DreamerService:
         *,
         memory: SqliteMemory,
         gate: EvolutionSchedulerGate,
+        governor: ResourceGovernor | None = None,
         audit: AuditLogger | None = None,
         guard: EvolutionWriteGuard | None = None,
         overlay_manager: PromptOverlayManager | None = None,
@@ -76,6 +78,7 @@ class DreamerService:
         self.settings = settings
         self.memory = memory
         self.gate = gate
+        self.governor = governor or gate.governor
         self.audit = audit
         self.guard = guard or EvolutionWriteGuard(settings, audit=audit)
         self.database_writer = EvolutionDatabaseWriter(memory.database, self.guard)
@@ -122,7 +125,8 @@ class DreamerService:
                 lambda: self._phase_examine(candidates or [], run_id=run_id),
             ),
         ]
-        for name, phase_factory in work_phases:
+        paused_reason: str | None = None
+        for phase_index, (name, phase_factory) in enumerate(work_phases):
             elapsed = self.clock() - started
             if elapsed >= budget_seconds:
                 # The wall-clock budget is enforced between phases: a phase in
@@ -133,6 +137,25 @@ class DreamerService:
                     f"(evolution.max_minutes={self.settings.evolution.max_minutes})",
                 }
                 self._audit("dreamer_phase_skipped_budget", run_id=run_id, detail=name)
+                continue
+            if (
+                phase_index > 0
+                and paused_reason is None
+                and self.settings.evolution.recheck_governor_between_phases
+            ):
+                # Like the wall-clock budget, governor policy is checked only
+                # between phases. Work already in flight is never interrupted.
+                governor_decision = self.governor.assess_background()
+                if not governor_decision.allowed:
+                    joined_reasons = ",".join(governor_decision.reasons)
+                    paused_reason = f"resource governor paused cycle: {joined_reasons}"
+                    self._audit(
+                        "dream_cycle_paused_mid_run",
+                        run_id=run_id,
+                        detail=joined_reasons,
+                    )
+            if paused_reason is not None:
+                phases[name] = {"status": "skipped", "reason": paused_reason}
                 continue
             remaining = max(0.0, budget_seconds - elapsed)
             result = await self._run_phase(
@@ -524,11 +547,13 @@ async def run_standalone(settings: AprilSettings, now: datetime) -> DreamerRunRe
         await run_migrations(database)
         memory = SqliteMemory(database)
         audit = AuditLogger(settings.audit_path)
-        gate = EvolutionSchedulerGate(settings, memory, governor=ResourceGovernor(settings))
+        governor = ResourceGovernor(settings)
+        gate = EvolutionSchedulerGate(settings, memory, governor=governor)
         dreamer = DreamerService(
             settings,
             memory=memory,
             gate=gate,
+            governor=governor,
             audit=audit,
             nice_applier=process_nice_applier,
             # Loopback-only local runtime; used solely for real-runtime evals.

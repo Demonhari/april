@@ -66,6 +66,22 @@ def test_default_applies_without_env_or_yaml(
     assert settings.api.token == "local-dev-token"
 
 
+def test_speaker_model_and_governor_recheck_env_mappings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "APRIL_WAKE_SPEAKER_VERIFIER_MODEL_PATH",
+        "models/speaker/operator.onnx",
+    )
+    monkeypatch.setenv("APRIL_EVOLUTION_RECHECK_GOVERNOR_BETWEEN_PHASES", "false")
+
+    settings = load_settings(root=tmp_path)
+
+    assert settings.wake.speaker_verifier_model_path == Path("models/speaker/operator.onnx")
+    assert settings.evolution.recheck_governor_between_phases is False
+
+
 def test_quoted_and_export_dotenv_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _isolate(monkeypatch, tmp_path)
     _write(

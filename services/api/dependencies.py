@@ -210,6 +210,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         active_settings,
         memory=memory,
         gate=EvolutionSchedulerGate(active_settings, memory, governor=governor),
+        governor=governor,
         audit=audit,
         runtime_client=runtime_client,
         memory_repository=memory_repository,

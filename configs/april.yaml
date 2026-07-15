@@ -76,14 +76,20 @@ wake:
   candidate_threshold: 0.35
   accept_threshold: 0.70
   confirm_with_stt: true
+  # With STT confirmation enabled, true lets scores >= accept_threshold wake
+  # immediately; false sends every candidate through local STT confirmation.
+  instant_accept: true
   ring_buffer_seconds: 10
   follow_up_seconds: 8
   earcon_enabled: true
   strict_address: false
   # Convenience filter only, never authentication. "soft" requires an
-  # operator-provided local SpeakerVerifier model; absent one, Sentinel audits a
-  # warning once and safely behaves as "off".
+  # operator-provided local raw-waveform speaker-embedding ONNX; absent or
+  # unloadable, Sentinel audits one warning and safely behaves as "off".
   speaker_gate: "off"
+  # Model binaries are operator-supplied and never downloaded by APRIL. See
+  # scripts/speaker_verifier/README.md for the required ONNX input contract.
+  speaker_verifier_model_path: null
 
 # Cross-surface session continuity: a wake (voice/terminal/desktop/hotkey/socket)
 # within continuity_minutes of the last activity joins the existing conversation.
@@ -117,6 +123,9 @@ evolution:
   window: "02:30-06:00"
   require_ac_power: true
   max_minutes: 90
+  # Reassess background-work policy between D1-D5 work phases. A busy machine
+  # pauses remaining work but D6 still writes an honest report.
+  recheck_governor_between_phases: true
   daily_memory_cap: 30
   prompt_overlay_max_chars: 1200
   model_drafted_overlays: false

@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 import anyio
 import pytest
@@ -22,6 +23,7 @@ from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
 from services.pool.governor import ResourceGovernor, ResourcePolicy, ResourceSignals
+from services.scheduler.briefing import format_evolution_report
 from tests.test_core_api import auth, make_container
 
 
@@ -31,6 +33,17 @@ class FixedSignals:
 
     def sample(self) -> ResourceSignals:
         return self.signals
+
+
+class SequenceSignals:
+    def __init__(self, signals: list[ResourceSignals]) -> None:
+        self.signals = signals
+        self.calls = 0
+
+    def sample(self) -> ResourceSignals:
+        index = min(self.calls, len(self.signals) - 1)
+        self.calls += 1
+        return self.signals[index]
 
 
 def _permissive_governor(settings) -> ResourceGovernor:
@@ -126,6 +139,91 @@ async def test_dreamer_wall_clock_budget_skips_late_phases(settings_tmp) -> None
             assert "wall clock budget" in report["phases"][name]["reason"]
         assert {item["phase"] for item in report["skipped_phases"]} == set(skipped)
         assert all("wall clock budget" in item["reason"] for item in report["skipped_phases"])
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dreamer_pauses_between_phases_when_governor_flips(settings_tmp) -> None:
+    enabled = _enabled_settings(settings_tmp)
+    database, memory = await _memory(enabled)
+    allowed = ResourceSignals(12.0, 5.0, True, 600.0)
+    busy = ResourceSignals(12.0, 95.0, True, 0.0)
+    signals = SequenceSignals([allowed, busy])
+    governor = ResourceGovernor(
+        enabled,
+        provider=signals,
+        policy=ResourcePolicy(min_ram_headroom_gb=1.0, max_cpu_load_percent=90.0),
+    )
+    audit = AuditLogger(enabled.audit_path)
+    try:
+        gate = EvolutionSchedulerGate(enabled, memory, governor=governor)
+        service = DreamerService(
+            enabled,
+            memory=memory,
+            gate=gate,
+            governor=governor,
+            audit=audit,
+        )
+
+        result = await service.run_once(datetime(2026, 7, 3, 2, 30, tzinfo=UTC))
+
+        assert result.status == "completed"
+        assert result.report_path is not None
+        report = json.loads(Path(result.report_path).read_text(encoding="utf-8"))
+        assert report["phase_statuses"]["replay"] == "completed"
+        for phase in ("distill", "mine", "evolve", "examine"):
+            assert report["phase_statuses"][phase] == "skipped"
+            assert "cpu_load_above_policy,user_not_idle" in report["phases"][phase]["reason"]
+        assert {item["phase"] for item in report["skipped_phases"]} == {
+            "distill",
+            "mine",
+            "evolve",
+            "examine",
+        }
+        assert "Dreamer paused between phases" in format_evolution_report(report)
+        audit_text = enabled.audit_path.read_text(encoding="utf-8")
+        assert audit_text.count("dream_cycle_paused_mid_run") == 1
+        assert signals.calls == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dreamer_governor_recheck_flag_false_preserves_phase_behavior(
+    settings_tmp,
+) -> None:
+    enabled = _enabled_settings(settings_tmp, recheck_governor_between_phases=False)
+    database, memory = await _memory(enabled)
+    allowed = ResourceSignals(12.0, 5.0, True, 600.0)
+    busy = ResourceSignals(12.0, 95.0, True, 0.0)
+    signals = SequenceSignals([allowed, busy])
+    governor = ResourceGovernor(
+        enabled,
+        provider=signals,
+        policy=ResourcePolicy(min_ram_headroom_gb=1.0, max_cpu_load_percent=90.0),
+    )
+    try:
+        gate = EvolutionSchedulerGate(enabled, memory, governor=governor)
+        service = DreamerService(
+            enabled,
+            memory=memory,
+            gate=gate,
+            governor=governor,
+            audit=AuditLogger(enabled.audit_path),
+        )
+
+        result = await service.run_once(datetime(2026, 7, 3, 2, 30, tzinfo=UTC))
+
+        assert result.report_path is not None
+        report = json.loads(Path(result.report_path).read_text(encoding="utf-8"))
+        assert all(
+            report["phase_statuses"][phase] == "completed"
+            for phase in ("replay", "distill", "mine", "evolve", "examine")
+        )
+        assert report["skipped_phases"] == []
+        assert "dream_cycle_paused_mid_run" not in enabled.audit_path.read_text(encoding="utf-8")
+        assert signals.calls == 1
     finally:
         await database.close()
 

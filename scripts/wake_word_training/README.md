@@ -96,9 +96,8 @@ generated locally.
 
 ## Known blocker: speaker verification (speaker gate)
 
-`wake.speaker_gate` currently supports only `"off"`. `april voice enroll`
-records local enrollment samples under `data/voice_profiles/`, but no local
-speaker-verification model ships with APRIL, so enrollment does not change wake
-behaviour yet. Do not enable any speaker-gate value other than `off`; the
-config validator rejects it by design until a real local verifier is
-integrated.
+`wake.speaker_gate` supports `"off"` and `"soft"`. APRIL ships the local verifier
+adapter but not a speaker-embedding model. `april voice enroll` records local
+enrollment samples under `data/voice_profiles/`, but enrollment alone does not
+change wake behaviour. Follow `scripts/speaker_verifier/README.md` to supply and
+validate a compatible local ONNX before enabling `soft`.

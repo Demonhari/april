@@ -20,12 +20,17 @@ from services.wake.confirmer import SttConfirmer, strip_vocative
 from services.wake.control import SentinelControlServer, sentinel_control_path
 from services.wake.ring_buffer import AudioRingBuffer
 from services.wake.schemas import WakeEvent
-from services.wake.speaker import SPEAKER_MATCH_THRESHOLD, SpeakerVerifier
+from services.wake.speaker import (
+    SPEAKER_MATCH_THRESHOLD,
+    OnnxSpeakerVerifier,
+    SpeakerVerifier,
+)
 from services.wake.status import WakeListeningState, write_wake_status
 
 logger = logging.getLogger(__name__)
 
 WakeDelivery = Callable[[WakeEvent], Awaitable[None]]
+SpeakerVerifierFactory = Callable[[Path], SpeakerVerifier]
 
 
 class AuditSink(Protocol):
@@ -578,6 +583,28 @@ def build_scorers(settings: AprilSettings) -> list[WakeScorer]:
     return scorers
 
 
+def configured_speaker_verifier(
+    settings: AprilSettings,
+    *,
+    factory: SpeakerVerifierFactory = OnnxSpeakerVerifier,
+) -> tuple[SpeakerVerifier | None, str | None]:
+    """Build the optional soft speaker gate or return its audited degrade reason."""
+    if settings.wake.speaker_gate != "soft":
+        return None, None
+    configured_path = settings.wake.speaker_verifier_model_path
+    if configured_path is None:
+        return None, "local_verifier_unavailable"
+    model_path = settings.resolve_path(configured_path)
+    if not model_path.is_file():
+        return None, "model_missing"
+    try:
+        return factory(model_path), None
+    except ImportError:
+        return None, "onnxruntime_unavailable"
+    except Exception:
+        return None, "model_load_failed"
+
+
 async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = None) -> None:
     """Production entry point: real microphone, wake models, STT confirmation.
 
@@ -655,6 +682,8 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
         if sentinel_ref is not None:
             sentinel_ref.notify_assistant_response()
 
+    audit = AuditLogger(settings.audit_path)
+    speaker_verifier, speaker_degrade_reason = configured_speaker_verifier(settings)
     delivery = ApiWakeDelivery(
         base_url=f"http://{settings.api.host}:{settings.api.port}",
         token=settings.api.token,
@@ -672,12 +701,13 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
         confirmer=confirmer,
         transcriber=stt,
         player=player,
-        # No production verifier model ships with APRIL. In soft mode Sentinel
-        # records one degraded warning and behaves as off until an operator
-        # supplies a local adapter implementing SpeakerVerifier.
-        speaker_verifier=None,
-        audit=AuditLogger(settings.audit_path),
+        # This remains a convenience filter only. A missing or unloadable local
+        # model degrades to off and can never affect permissions or identity.
+        speaker_verifier=speaker_verifier,
+        audit=audit,
     )
+    if speaker_degrade_reason is not None:
+        sentinel._degrade_speaker_gate(speaker_degrade_reason)
     if tts is None:
         sentinel._audit(
             {

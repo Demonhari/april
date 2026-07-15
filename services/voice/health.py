@@ -77,6 +77,39 @@ def _openwakeword_health(available: bool, *, wake_word_configured: bool) -> Voic
     )
 
 
+def _speaker_verifier_health(settings: AprilSettings) -> VoiceComponentHealth:
+    from services.wake.speaker import onnxruntime_importable
+
+    configured_path = settings.wake.speaker_verifier_model_path
+    if configured_path is None:
+        return VoiceComponentHealth(
+            name="speaker verifier",
+            status="degraded",
+            message=(
+                "wake.speaker_verifier_model_path is not configured; see "
+                "scripts/speaker_verifier/README.md."
+            ),
+        )
+    model_path = settings.resolve_path(configured_path)
+    if not model_path.is_file():
+        return VoiceComponentHealth(
+            name="speaker verifier",
+            status="degraded",
+            message=f"Configured local ONNX is missing: {model_path}",
+        )
+    if not onnxruntime_importable():
+        return VoiceComponentHealth(
+            name="speaker verifier",
+            status="degraded",
+            message="onnxruntime is unavailable; install APRIL's optional voice extra.",
+        )
+    return VoiceComponentHealth(
+        name="speaker verifier",
+        status="ok",
+        message=f"Configured local ONNX: {model_path}",
+    )
+
+
 def _audio_cache_health(settings: AprilSettings) -> VoiceComponentHealth:
     path = settings.audio_cache_path
     try:
@@ -133,16 +166,7 @@ def voice_health(settings: AprilSettings) -> VoiceHealth:
             )
         )
     if settings.wake.speaker_gate == "soft":
-        components.append(
-            VoiceComponentHealth(
-                name="speaker verifier",
-                status="degraded",
-                message=(
-                    "No production local verifier/model is configured; enrollment samples "
-                    "do not constitute a voiceprint."
-                ),
-            )
-        )
+        components.append(_speaker_verifier_health(settings))
     status = "ok" if all(component.status == "ok" for component in components) else "degraded"
     return VoiceHealth(status=status, components=components)
 
@@ -473,16 +497,7 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
             )
         )
     if settings.wake.speaker_gate == "soft":
-        components.append(
-            VoiceComponentHealth(
-                name="speaker verifier",
-                status="degraded",
-                message=(
-                    "No production local verifier/model is configured; enrollment "
-                    "samples are not a voiceprint."
-                ),
-            )
-        )
+        components.append(_speaker_verifier_health(settings))
     degraded = [component for component in components if component.status == "degraded"]
     return {
         "status": "degraded" if degraded else "ok",

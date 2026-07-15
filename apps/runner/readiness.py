@@ -536,22 +536,58 @@ def build_readiness_report(home: Path) -> ReadinessReport:
 
     wake_enabled = settings.wake.enabled
     speaker_soft = settings.wake.speaker_gate == "soft"
+    speaker_model_path = settings.wake.speaker_verifier_model_path
+    speaker_model_configured = speaker_model_path is not None
+    speaker_model_exists = bool(
+        speaker_model_path is not None and settings.resolve_path(speaker_model_path).is_file()
+    )
+    if speaker_soft and speaker_model_exists:
+        from services.wake.speaker import onnxruntime_importable
+
+        speaker_runtime_available = onnxruntime_importable()
+    else:
+        speaker_runtime_available = False
+    speaker_gate_supported = bool(
+        speaker_soft
+        and speaker_model_configured
+        and speaker_model_exists
+        and speaker_runtime_available
+    )
+    if speaker_gate_supported:
+        speaker_detail = (
+            "speaker_gate=soft has a configured local ONNX model and ONNX Runtime is "
+            "importable. Live scoring still requires target-Mac validation."
+        )
+    elif speaker_soft and not speaker_model_configured:
+        speaker_detail = (
+            "speaker_gate=soft is configured without "
+            "wake.speaker_verifier_model_path; Sentinel degrades to off with one audited "
+            "warning. Follow scripts/speaker_verifier/README.md."
+        )
+    elif speaker_soft and not speaker_model_exists:
+        speaker_detail = (
+            "wake.speaker_verifier_model_path does not name an existing local file; "
+            "Sentinel degrades to off with one audited warning. Follow "
+            "scripts/speaker_verifier/README.md."
+        )
+    elif speaker_soft:
+        speaker_detail = (
+            "The optional onnxruntime dependency is not importable; Sentinel degrades "
+            "to off with one audited warning. Install APRIL's voice extra and follow "
+            "scripts/speaker_verifier/README.md."
+        )
+    else:
+        speaker_detail = (
+            "speaker_gate is off. `april voice enroll` records local samples but does "
+            "not enable soft mode by itself. Configure wake.speaker_verifier_model_path "
+            "as described in scripts/speaker_verifier/README.md before enabling it."
+        )
     checks.append(
         ReadinessCheck(
             name="speaker gate",
-            # The control path exists, but a real local verifier model remains an
-            # operator-provided blocker. Soft mode fails open by design because
-            # it is only a convenience filter, never authentication.
-            status="warning" if wake_enabled else "skipped",
+            status=("ok" if speaker_gate_supported else "warning") if wake_enabled else "skipped",
             detail=(
-                (
-                    "speaker_gate=soft is configured, but no production local speaker "
-                    "verifier model ships with APRIL. Sentinel degrades to off with one "
-                    "audited warning until an operator supplies SpeakerVerifier."
-                    if speaker_soft
-                    else "speaker_gate is off. `april voice enroll` records local samples "
-                    "but does not enable soft mode by itself."
-                )
+                speaker_detail
                 + " The speaker gate is a convenience filter, never a security boundary."
                 + (" Anyone near the microphone can wake APRIL." if wake_enabled else "")
             ),
@@ -760,7 +796,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         api_token_status=api_status,
         runtime_token_status=runtime_status,
         speaker_gate=settings.wake.speaker_gate,
-        speaker_gate_supported=False,
+        speaker_gate_supported=speaker_gate_supported,
         daemon_status=daemon_status,
         daemon_details_available=daemon_details_available,
         sentinel_live_status=sentinel_live_status,

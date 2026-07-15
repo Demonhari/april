@@ -142,12 +142,18 @@ native packaging.
   fake-tested wake routing, feedback verbs, generated earcon plumbing, and
   `idle | listening | muted` status. Live wake-word still requires a local
   openWakeWord ONNX and `run april voice verify-wake-live`. The speaker gate
-  accepts `off | soft`; soft mode is fake-tested through the local
-  `SpeakerVerifier` protocol, silently drops non-matches with an audit event,
-  and degrades to off with one audited startup warning when no verifier is
-  available. No real verifier model ships with APRIL, so operator-provided local
-  speaker embeddings remain a target-Mac blocker. This filter is convenience
-  only, never authentication or a permission boundary.
+  accepts `off | soft`; the shipped `OnnxSpeakerVerifier` scores bounded local
+  PCM through an operator-configured raw-waveform embedding ONNX, silently drops
+  non-matches with an audit event, and degrades to off with one audited warning
+  when the model or optional runtime is unavailable. The manual setup runbook is
+  `scripts/speaker_verifier/README.md`. No embedding model ships with APRIL, so
+  supplying and validating that model remains a target-Mac blocker. This filter
+  is convenience only, never authentication or a permission boundary.
+- **Dreamer pauses between phases when the Mac becomes busy.** With
+  `evolution.recheck_governor_between_phases` enabled, the same Resource Governor
+  used at entry is consulted between D1-D5 work phases. A denial skips the
+  remaining work phases with an audited reason while D6 still writes the report
+  and morning briefing line.
 - **Governor generation threads: implemented at model-load granularity.** The
   injected activity/idle policy selects 6 threads for an active or unknown user
   signal and 8 for a trusted idle signal. Core orchestration transports the
@@ -172,9 +178,10 @@ native packaging.
   email, payments, automatic model downloads, telemetry, cloud APIs, or broad
   delete. The only file-removing flow is the scoped, Level-4 approval-gated
   log/cache cleanup.
-- **Remaining v2 operator blockers are explicit.** No production
-  speaker-verifier model is present (soft-mode interface/fallback is implemented
-  and fake-tested), and LoRA training remains a supervised manual runbook.
+- **Remaining v2 operator blockers are explicit.** The production speaker
+  verifier adapter and manual runbook ship, but no speaker-embedding model is
+  present; the operator must supply and validate one on the target Mac. LoRA
+  training remains a supervised manual runbook.
   Governor load-time thread throttling and the dedicated SPA Adapters screen are
   implemented; neither claims target-Mac model quality or hardware validation.
 

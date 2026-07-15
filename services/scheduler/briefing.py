@@ -165,6 +165,22 @@ def format_evolution_report(evolution_report: Mapping[str, object]) -> str:
     if awaiting is not None:
         parts.append(f"{awaiting} overlay candidates awaiting approval")
 
+    skipped_phases = [
+        (str(name), _mapping(payload))
+        for name, payload in phases.items()
+        if _mapping(payload).get("status") == "skipped"
+    ]
+    paused = next(
+        (
+            _notification_text(payload.get("reason", ""), limit=120)
+            for _, payload in skipped_phases
+            if "resource governor paused cycle" in str(payload.get("reason", ""))
+        ),
+        "",
+    )
+    if paused:
+        parts.append(f"Dreamer paused between phases ({paused})")
+
     paragraph = "Overnight: " + ("; ".join(parts) if parts else "Dreamer completed") + "."
     if len(paragraph) > _MAX_OVERNIGHT_CHARS:
         paragraph = paragraph[: _MAX_OVERNIGHT_CHARS - 3].rstrip() + "..."

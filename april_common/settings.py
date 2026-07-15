@@ -163,6 +163,7 @@ class WakeSettings(BaseModel):
     earcon_enabled: bool = True
     strict_address: bool = False
     speaker_gate: str = "off"
+    speaker_verifier_model_path: Path | None = None
 
     @field_validator("speaker_gate", mode="before")
     @classmethod
@@ -228,6 +229,7 @@ class EvolutionSettings(BaseModel):
     window: str = "02:30-06:00"
     require_ac_power: bool = True
     max_minutes: int = Field(default=90, ge=1, le=24 * 60)
+    recheck_governor_between_phases: bool = True
     daily_memory_cap: int = Field(default=30, ge=0)
     # Archive reflection candidates below this confidence are discarded
     # (architecture default: 0.5).
@@ -460,6 +462,10 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_WAKE_EARCON_ENABLED": ("wake", "earcon_enabled"),
     "APRIL_WAKE_STRICT_ADDRESS": ("wake", "strict_address"),
     "APRIL_WAKE_SPEAKER_GATE": ("wake", "speaker_gate"),
+    "APRIL_WAKE_SPEAKER_VERIFIER_MODEL_PATH": (
+        "wake",
+        "speaker_verifier_model_path",
+    ),
     "APRIL_SESSION_CONTINUITY_MINUTES": ("session", "continuity_minutes"),
     "APRIL_DAEMON_AUTOSTART_ON_CLI": ("daemon", "autostart_on_cli"),
     "APRIL_GOVERNOR_MAX_RESIDENT_GB": ("governor", "max_resident_gb"),
@@ -476,6 +482,10 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_EVOLUTION_WINDOW": ("evolution", "window"),
     "APRIL_EVOLUTION_REQUIRE_AC_POWER": ("evolution", "require_ac_power"),
     "APRIL_EVOLUTION_MAX_MINUTES": ("evolution", "max_minutes"),
+    "APRIL_EVOLUTION_RECHECK_GOVERNOR_BETWEEN_PHASES": (
+        "evolution",
+        "recheck_governor_between_phases",
+    ),
     "APRIL_EVOLUTION_DAILY_MEMORY_CAP": ("evolution", "daily_memory_cap"),
     "APRIL_EVOLUTION_PROMPT_OVERLAY_MAX_CHARS": ("evolution", "prompt_overlay_max_chars"),
     "APRIL_EVOLUTION_MODEL_DRAFTED_OVERLAYS": ("evolution", "model_drafted_overlays"),

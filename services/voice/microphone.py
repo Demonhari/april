@@ -36,6 +36,36 @@ def write_pcm_wav(
     return output_path
 
 
+def read_pcm_wav(
+    input_path: Path,
+    *,
+    sample_rate: int = 16_000,
+    channels: int = 1,
+    max_frames: int | None = None,
+) -> bytes:
+    """Read a bounded uncompressed 16-bit PCM WAV with an exact audio format."""
+    try:
+        with wave.open(str(input_path), "rb") as wav:
+            frame_count = wav.getnframes()
+            if wav.getnchannels() != channels:
+                raise ValueError(f"WAV must have exactly {channels} channel(s).")
+            if wav.getsampwidth() != 2:
+                raise ValueError("WAV must contain 16-bit PCM samples.")
+            if wav.getframerate() != sample_rate:
+                raise ValueError(f"WAV sample rate must be {sample_rate} Hz.")
+            if wav.getcomptype() != "NONE":
+                raise ValueError("WAV must contain uncompressed PCM audio.")
+            if max_frames is not None and frame_count > max_frames:
+                raise ValueError(f"WAV exceeds the maximum of {max_frames} audio frames.")
+            pcm = wav.readframes(frame_count)
+    except (OSError, EOFError, wave.Error) as exc:
+        raise ValueError(f"Invalid WAV file: {input_path}") from exc
+    expected_bytes = frame_count * channels * 2
+    if len(pcm) != expected_bytes:
+        raise ValueError(f"WAV contains incomplete PCM data: {input_path}")
+    return pcm
+
+
 class Microphone:
     async def record_push_to_talk(self, output_path: Path) -> Path:
         raise RuntimeUnavailableError(
