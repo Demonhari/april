@@ -16,6 +16,7 @@ from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.repository import MemoryRepository
 from services.memory.retriever import MemoryRetriever
+from services.memory.schemas import VectorMetadata
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
@@ -182,6 +183,20 @@ def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
     assert isinstance(embeddings["reindex_required"], bool)
     assert "embedding_model_registered" in embeddings
     assert "embedding_model_path_exists" in embeddings
+    vector_index = response.json()["core"]["vector_index"]
+    for field in (
+        "storage_mode",
+        "active_generation",
+        "effective_generation",
+        "previous_generation",
+        "hashes_valid",
+        "fallback_active",
+        "last_successful_reindex_at",
+        "failure_reasons",
+        "repair_command",
+        "rebuild_command",
+    ):
+        assert field in vector_index
     assert voice["speaker_gate"]["mode"] == "off"
     assert voice["speaker_gate"]["supported"] is False
     assert isinstance(voice["sentinel_live_verified"], bool)
@@ -978,9 +993,7 @@ def test_health_remains_live_when_runtime_unavailable(settings_tmp) -> None:
     assert response.json() == {"status": "ok", "service": "april-core-api"}
     readiness = client.get("/readiness", headers=auth(settings_tmp)).json()
     assert readiness["ready"] is False
-    assert any(
-        reason["code"].startswith("runtime_") for reason in readiness["failure_reasons"]
-    )
+    assert any(reason["code"].startswith("runtime_") for reason in readiness["failure_reasons"])
     assert "voice" in readiness
     assert "memory_index" in readiness
     assert "scheduler" in readiness["core"]
@@ -1016,9 +1029,7 @@ def test_readiness_classifies_runtime_http_failures(
 
     active_settings = settings_tmp.model_copy(
         update={
-            "runtime": settings_tmp.runtime.model_copy(
-                update={"token": "readiness-runtime-secret"}
-            )
+            "runtime": settings_tmp.runtime.model_copy(update={"token": "readiness-runtime-secret"})
         }
     )
     container = anyio.run(make_container, active_settings)
@@ -1044,6 +1055,38 @@ def test_readiness_classifies_runtime_http_failures(
         assert "authentication" in reasons[expected_code].lower()
     else:
         assert "endpoint" in reasons[expected_code].lower()
+
+
+def test_readiness_reports_vector_recovery_as_degraded(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    vector_metadata = VectorMetadata(
+        source_type="test",
+        source_id="test",
+        content_hash="h",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    container.vector_memory.upsert(record_id="1", content="first", metadata=vector_metadata)
+    container.vector_memory.upsert(record_id="2", content="second", metadata=vector_metadata)
+    current = (settings_tmp.vector_index_path / "CURRENT").read_text(encoding="utf-8").strip()
+    records = settings_tmp.vector_index_path / "generations" / current / "records.json"
+    records.write_text(
+        records.read_text(encoding="utf-8").replace("second", "corrupt"),
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_app(container))
+    payload = client.get("/readiness", headers=auth(settings_tmp)).json()
+    vector = payload["core"]["vector_index"]
+    assert payload["ready"] is False
+    assert vector["status"] == "degraded"
+    assert vector["fallback_active"] is True
+    assert any(
+        reason["code"] == "vector_index_recovery_active" for reason in payload["failure_reasons"]
+    )
+    assert payload["memory_index"]["repair_required"] is False
+    assert str(settings_tmp.vector_index_path) not in json.dumps(payload)
 
 
 def test_task_plan_created_listed_and_completed(settings_tmp) -> None:

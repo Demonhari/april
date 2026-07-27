@@ -123,7 +123,11 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         runtime_client=runtime_client,
         audit=audit,
     )
-    vector_memory = VectorMemory(active_settings.vector_index_path, embedding=embedding)
+    vector_memory = VectorMemory(
+        active_settings.vector_index_path,
+        embedding=embedding,
+        audit=audit,
+    )
     memory_repository = MemoryRepository(memory, vector_memory, audit=audit)
     model_registry = ModelRegistry.from_file(
         active_settings.home / "configs" / "models.yaml",

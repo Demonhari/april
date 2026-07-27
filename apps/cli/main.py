@@ -561,6 +561,19 @@ def memory_reindex() -> None:
         )
 
 
+@memory_app.command("repair-index")
+def memory_repair_index(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Atomically repoint CURRENT and perform safe cleanup.",
+    ),
+) -> None:
+    """Inspect recoverable generations; mutation is opt-in with ``--apply``."""
+    data = run(client().post(f"/memory/repair-index?apply={str(apply).lower()}", {}))
+    print_jsonish(data)
+
+
 @conversation_app.command("delete")
 def conversation_delete(conversation_id: str) -> None:
     data = run(client().delete(f"/conversations/{conversation_id}"))

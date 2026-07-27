@@ -34,6 +34,12 @@ class EmbeddingProvider(ABC):
     def embed(self, text: str) -> np.ndarray:
         raise NotImplementedError
 
+    def embed_many(self, texts: list[str]) -> np.ndarray:
+        """Embed a bounded batch using the provider's single-item implementation."""
+        if not texts:
+            return np.empty((0, self.dimensions), dtype=np.float32)
+        return np.stack([self.embed(text) for text in texts]).astype(np.float32)
+
 
 class HashedTokenEmbedding(EmbeddingProvider):
     def __init__(self, dimensions: int = 256) -> None:
@@ -58,6 +64,12 @@ class HashedTokenEmbedding(EmbeddingProvider):
         if math.isclose(norm, 0.0):
             return vector
         return vector / norm
+
+    def embed_many(self, texts: list[str]) -> np.ndarray:
+        """Return the same deterministic vectors as repeated ``embed`` calls."""
+        if not texts:
+            return np.empty((0, self.dimensions), dtype=np.float32)
+        return np.stack([self.embed(text) for text in texts]).astype(np.float32)
 
     def _tokens(self, text: str) -> list[str]:
         return re.findall(r"[a-z0-9_]+", text.lower())
@@ -105,6 +117,10 @@ class RuntimeLocalEmbedding(EmbeddingProvider):
         if self._dimensions is None:
             self._dimensions = int(array.shape[0])
         return array
+
+    def embed_many(self, texts: list[str]) -> np.ndarray:
+        """Use bounded individual Runtime calls until a batch endpoint exists."""
+        return super().embed_many(texts)
 
 
 _loop_lock = threading.Lock()

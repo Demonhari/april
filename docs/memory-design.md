@@ -65,13 +65,48 @@ contradiction detection (negation flips plus deterministic subject/value
 mismatches) only ever flags pairs for Dreamer adjudication — it never deletes or
 supersedes memory on its own.
 
-The vector index stores metadata and matrix data separately as `records.json`,
-`metadata.json`, and `vectors.npy`. Writes are batched under a local file lock
-and committed through atomic temporary-file replacement. Search uses the
-persisted matrix directly instead of reparsing vectors from JSON records.
+The vector index stores immutable generations:
+
+```text
+data/vector_index/
+  CURRENT
+  generations/<generation-id>/{records.json,vectors.npy,metadata.json}
+  staging/
+  .lock
+```
+
+Writers serialize with the advisory lock, build beneath `staging/`, flush and
+fsync every file, validate counts, dimensions, provider, finite values and
+SHA-256 hashes, atomically rename the directory into `generations/`, then
+atomically replace the newline-terminated `CURRENT` pointer. A reader loads the
+files from one resolved generation while holding the same lock, so it cannot
+observe mixed files. The active generation and at least one prior validated
+generation are retained.
+
+If `CURRENT` is missing, malformed, or points at an invalid generation, reads
+can fall back to the newest valid compatible generation in degraded mode. An
+ordinary read never rewrites the pointer. `run april memory repair-index` is a
+dry run showing the pointer state, candidate, retention plan and abandoned
+staging directories; `run april memory repair-index --apply` performs only the
+reported pointer switch and safe cleanup. It never fabricates vectors. With no
+valid generation, `run april memory reindex` is required.
+
+Legacy version-two root files (`records.json`, `vectors.npy`, `metadata.json`)
+and legacy `records.jsonl` remain readable when no valid `CURRENT` exists. The
+first successful mutation publishes them as a generation; failed migration
+leaves the legacy files intact.
+
+Search uses the persisted matrix directly instead of reparsing vectors from JSON records.
 Indexing is scoped by source type, source ID, project ID, path, and content
 hash so deleted files are removed, changed files are replaced, unchanged files
 are reused, and repeated indexing is idempotent.
+
+Full reindexing embeds records in conservative bounded batches, advances
+progress as embeddings complete, constructs one final matrix, publishes one
+generation and switches `CURRENT` once. Hashed-token batch output is identical
+to individual deterministic embeddings. Runtime-local currently uses bounded
+individual local Runtime calls inside each batch because no new Runtime batch
+endpoint is required.
 
 Document ingestion uses typed local extractors. Text/source files are supported
 by default. PDF text extraction is optional through the `documents` extra

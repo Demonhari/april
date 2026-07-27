@@ -73,4 +73,4 @@ def vector_memory_from_settings(
         runtime_client=runtime_client,
         audit=audit,
     )
-    return VectorMemory(settings.vector_index_path, embedding=embedding)
+    return VectorMemory(settings.vector_index_path, embedding=embedding, audit=audit)

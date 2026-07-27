@@ -200,11 +200,19 @@ report-history display.
 memory. It reports the configured embedding provider, active vector-index
 provider, dimensions, whether runtime-local was requested, whether APRIL is
 falling back to hashed-token, whether reindex is required, whether an
-embedding-role model is registered, and whether that model path exists. It does
-not start Runtime or load a model unless `--verify-runtime-embedding` is passed,
-and that flag only probes `/runtime/embed`. Real semantic memory requires a
-runtime-local embedding-role model and `run april memory reindex` after switching
-providers.
+embedding-role model is registered, whether that model path exists, the active
+and effective generation, recovery state, and the last successful full reindex.
+It does not start Runtime or load a model unless
+`--verify-runtime-embedding` is passed, and that flag only probes
+`/runtime/embed`.
+
+Use `run april memory repair-index` to inspect a malformed/missing/corrupt
+`CURRENT` pointer without mutation. If it reports a validated recovery
+candidate, apply exactly that repair with
+`run april memory repair-index --apply`. If it reports no valid generation, run
+`run april memory reindex`. Recovery mode is degraded readiness even though
+SQLite memory remains available. Real semantic memory requires a runtime-local
+embedding-role model and a reindex after switching providers.
 
 Fake soak is non-destructive and fake-backend-only:
 

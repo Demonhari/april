@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import os
 import shutil
 import subprocess
@@ -1136,6 +1135,22 @@ def memory_reindex(
     )
 
 
+@memory_app.command("repair-index")
+def memory_repair_index(
+    ctx: typer.Context,
+    apply: bool = typer.Option(False, "--apply", help="Apply the reported pointer repair."),
+    fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+) -> None:
+    args = ["memory", "repair-index"]
+    if apply:
+        args.append("--apply")
+    _delegate(
+        args,
+        fake=_effective_fake(ctx, fake),
+        oneshot=_effective_oneshot(ctx),
+    )
+
+
 @memory_app.command("doctor")
 def memory_doctor(
     json_output: bool = typer.Option(False, "--json"),
@@ -1191,8 +1206,13 @@ def _memory_doctor_report(
     ):
         reindex_required = True
 
+    index_status = str(index.get("status", "ok"))
     if reindex_required:
         status = "reindex_required"
+    elif index_status == "not_ready":
+        status = "not_ready"
+    elif index_status == "degraded":
+        status = "degraded"
     elif (runtime_local_requested and not model_ready) or (
         verification is not None and not verified_ok
     ):
@@ -1228,6 +1248,9 @@ def _memory_doctor_report(
         # present so switching providers never leaves the operator guessing; it is
         # the required next step whenever reindex_required is true.
         "reindex_command": "run april memory reindex",
+        "repair_command": "run april memory repair-index --apply",
+        "active_generation": index.get("effective_generation"),
+        "last_successful_reindex_at": index.get("last_successful_reindex_at"),
         "embedding_model_id": model_info.get("model_id"),
         "embedding_role_model_registered": model_info["embedding_model_registered"],
         "embedding_model_path_exists": model_info["embedding_model_path_exists"],
@@ -1287,28 +1310,47 @@ def _embedding_model_info(settings: Any) -> dict[str, Any]:
 
 
 def _vector_index_report(settings: Any) -> dict[str, Any]:
-    metadata_path = settings.vector_index_path / "metadata.json"
-    persisted_provider: str | None = None
-    persisted_dimensions: int | None = None
-    record_count = 0
-    if metadata_path.exists():
+    # Health inspection is deliberately offline: it validates the persisted
+    # bytes but never probes Runtime merely to render doctor output.
+    from services.memory.vector_memory import VectorMemory
+
+    inspector = VectorMemory(
+        settings.vector_index_path,
+        embedding=HashedTokenEmbedding(),
+        initialize=False,
+    )
+    report = inspector.health()
+    persisted_dimensions = report.get("active_dimensions")
+    expected_dimensions = (
+        HashedTokenEmbedding().dimensions
+        if settings.memory.embedding_provider == "hashed-token"
+        else persisted_dimensions
+        if type(persisted_dimensions) is int
+        else HashedTokenEmbedding().dimensions
+    )
+    report = inspector.health(
+        configured_provider=settings.memory.embedding_provider,
+        configured_dimensions=expected_dimensions,
+    )
+    legacy_metadata = settings.vector_index_path / "metadata.json"
+    if report.get("active_provider") is None and legacy_metadata.is_file():
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            metadata = {}
-        if isinstance(metadata, dict):
-            raw_provider = metadata.get("provider")
-            raw_dimensions = metadata.get("dimensions")
-            raw_records = metadata.get("record_count")
-            persisted_provider = raw_provider if isinstance(raw_provider, str) else None
-            persisted_dimensions = raw_dimensions if type(raw_dimensions) is int else None
-            record_count = raw_records if type(raw_records) is int and raw_records >= 0 else 0
-    return {
-        "path_basename": settings.vector_index_path.name,
-        "persisted_provider": persisted_provider,
-        "persisted_dimensions": persisted_dimensions,
-        "record_count": record_count,
-    }
+            import json
+
+            raw = json.loads(legacy_metadata.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raw = {}
+        if isinstance(raw, dict):
+            provider = raw.get("provider")
+            dimensions = raw.get("dimensions")
+            if isinstance(provider, str):
+                report["active_provider"] = provider
+            if type(dimensions) is int:
+                report["active_dimensions"] = dimensions
+    report["path_basename"] = settings.vector_index_path.name
+    report["persisted_provider"] = report.get("active_provider")
+    report["persisted_dimensions"] = report.get("active_dimensions")
+    return report
 
 
 def _verify_runtime_embedding(settings: Any, model_id: str | None) -> dict[str, Any]:
@@ -1349,6 +1391,8 @@ def _print_memory_doctor(data: dict[str, Any]) -> None:
         "embedding_role_model_registered",
         "embedding_model_path_exists",
         "embedding_model_path_basename",
+        "active_generation",
+        "last_successful_reindex_at",
     ):
         table.add_row(key, str(data.get(key)))
     console.print(table)
@@ -1359,6 +1403,18 @@ def _print_memory_doctor(data: dict[str, Any]) -> None:
         )
         console.print("Next command:")
         # markup=False so command tokens are not parsed as Rich tags.
+        console.print(f"  {data.get('reindex_command')}", markup=False)
+    vector_index = data.get("vector_index", {})
+    if isinstance(vector_index, dict) and vector_index.get("fallback_active"):
+        console.print("[yellow]A validated recovery generation is active read-only.[/yellow]")
+        console.print("Repair command:")
+        console.print(f"  {data.get('repair_command')}", markup=False)
+    if (
+        isinstance(vector_index, dict)
+        and vector_index.get("status") == "not_ready"
+        and not data.get("reindex_required")
+    ):
+        console.print("Rebuild command:")
         console.print(f"  {data.get('reindex_command')}", markup=False)
     if data.get("setup_command"):
         console.print("Configure a runtime-local embedding model:")

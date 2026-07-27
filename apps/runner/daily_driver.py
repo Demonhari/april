@@ -392,29 +392,32 @@ def _embedding_check(settings: AprilSettings | None) -> DailyDriverCheck:
 
 
 def _vector_index_check(home: Path, settings: AprilSettings | None) -> DailyDriverCheck:
-    import json
-
     if settings is None:
         return DailyDriverCheck(
             name="vector index compatibility", status="warning", detail="settings unavailable"
         )
-    metadata_path = settings.vector_index_path / "metadata.json"
-    if not metadata_path.exists():
+    from services.memory.embeddings import HashedTokenEmbedding
+    from services.memory.vector_memory import VectorMemory
+
+    health = VectorMemory(
+        settings.vector_index_path,
+        embedding=HashedTokenEmbedding(),
+        initialize=False,
+    ).health()
+    if health.get("storage_mode") == "empty":
         return DailyDriverCheck(
             name="vector index compatibility",
             status="ready",
             detail="no index yet (built on first memory write)",
         )
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    if health.get("status") == "not_ready":
         return DailyDriverCheck(
             name="vector index compatibility",
             status="warning",
-            detail="index metadata is unreadable",
+            detail="no valid vector-index generation is available",
             next_command=_MEMORY_REINDEX,
         )
-    persisted = metadata.get("provider") if isinstance(metadata, dict) else None
+    persisted = health.get("active_provider")
     active = settings.memory.embedding_provider
     if persisted is not None and persisted != active:
         return DailyDriverCheck(
@@ -422,6 +425,13 @@ def _vector_index_check(home: Path, settings: AprilSettings | None) -> DailyDriv
             status="warning",
             detail=f"index built with '{persisted}' but provider is '{active}' (reindex required)",
             next_command=_MEMORY_REINDEX,
+        )
+    if health.get("fallback_active"):
+        return DailyDriverCheck(
+            name="vector index compatibility",
+            status="warning",
+            detail="validated recovery generation is active (repair required)",
+            next_command="run april memory repair-index --apply",
         )
     return DailyDriverCheck(
         name="vector index compatibility",

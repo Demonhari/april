@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from services.api.server import create_app
 from services.evolution.evaluator import write_pending_eval_case
 from services.evolution.write_guard import EvolutionWriteGuard
+from services.memory.schemas import VectorMetadata
 from tests.test_core_api import auth, make_container
 
 
@@ -99,3 +100,37 @@ def test_memory_reindex_reports_provider_and_degradation(settings_tmp) -> None:
     assert payload["index_compatible"] is True
     assert payload["fallback_active"] is False
     assert payload["degraded"] is False
+
+
+def test_memory_repair_index_is_dry_run_unless_apply_is_requested(settings_tmp) -> None:
+    container = anyio.run(make_container, settings_tmp)
+    metadata = VectorMetadata(
+        source_type="test",
+        source_id="test",
+        content_hash="h",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    container.vector_memory.upsert(record_id="1", content="first", metadata=metadata)
+    recovery = (settings_tmp.vector_index_path / "CURRENT").read_text(encoding="utf-8").strip()
+    container.vector_memory.upsert(record_id="2", content="second", metadata=metadata)
+    broken = (settings_tmp.vector_index_path / "CURRENT").read_text(encoding="utf-8").strip()
+    records = settings_tmp.vector_index_path / "generations" / broken / "records.json"
+    records.write_text(
+        records.read_text(encoding="utf-8").replace("second", "corrupt"),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(container))
+    headers = auth(settings_tmp)
+
+    dry_run = client.post("/memory/repair-index", headers=headers).json()
+    assert dry_run["applied"] is False
+    assert dry_run["recovery_candidate"] == recovery
+    assert (settings_tmp.vector_index_path / "CURRENT").read_text(
+        encoding="utf-8"
+    ).strip() == broken
+
+    applied = client.post("/memory/repair-index?apply=true", headers=headers).json()
+    assert applied["applied"] is True
+    assert (settings_tmp.vector_index_path / "CURRENT").read_text(
+        encoding="utf-8"
+    ).strip() == recovery

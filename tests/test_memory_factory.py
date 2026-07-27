@@ -119,14 +119,23 @@ def test_vector_memory_from_settings_persists_configured_provider(settings_tmp) 
         _runtime_local(settings_tmp), runtime_client=_DeterministicRuntimeClient()
     )
     _index_one(vector, "local note")
-    header = json.loads((settings_tmp.vector_index_path / "metadata.json").read_text("utf-8"))
+    header = _generation_header(settings_tmp)
     assert header["provider"] == "runtime-local"
     assert header["dimensions"] == _DeterministicRuntimeClient.dimensions
 
 
 def _persisted_provider(settings_tmp) -> str:
-    header = json.loads((settings_tmp.vector_index_path / "metadata.json").read_text("utf-8"))
+    header = _generation_header(settings_tmp)
     return str(header["provider"])
+
+
+def _generation_header(settings_tmp) -> dict[str, object]:
+    generation_id = (settings_tmp.vector_index_path / "CURRENT").read_text("utf-8").strip()
+    return json.loads(
+        (
+            settings_tmp.vector_index_path / "generations" / generation_id / "metadata.json"
+        ).read_text("utf-8")
+    )
 
 
 def test_document_indexer_uses_configured_provider(settings_tmp, monkeypatch) -> None:

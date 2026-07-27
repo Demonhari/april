@@ -236,9 +236,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.middleware("http")
     async def enforce_request_size(request: Request, call_next: Any) -> object:
         active_settings = (
-            app.state.container.settings
-            if app.state.container is not None
-            else initial_settings
+            app.state.container.settings if app.state.container is not None else initial_settings
         )
         content_length = request.headers.get("content-length")
         if content_length is not None:
@@ -764,6 +762,13 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             "fallback_active": fallback_active,
             "degraded": fallback_active or not bool(vector_health.get("compatible", True)),
         }
+
+    @app.post("/memory/repair-index")
+    async def memory_repair_index(
+        apply: bool = False,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        return active.vector_memory.repair_index(apply=apply)
 
     @app.post("/feedback")
     async def feedback(
@@ -1513,6 +1518,10 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         "reindex_required": not embedding_index_compatible,
         "reindex_command": "run april memory reindex",
         "warnings": embedding_warnings,
+        "active_generation": vector_health.get("effective_generation"),
+        "last_successful_reindex_at": vector_health.get("last_successful_reindex_at"),
+        "vector_index_status": vector_health.get("status"),
+        "repair_command": vector_health.get("repair_command"),
     }
     embeddings.update(embedding_model_status)
     # query_audio_devices() only *enumerates* devices; it never opens the
@@ -1572,6 +1581,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         model_registry=model_registry,
         scheduler_required=scheduler_required,
         scheduler_available=scheduler_available,
+        vector_health=vector_health,
     )
     ready = not failure_reasons
     overlay_approval_service = PromptOverlayApprovalService(
@@ -1766,6 +1776,7 @@ def _readiness_failure_reasons(
     model_registry: dict[str, Any],
     scheduler_required: bool,
     scheduler_available: bool,
+    vector_health: dict[str, Any],
 ) -> list[dict[str, str]]:
     reasons: list[dict[str, str]] = []
     if not runtime_probe.ok:
@@ -1786,9 +1797,7 @@ def _readiness_failure_reasons(
     if not database_available:
         reasons.append({"code": "database_unavailable", "message": "Database is unavailable."})
     if not bool(model_registry["valid"]):
-        reasons.append(
-            {"code": "model_registry_invalid", "message": "Model registry is invalid."}
-        )
+        reasons.append({"code": "model_registry_invalid", "message": "Model registry is invalid."})
     elif not bool(model_registry["required_model_available"]):
         reasons.append(
             {
@@ -1801,6 +1810,28 @@ def _readiness_failure_reasons(
             {
                 "code": "required_scheduler_unavailable",
                 "message": "The required scheduler service is unavailable.",
+            }
+        )
+    vector_status = str(vector_health.get("status", "not_ready"))
+    if vector_status == "not_ready":
+        reasons.append(
+            {
+                "code": "vector_index_unavailable",
+                "message": "Vector retrieval has no valid index generation.",
+            }
+        )
+    elif bool(vector_health.get("fallback_active")):
+        reasons.append(
+            {
+                "code": "vector_index_recovery_active",
+                "message": "Vector retrieval is using a read-only recovery generation.",
+            }
+        )
+    elif vector_status == "degraded":
+        reasons.append(
+            {
+                "code": "vector_index_degraded",
+                "message": "Vector retrieval requires index repair or reindexing.",
             }
         )
     return reasons

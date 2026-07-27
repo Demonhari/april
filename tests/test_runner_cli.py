@@ -19,6 +19,8 @@ from apps.runner.wake_live import WakeWordLiveReport
 from april_common.config_validation import validate_configuration
 from april_common.errors import ConfigError
 from april_common.settings import load_settings
+from services.memory.schemas import VectorMetadata
+from services.memory.vector_memory import VectorMemory
 
 
 class FakeManager:
@@ -159,10 +161,18 @@ def test_run_april_project_and_memory_commands_delegate(tmp_path: Path, monkeypa
     assert runner.invoke(app, ["april", "projects", "--fake"]).exit_code == 0
     assert runner.invoke(app, ["april", "project", "add", str(tmp_path), "--fake"]).exit_code == 0
     assert runner.invoke(app, ["april", "memory", "search", "query", "--fake"]).exit_code == 0
+    assert (
+        runner.invoke(
+            app,
+            ["april", "memory", "repair-index", "--apply", "--fake"],
+        ).exit_code
+        == 0
+    )
     assert delegated == [
         ["projects"],
         ["project", "add", str(tmp_path)],
         ["memory", "search", "query"],
+        ["memory", "repair-index", "--apply"],
     ]
 
 
@@ -1616,6 +1626,7 @@ def test_memory_doctor(tmp_path: Path, monkeypatch) -> None:
     assert payload["configured_embedding_provider"] == "hashed-token"
     assert payload["active_vector_index_provider"] == "hashed-token"
     assert payload["dimensions"] == 256
+    assert not (tmp_path / "data" / "vector_index").exists()
 
 
 def test_memory_doctor_runtime_local_without_embedding_model_not_ready(
@@ -1665,6 +1676,42 @@ def test_memory_doctor_mismatched_vector_provider_requires_reindex(
     assert payload["reindex_required"] is True
     assert payload["status"] == "reindex_required"
     assert payload["vector_index"]["persisted_provider"] == "runtime-local"
+
+
+def test_memory_doctor_reports_recovery_generation_and_repair_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    settings = load_settings(root=tmp_path)
+    vector = VectorMemory(settings.vector_index_path)
+    metadata = VectorMetadata(
+        source_type="test",
+        source_id="test",
+        content_hash="h",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    vector.upsert(record_id="1", content="first", metadata=metadata)
+    recovery = vector.health()["effective_generation"]
+    vector.upsert(record_id="2", content="second", metadata=metadata)
+    broken = vector.health()["effective_generation"]
+    records = settings.vector_index_path / "generations" / broken / "records.json"
+    records.write_text(
+        records.read_text(encoding="utf-8").replace("second", "corrupt"),
+        encoding="utf-8",
+    )
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    result = CliRunner().invoke(app, ["april", "memory", "doctor", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "degraded"
+    assert payload["active_generation"] == recovery
+    assert payload["vector_index"]["active_generation"] == broken
+    assert payload["vector_index"]["fallback_active"] is True
+    assert payload["repair_command"] == "run april memory repair-index --apply"
+    assert str(tmp_path) not in result.output
 
 
 def test_memory_doctor_json_redacts_paths(tmp_path: Path, monkeypatch) -> None:

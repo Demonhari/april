@@ -265,6 +265,10 @@ up with explicit, dry-run-by-default commands:
 # Diagnose the active provider, configured model, file existence, index match,
 # whether a reindex is required, and the exact next command — read-only:
 run april memory doctor
+# Inspect pointer/recovery state without changing it:
+run april memory repair-index
+# Apply only the reported pointer repair and safe generation cleanup:
+run april memory repair-index --apply
 # Optionally prove the local embedding actually serves vectors via /runtime/embed:
 run april memory doctor --verify-runtime-embedding
 # Register a local embedding GGUF and switch to runtime-local (dry-run unless --apply):
@@ -282,6 +286,17 @@ go-live hardening warnings, and the Desktop Readiness screen. **Switching
 embedding providers changes the vector space and requires a
 `run april memory reindex`** — `memory doctor` and `/readiness` always print the
 exact reindex command.
+
+Vector-index writes publish immutable generations under
+`data/vector_index/generations/`. APRIL fsyncs and validates the complete
+`records.json`/`vectors.npy`/`metadata.json` set before atomically replacing the
+newline-terminated `CURRENT` pointer. Readers therefore use one complete old or
+new generation, never a mixture. The active generation plus one validated
+recovery generation are retained. If `CURRENT` is missing, malformed, or names
+a corrupt generation, reads may use the newest compatible generation in
+degraded mode without changing `CURRENT`; use the dry-run repair command above
+to inspect it, then opt in with `--apply`. If no valid generation exists, use
+`run april memory reindex`.
 
 ## Backends, Verification, and Honest Status
 
@@ -1002,6 +1017,8 @@ run april voice test-tts "Hello Hari"
 run april voice ptt
 run april voice listen
 run april memory doctor
+run april memory repair-index
+run april memory repair-index --apply
 run april memory inspect --state machine
 run april eval brain --fake
 run april sessions
@@ -1262,8 +1279,10 @@ hashed-token embeddings** instead of crashing.
 `run april memory doctor --json` reports the configured embedding provider,
 active vector-index provider, dimensions, whether runtime-local was requested,
 fallback/reindex risk, whether an embedding-role model is registered, and
-whether that model path exists. It does not start Runtime or load a model unless
-you explicitly pass `--verify-runtime-embedding`, which probes `/runtime/embed`.
+whether that model path exists. It also reports the active/effective generation,
+last successful full reindex, recovery status, and the exact repair or rebuild
+command. It does not start Runtime or load a model unless you explicitly pass
+`--verify-runtime-embedding`, which probes `/runtime/embed`.
 Real semantic memory requires a runtime-local embedding model plus
 `run april memory reindex` after switching providers.
 
@@ -1271,8 +1290,9 @@ Switching embedding providers changes the vector space, so APRIL refuses to
 silently mix spaces: searches/writes against an index built with a different
 provider/dimension raise an actionable error pointing you to
 `run april memory reindex`. Reindexing re-embeds existing memories and known
-sources under the current provider — it never wipes your index without this
-explicit command.
+sources in bounded batches, writes one complete generation, and switches
+`CURRENT` once. An embedding or publication failure leaves the previous
+generation active.
 
 Document ingestion is offline. Text/source files are supported by default; PDF
 text extraction is local and optional via `pip install -e '.[documents]'`.
