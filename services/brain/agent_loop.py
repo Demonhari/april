@@ -140,7 +140,6 @@ class StructuredAgentLoop:
             tool_result=tool_result.model_dump(),
             approval_id=suspended.approval_id,
         )
-        await self.memory.mark_agent_run_resumed(approval_id=suspended.approval_id)
         loop_messages.append(
             ChatMessage(
                 role="user",

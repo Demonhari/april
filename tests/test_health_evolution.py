@@ -1,4 +1,4 @@
-"""Dreamer/evolution visibility in /health, /evolution/status, and readiness."""
+"""Dreamer/evolution visibility in authenticated status and readiness."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from services.evolution.write_guard import EvolutionWriteGuard
 from tests.test_core_api import auth, make_container
 
 
-def test_health_exposes_redacted_evolution_block(settings_tmp) -> None:
+def test_readiness_exposes_redacted_evolution_block(settings_tmp) -> None:
     write_pending_eval_case(settings_tmp, {"case_type": "negative_feedback", "prompt": "x"})
     guard = EvolutionWriteGuard(settings_tmp)
     guard.write_text(
@@ -27,32 +27,27 @@ def test_health_exposes_redacted_evolution_block(settings_tmp) -> None:
     container = anyio.run(make_container, settings_tmp)
     client = TestClient(create_app(container))
 
-    # /health is unauthenticated: the block must be booleans/counts/enums only.
-    payload = client.get("/health").json()
+    payload = client.get("/readiness", headers=auth(settings_tmp)).json()
     evolution = payload["evolution"]
     assert evolution["enabled"] is False
     assert evolution["kill_switch_active"] is False
     assert evolution["scheduler_enabled"] is False
-    assert evolution["dreamer_last_run_date"] is None
-    assert evolution["dreamer_last_report_available"] is True
     assert evolution["pending_eval_case_count"] == 1
-    assert evolution["pending_write_capable_overlay_count"] == 1
-    assert evolution["last_skip_reason"] == "evolution disabled"
+    assert evolution["pending_write_capable_overlay_candidate_count"] == 1
     blob = json.dumps(payload)
     assert str(settings_tmp.home) not in blob
     assert str(settings_tmp.evolution_path) not in blob
     assert "run-1.json" not in blob  # only a boolean, never the report name
 
 
-def test_health_evolution_kill_switch_reason(settings_tmp) -> None:
+def test_readiness_evolution_kill_switch_state(settings_tmp) -> None:
     container = anyio.run(make_container, settings_tmp)
     client = TestClient(create_app(container))
     headers = auth(settings_tmp)
     client.post("/evolution/off", headers=headers)
 
-    evolution = client.get("/health").json()["evolution"]
+    evolution = client.get("/readiness", headers=headers).json()["evolution"]
     assert evolution["kill_switch_active"] is True
-    assert evolution["last_skip_reason"] == "disabled by local kill switch"
 
 
 def test_evolution_status_reports_gate_and_counts(settings_tmp) -> None:

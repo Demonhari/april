@@ -182,7 +182,7 @@ function updateRail() {
   setRailItem("rail-backend", undefined, "backend", backend.backend + " · " + badge);
   setRailItem("rail-project", undefined, "project", selectedProject ? selectedProject.name : "no project");
   setRailItem("rail-conv", undefined, "conv", CONVERSATION_ID.slice(0, 8));
-  // Wake/mute/listening status from /health; "unknown" when unreported.
+  // Wake/mute/listening status from authenticated diagnostics.
   const wake = state.health && state.health.wake;
   if (!wake) {
     setRailItem("rail-wake", "neutral", "wake", "unknown");
@@ -202,7 +202,7 @@ function updateRail() {
 // Back-compat name: refreshes health + the always-on rail. Called only from the
 // polling loop, which starts strictly after token acquisition succeeds.
 async function refreshConnection() {
-  const data = await pollGet("/health");
+  const data = await pollGet("/diagnostics");
   if (data) state.health = data;
   updateRail();
   renderDashboard();
@@ -835,7 +835,7 @@ function flashApprovals() {
 let pollTimers = [];
 
 async function refreshHealth() {
-  const data = await pollGet("/health");
+  const data = await pollGet("/diagnostics");
   if (data) state.health = data;
   updateRail();
   renderSystems();
@@ -1737,10 +1737,14 @@ screens.readiness = async function () {
 
 screens.status = async function () {
   screenEl.appendChild(screenHeader("Status & Models", "Local health, diagnostics, and runtime model control."));
-  const health = await api("GET", "/health").catch(() => null);
-  if (health) {
-    state.health = health;
-    const backend = D.backendInfo(health);
+  const liveness = await api("GET", "/health").catch(() => null);
+  if (liveness) {
+    screenEl.appendChild(card("<div class='panel-title'>Liveness</div><pre>" + esc(JSON.stringify(liveness, null, 2)) + "</pre>"));
+  }
+  try {
+    const diag = await api("GET", "/diagnostics");
+    state.health = diag;
+    const backend = D.backendInfo(diag);
     const badge = backend.badge === "SIMULATED"
       ? "<span class='pill warn'>SIMULATED runtime (fake backend) — not real-model verified</span>"
       : backend.badge === "REAL" ? "<span class='pill ok'>real backend</span>"
@@ -1751,10 +1755,6 @@ screens.status = async function () {
         esc(backend.missing_models.join(", ")) + "</span>";
     }
     screenEl.appendChild(card(note));
-    screenEl.appendChild(card("<div class='panel-title'>Health (redacted /health)</div><pre>" + esc(JSON.stringify(health, null, 2)) + "</pre>"));
-  }
-  try {
-    const diag = await api("GET", "/diagnostics");
     screenEl.appendChild(card("<div class='panel-title'>Diagnostics</div><pre>" + esc(JSON.stringify(diag, null, 2)) + "</pre>"));
   } catch (_) { /* surfaced via banner */ }
   const modelData = await api("GET", "/runtime/models").catch(() => null);

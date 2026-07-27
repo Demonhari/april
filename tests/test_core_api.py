@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import subprocess
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agents.registry import default_agent_registry
 from april_common.audit import AuditLogger
+from april_common.service_health import ServiceHealthResult
 from april_common.token_setup import generate_tokens
 from services.api.dependencies import ApiContainer
 from services.api.server import create_app
@@ -953,18 +955,14 @@ def test_health_response(settings_tmp) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     health = response.json()
-    assert health["database"]["ok"] is True
-    assert health["database"]["path"] == "[REDACTED]"
-    assert health["vector_index"]["path"] == "[REDACTED]"
-    assert str(settings_tmp.home) not in json.dumps(health)
-    assert health["runtime"]["status"] == "ok"
+    assert health == {"status": "ok", "service": "april-core-api"}
 
     diagnostics = client.get("/diagnostics", headers=auth(settings_tmp))
     assert diagnostics.status_code == 200
     assert str(settings_tmp.database_path) in diagnostics.text
 
 
-def test_health_degrades_when_runtime_unavailable(settings_tmp) -> None:
+def test_health_remains_live_when_runtime_unavailable(settings_tmp) -> None:
     import anyio
 
     class OfflineRuntime(FakeRuntimeClient):
@@ -977,8 +975,75 @@ def test_health_degrades_when_runtime_unavailable(settings_tmp) -> None:
     client = TestClient(create_app(container))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "degraded"
-    assert response.json()["runtime"]["status"] == "unavailable"
+    assert response.json() == {"status": "ok", "service": "april-core-api"}
+    readiness = client.get("/readiness", headers=auth(settings_tmp)).json()
+    assert readiness["ready"] is False
+    assert any(
+        reason["code"].startswith("runtime_") for reason in readiness["failure_reasons"]
+    )
+    assert "voice" in readiness
+    assert "memory_index" in readiness
+    assert "scheduler" in readiness["core"]
+
+
+def test_health_does_not_construct_application_container(monkeypatch) -> None:
+    async def fail() -> None:
+        raise AssertionError("container construction must not run for liveness")
+
+    monkeypatch.setattr("services.api.server.build_container", fail)
+    with TestClient(create_app()) as client:
+        assert client.get("/health").json() == {
+            "status": "ok",
+            "service": "april-core-api",
+        }
+
+
+@pytest.mark.parametrize(
+    ("status_code", "reason", "expected_code"),
+    [
+        (403, "authentication_rejected", "runtime_authentication_rejected"),
+        (404, "endpoint_not_found", "runtime_endpoint_not_found"),
+    ],
+)
+def test_readiness_classifies_runtime_http_failures(
+    settings_tmp,
+    monkeypatch,
+    status_code: int,
+    reason: str,
+    expected_code: str,
+) -> None:
+    import anyio
+
+    active_settings = settings_tmp.model_copy(
+        update={
+            "runtime": settings_tmp.runtime.model_copy(
+                update={"token": "readiness-runtime-secret"}
+            )
+        }
+    )
+    container = anyio.run(make_container, active_settings)
+    captured: dict[str, object] = {}
+
+    def probe(*_args, **kwargs) -> ServiceHealthResult:
+        captured["bearer_token"] = kwargs.get("bearer_token")
+        return ServiceHealthResult(
+            False,
+            status_code,
+            reason,
+            "safe failure",
+        )
+
+    monkeypatch.setattr("services.api.server.probe_service_health", probe)
+    client = TestClient(create_app(container))
+    readiness = client.get("/readiness", headers=auth(active_settings)).json()
+    assert readiness["ready"] is False
+    assert captured["bearer_token"] == "readiness-runtime-secret"
+    reasons = {item["code"]: item["message"] for item in readiness["failure_reasons"]}
+    assert expected_code in reasons
+    if status_code == 403:
+        assert "authentication" in reasons[expected_code].lower()
+    else:
+        assert "endpoint" in reasons[expected_code].lower()
 
 
 def test_task_plan_created_listed_and_completed(settings_tmp) -> None:

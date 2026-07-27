@@ -64,9 +64,9 @@ def test_health_reflects_mute_state(settings_tmp) -> None:
     client = TestClient(create_app(container))
     headers = auth(settings_tmp)
 
-    assert client.get("/health").json()["wake"]["muted"] is False
+    assert client.get("/diagnostics", headers=headers).json()["wake"]["muted"] is False
     client.post("/wake/mute", json={"muted": True}, headers=headers)
-    assert client.get("/health").json()["wake"]["muted"] is True
+    assert client.get("/diagnostics", headers=headers).json()["wake"]["muted"] is True
 
 
 class _RecordingClient:

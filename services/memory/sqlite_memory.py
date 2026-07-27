@@ -1058,18 +1058,26 @@ class SqliteMemory:
             row = await cursor.fetchone()
             if row is None:
                 return
-            await conn.execute(
+            suspended_cursor = await conn.execute(
                 """
                 UPDATE suspended_agent_runs
                 SET status = 'resumed', resumed_at = ?
-                WHERE approval_id = ?
+                WHERE approval_id = ? AND status = 'suspended'
                 """,
                 (now, approval_id),
             )
-            await conn.execute(
-                "UPDATE agent_runs SET status = 'running' WHERE id = ?",
+            if suspended_cursor.rowcount != 1:
+                raise RuntimeError("Suspended agent run is not resumable.")
+            run_cursor = await conn.execute(
+                """
+                UPDATE agent_runs
+                SET status = 'running'
+                WHERE id = ? AND status = 'suspended'
+                """,
                 (row["agent_run_id"],),
             )
+            if run_cursor.rowcount != 1:
+                raise RuntimeError("Agent run is not suspended.")
 
     async def mark_agent_run_completed(self, *, agent_run_id: str, status: str = "ok") -> None:
         now = utc_now_iso()

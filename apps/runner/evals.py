@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +12,7 @@ from pydantic import BaseModel, Field
 from apps.runner.mac_report import RoutingReport, routing_report_from_results
 from services.brain.fallback_router import FallbackRouter
 from services.brain.schemas import BrainDecision
+from services.memory.database import connect_sqlite
 
 from .verify import RealModelVerifier
 
@@ -206,7 +206,7 @@ class RealBrainEvalRunner(
 
     def _latest_decision(self) -> dict[str, Any]:
         database = self.temp / "data" / "april.db"
-        with sqlite3.connect(database) as conn:
+        with connect_sqlite(database) as conn:
             row = conn.execute(
                 """
                 SELECT payload_json

@@ -23,6 +23,7 @@ from apps.runner.verify import (
     TargetMacValidator,
     VerifyCheck,
     WorkflowVerifier,
+    _verification_health_failure,
     brain_decision_after_marker,
     build_workflow_report,
     chat_result_from_response,
@@ -33,12 +34,84 @@ from apps.runner.verify import (
     run_workflow_verification,
     write_workflow_report,
 )
+from april_common.service_health import ServiceHealthResult
 
 
 def verifier_with_ports(monkeypatch) -> LauncherVerifier:
     ports = iter([18001, 18002])
     monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
     return LauncherVerifier(home=Path.cwd())
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            ServiceHealthResult(
+                False,
+                None,
+                "connection_failed",
+                "not reachable",
+            ),
+            "Runtime is not reachable.",
+        ),
+        (
+            ServiceHealthResult(
+                False,
+                403,
+                "authentication_rejected",
+                "rejected",
+            ),
+            "Runtime authentication was rejected.",
+        ),
+        (
+            ServiceHealthResult(False, 404, "endpoint_not_found", "missing"),
+            "Runtime health endpoint returned 404",
+        ),
+    ],
+)
+def test_verification_health_failures_are_distinct(
+    result: ServiceHealthResult,
+    expected: str,
+) -> None:
+    detail = _verification_health_failure(
+        "http://127.0.0.1:8766/runtime/health",
+        "http://127.0.0.1:8765",
+        result,
+    )
+    assert expected in detail
+
+
+def test_verification_distinguishes_live_but_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = verifier_with_ports(monkeypatch)
+    request = httpx.Request("GET", verifier.api_url + "/readiness")
+    response = httpx.Response(
+        200,
+        request=request,
+        json={
+            "ready": False,
+            "failure_reasons": [
+                {"code": "database_unavailable", "message": "Database is unavailable."},
+                {
+                    "code": "model_registry_invalid",
+                    "message": "Model registry is invalid.",
+                },
+                {
+                    "code": "required_model_unavailable",
+                    "message": "A required model is unavailable.",
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr("apps.runner.verify.httpx.get", lambda *_args, **_kwargs: response)
+    with pytest.raises(RuntimeError, match="Core API is alive but not ready") as exc_info:
+        verifier._core_readiness()
+    detail = str(exc_info.value)
+    assert "database_unavailable" in detail
+    assert "model_registry_invalid" in detail
+    assert "required_model_unavailable" in detail
 
 
 def test_all_configured_specialist_smoke_schema_validators() -> None:
@@ -314,6 +387,7 @@ def test_verifier_run_records_failures_and_stops(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(verifier, "_env", lambda: {})
     monkeypatch.setattr(verifier, "_start", lambda *args: subprocess.Popen(["true"]))
     monkeypatch.setattr(verifier, "_wait_json", lambda url: {"status": "ok"})
+    monkeypatch.setattr(verifier, "_core_readiness", lambda: "ready")
     monkeypatch.setattr(verifier, "_check_models", lambda: "models")
     monkeypatch.setattr(verifier, "_register_project", lambda: "project")
     warmups: list[str] = []

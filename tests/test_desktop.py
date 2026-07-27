@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from apps.runner.main import app as runner_app
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
+from april_common.service_health import ServiceHealthResult
 from april_common.settings import load_settings
 from services.api.server import create_app
 from tests.conftest import FakeRuntimeClient
@@ -43,7 +44,7 @@ def test_readiness_requires_auth(settings_tmp) -> None:
     assert client.get("/readiness").status_code == 403
 
 
-def test_readiness_redacts_tokens_and_paths(settings_tmp) -> None:
+def test_readiness_redacts_tokens_and_paths(settings_tmp, monkeypatch) -> None:
     class RuntimeWithPaths(FakeRuntimeClient):
         async def health(self, *, timeout: float | None = None) -> dict[str, object]:
             return {
@@ -80,6 +81,10 @@ def test_readiness_redacts_tokens_and_paths(settings_tmp) -> None:
                 ]
             }
 
+    monkeypatch.setattr(
+        "services.api.server.probe_service_health",
+        lambda *_args, **_kwargs: ServiceHealthResult(True, 200, "ok", "ready"),
+    )
     container = anyio.run(make_container, settings_tmp, RuntimeWithPaths())
     client = TestClient(create_app(container))
     response = client.get("/readiness", headers=auth(settings_tmp))

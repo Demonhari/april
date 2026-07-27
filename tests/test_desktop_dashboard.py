@@ -274,12 +274,11 @@ def test_dashboard_polled_endpoints_are_authenticated_and_shaped(settings_tmp) -
         # Every GET endpoint the cockpit polls must require auth and return its
         # documented envelope, so the data-driven UI never silently degrades.
         health = client.get("/health")
-        assert health.status_code == 200  # health is unauthenticated
-        # The rail/telemetry read /health, so its path redaction must hold: the
-        # real database path must never leak through this surface.
-        health_body = health.json()
-        assert health_body["database"]["path"] == "[REDACTED]"
-        assert str(settings_tmp.database_path) not in json.dumps(health_body)
+        assert health.status_code == 200
+        assert health.json() == {"status": "ok", "service": "april-core-api"}
+        assert client.get("/diagnostics").status_code in (401, 403)
+        diagnostics = client.get("/diagnostics", headers=headers).json()
+        assert str(settings_tmp.database_path) in json.dumps(diagnostics)
         for path in (
             "/approvals",
             "/runtime/models",

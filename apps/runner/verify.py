@@ -39,10 +39,12 @@ from apps.runner.multi_model_report import (
     build_multi_model_report,
 )
 from april_common.errors import ConfigError
+from april_common.service_health import ServiceHealthResult, probe_service_health
 from april_common.settings import load_settings
 from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
 from services.brain.schemas import BrainDecision
 from services.evolution.adapters import sha256_file
+from services.memory.database import connect_sqlite, sqlite_write_transaction
 from services.voice.health import query_audio_devices, voice_doctor
 
 VerifyStatus = Literal["pass", "fail", "skip", "manual"]
@@ -58,6 +60,20 @@ class VerifyCheck:
     def __post_init__(self) -> None:
         if self.status is None:
             self.status = "pass" if self.ok else "fail"
+
+
+def _verification_health_failure(
+    url: str,
+    api_url: str,
+    result: ServiceHealthResult,
+) -> str:
+    if url.startswith(api_url):
+        return "Core API process is not running or its liveness endpoint is unreachable."
+    if result.reason == "authentication_rejected":
+        return "Runtime authentication was rejected."
+    if result.reason == "endpoint_not_found":
+        return "Runtime health endpoint returned 404; check the configured endpoint."
+    return "Runtime is not reachable."
 
 
 def run_fake_verification(home: Path) -> list[VerifyCheck]:
@@ -269,7 +285,7 @@ def latest_brain_decision_marker(database: Path) -> int:
     if not database.exists():
         return 0
     try:
-        with sqlite3.connect(database) as conn:
+        with connect_sqlite(database) as conn:
             row = conn.execute(
                 """
                 SELECT COALESCE(MAX(rowid), 0)
@@ -286,7 +302,7 @@ def brain_decision_after_marker(database: Path, marker: int) -> dict[str, Any]:
     if not database.exists():
         return {}
     try:
-        with sqlite3.connect(database) as conn:
+        with connect_sqlite(database) as conn:
             row = conn.execute(
                 """
                 SELECT payload_json
@@ -962,18 +978,14 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
 
     def _wait_json(self, url: str, *, auth_runtime: bool = False) -> dict[str, Any]:
         deadline = time.monotonic() + 30.0
-        last = ""
-        headers = self.runtime_headers if auth_runtime else None
+        last = ServiceHealthResult(False, None, "connection_failed", "Endpoint is not reachable.")
         while time.monotonic() < deadline:
-            try:
-                response = httpx.get(url, timeout=1.0, headers=headers)
-                if response.status_code == 200:
-                    return response.json()
-                last = response.text[:500]
-            except httpx.HTTPError as exc:
-                last = str(exc)
+            token = self.runtime_token if auth_runtime else None
+            last = probe_service_health(url, bearer_token=token, timeout=1.0)
+            if last.ok:
+                return {"status": "ok", "http_status": last.status_code}
             time.sleep(0.2)
-        raise RuntimeError(f"health check failed for {url}: {last}")
+        raise RuntimeError(_verification_health_failure(url, self.api_url, last))
 
     def _load_model(self) -> str:
         start = time.monotonic()
@@ -1314,6 +1326,7 @@ class LauncherVerifier:
                 "runtime health", lambda: self._wait_json(self.runtime_url + "/runtime/health")
             )
             self._check("core health", lambda: self._wait_json(self.api_url + "/health"))
+            self._check("core readiness", self._core_readiness)
             self._check("model listing", self._check_models)
             project_id = self._check("project registration", self._register_project)
             # Unscored readiness warm-up: import contention can make the first
@@ -1438,18 +1451,43 @@ class LauncherVerifier:
 
     def _wait_json(self, url: str) -> dict[str, Any]:
         deadline = time.monotonic() + 20.0
-        last = ""
+        last = ServiceHealthResult(False, None, "connection_failed", "Endpoint is not reachable.")
         while time.monotonic() < deadline:
-            try:
-                headers = self.runtime_headers if url.startswith(self.runtime_url) else None
-                response = httpx.get(url, timeout=1.0, headers=headers)
-                if response.status_code == 200:
-                    return response.json()
-                last = response.text[:200]
-            except httpx.HTTPError as exc:
-                last = str(exc)
+            token = self.runtime_token if url.startswith(self.runtime_url) else None
+            last = probe_service_health(url, bearer_token=token, timeout=1.0)
+            if last.ok:
+                return {"status": "ok", "http_status": last.status_code}
             time.sleep(0.2)
-        raise RuntimeError(f"health check failed for {url}: {last}")
+        raise RuntimeError(_verification_health_failure(url, self.api_url, last))
+
+    def _core_readiness(self) -> str:
+        try:
+            response = httpx.get(
+                self.api_url + "/readiness",
+                headers=self.headers,
+                timeout=2.0,
+                follow_redirects=False,
+            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError("Core API is alive but readiness could not be read.") from exc
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Core API is alive but readiness returned HTTP {response.status_code}."
+            )
+        payload = response.json()
+        if payload.get("ready") is not True:
+            raw_reasons = payload.get("failure_reasons")
+            reasons = raw_reasons if isinstance(raw_reasons, list) else []
+            details = "; ".join(
+                f"{reason.get('code', 'not_ready')}: {reason.get('message', 'not ready')}"
+                for reason in reasons
+                if isinstance(reason, dict)
+            )
+            raise RuntimeError(
+                "Core API is alive but not ready"
+                + (f": {details}" if details else ".")
+            )
+        return "ready"
 
     def _client(self, *, timeout: float = 10.0) -> httpx.Client:
         return httpx.Client(base_url=self.api_url, headers=self.headers, timeout=timeout)
@@ -1629,12 +1667,11 @@ class LauncherVerifier:
     def _expired_approval_rejected(self, approval_id: str) -> str:
         database = self.temp / "data" / "april.db"
         if database.exists():
-            with sqlite3.connect(database) as conn:
+            with sqlite_write_transaction(database) as conn:
                 conn.execute(
                     "UPDATE approvals SET expires_at = ? WHERE id = ?",
                     ("1970-01-01T00:00:00Z", approval_id),
                 )
-                conn.commit()
         with self._client() as client:
             response = client.post("/tools/approve", json={"approval_id": approval_id})
         if response.status_code != 403:
@@ -1784,7 +1821,7 @@ class LauncherVerifier:
         deadline = time.monotonic() + 5.0
         last_count = 0
         while True:
-            with sqlite3.connect(database) as conn:
+            with connect_sqlite(database) as conn:
                 last_count = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
             if last_count >= 1:
                 return str(last_count)
@@ -1797,7 +1834,7 @@ class LauncherVerifier:
         deadline = time.monotonic() + 5.0
         runs = iterations = suspended = 0
         while True:
-            with sqlite3.connect(database) as conn:
+            with connect_sqlite(database) as conn:
                 runs = conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
                 iterations = conn.execute("SELECT COUNT(*) FROM agent_iterations").fetchone()[0]
                 suspended = conn.execute("SELECT COUNT(*) FROM suspended_agent_runs").fetchone()[0]
@@ -1811,7 +1848,7 @@ class LauncherVerifier:
         database = self.temp / "data" / "april.db"
         if not database.exists():
             return None
-        with sqlite3.connect(database) as conn:
+        with connect_sqlite(database) as conn:
             row = conn.execute(
                 "SELECT status FROM suspended_agent_runs WHERE approval_id = ?",
                 (approval_id,),
@@ -1904,7 +1941,7 @@ class WorkflowVerifier(LauncherVerifier):
 
     def _system_action_policy(self) -> str:
         database = self.temp / "data" / "april.db"
-        with sqlite3.connect(database) as conn:
+        with connect_sqlite(database) as conn:
             rows = conn.execute(
                 "SELECT payload_json FROM conversation_events WHERE event_type = 'brain_decision'"
             ).fetchall()
@@ -1925,7 +1962,7 @@ class WorkflowVerifier(LauncherVerifier):
 
     def _voice_health(self) -> str:
         with self._client() as client:
-            data = client.get("/health").json()
+            data = client.get("/diagnostics").json()
         voice = data.get("voice") or {}
         return str(voice.get("status", "unknown"))
 
@@ -2508,7 +2545,7 @@ class RealWorkflowVerifier(
 
     def _security_tool_call_records(self) -> str:
         database = self._brain_decision_database()
-        with sqlite3.connect(database) as conn:
+        with connect_sqlite(database) as conn:
             count = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
         if count < 1:
             raise RuntimeError("no tool call rows found")
@@ -2516,7 +2553,7 @@ class RealWorkflowVerifier(
 
     def _security_agent_run_records(self) -> str:
         database = self._brain_decision_database()
-        with sqlite3.connect(database) as conn:
+        with connect_sqlite(database) as conn:
             runs = conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
             iterations = conn.execute("SELECT COUNT(*) FROM agent_iterations").fetchone()[0]
             suspended = conn.execute("SELECT COUNT(*) FROM suspended_agent_runs").fetchone()[0]

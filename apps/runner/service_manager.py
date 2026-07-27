@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import IO, Protocol
 from urllib.parse import urlparse
 
-import httpx
-
+from april_common.service_health import probe_service_health
 from april_common.settings import AprilSettings, load_settings, project_root
 
 
@@ -276,21 +275,13 @@ class AprilServiceManager:
 
     @staticmethod
     def _default_health_getter(url: str, timeout: float) -> bool:
-        try:
-            response = httpx.get(url, timeout=timeout)
-        except httpx.HTTPError:
-            return False
-        return 200 <= response.status_code < 500
+        return probe_service_health(url, timeout=timeout).ok
 
     def _authenticated_health_getter(self, url: str, timeout: float) -> bool:
-        headers = None
-        if url.startswith(self.settings.runtime.url) and self.settings.runtime.token:
-            headers = {"Authorization": f"Bearer {self.settings.runtime.token}"}
-        try:
-            response = httpx.get(url, timeout=timeout, headers=headers)
-        except httpx.HTTPError:
-            return False
-        return 200 <= response.status_code < 500
+        token = (
+            self.settings.runtime.token if url.startswith(self.settings.runtime.url) else None
+        )
+        return probe_service_health(url, bearer_token=token, timeout=timeout).ok
 
     def _port_in_use(self, host: str, port: int) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

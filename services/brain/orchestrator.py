@@ -1217,7 +1217,6 @@ class AprilOrchestrator:
                 actor=actor,
                 request_id=request_id,
             )
-            await self.memory.mark_agent_run_expired(approval_id=approval_id)
             raise PermissionDeniedError("Approval has expired.")
         if await self.memory.get_conversation(suspended.conversation_id) is None:
             await self.memory.mark_agent_run_failed(approval_id=approval_id)
@@ -1291,7 +1290,6 @@ class AprilOrchestrator:
         await self._record_denial_feedback(approval, suspended)
         if suspended is None:
             return {"status": "denied", "approval_id": approval_id}
-        await self.memory.mark_agent_run_denied(approval_id=approval_id)
         result = AgentResult(
             status="error",
             final_message="Approval denied. The suspended agent run was stopped.",

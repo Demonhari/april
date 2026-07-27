@@ -122,6 +122,7 @@ class ApprovalStore:
         actor: str,
         request_id: str,
     ) -> ApprovalRecord:
+        expired = False
         async with self.database.transaction() as conn:
             cursor = await conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
             row = await cursor.fetchone()
@@ -132,22 +133,50 @@ class ApprovalStore:
             if record.status != "pending":
                 raise PermissionDeniedError("Approval is not pending.", {"status": record.status})
             if parse_utc_iso(record.expires_at) < now:
-                await conn.execute(
-                    "UPDATE approvals SET status = 'expired' WHERE id = ?",
+                cursor = await conn.execute(
+                    """
+                    UPDATE approvals
+                    SET status = 'expired'
+                    WHERE id = ? AND status = 'pending'
+                    """,
                     (approval_id,),
                 )
-                raise PermissionDeniedError("Approval has expired.")
-            expected_hash = canonical_hash(tool, args, record.metadata)
-            legacy_hash = legacy_canonical_hash(tool, args)
-            hash_matches = record.canonical_hash == expected_hash or (
-                not record.metadata and record.canonical_hash == legacy_hash
+                expired = cursor.rowcount == 1
+                if not expired:
+                    raise PermissionDeniedError("Approval is not pending.")
+                await self._mark_suspended_terminal(
+                    conn,
+                    approval_id=approval_id,
+                    suspended_status="expired",
+                    run_status="expired",
+                )
+            else:
+                expected_hash = canonical_hash(tool, args, record.metadata)
+                legacy_hash = legacy_canonical_hash(tool, args)
+                hash_matches = record.canonical_hash == expected_hash or (
+                    not record.metadata and record.canonical_hash == legacy_hash
+                )
+                if record.tool != tool or not hash_matches:
+                    raise PermissionDeniedError("Approval arguments changed.")
+                cursor = await conn.execute(
+                    """
+                    UPDATE approvals
+                    SET status = 'approved'
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (approval_id,),
+                )
+                if cursor.rowcount != 1:
+                    raise PermissionDeniedError("Approval is not pending.")
+        if expired:
+            self._write_audit_event(
+                record=record,
+                actor=actor,
+                request_id=request_id,
+                event_type="approval_expired",
+                outcome="expired",
             )
-            if record.tool != tool or not hash_matches:
-                raise PermissionDeniedError("Approval arguments changed.")
-            await conn.execute(
-                "UPDATE approvals SET status = 'approved' WHERE id = ?",
-                (approval_id,),
-            )
+            raise PermissionDeniedError("Approval has expired.")
         self.audit.write(
             {
                 "actor": actor,
@@ -181,13 +210,22 @@ class ApprovalStore:
             record = self._record_from_row(row)
             if record.status != "approved":
                 raise PermissionDeniedError("Approval has not been approved.")
-            await conn.execute(
+            consumed_at = utc_now_iso()
+            cursor = await conn.execute(
                 """
                 UPDATE approvals
                 SET status = 'consumed', consumed_at = ?, result_json = ?
-                WHERE id = ?
+                WHERE id = ? AND status = 'approved'
                 """,
-                (utc_now_iso(), json.dumps(result, sort_keys=True), approval_id),
+                (consumed_at, json.dumps(result, sort_keys=True), approval_id),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionDeniedError("Approval has not been approved.")
+            await self._transition_suspended_after_consumption(
+                conn,
+                approval_id=approval_id,
+                succeeded=result.get("ok") is True,
+                transitioned_at=consumed_at,
             )
         self.audit.write(
             {
@@ -214,8 +252,21 @@ class ApprovalStore:
             record = self._record_from_row(row)
             if record.status != "pending":
                 raise PermissionDeniedError("Approval is not pending.", {"status": record.status})
-            await conn.execute(
-                "UPDATE approvals SET status = 'denied' WHERE id = ?", (approval_id,)
+            cursor = await conn.execute(
+                """
+                UPDATE approvals
+                SET status = 'denied'
+                WHERE id = ? AND status = 'pending'
+                """,
+                (approval_id,),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionDeniedError("Approval is not pending.")
+            await self._mark_suspended_terminal(
+                conn,
+                approval_id=approval_id,
+                suspended_status="denied",
+                run_status="denied",
             )
         self.audit.write(
             {
@@ -242,9 +293,21 @@ class ApprovalStore:
             record = self._record_from_row(row)
             if record.status != "pending":
                 raise PermissionDeniedError("Approval is not pending.", {"status": record.status})
-            await conn.execute(
-                "UPDATE approvals SET status = 'expired' WHERE id = ?",
+            cursor = await conn.execute(
+                """
+                UPDATE approvals
+                SET status = 'expired'
+                WHERE id = ? AND status = 'pending'
+                """,
                 (approval_id,),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionDeniedError("Approval is not pending.")
+            await self._mark_suspended_terminal(
+                conn,
+                approval_id=approval_id,
+                suspended_status="expired",
+                run_status="expired",
             )
         self.audit.write(
             {
@@ -267,6 +330,117 @@ class ApprovalStore:
             "This action requires approval.",
             {"approval": response.model_dump()},
         )
+
+    def _write_audit_event(
+        self,
+        *,
+        record: ApprovalRecord,
+        actor: str,
+        request_id: str,
+        event_type: str,
+        outcome: str,
+    ) -> None:
+        self.audit.write(
+            {
+                "actor": actor,
+                "request_id": request_id,
+                "event_type": event_type,
+                "tool": record.tool,
+                "arguments": record.args,
+                "agent": record.agent,
+                "permission_level": record.permission_level,
+                "risk": record.risk_level,
+                "metadata": record.metadata,
+                "approval_id": record.id,
+                "outcome": outcome,
+            }
+        )
+
+    @staticmethod
+    async def _mark_suspended_terminal(
+        conn: Any,
+        *,
+        approval_id: str,
+        suspended_status: str,
+        run_status: str,
+    ) -> None:
+        cursor = await conn.execute(
+            "SELECT agent_run_id FROM suspended_agent_runs WHERE approval_id = ?",
+            (approval_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+        now = utc_now_iso()
+        cursor = await conn.execute(
+            """
+            UPDATE suspended_agent_runs
+            SET status = ?, completed_at = ?
+            WHERE approval_id = ? AND status = 'suspended'
+            """,
+            (suspended_status, now, approval_id),
+        )
+        if cursor.rowcount != 1:
+            raise PermissionDeniedError("Suspended agent run is not pending.")
+        cursor = await conn.execute(
+            """
+            UPDATE agent_runs
+            SET status = ?, completed_at = ?
+            WHERE id = ? AND status = 'suspended'
+            """,
+            (run_status, now, row["agent_run_id"]),
+        )
+        if cursor.rowcount != 1:
+            raise PermissionDeniedError("Agent run is not suspended.")
+
+    @staticmethod
+    async def _transition_suspended_after_consumption(
+        conn: Any,
+        *,
+        approval_id: str,
+        succeeded: bool,
+        transitioned_at: str,
+    ) -> None:
+        cursor = await conn.execute(
+            "SELECT agent_run_id, status FROM suspended_agent_runs WHERE approval_id = ?",
+            (approval_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+        if row["status"] != "suspended":
+            raise PermissionDeniedError(
+                "Suspended agent run is not resumable.",
+                {"status": row["status"]},
+            )
+        suspended_status = "resumed" if succeeded else "failed"
+        run_status = "running" if succeeded else "failed"
+        completed_at = None if succeeded else transitioned_at
+        cursor = await conn.execute(
+            """
+            UPDATE suspended_agent_runs
+            SET status = ?, resumed_at = ?, completed_at = ?
+            WHERE approval_id = ? AND status = 'suspended'
+            """,
+            (
+                suspended_status,
+                transitioned_at if succeeded else None,
+                completed_at,
+                approval_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise PermissionDeniedError("Suspended agent run is not resumable.")
+        cursor = await conn.execute(
+            """
+            UPDATE agent_runs
+            SET status = ?, completed_at = ?
+            WHERE id = ? AND status = 'suspended'
+            """,
+            (run_status, completed_at, row["agent_run_id"]),
+        )
+        if cursor.rowcount != 1:
+            raise PermissionDeniedError("Agent run is not suspended.")
 
     def _record_from_row(self, row: Any) -> ApprovalRecord:
         data = dict(row)

@@ -82,7 +82,7 @@
 
   // --- runtime telemetry -----------------------------------------------------
   // Pull per-model telemetry out of whichever loaded model exposes it. Used by
-  // both the /health.runtime payload (paths already redacted) and a richer
+  // both the /diagnostics.runtime payload (paths already redacted) and a richer
   // /runtime/models payload. Returns undefined when no loaded model reports it.
   function firstLoadedValue(models, key) {
     if (!Array.isArray(models)) return undefined;
@@ -98,9 +98,9 @@
     return undefined;
   }
 
-  // Build the runtime telemetry view model. `health` is the /health body; an
+  // Build the runtime telemetry view model. `health` is the /diagnostics body; an
   // optional richer `models` list (/runtime/models) is consulted for per-model
-  // rates when /health did not carry them. Missing values stay undefined and
+  // rates when diagnostics did not carry them. Missing values stay undefined and
   // are rendered as "unknown" by the caller — never faked.
   function telemetryFrom(health, models) {
     const runtime = (health && health.runtime) || {};
@@ -123,7 +123,7 @@
 
   // --- backend / subsystem status -------------------------------------------
   // The simulated badge is tri-state: true (fake backend), false (real), or
-  // null when /health did not report it. Real != verified; the label says so.
+  // null when diagnostics did not report it. Real != verified; the label says so.
   function backendInfo(health) {
     const runtime = (health && health.runtime) || {};
     const simulated = typeof runtime.simulated === "boolean" ? runtime.simulated : null;

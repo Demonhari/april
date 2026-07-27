@@ -6,6 +6,11 @@ SCHEMA_VERSION = 14
 
 
 async def run_migrations(database: Database) -> None:
+    async with database.write_coordination():
+        await _run_migrations_locked(database)
+
+
+async def _run_migrations_locked(database: Database) -> None:
     conn = database.connection
     await conn.executescript(
         """

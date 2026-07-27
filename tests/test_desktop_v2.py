@@ -6,7 +6,7 @@ import anyio
 from fastapi.testclient import TestClient
 
 from services.api.server import create_app
-from tests.test_core_api import make_container
+from tests.test_core_api import auth, make_container
 
 WEB = Path(__file__).resolve().parents[1] / "apps" / "desktop" / "web"
 INDEX = (WEB / "index.html").read_text(encoding="utf-8")
@@ -19,9 +19,10 @@ def test_nav_exposes_v2_screens() -> None:
         assert f"screens.{screen} = async function" in APP_JS
 
 
-def test_header_shows_wake_status_from_health_booleans() -> None:
+def test_header_shows_wake_status_from_diagnostics_booleans() -> None:
     assert 'id="rail-wake"' in INDEX
     assert "state.health.wake" in APP_JS
+    assert 'pollGet("/diagnostics")' in APP_JS
     # Honest states only: off / muted / listening / idle / on / unknown.
     for word in ('"off"', '"muted"', '"listening"', '"idle"', '"on"', '"unknown"'):
         assert word in APP_JS
@@ -56,15 +57,15 @@ def test_no_secrets_or_tokens_in_new_markup() -> None:
     assert "local-dev-token" not in APP_JS
 
 
-def test_health_reports_wake_booleans_only(settings_tmp) -> None:
+def test_diagnostics_reports_wake_booleans_only(settings_tmp) -> None:
     container = anyio.run(make_container, settings_tmp)
     client = TestClient(create_app(container))
-    response = client.get("/health")
+    response = client.get("/diagnostics", headers=auth(settings_tmp))
     assert response.status_code == 200
     wake = response.json()["wake"]
     assert wake == {"enabled": False, "muted": False, "state": "idle"}
 
     settings_tmp.mute_flag_path.parent.mkdir(parents=True, exist_ok=True)
     settings_tmp.mute_flag_path.write_text("muted\n", encoding="utf-8")
-    muted = client.get("/health").json()["wake"]
+    muted = client.get("/diagnostics", headers=auth(settings_tmp)).json()["wake"]
     assert muted["muted"] is True

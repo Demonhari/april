@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import importlib.util
 import json
@@ -27,6 +28,7 @@ from april_common.errors import (
 )
 from april_common.path_security import PathPolicy, normalize_existing_path
 from april_common.report_freshness import freshness_from_payload
+from april_common.service_health import ServiceHealthResult, probe_service_health
 from april_common.settings import (
     INSECURE_API_TOKENS,
     INSECURE_RUNTIME_TOKENS,
@@ -76,7 +78,6 @@ from services.evolution.eval_review import (
 from services.evolution.feedback_eval import count_pending_eval_cases, stage_feedback_eval_case
 from services.evolution.inspect import (
     count_pending_write_capable_overlay_candidates,
-    evolution_health_snapshot,
     evolution_history,
     evolution_kill_switch_active,
     evolution_status,
@@ -187,14 +188,18 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if app.state.container is None:
-            app.state.container = await build_container()
-        scheduler = app.state.container.scheduler
-        if scheduler is not None:
+            try:
+                app.state.container = await build_container()
+            except Exception:
+                # Liveness must remain available when dependency assembly fails.
+                # Authenticated endpoints retry assembly and surface the real error.
+                app.state.container_error = True
+        active: ApiContainer | None = app.state.container
+        if active is not None and active.scheduler is not None:
             # start() is a no-op unless scheduler.enabled, so this is safe in tests.
-            await scheduler.start()
-        active: ApiContainer = app.state.container
+            await active.scheduler.start()
         wake_bus: WakeBus | None = None
-        if active.settings.wake.enabled:
+        if active is not None and active.settings.wake.enabled:
             # Local wake bus: owner-only Unix socket for hotkey/desktop wakes.
             async def bus_handler(event: WakeEvent) -> dict[str, Any]:
                 return await _handle_wake_event(active, event, request_id=str(uuid.uuid4()))
@@ -211,6 +216,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
 
     app = FastAPI(title="APRIL Core API", version="0.1.0", lifespan=lifespan)
     app.state.container = container
+    app.state.container_error = False
     app.state.wake_bus = None
     initial_settings = container.settings if container is not None else get_settings()
     if initial_settings.api.cors_enabled:
@@ -230,7 +236,9 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.middleware("http")
     async def enforce_request_size(request: Request, call_next: Any) -> object:
         active_settings = (
-            app.state.container.settings if app.state.container is not None else get_settings()
+            app.state.container.settings
+            if app.state.container is not None
+            else initial_settings
         )
         content_length = request.headers.get("content-length")
         if content_length is not None:
@@ -260,50 +268,8 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         return active
 
     @app.get("/health")
-    async def health(active: ApiContainer = Depends(get_container)) -> object:
-        status = "ok"
-        memory_index = await active.memory_repository.health()
-        if memory_index.repair_required:
-            status = "degraded"
-        try:
-            runtime = await active.runtime_client.health(timeout=1.0)
-            if str(runtime.get("status", "ok")) not in {"ok", "degraded"}:
-                status = "degraded"
-        except AprilError as exc:
-            runtime = {"status": "unavailable", "error": exc.message}
-            status = "degraded"
-        return _redact_health_payload(
-            {
-                "status": status,
-                "database": {
-                    "ok": active.database.path.exists(),
-                    "path": str(active.database.path),
-                },
-                "vector_index": active.vector_memory.health(),
-                "memory_index": asdict(memory_index),
-                "voice": voice_health(active.settings).model_dump(),
-                # Booleans only: wake configuration + the local hard-mute flag.
-                # No paths or scores are ever exposed here.
-                "wake": {
-                    "enabled": active.settings.wake.enabled,
-                    "muted": active.settings.mute_flag_path.exists(),
-                    "state": read_wake_status(active.settings)["state"],
-                },
-                "scheduler": {
-                    "enabled": active.settings.scheduler.enabled,
-                    "running": active.scheduler.running if active.scheduler else False,
-                    "briefing_enabled": active.settings.scheduler.briefing_enabled,
-                    "fired_reminders": (
-                        active.scheduler.fired_reminder_count if active.scheduler else 0
-                    ),
-                },
-                # Dreamer/evolution visibility: booleans, counts, dates, and
-                # fixed gate-reason strings only — never a path or report body.
-                "evolution": await evolution_health_snapshot(active.settings, active.database),
-                "runtime_url": active.settings.runtime.url,
-                "runtime": runtime,
-            }
-        )
+    async def health() -> object:
+        return {"status": "ok", "service": "april-core-api"}
 
     @app.get("/diagnostics")
     async def diagnostics(active: ApiContainer = Depends(authorized)) -> object:
@@ -324,6 +290,11 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             "vector_index": active.vector_memory.health(),
             "memory_index": asdict(memory_index),
             "voice": voice_health(active.settings).model_dump(),
+            "wake": {
+                "enabled": active.settings.wake.enabled,
+                "muted": active.settings.mute_flag_path.exists(),
+                "state": read_wake_status(active.settings)["state"],
+            },
             "scheduler": {
                 "enabled": active.settings.scheduler.enabled,
                 "running": active.scheduler.running if active.scheduler else False,
@@ -1454,22 +1425,45 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
     runtime_backend = "unknown"
     runtime_simulated: bool | None = None
     runtime_health: dict[str, Any]
-    try:
-        raw_runtime = await active.runtime_client.health(timeout=1.0)
-        runtime_health = _safe_runtime_health(raw_runtime)
-        runtime_status = str(raw_runtime.get("status", "unknown"))
-        runtime_backend = str(raw_runtime.get("backend", "unknown"))
-        simulated = raw_runtime.get("simulated")
-        runtime_simulated = simulated if isinstance(simulated, bool) else None
-    except AprilError as exc:
-        runtime_health = {"status": "unavailable", "error": exc.message}
+    runtime_probe = await asyncio.to_thread(
+        probe_service_health,
+        active.settings.runtime.url.rstrip("/") + "/runtime/health",
+        bearer_token=active.settings.runtime.token,
+        timeout=1.0,
+    )
+    if runtime_probe.ok:
+        try:
+            raw_runtime = await active.runtime_client.health(timeout=1.0)
+            runtime_health = _safe_runtime_health(raw_runtime)
+            runtime_status = str(raw_runtime.get("status", "unknown"))
+            runtime_backend = str(raw_runtime.get("backend", "unknown"))
+            simulated = raw_runtime.get("simulated")
+            runtime_simulated = simulated if isinstance(simulated, bool) else None
+        except AprilError as exc:
+            runtime_health = {"status": "unavailable", "error": exc.message}
+            runtime_probe = ServiceHealthResult(
+                ok=False,
+                status_code=None,
+                reason="invalid_response",
+                message="Runtime health response could not be read.",
+            )
+    else:
+        runtime_health = {
+            "status": "unavailable",
+            "probe_reason": runtime_probe.reason,
+            "http_status": runtime_probe.status_code,
+            "error": runtime_probe.message,
+        }
 
-    try:
-        raw_models = await active.runtime_client.models()
-        models = [
-            _safe_model_entry(model, runtime_backend) for model in raw_models.get("models", [])
-        ]
-    except AprilError:
+    if runtime_probe.ok:
+        try:
+            raw_models = await active.runtime_client.models()
+            models = [
+                _safe_model_entry(model, runtime_backend) for model in raw_models.get("models", [])
+            ]
+        except AprilError:
+            models = []
+    else:
         models = []
     if not models and isinstance(runtime_health.get("models"), list):
         models = [
@@ -1564,12 +1558,22 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
     runtime_localhost = active.settings.runtime.url.startswith(
         ("http://127.0.0.1", "http://localhost")
     )
-    degraded = (
-        str(runtime_status) not in {"ok", "degraded"}
-        or not active.database.path.exists()
-        or runtime_simulated is True
-        or memory_index_health.repair_required
+    try:
+        database_available = (await active.database.fetchone("SELECT 1")) is not None
+    except Exception:
+        database_available = False
+    model_registry = _model_registry_readiness(active.settings)
+    scheduler_required = active.settings.scheduler.enabled
+    scheduler_available = active.scheduler is not None and active.scheduler.running
+    failure_reasons = _readiness_failure_reasons(
+        runtime_probe=runtime_probe,
+        runtime_status=runtime_status,
+        database_available=database_available,
+        model_registry=model_registry,
+        scheduler_required=scheduler_required,
+        scheduler_available=scheduler_available,
     )
+    ready = not failure_reasons
     overlay_approval_service = PromptOverlayApprovalService(
         active.settings,
         active.database,
@@ -1580,15 +1584,19 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
     pending_real_runtime_blockers = _pending_real_runtime_overlay_blockers(active.settings)
     real_runtime_required = active.settings.environment == "production"
     return {
-        "status": "degraded" if degraded else "ok",
+        "ready": ready,
+        "status": "ok" if ready else "degraded",
+        "failure_reasons": failure_reasons,
         "core": {
             "api_health": "ok",
             "runtime_health": runtime_status,
             "runtime_backend": runtime_backend,
             "runtime_simulated": runtime_simulated,
+            "runtime": runtime_health,
             "database": {
-                "status": "ok" if active.database.path.exists() else "missing",
+                "status": "ok" if database_available else "unavailable",
                 "configured": True,
+                "available": database_available,
             },
             "vector_index": vector,
             "scheduler": {
@@ -1596,12 +1604,18 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
                 "running": active.scheduler.running if active.scheduler else False,
                 "briefing_enabled": active.settings.scheduler.briefing_enabled,
             },
+            "required_services": {
+                "runtime": runtime_probe.ok,
+                "database": database_available,
+                "scheduler": not scheduler_required or scheduler_available,
+            },
         },
         "memory_index": asdict(memory_index_health),
         "models": {
             "llama_cpp_python_available": importlib.util.find_spec("llama_cpp") is not None,
             "registered": models,
             "lora_adapters": _lora_adapter_readiness(active.settings),
+            "registry": model_registry,
         },
         "embeddings": embeddings,
         "evolution": {
@@ -1713,6 +1727,83 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "run april setup app-stub",
         ],
     }
+
+
+def _model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
+    try:
+        registry = ModelRegistry.from_file(
+            settings.home / "configs" / "models.yaml",
+            root=settings.home,
+        )
+    except AprilError:
+        return {
+            "valid": False,
+            "required_model_available": False,
+            "required_model_ids": [],
+            "unavailable_required_model_ids": [],
+        }
+    required_models = [model for model in registry.list() if model.role == "brain"]
+    unavailable = [
+        model.id
+        for model in required_models
+        if settings.runtime.backend != "fake"
+        and model.backend != "fake"
+        and not model.resolved_path(registry.root).is_file()
+    ]
+    return {
+        "valid": True,
+        "required_model_available": bool(required_models) and not unavailable,
+        "required_model_ids": [model.id for model in required_models],
+        "unavailable_required_model_ids": unavailable,
+    }
+
+
+def _readiness_failure_reasons(
+    *,
+    runtime_probe: ServiceHealthResult,
+    runtime_status: str,
+    database_available: bool,
+    model_registry: dict[str, Any],
+    scheduler_required: bool,
+    scheduler_available: bool,
+) -> list[dict[str, str]]:
+    reasons: list[dict[str, str]] = []
+    if not runtime_probe.ok:
+        if runtime_probe.reason == "authentication_rejected":
+            message = "Runtime authentication was rejected."
+        elif runtime_probe.reason == "endpoint_not_found":
+            message = "The configured Runtime health endpoint is missing or incorrect."
+        else:
+            message = "Runtime is not reachable."
+        reasons.append({"code": f"runtime_{runtime_probe.reason}", "message": message})
+    elif runtime_status not in {"ok", "degraded"}:
+        reasons.append(
+            {
+                "code": "runtime_unhealthy",
+                "message": "Runtime reported an unhealthy operational status.",
+            }
+        )
+    if not database_available:
+        reasons.append({"code": "database_unavailable", "message": "Database is unavailable."})
+    if not bool(model_registry["valid"]):
+        reasons.append(
+            {"code": "model_registry_invalid", "message": "Model registry is invalid."}
+        )
+    elif not bool(model_registry["required_model_available"]):
+        reasons.append(
+            {
+                "code": "required_model_unavailable",
+                "message": "A required model is unavailable.",
+            }
+        )
+    if scheduler_required and not scheduler_available:
+        reasons.append(
+            {
+                "code": "required_scheduler_unavailable",
+                "message": "The required scheduler service is unavailable.",
+            }
+        )
+    return reasons
 
 
 def _embedding_model_status(settings: AprilSettings) -> dict[str, Any]:

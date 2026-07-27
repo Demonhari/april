@@ -7,14 +7,13 @@ import signal
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from april_common.audit import AuditLogger
+from april_common.service_health import probe_service_health
 from april_common.settings import AprilSettings, get_settings
 from april_common.time import utc_now_iso
 from services.pool.governor import GovernorDecision, ResourceGovernor
@@ -25,6 +24,7 @@ class ChildSpec:
     name: str
     argv: tuple[str, ...]
     health_url: str | None = None
+    health_token: str | None = field(default=None, repr=False)
     restart_backoff_seconds: float = 2.0
     max_restart_backoff_seconds: float = 60.0
 
@@ -431,7 +431,8 @@ def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
         ChildSpec(
             name="runtime",
             argv=(python, "-m", "services.april_runtime.server"),
-            health_url=settings.runtime.url.rstrip("/") + "/health",
+            health_url=settings.runtime.url.rstrip("/") + "/runtime/health",
+            health_token=settings.runtime.token,
         ),
         ChildSpec(
             name="api",
@@ -469,14 +470,13 @@ async def _loopback_health_check(spec: ChildSpec) -> bool:
             return status.get("state") in {"listening", "muted"}
         except (OSError, RuntimeError, ValueError):
             return False
-    try:
-        import httpx
-
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            response = await client.get(spec.health_url)
-        return response.status_code == 200
-    except Exception:
-        return False
+    result = await asyncio.to_thread(
+        probe_service_health,
+        spec.health_url,
+        bearer_token=spec.health_token,
+        timeout=1.0,
+    )
+    return result.ok
 
 
 def read_daemon_status(settings: AprilSettings) -> dict[str, object]:
@@ -640,11 +640,7 @@ def autostart_if_needed(settings: AprilSettings) -> dict[str, object]:
 
 
 def _sync_health_probe(url: str) -> bool:
-    try:
-        with urllib.request.urlopen(url, timeout=1.0) as response:
-            return response.status == 200
-    except (OSError, urllib.error.URLError):
-        return False
+    return probe_service_health(url, timeout=1.0).ok
 
 
 def _write_pid_file(settings: AprilSettings, pid: int) -> None:
