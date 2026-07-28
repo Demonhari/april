@@ -295,9 +295,7 @@ def _doctor() -> None:
     try:
         adapter_state = inspect_adapter_state(load_settings(root=home))
         adapter_state_label = (
-            "consistent"
-            if adapter_state["consistent"]
-            else "reconciliation required"
+            "consistent" if adapter_state["consistent"] else "reconciliation required"
         )
     except ConfigError:
         adapter_state_label = "unavailable (configuration invalid)"
@@ -895,7 +893,14 @@ def model_recommend_command(json_output: bool = typer.Option(False, "--json")) -
 
 @model_app.command("import")
 def model_import_command(
-    role: str = typer.Option(..., "--role"),
+    role: str = typer.Option(
+        ...,
+        "--role",
+        help=(
+            "Logical model role: brain/router/coding/reading/creative/"
+            "reasoning/system_action/embedding."
+        ),
+    ),
     model_id: str = typer.Option(..., "--id"),
     name: str = typer.Option(..., "--name"),
     path: Path = typer.Option(..., "--path"),

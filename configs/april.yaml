@@ -44,6 +44,12 @@ permissions:
 
 brain:
   model_id: april-brain
+  # Null aliases routing to the Brain without a duplicate registry entry or
+  # a second load of the same GGUF.
+  router_model_id: null
+  routing_reliability_min_samples: 5
+  routing_reliability_prior_successes: 4.0
+  routing_reliability_prior_failures: 4.0
 
 # Core-side character pre-bounds for independent context categories. Runtime's
 # tokenizer and model context window remain the final exact budget authority.

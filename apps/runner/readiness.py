@@ -123,6 +123,10 @@ class ReadinessReport(BaseModel):
     embedding_role_model_registered: bool = False
     conversation_summarization_enabled: bool = True
     reading_model_registered: bool = False
+    router_model_id: str | None = None
+    router_aliased_to_brain: bool = True
+    dedicated_router_available: bool = False
+    router_failure_reason: str | None = None
     conversation_summarization_available: bool = False
     conversation_summarization_degrades_safely: bool = True
     hashed_token_embedding_fallback: bool = False
@@ -306,6 +310,46 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 )
             )
 
+    router_model_id = settings.brain.router_model_id or settings.brain.model_id
+    router_aliased = settings.brain.router_model_id is None
+    dedicated_router_available = False
+    router_failure_reason: str | None = None
+    if registry is not None:
+        if router_aliased:
+            if registry.exists(settings.brain.model_id):
+                checks.append(
+                    ReadinessCheck(
+                        name="router model",
+                        status="ok",
+                        detail=f"{router_model_id} aliases the Brain model.",
+                    )
+                )
+            else:
+                router_failure_reason = "aliased_brain_model_not_registered"
+        elif not registry.exists(router_model_id):
+            router_failure_reason = "dedicated_router_not_registered"
+        else:
+            router_model = registry.get(router_model_id)
+            if router_model.role != "router":
+                router_failure_reason = "dedicated_router_role_mismatch"
+            else:
+                dedicated_router_available = (
+                    backend == "fake"
+                    or router_model.backend == "fake"
+                    or router_model.resolved_path(registry.root).is_file()
+                )
+                if not dedicated_router_available:
+                    router_failure_reason = "dedicated_router_artifact_unavailable"
+        if router_failure_reason is not None:
+            checks.append(
+                ReadinessCheck(
+                    name="router model",
+                    status="blocker",
+                    detail=router_failure_reason,
+                    action="run april config validate",
+                )
+            )
+
     reading_models = (
         [model for model in registry.list() if model.role == "reading"]
         if registry is not None
@@ -327,8 +371,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
             name="conversation summarization",
             status="skipped",
             detail=(
-                "Conversation summarization is disabled by configuration; "
-                "chat remains available."
+                "Conversation summarization is disabled by configuration; chat remains available."
             ),
         )
     elif reading_available:
@@ -907,6 +950,10 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         embedding_role_model_registered=bool(embedding_role_models),
         conversation_summarization_enabled=settings.conversation_context.summary_enabled,
         reading_model_registered=bool(reading_models),
+        router_model_id=router_model_id,
+        router_aliased_to_brain=router_aliased,
+        dedicated_router_available=dedicated_router_available,
+        router_failure_reason=router_failure_reason,
         conversation_summarization_available=reading_available,
         conversation_summarization_degrades_safely=True,
         hashed_token_embedding_fallback=settings.memory.embedding_provider == "hashed-token",

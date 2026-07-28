@@ -25,6 +25,7 @@ from services.brain.agent_loop import (
 )
 from services.brain.parser import parse_brain_decision, parse_with_repair
 from services.brain.router import BrainRouter
+from services.brain.schemas import RouteSource
 from services.brain.structured_output import BRAIN_DECISION_RESPONSE_FORMAT
 from tests.test_runtime_api import runtime_lifecycle
 
@@ -157,13 +158,12 @@ async def test_repair_success() -> None:
     assert decision.routing_method == "model_repair"
 
 
-async def test_repair_failure_falls_back_to_deterministic_router() -> None:
+async def test_exact_git_status_uses_pre_model_deterministic_router() -> None:
     client = ScriptedRuntimeClient(["garbage one", "garbage two"])
-    decision = await BrainRouter(client).route("show git status")  # type: ignore[arg-type]
-    assert decision.routing_method == "fallback"
-    assert "git_status" in decision.tools_needed
-    # Even on the path that ends in fallback, the brain still requested its schema.
-    assert client.response_formats[0] is BRAIN_DECISION_RESPONSE_FORMAT
+    result = await BrainRouter(client).route_result("show git status")  # type: ignore[arg-type]
+    assert result.route_source is RouteSource.DETERMINISTIC
+    assert "git_status" in result.decision.tools_needed
+    assert client.response_formats == []
 
 
 # --- exact-schema requests --------------------------------------------------

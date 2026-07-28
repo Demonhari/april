@@ -95,6 +95,8 @@ class FakeBackend(RuntimeBackend):
         response_format: ResponseFormat | None = None,
     ) -> GenerationResult:
         self.last_response_format = response_format
+        if messages and messages[-1].role == "tool":
+            prompt = f"{prompt}\n\nTool result:\n{messages[-1].content}"
         return await self.generate(
             prompt,
             temperature=temperature,

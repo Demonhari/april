@@ -84,6 +84,10 @@ class PermissionSettings(BaseModel):
 
 class BrainSettings(BaseModel):
     model_id: str = "april-brain"
+    router_model_id: str | None = None
+    routing_reliability_min_samples: int = Field(default=5, ge=1, le=1000)
+    routing_reliability_prior_successes: float = Field(default=4.0, gt=0.0, le=100.0)
+    routing_reliability_prior_failures: float = Field(default=4.0, gt=0.0, le=100.0)
 
 
 class ConversationContextSettings(BaseModel):
@@ -486,6 +490,11 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_MAXIMUM_AGENT_TOOL_ITERATIONS": ("permissions", "maximum_agent_tool_iterations"),
     "APRIL_EXTERNAL_ACTIONS_ENABLED": ("permissions", "external_actions_enabled"),
     "APRIL_BRAIN_MODEL_ID": ("brain", "model_id"),
+    "APRIL_ROUTER_MODEL_ID": ("brain", "router_model_id"),
+    "APRIL_ROUTING_RELIABILITY_MIN_SAMPLES": (
+        "brain",
+        "routing_reliability_min_samples",
+    ),
     "APRIL_VOICE_ENABLED": ("voice", "enabled"),
     "APRIL_AUDIO_CACHE_PATH": ("voice", "audio_cache_path"),
     "APRIL_VOICE_INPUT_DEVICE": ("voice", "input_device"),

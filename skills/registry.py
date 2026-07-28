@@ -66,6 +66,7 @@ def default_registry() -> ToolRegistry:
     from skills.memory.remember_memory import remember_memory_definition
     from skills.notes.create_note import create_note_definition
     from skills.notes.search_notes import search_notes_definition
+    from skills.reminders.cancel_reminder import cancel_reminder_definition
     from skills.reminders.create_reminder import create_reminder_definition
     from skills.reminders.list_reminders import list_reminders_definition
     from skills.terminal.run_command import run_command_definition
@@ -92,6 +93,7 @@ def default_registry() -> ToolRegistry:
         create_note_definition(),
         search_notes_definition(),
         create_reminder_definition(),
+        cancel_reminder_definition(),
         list_reminders_definition(),
         open_app_definition(),
         open_url_definition(),

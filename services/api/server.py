@@ -796,6 +796,10 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
             conversation_id=conversation_id,
             agent_run_id=agent_run_id,
         )
+        if record.rating == "bad" and record.agent_run_id is not None:
+            await active.orchestrator.routing_reliability.mark_negative_feedback(
+                agent_run_id=record.agent_run_id
+            )
         active.approvals.audit.write(
             {
                 "event_type": "feedback_recorded",
@@ -1718,9 +1722,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "barge_in_trigger": active.settings.voice.barge_in_trigger,
             "barge_in_action": active.settings.voice.barge_in_action,
             "acoustic_echo_cancellation_available": False,
-            "complete_live_conversation_verified": live_flags[
-                "voice_conversation_live_verified"
-            ],
+            "complete_live_conversation_verified": live_flags["voice_conversation_live_verified"],
             "complete_live_conversation_command": (
                 "run april voice verify-conversation-live "
                 "--report data/verification/voice-conversation-live.json"
@@ -1774,6 +1776,8 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
 
 
 def _model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
+    router_model_id = settings.brain.router_model_id or settings.brain.model_id
+    router_aliased = settings.brain.router_model_id is None
     try:
         registry = ModelRegistry.from_file(
             settings.home / "configs" / "models.yaml",
@@ -1785,6 +1789,10 @@ def _model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
             "required_model_available": False,
             "required_model_ids": [],
             "unavailable_required_model_ids": [],
+            "router_model_id": router_model_id,
+            "router_aliased_to_brain": router_aliased,
+            "dedicated_router_available": False,
+            "router_failure_reason": "model_registry_invalid",
         }
     required_models = [model for model in registry.list() if model.role == "brain"]
     unavailable = [
@@ -1794,11 +1802,36 @@ def _model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
         and model.backend != "fake"
         and not model.resolved_path(registry.root).is_file()
     ]
+    router_failure_reason: str | None = None
+    dedicated_router_available = False
+    if router_aliased:
+        router_valid = registry.exists(settings.brain.model_id)
+        if not router_valid:
+            router_failure_reason = "aliased_brain_model_not_registered"
+    elif not registry.exists(router_model_id):
+        router_valid = False
+        router_failure_reason = "dedicated_router_not_registered"
+    else:
+        router_model = registry.get(router_model_id)
+        router_valid = router_model.role == "router"
+        dedicated_router_available = router_valid and (
+            settings.runtime.backend == "fake"
+            or router_model.backend == "fake"
+            or router_model.resolved_path(registry.root).is_file()
+        )
+        if not router_valid:
+            router_failure_reason = "dedicated_router_role_mismatch"
+        elif not dedicated_router_available:
+            router_failure_reason = "dedicated_router_artifact_unavailable"
     return {
         "valid": True,
-        "required_model_available": bool(required_models) and not unavailable,
+        "required_model_available": (bool(required_models) and not unavailable and router_valid),
         "required_model_ids": [model.id for model in required_models],
         "unavailable_required_model_ids": unavailable,
+        "router_model_id": router_model_id,
+        "router_aliased_to_brain": router_aliased,
+        "dedicated_router_available": dedicated_router_available,
+        "router_failure_reason": router_failure_reason,
     }
 
 
@@ -1839,11 +1872,7 @@ def _conversation_summary_readiness(
         "model_entry_exists": model_entry_exists,
         "available": available,
         "degrades_safely": True,
-        "status": (
-            "disabled"
-            if not enabled
-            else ("available" if available else "degraded")
-        ),
+        "status": ("disabled" if not enabled else ("available" if available else "degraded")),
     }
 
 
@@ -2150,8 +2179,7 @@ def _latest_verification_report(
     # real-model report (or vice versa).
     filter_type = (
         report_type
-        if report_type
-        in {"any", "real_model", "voice_live", "voice_conversation_live", "workflow"}
+        if report_type in {"any", "real_model", "voice_live", "voice_conversation_live", "workflow"}
         else "any"
     )
     candidates = _verification_report_files(settings)

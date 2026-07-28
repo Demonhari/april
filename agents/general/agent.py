@@ -14,7 +14,12 @@ def general_agent() -> BaseAgent:
             description="Chat, planning, and small answers.",
             model_id="april-brain",
             system_prompt_path=str(prompt_path),
-            allowed_tools={"remember_memory", "create_reminder", "list_reminders"},
+            allowed_tools={
+                "remember_memory",
+                "create_reminder",
+                "list_reminders",
+                "cancel_reminder",
+            },
             blocked_tools={
                 "write_file",
                 "run_command",

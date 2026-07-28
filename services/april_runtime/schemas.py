@@ -6,7 +6,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ModelRole = Literal[
-    "brain", "coding", "reading", "creative", "reasoning", "system_action", "embedding"
+    "brain",
+    "router",
+    "coding",
+    "reading",
+    "creative",
+    "reasoning",
+    "system_action",
+    "embedding",
 ]
 ModelState = Literal["unavailable", "unloaded", "loading", "loaded", "unloading", "error"]
 FinishReason = Literal["stop", "length", "error", "cancelled"]

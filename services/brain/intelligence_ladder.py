@@ -137,6 +137,7 @@ class IntelligenceLadder:
         message: str,
         decision: BrainDecision,
         mode: ChatMode,
+        effective_confidence: float | None = None,
     ) -> LadderSelection:
         # The model may recommend escalation, but can never lower the bounded
         # deterministic classification.
@@ -206,18 +207,25 @@ class IntelligenceLadder:
         thresholds = active_ladder_thresholds(self.settings)
         deep_threshold = thresholds["deep_confidence_threshold"]
         verified_threshold = thresholds["verified_confidence_threshold"]
-        if decision.confidence < deep_threshold:
+        confidence = (
+            decision.confidence
+            if effective_confidence is None
+            else min(1.0, max(0.0, effective_confidence))
+        )
+        if confidence < deep_threshold:
             return LadderSelection(
                 mode=mode,
                 rung=3,
-                reason=(f"routing confidence {decision.confidence:.2f} below {deep_threshold}"),
+                reason=(f"effective routing confidence {confidence:.2f} below {deep_threshold}"),
                 announcement=_MODE_ANNOUNCEMENTS[3],
             )
-        if decision.confidence < verified_threshold:
+        if confidence < verified_threshold:
             return LadderSelection(
                 mode=mode,
                 rung=2,
-                reason=(f"routing confidence {decision.confidence:.2f} below {verified_threshold}"),
+                reason=(
+                    f"effective routing confidence {confidence:.2f} below {verified_threshold}"
+                ),
                 announcement=_MODE_ANNOUNCEMENTS[2],
             )
         return LadderSelection(mode=mode, rung=1, reason="standard route")

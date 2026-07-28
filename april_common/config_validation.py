@@ -55,6 +55,18 @@ def validate_configuration(home: Path) -> list[str]:
             build_configured_tool_registry(root, agent_registry)
         except (ConfigError, ValidationError) as exc:
             errors.append(f"configs/tools.yaml: {exc}")
+    if settings is not None and model_registry is not None:
+        router_model_id = settings.brain.router_model_id
+        if router_model_id:
+            if not model_registry.exists(router_model_id):
+                errors.append(
+                    "configs/april.yaml: brain.router_model_id is not registered "
+                    "in configs/models.yaml"
+                )
+            elif model_registry.get(router_model_id).role != "router":
+                errors.append(
+                    "configs/april.yaml: brain.router_model_id must reference a role=router model"
+                )
     if settings is not None and settings.api.host != "127.0.0.1":
         errors.append("configs/april.yaml: API host should default to 127.0.0.1")
     if settings is not None and settings.runtime.host != "127.0.0.1":

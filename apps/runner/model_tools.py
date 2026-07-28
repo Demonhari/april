@@ -16,7 +16,11 @@ from april_common.config_validation import validate_configuration
 from april_common.errors import ConfigError
 from april_common.path_security import is_path_within_roots
 from april_common.settings import load_settings
-from services.april_runtime.model_registry import ModelRegistry, UniqueKeyLoader
+from services.april_runtime.model_registry import (
+    ModelDefinition,
+    ModelRegistry,
+    UniqueKeyLoader,
+)
 
 MODEL_RUNTIME_FIELDS = {
     "context_size",
@@ -140,6 +144,11 @@ def import_model(
     force: bool = False,
 ) -> ModelImportResult:
     root = home.expanduser().resolve()
+    if role not in ModelDefinition.VALID_ROLES:
+        raise ConfigError(
+            "Unknown model role.",
+            {"role": role, "allowed_roles": sorted(ModelDefinition.VALID_ROLES)},
+        )
     source = source_path.expanduser().resolve()
     if not source.exists():
         raise ConfigError(f"Model path does not exist: {source}")

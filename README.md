@@ -633,8 +633,8 @@ real thing and make the readiness ladder explicit on this Mac:
 1. fake/local plumbing works,
 2. real GGUF models are installed,
 3. real models load / chat / stream / unload,
-4. the Brain produces strict-JSON routing with the **real** brain model (no
-   fallback),
+4. ambiguous requests produce strict-JSON routing with the configured local
+   router model (the Brain alias by default, with no fallback),
 5. specialist model switching keeps the brain resident, and
 6. APRIL is actually ready on this Mac.
 

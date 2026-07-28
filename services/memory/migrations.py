@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 async def run_migrations(database: Database) -> None:
@@ -347,6 +347,35 @@ async def _run_migrations_locked(database: Database) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_adapter_operations_status
         ON adapter_operations(status, model_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS routing_outcomes (
+            id TEXT PRIMARY KEY,
+            agent_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
+            route_key TEXT NOT NULL,
+            intent TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            route_source TEXT NOT NULL,
+            normalized_tool_class TEXT NOT NULL,
+            raw_confidence REAL,
+            effective_confidence REAL NOT NULL,
+            structured_output_valid INTEGER NOT NULL DEFAULT 1,
+            repair_used INTEGER NOT NULL DEFAULT 0,
+            tool_outcome TEXT,
+            approval_outcome TEXT,
+            user_correction INTEGER NOT NULL DEFAULT 0,
+            negative_feedback INTEGER NOT NULL DEFAULT 0,
+            regeneration_or_retry INTEGER NOT NULL DEFAULT 0,
+            coding_test_outcome TEXT,
+            final_status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_routing_outcomes_route_created
+        ON routing_outcomes(route_key, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_routing_outcomes_agent_run
+        ON routing_outcomes(agent_run_id);
         """
     )
     columns = await conn.execute("PRAGMA table_info(approvals)")

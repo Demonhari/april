@@ -71,6 +71,24 @@ models:
   #   idle_unload_seconds: 300
   #   priority: 60
 
+  # Optional: a dedicated small local router. Leave brain.router_model_id null
+  # to alias routing to the Brain without a duplicate entry or duplicate load.
+  # If configured, this entry must use role: router and its id must be selected
+  # by brain.router_model_id in configs/april.yaml.
+  # router:
+  #   id: april-router
+  #   name: your-router-model
+  #   path: models/your-router-model-q4_k_m.gguf
+  #   backend: llama_cpp
+  #   role: router
+  #   threads: 4
+  #   context_size: 4096
+  #   temperature: 0.0
+  #   max_output_tokens: 512
+  #   keep_loaded: false
+  #   idle_unload_seconds: 300
+  #   priority: 70
+
   # Optional: register a local embedding model to enable runtime-local semantic
   # memory embeddings. Without it, memory uses deterministic hashed-token
   # embeddings (the default). Import a real GGUF embedding model with:

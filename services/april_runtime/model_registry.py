@@ -39,6 +39,7 @@ class ModelDefinition(BaseModel):
     VALID_BACKENDS: ClassVar[set[str]] = {"llama_cpp", "fake"}
     VALID_ROLES: ClassVar[set[str]] = {
         "brain",
+        "router",
         "coding",
         "reading",
         "creative",

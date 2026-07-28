@@ -1484,8 +1484,7 @@ class LauncherVerifier:
                 if isinstance(reason, dict)
             )
             raise RuntimeError(
-                "Core API is alive but not ready"
-                + (f": {details}" if details else ".")
+                "Core API is alive but not ready" + (f": {details}" if details else ".")
             )
         return "ready"
 
@@ -1838,8 +1837,23 @@ class LauncherVerifier:
                 runs = conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
                 iterations = conn.execute("SELECT COUNT(*) FROM agent_iterations").fetchone()[0]
                 suspended = conn.execute("SELECT COUNT(*) FROM suspended_agent_runs").fetchone()[0]
+                route_sources = [
+                    str(row[0])
+                    for row in conn.execute(
+                        """
+                        SELECT DISTINCT json_extract(metadata_json, '$.route_source')
+                        FROM agent_runs
+                        WHERE json_extract(metadata_json, '$.route_source') IS NOT NULL
+                        ORDER BY 1
+                        """
+                    ).fetchall()
+                ]
             if runs >= 1 and iterations >= 1 and suspended >= 1:
-                return f"runs={runs}, iterations={iterations}, suspended={suspended}"
+                sources = ",".join(route_sources) if route_sources else "none"
+                return (
+                    f"runs={runs}, iterations={iterations}, suspended={suspended}, "
+                    f"route_sources={sources}"
+                )
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"runs={runs}, iterations={iterations}, suspended={suspended}")
             time.sleep(0.1)
@@ -2826,6 +2840,15 @@ class AllConfiguredModelsVerifier(
     def _smoke_spec(self, role: str) -> tuple[str, str | None, Callable[[str], bool] | None]:
         prompts: dict[str, tuple[str, str | None, Callable[[str], bool] | None]] = {
             "brain": ("Reply with the single word ready.", None, None),
+            "router": (
+                "/no_think\nReturn exactly one compact APRIL route JSON object: "
+                '{"intent":"planning","agent":"general_agent",'
+                '"model_id":"april-brain","confidence":0.7,'
+                '"permission_level":0,"risk_level":"none",'
+                '"needs_confirmation":false,"decision_summary":"Plan locally."}.',
+                "router_decision",
+                self._valid_router_decision,
+            ),
             "coding": (
                 "/no_think\nReturn exactly this JSON object and nothing else: "
                 '{"plan":["edit","test"]}.',
@@ -2871,6 +2894,20 @@ class AllConfiguredModelsVerifier(
             parsed.get("execute") is False and isinstance(parsed.get("permission_level"), int)
             for parsed in _json_object_candidates(content)
         )
+
+    def _valid_router_decision(self, content: str) -> bool:
+        return any(
+            self._is_valid_brain_decision(candidate)
+            for candidate in _json_object_candidates(content)
+        )
+
+    @staticmethod
+    def _is_valid_brain_decision(candidate: dict[str, Any]) -> bool:
+        try:
+            BrainDecision.model_validate(candidate)
+        except ValueError:
+            return False
+        return True
 
     def _chat_model(
         self,

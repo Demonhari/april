@@ -6,7 +6,7 @@ agents:
     # The Brain routes reminder requests through general_agent, so the effective
     # tool registry (derived from this list) must grant the local reminder tools.
     # These stay Level 1/2 local writes and never require Level 3 approval.
-    allowed_tools: [remember_memory, create_reminder, list_reminders]
+    allowed_tools: [remember_memory, create_reminder, list_reminders, cancel_reminder]
     blocked_tools: [write_file, run_command, git_commit, patch_applier, open_url, open_app]
     memory_access: conversation_and_safe_memory
     maximum_tool_iterations: 5

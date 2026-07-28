@@ -70,6 +70,15 @@ latency, recent tokens per second, load/unload timestamps, and the active
 eviction policy. A loaded model with active requests cannot be unloaded or
 evicted, and keep-loaded brain models are not idle-unloaded.
 
+Routing first applies conservative deterministic rules for exact local
+inspections, reminder operations, explicit approval IDs, and safety denials.
+Ambiguous requests use the logical router model role. By default
+`brain.router_model_id` is null and routing aliases `brain.model_id`, so the
+registry has one model entry and Runtime loads one GGUF. A configured dedicated
+router must reference a registered `role: router` model. Route provenance and
+outcome-calibrated confidence are stored separately from model-generated
+`BrainDecision` JSON; prompts and tool arguments are not routing diagnostics.
+
 Prompt rendering stays centralized in April Runtime. Model config should set an
 explicit `chat_format` (`granite`, `qwen`, or `generic`) where known. If absent,
 Runtime first accepts trustworthy backend/GGUF chat-template metadata when

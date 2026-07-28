@@ -41,6 +41,17 @@ def test_valid_registry(tmp_path: Path) -> None:
     assert registry.get("april-brain").priority == 10
 
 
+def test_router_role_is_valid(tmp_path: Path) -> None:
+    router = {
+        **model_data(),
+        "id": "april-router",
+        "name": "router",
+        "role": "router",
+    }
+    registry = ModelRegistry.from_dict({"models": {"router": router}}, root=tmp_path)
+    assert registry.get("april-router").role == "router"
+
+
 def test_duplicate_ids_rejected(tmp_path: Path) -> None:
     data = {"models": {"one": model_data(), "two": {**model_data(), "name": "other"}}}
     with pytest.raises(ConfigError):

@@ -31,7 +31,13 @@ from services.brain.memory_policy import AgentMemoryContext, build_agent_memory_
 from services.brain.planner import task_plan_from_decision
 from services.brain.reasoning_resolver import resolve_reasoning_model
 from services.brain.router import BrainRouter
-from services.brain.schemas import BrainDecision, PlannedToolCall
+from services.brain.routing_reliability import RoutingReliabilityService
+from services.brain.schemas import (
+    BrainDecision,
+    PlannedToolCall,
+    RouteResult,
+    RouteSource,
+)
 from services.evolution.feedback_eval import stage_feedback_eval_case
 from services.evolution.versions import LEARNED_GUIDANCE_HEADER, PromptOverlayManager
 from services.memory.policy import MemoryPolicy
@@ -71,6 +77,7 @@ class PreparedTurn:
     request_id: str
     conversation_id: str
     decision: BrainDecision
+    route_result: RouteResult
     agent_name: str
     model_id: str
     messages: list[ChatMessage]
@@ -124,6 +131,11 @@ class AprilOrchestrator:
         self.brain_router = brain_router or BrainRouter(
             runtime_client,
             brain_model_id=settings.brain.model_id,
+            router_model_id=settings.brain.router_model_id,
+        )
+        self.routing_reliability = RoutingReliabilityService(
+            memory.database,
+            settings.brain,
         )
         self.structured_loop = StructuredAgentLoop(
             runtime_client=runtime_client,
@@ -211,6 +223,10 @@ class AprilOrchestrator:
             agent_run_id = await self.memory.latest_agent_run_id(conversation_id=conversation_id)
             if agent_run_id is None:
                 return
+            await self.routing_reliability.mark_negative_feedback(
+                agent_run_id=agent_run_id,
+                implicit_correction=True,
+            )
             record = await self.memory.record_feedback_event(
                 rating="bad",
                 reason=f"implicit_correction: {marker}",
@@ -350,13 +366,18 @@ class AprilOrchestrator:
             usage=response.usage.model_dump(),
             metadata=dict(prepared.run_metadata),
         )
-        await self.memory.record_agent_run(
+        agent_run_id = await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
             agent=prepared.agent_name,
             status=result.status,
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
             metadata=prepared.run_metadata,
+        )
+        await self._record_routing_outcome(
+            prepared,
+            agent_run_id=agent_run_id,
+            final_status=result.status,
         )
         await self._update_task_status(prepared, "completed")
         return result
@@ -393,13 +414,19 @@ class AprilOrchestrator:
             usage={**response.usage.model_dump(), **verified.usage},
             metadata=dict(prepared.run_metadata),
         )
-        await self.memory.record_agent_run(
+        agent_run_id = await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
             agent=prepared.agent_name,
             status=result.status,
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
             metadata=prepared.run_metadata,
+        )
+        await self._record_routing_outcome(
+            prepared,
+            agent_run_id=agent_run_id,
+            final_status=result.status,
+            regeneration_or_retry=True,
         )
         await self._update_task_status(prepared, "completed")
         return result
@@ -605,13 +632,18 @@ class AprilOrchestrator:
         content = "".join(chunks)
         if content:
             await self.memory.add_message(prepared.conversation_id, "assistant", content)
-        await self.memory.record_agent_run(
+        agent_run_id = await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
             agent=prepared.agent_name,
             status="ok" if finish_reason != "error" else "error",
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
             metadata=prepared.run_metadata,
+        )
+        await self._record_routing_outcome(
+            prepared,
+            agent_run_id=agent_run_id,
+            final_status="ok" if finish_reason != "error" else "error",
         )
         await self._update_task_status(
             prepared,
@@ -643,13 +675,23 @@ class AprilOrchestrator:
             message=message,
             decision=prepared.decision,
             mode=mode,
+            effective_confidence=prepared.route_result.effective_confidence,
         )
         prepared.run_metadata.update(
             {
                 "chat_mode": selection.mode,
                 "intelligence_rung": selection.rung,
                 "intelligence_reason": selection.reason,
-                "routing_confidence": prepared.decision.confidence,
+                "routing_confidence": prepared.route_result.effective_confidence,
+                "raw_routing_confidence": prepared.route_result.raw_model_confidence,
+                "historical_routing_reliability": (prepared.route_result.historical_reliability),
+                "effective_routing_confidence": prepared.route_result.effective_confidence,
+                "routing_reliability_sample_count": (
+                    prepared.route_result.reliability_sample_count
+                ),
+                "routing_confidence_source": prepared.route_result.confidence_source,
+                "route_source": prepared.route_result.route_source.value,
+                "matched_rule": prepared.route_result.matched_rule,
                 "high_stakes": selection.high_stakes,
             }
         )
@@ -887,13 +929,18 @@ class AprilOrchestrator:
             usage=run.usage,
             metadata=dict(prepared.run_metadata),
         )
-        await self.memory.record_agent_run(
+        agent_run_id = await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
             agent=prepared.agent_name,
             status=result.status,
             model_id=run.model_id or prepared.model_id,
             summary=prepared.decision.decision_summary,
             metadata=prepared.run_metadata,
+        )
+        await self._record_routing_outcome(
+            prepared,
+            agent_run_id=agent_run_id,
+            final_status=result.status,
         )
         await self._update_task_status(
             prepared,
@@ -935,15 +982,50 @@ class AprilOrchestrator:
             raw_history,
         )
         await self.memory.add_message(active_conversation_id, "user", message)
-        decision = await self.brain_router.route(
-            message,
-            request_id=active_request_id,
-            history=router_history,
-        )
+        route_result_method = getattr(self.brain_router, "route_result", None)
+        if route_result_method is None:
+            decision = await self.brain_router.route(
+                message,
+                request_id=active_request_id,
+                history=router_history,
+            )
+            route_result = RouteResult(
+                decision=decision,
+                route_source=RouteSource(decision.routing_method),
+                raw_model_confidence=(
+                    decision.confidence if decision.routing_method != "fallback" else None
+                ),
+                effective_confidence=decision.confidence,
+                confidence_source="legacy_router",
+                repair_used=decision.routing_method == "model_repair",
+            )
+        else:
+            route_result = await route_result_method(
+                message,
+                request_id=active_request_id,
+                history=router_history,
+            )
+            decision = route_result.decision
+        route_result = await self.routing_reliability.calibrate(route_result)
         await self.memory.record_conversation_event(
             conversation_id=active_conversation_id,
             event_type="brain_decision",
-            payload=decision.model_dump(),
+            payload={
+                "intent": decision.intent[:64],
+                "agent": decision.agent,
+                "route_source": route_result.route_source.value,
+                "matched_rule": route_result.matched_rule,
+                "fallback_reason": route_result.fallback_reason,
+                "raw_model_confidence": route_result.raw_model_confidence,
+                "historical_reliability": route_result.historical_reliability,
+                "effective_confidence": route_result.effective_confidence,
+                "reliability_sample_count": route_result.reliability_sample_count,
+                "confidence_source": route_result.confidence_source,
+                "normalized_tool_classes": sorted(
+                    {call.tool[:64] for call in decision.planned_tool_calls}
+                    | {tool[:64] for tool in decision.tools_needed}
+                ),
+            },
         )
         agent = self.agent_registry.get(decision.agent)
         if agent is None:
@@ -952,9 +1034,20 @@ class AprilOrchestrator:
             )
         agent = await self.apply_prompt_overlay(agent)
         model_id = agent.model_id or decision.model_id
-        run_metadata: dict[str, Any] = prepared_context.diagnostics()
+        run_metadata: dict[str, Any] = {
+            **prepared_context.diagnostics(),
+            "route_source": route_result.route_source.value,
+            "matched_rule": route_result.matched_rule,
+            "fallback_reason": route_result.fallback_reason,
+            "raw_routing_confidence": route_result.raw_model_confidence,
+            "historical_routing_reliability": route_result.historical_reliability,
+            "effective_routing_confidence": route_result.effective_confidence,
+            "routing_reliability_sample_count": route_result.reliability_sample_count,
+            "routing_confidence_source": route_result.confidence_source,
+        }
         if agent.model_id is not None and decision.model_id != agent.model_id:
             decision = decision.model_copy(update={"model_id": agent.model_id})
+            route_result = route_result.model_copy(update={"decision": decision})
         if agent.name == "reasoning_agent":
             resolution = await resolve_reasoning_model(
                 runtime_client=self.runtime_client,
@@ -993,6 +1086,7 @@ class AprilOrchestrator:
                 request_id=active_request_id,
                 conversation_id=active_conversation_id,
                 decision=decision,
+                route_result=route_result,
                 agent_name=agent.name,
                 model_id=model_id,
                 messages=[],
@@ -1012,11 +1106,16 @@ class AprilOrchestrator:
                 run_metadata=run_metadata,
             )
 
-        if structured_specialists and self._uses_structured_loop(agent.name, decision):
+        if (
+            structured_specialists
+            and route_result.route_source is not RouteSource.DETERMINISTIC
+            and self._uses_structured_loop(agent.name, decision)
+        ):
             return PreparedTurn(
                 request_id=active_request_id,
                 conversation_id=active_conversation_id,
                 decision=decision,
+                route_result=route_result,
                 agent_name=agent.name,
                 model_id=model_id,
                 messages=[],
@@ -1034,6 +1133,7 @@ class AprilOrchestrator:
             return await self._prepare_code_modification(
                 message=message,
                 decision=decision,
+                route_result=route_result,
                 agent_name=agent.name,
                 agent_prompt=agent.system_prompt,
                 model_id=model_id,
@@ -1046,7 +1146,46 @@ class AprilOrchestrator:
             )
 
         planned_calls = self._planned_tool_calls(decision, message=message, project=project)
+        if decision.intent in {"approval_command", "rejection_command"}:
+            approval_id = str(planned_calls[0].args["approval_id"])
+            if decision.intent == "approval_command":
+                approval_result = await self.approve_tool(
+                    approval_id=approval_id,
+                    actor=actor,
+                    request_id=active_request_id,
+                )
+                nested = approval_result.get("result")
+                final_message = (
+                    str(nested.get("final_message"))
+                    if isinstance(nested, dict) and nested.get("final_message")
+                    else f"Approval {approval_id} was consumed once."
+                )
+            else:
+                await self.deny_tool(
+                    approval_id=approval_id,
+                    actor=actor,
+                    request_id=active_request_id,
+                )
+                final_message = f"Approval {approval_id} was rejected."
+            return PreparedTurn(
+                request_id=active_request_id,
+                conversation_id=active_conversation_id,
+                decision=decision,
+                route_result=route_result,
+                agent_name=agent.name,
+                model_id=model_id,
+                messages=[],
+                final_message=final_message,
+                final_status="ok",
+                project_id=project.id if project else None,
+                actor=actor,
+                history=memory_context.history,
+                context_sections=context_sections,
+                task_plan_id=task_plan.id,
+                run_metadata=run_metadata,
+            )
         tool_outputs: list[str] = []
+        tool_failures: list[str] = []
         citations: list[LocalCitation] = []
         pending_approval: dict[str, Any] | None = None
         warnings: list[str] = list(prepared_context.warnings)
@@ -1075,6 +1214,7 @@ class AprilOrchestrator:
                 context=context,
                 model_permission_level=decision.permission_level,
                 model_risk_level=decision.risk_level,
+                approval_metadata={"route_key": route_result.route_key},
             )
             if outcome.approval is not None:
                 pending_approval = outcome.approval.model_dump()
@@ -1082,6 +1222,10 @@ class AprilOrchestrator:
             tool_result = outcome.result
             if tool_result is None:
                 continue
+            if not tool_result.ok:
+                tool_failures.append(
+                    f"{planned.tool}: {tool_result.stderr or 'tool execution failed'}"
+                )
             if tool_result.stdout:
                 tool_outputs.append(f"{planned.tool}:\n{tool_result.stdout}")
             if planned.tool == "remember_memory" and tool_result.ok:
@@ -1100,12 +1244,79 @@ class AprilOrchestrator:
                 request_id=active_request_id,
                 conversation_id=active_conversation_id,
                 decision=decision,
+                route_result=route_result,
                 agent_name=agent.name,
                 model_id=model_id,
                 messages=[],
                 citations=citations,
                 final_message=memory_write_message or "Stored memory.",
                 final_status="ok",
+                warnings=warnings,
+                project_id=project.id if project else None,
+                actor=actor,
+                history=memory_context.history,
+                context_sections=context_sections,
+                task_plan_id=task_plan.id,
+                run_metadata=run_metadata,
+            )
+
+        if route_result.route_source is RouteSource.DETERMINISTIC:
+            if pending_approval is not None:
+                return PreparedTurn(
+                    request_id=active_request_id,
+                    conversation_id=active_conversation_id,
+                    decision=decision,
+                    route_result=route_result,
+                    agent_name=agent.name,
+                    model_id=model_id,
+                    messages=[],
+                    citations=citations,
+                    pending_approval=pending_approval,
+                    final_message=(
+                        "The exact local action is paused for one-time approval.\n"
+                        f"Approval required: {pending_approval['approval_id']}"
+                    ),
+                    warnings=warnings,
+                    project_id=project.id if project else None,
+                    actor=actor,
+                    history=memory_context.history,
+                    context_sections=context_sections,
+                    task_plan_id=task_plan.id,
+                    run_metadata=run_metadata,
+                )
+            if planned_calls and decision.intent != "patch_proposal":
+                final_message = "\n\n".join(tool_outputs or ["The local operation completed."])
+                if tool_failures:
+                    final_message = "\n\n".join(tool_failures)
+                return PreparedTurn(
+                    request_id=active_request_id,
+                    conversation_id=active_conversation_id,
+                    decision=decision,
+                    route_result=route_result,
+                    agent_name=agent.name,
+                    model_id=model_id,
+                    messages=[],
+                    citations=citations,
+                    final_message=final_message,
+                    final_status="error" if tool_failures else "ok",
+                    warnings=warnings,
+                    project_id=project.id if project else None,
+                    actor=actor,
+                    history=memory_context.history,
+                    context_sections=context_sections,
+                    task_plan_id=task_plan.id,
+                    run_metadata=run_metadata,
+                )
+            return PreparedTurn(
+                request_id=active_request_id,
+                conversation_id=active_conversation_id,
+                decision=decision,
+                route_result=route_result,
+                agent_name=agent.name,
+                model_id=model_id,
+                messages=[],
+                final_message=decision.decision_summary,
+                final_status="error",
                 warnings=warnings,
                 project_id=project.id if project else None,
                 actor=actor,
@@ -1132,6 +1343,7 @@ class AprilOrchestrator:
             request_id=active_request_id,
             conversation_id=active_conversation_id,
             decision=decision,
+            route_result=route_result,
             agent_name=agent.name,
             model_id=model_id,
             messages=self._conversation_chat_messages(
@@ -1257,6 +1469,20 @@ class AprilOrchestrator:
                 tool=tool,
                 args=args,
             )
+            route_key = approval.metadata.get("route_key")
+            if isinstance(route_key, str):
+                tool_ok = outcome.result is not None and outcome.result.ok
+                await self.routing_reliability.mark_latest_route_outcome(
+                    route_key=route_key,
+                    approval_outcome="approved",
+                    tool_outcome="success" if tool_ok else "failed",
+                    coding_test_outcome=(
+                        ("passed" if tool_ok else "failed")
+                        if approval.tool == "test_runner"
+                        else None
+                    ),
+                    final_status="ok" if tool_ok else "error",
+                )
             return {"status": outcome.status, "result": outcome.result}
         if suspended.status != "suspended":
             raise PermissionDeniedError(
@@ -1271,6 +1497,12 @@ class AprilOrchestrator:
                 actor=actor,
                 request_id=request_id,
             )
+            if suspended is not None:
+                await self.routing_reliability.mark_approval_outcome(
+                    agent_run_id=suspended.agent_run_id,
+                    outcome="expired",
+                    final_status="expired",
+                )
             raise PermissionDeniedError("Approval has expired.")
         if await self.memory.get_conversation(suspended.conversation_id) is None:
             await self.memory.mark_agent_run_failed(approval_id=approval_id)
@@ -1328,6 +1560,11 @@ class AprilOrchestrator:
             await self.memory.add_message(
                 suspended.conversation_id, "assistant", result.final_message
             )
+        await self.routing_reliability.mark_approval_outcome(
+            agent_run_id=suspended.agent_run_id,
+            outcome="approved",
+            final_status=result.status,
+        )
         return {"status": "resumed", "result": result.model_dump()}
 
     async def deny_tool(
@@ -1349,6 +1586,13 @@ class AprilOrchestrator:
         )
         await self._record_denial_feedback(approval, suspended)
         if suspended is None:
+            route_key = approval.metadata.get("route_key")
+            if isinstance(route_key, str):
+                await self.routing_reliability.mark_latest_route_outcome(
+                    route_key=route_key,
+                    approval_outcome="denied",
+                    final_status="denied",
+                )
             return {"status": "denied", "approval_id": approval_id}
         result = AgentResult(
             status="error",
@@ -1369,6 +1613,12 @@ class AprilOrchestrator:
         failures are swallowed because denial itself must always succeed.
         """
         try:
+            if suspended is not None:
+                await self.routing_reliability.mark_approval_outcome(
+                    agent_run_id=suspended.agent_run_id,
+                    outcome="denied",
+                    final_status="denied",
+                )
             record = await self.memory.record_feedback_event(
                 rating="bad",
                 reason=f"approval_denied: {approval.tool}",
@@ -1427,6 +1677,16 @@ class AprilOrchestrator:
             await self.memory.add_message(
                 prepared.conversation_id, "assistant", result.final_message
             )
+        agent_run_id = await self.memory.latest_agent_run_id(
+            conversation_id=prepared.conversation_id
+        )
+        await self._record_routing_outcome(
+            prepared,
+            agent_run_id=agent_run_id,
+            final_status=result.status,
+            approval_outcome=("pending" if result.status == "pending_approval" else None),
+            tool_outcome="failed" if result.status == "error" else "success",
+        )
         await self._update_task_status(
             prepared,
             "pending_approval"
@@ -1509,6 +1769,7 @@ class AprilOrchestrator:
         *,
         message: str,
         decision: BrainDecision,
+        route_result: RouteResult,
         agent_name: str,
         agent_prompt: str,
         model_id: str,
@@ -1548,6 +1809,7 @@ class AprilOrchestrator:
                 request_id=request_id,
                 conversation_id=conversation_id,
                 decision=decision,
+                route_result=route_result,
                 agent_name=agent_name,
                 model_id=model_id,
                 messages=[],
@@ -1586,6 +1848,7 @@ class AprilOrchestrator:
                 request_id=request_id,
                 conversation_id=conversation_id,
                 decision=decision,
+                route_result=route_result,
                 agent_name=agent_name,
                 model_id=model_id,
                 messages=[],
@@ -1620,6 +1883,7 @@ class AprilOrchestrator:
                 request_id=request_id,
                 conversation_id=conversation_id,
                 decision=decision,
+                route_result=route_result,
                 agent_name=agent_name,
                 model_id=model_id,
                 messages=[],
@@ -1639,6 +1903,7 @@ class AprilOrchestrator:
             request_id=request_id,
             conversation_id=conversation_id,
             decision=decision,
+            route_result=route_result,
             agent_name=agent_name,
             model_id=model_id,
             messages=[],
@@ -1691,6 +1956,7 @@ class AprilOrchestrator:
             "git_branch",
             "search_files",
             "repo_indexer",
+            "test_runner",
         }
         requested = {call.tool for call in decision.planned_tool_calls} | set(decision.tools_needed)
         return bool(requested & repo_tools)
@@ -1770,7 +2036,9 @@ class AprilOrchestrator:
             "git_commit": ["repo_path", "message"],
             "run_command": ["argv"],
             "repo_indexer": ["repo_path"],
+            "test_runner": ["repo_path"],
             "create_reminder": ["content"],
+            "cancel_reminder": ["reminder_id"],
         }
         return [key for key in requirements.get(call.tool, []) if key not in call.args]
 
@@ -1858,9 +2126,7 @@ class AprilOrchestrator:
     ) -> list[ChatMessage]:
         messages = [ChatMessage(role="system", content=system_prompt)]
         if memory_context.conversation_summary:
-            messages.append(
-                ChatMessage(role="system", content=memory_context.conversation_summary)
-            )
+            messages.append(ChatMessage(role="system", content=memory_context.conversation_summary))
         if memory_context.history:
             messages.append(
                 ChatMessage(
@@ -1941,13 +2207,19 @@ class AprilOrchestrator:
             warnings=prepared.warnings,
             metadata=dict(prepared.run_metadata),
         )
-        await self.memory.record_agent_run(
+        agent_run_id = await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
             agent=prepared.agent_name,
             status=result.status,
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
             metadata=prepared.run_metadata,
+        )
+        await self._record_routing_outcome(
+            prepared,
+            agent_run_id=agent_run_id,
+            final_status=result.status,
+            approval_outcome="pending",
         )
         await self._update_task_status(prepared, "pending_approval")
         return result
@@ -1961,7 +2233,7 @@ class AprilOrchestrator:
             warnings=prepared.warnings,
             metadata=dict(prepared.run_metadata),
         )
-        await self.memory.record_agent_run(
+        agent_run_id = await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
             agent=prepared.agent_name,
             status=result.status,
@@ -1969,12 +2241,41 @@ class AprilOrchestrator:
             summary=prepared.decision.decision_summary,
             metadata=prepared.run_metadata,
         )
+        await self._record_routing_outcome(
+            prepared,
+            agent_run_id=agent_run_id,
+            final_status=result.status,
+            tool_outcome="failed" if result.status == "error" else "success",
+        )
         await self._update_task_status(prepared, "completed" if result.status == "ok" else "error")
         return result
 
     async def _update_task_status(self, prepared: PreparedTurn, status: str) -> None:
         if prepared.task_plan_id is not None:
             await self.memory.update_task_status(prepared.task_plan_id, status)
+
+    async def _record_routing_outcome(
+        self,
+        prepared: PreparedTurn,
+        *,
+        agent_run_id: str | None,
+        final_status: str,
+        tool_outcome: str | None = None,
+        approval_outcome: str | None = None,
+        regeneration_or_retry: bool = False,
+    ) -> None:
+        try:
+            await self.routing_reliability.record(
+                prepared.route_result,
+                agent_run_id=agent_run_id,
+                final_status=final_status,
+                tool_outcome=tool_outcome,
+                approval_outcome=approval_outcome,
+                regeneration_or_retry=regeneration_or_retry,
+            )
+        except Exception:
+            # Reliability evidence is diagnostic and must never break the turn.
+            return
 
     def _parse_runtime_stream_event(self, raw_event: str) -> tuple[str, dict[str, Any]]:
         parsed = json.loads(raw_event)
