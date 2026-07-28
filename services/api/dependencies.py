@@ -15,6 +15,7 @@ from april_common.settings import AprilSettings, get_settings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.model_registry import ModelRegistry
 from services.brain.orchestrator import AprilOrchestrator
+from services.evolution.adapters import AdapterLifecycleManager
 from services.evolution.dreamer import DreamerService
 from services.evolution.scheduler import EvolutionSchedulerGate
 from services.evolution.versions import PromptOverlayManager
@@ -108,6 +109,12 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
 
 async def _assemble_container(active_settings: AprilSettings, database: Database) -> ApiContainer:
     await run_migrations(database)
+    audit = AuditLogger(active_settings.audit_path)
+    await AdapterLifecycleManager(
+        active_settings,
+        database,
+        audit=audit,
+    ).reconcile_incomplete_operations()
     memory = SqliteMemory(database)
     governor = ResourceGovernor(active_settings)
     runtime_client = RuntimeClient(
@@ -116,7 +123,6 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         token=active_settings.runtime.token,
         generation_thread_provider=governor.generation_thread_budget,
     )
-    audit = AuditLogger(active_settings.audit_path)
     embedding = embedding_provider_from_config(
         active_settings.memory.embedding_provider,
         model_id=active_settings.memory.embedding_model_id,

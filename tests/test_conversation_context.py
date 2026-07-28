@@ -267,6 +267,32 @@ async def test_incomplete_newest_turn_is_never_summarized(settings_tmp: Any) -> 
     await database.close()
 
 
+@pytest.mark.asyncio
+async def test_recent_bound_preserves_current_request_and_drops_older_after_oversize(
+    settings_tmp: Any,
+) -> None:
+    database, memory, conversation_id = await _memory(settings_tmp.database_path)
+    await memory.add_message(conversation_id, "user", "older small")
+    await memory.add_message(conversation_id, "assistant", "older answer")
+    await memory.add_message(conversation_id, "user", "newer " * 200)
+    await memory.add_message(conversation_id, "assistant", "newer answer " * 200)
+    await memory.add_message(conversation_id, "user", "current request")
+    service = ConversationContextService(
+        memory=memory,
+        runtime_client=SummaryRuntime([]),  # type: ignore[arg-type]
+        agent_registry=default_agent_registry(),
+        settings=ConversationContextSettings(
+            summary_enabled=False,
+            conversation_history_max_chars=1000,
+        ),
+    )
+    prepared = await service.prepare(conversation_id=conversation_id)
+    assert [message.content for message in prepared.recent_messages] == [
+        "current request"
+    ]
+    await database.close()
+
+
 def test_grouping_preserves_complete_turns_and_reports_orphans() -> None:
     def message(index: int, role: str, content: str) -> Message:
         return Message(

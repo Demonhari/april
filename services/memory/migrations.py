@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 async def run_migrations(database: Database) -> None:
@@ -327,6 +327,26 @@ async def _run_migrations_locked(database: Database) -> None:
             created_at TEXT NOT NULL,
             activated_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS adapter_operations (
+            id TEXT PRIMARY KEY,
+            model_id TEXT NOT NULL,
+            operation_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            previous_active_version INTEGER,
+            requested_target_version INTEGER NOT NULL,
+            previous_pointer_json TEXT,
+            target_pointer_json TEXT NOT NULL,
+            target_adapter_path TEXT NOT NULL,
+            target_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            error_code TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_adapter_operations_status
+        ON adapter_operations(status, model_id, created_at);
         """
     )
     columns = await conn.execute("PRAGMA table_info(approvals)")

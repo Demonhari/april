@@ -1579,6 +1579,11 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         active,
         runtime_available=runtime_probe.ok,
     )
+    adapter_state = await AdapterLifecycleManager(
+        active.settings,
+        active.database,
+        audit=active.approvals.audit,
+    ).state_health()
     scheduler_required = active.settings.scheduler.enabled
     scheduler_available = active.scheduler is not None and active.scheduler.running
     failure_reasons = _readiness_failure_reasons(
@@ -1590,6 +1595,13 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         scheduler_available=scheduler_available,
         vector_health=vector_health,
     )
+    if not bool(adapter_state["consistent"]):
+        failure_reasons.append(
+            {
+                "code": "adapter_state_inconsistent",
+                "message": "Adapter lifecycle state requires reconciliation.",
+            }
+        )
     ready = not failure_reasons
     overlay_approval_service = PromptOverlayApprovalService(
         active.settings,
@@ -1632,6 +1644,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "llama_cpp_python_available": importlib.util.find_spec("llama_cpp") is not None,
             "registered": models,
             "lora_adapters": _lora_adapter_readiness(active.settings),
+            "adapter_lifecycle": adapter_state,
             "registry": model_registry,
         },
         "embeddings": embeddings,

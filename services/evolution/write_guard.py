@@ -19,6 +19,7 @@ APPROVED_EVOLUTION_TABLES = frozenset(
         "playbooks",
         "playbook_runs",
         "model_adapters",
+        "adapter_operations",
         # D2 distill/consolidate: duplicate merges and contradiction
         # adjudication update rows (supersede/refresh/resolve) — never delete.
         "memories",
@@ -59,12 +60,18 @@ class EvolutionWriteGuard:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp, target)
+            _fsync_directory(target.parent)
         finally:
             temp.unlink(missing_ok=True)
         return target
 
     def write_text(self, path: Path, text: str) -> Path:
         return self.write_bytes(path, text.encode("utf-8"))
+
+    def remove_file(self, path: Path) -> None:
+        target = self.validate_path(path)
+        target.unlink(missing_ok=True)
+        _fsync_directory(target.parent)
 
     def validate_table(self, table: str) -> None:
         if table not in APPROVED_EVOLUTION_TABLES:
@@ -132,3 +139,19 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _fsync_directory(path: Path) -> None:
+    """Durably publish a replace where the platform supports directory fsync."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)

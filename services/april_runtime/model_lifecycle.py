@@ -409,6 +409,11 @@ class ModelLifecycle:
             total_tokens=result.input_tokens + result.output_tokens,
         )
         warnings = ["Context was truncated."] if context.truncated else []
+        if "context_truncated_without_persisted_summary" in context.context_warning_codes:
+            warnings.append(
+                "Older context was omitted and no persisted Core conversation "
+                "summary was supplied."
+            )
         structured_fallback = bool(getattr(state.backend, "last_structured_output_fallback", False))
         if structured_fallback:
             warnings.append(

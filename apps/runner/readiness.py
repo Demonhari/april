@@ -6,9 +6,10 @@ APRIL can run real local models (and, optionally, real local voice)?*
 
 It is deliberately inert and safe:
 
-* It only reads ``configs/*.yaml`` and settings/env, plus ``importlib`` spec
-  lookups and ``Path.exists`` probes. It never loads a model, never opens the
-  microphone, never reaches the network, and never mutates anything.
+* It reads ``configs/*.yaml`` and settings/env, performs ``importlib`` spec
+  lookups and ``Path.exists`` probes, and opens SQLite read-only for integrity
+  signals. It never loads a model, opens the microphone, reaches the network,
+  or mutates anything.
 * Every emitted field is redacted by construction: model/voice paths collapse to
   basenames, tokens are reported as ``configured``/``default-development``/
   ``missing`` (never the value), and skip/blocker details run through
@@ -43,6 +44,7 @@ from april_common.settings import (
 )
 from april_common.time import utc_now_iso
 from services.april_runtime.model_registry import ModelRegistry
+from services.evolution.adapters import inspect_adapter_state
 
 CheckStatus = Literal["ok", "warning", "blocker", "skipped"]
 
@@ -125,6 +127,8 @@ class ReadinessReport(BaseModel):
     conversation_summarization_degrades_safely: bool = True
     hashed_token_embedding_fallback: bool = False
     lora_adapter_missing_count: int = 0
+    adapter_lifecycle_consistent: bool = True
+    incomplete_adapter_operation_count: int = 0
     overlay_eval_mode: str = "deterministic_fixture"
     production_real_runtime_eval_required: bool = False
     pending_real_runtime_overlay_blocker_count: int = 0
@@ -381,6 +385,27 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 )
     else:
         lora_adapter_missing_count = 0
+    adapter_state = inspect_adapter_state(settings)
+    if bool(adapter_state["consistent"]):
+        checks.append(
+            ReadinessCheck(
+                name="adapter lifecycle state",
+                status="ok",
+                detail="Adapter pointer and database history are consistent.",
+            )
+        )
+    else:
+        checks.append(
+            ReadinessCheck(
+                name="adapter lifecycle state",
+                status="blocker",
+                detail=(
+                    "An interrupted adapter operation or pointer/database "
+                    "disagreement requires Core startup reconciliation."
+                ),
+                action="Restart the APRIL Core API, then run april readiness.",
+            )
+        )
 
     embedding_role_models = (
         [model for model in registry.list() if model.role == "embedding"]
@@ -886,6 +911,12 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         conversation_summarization_degrades_safely=True,
         hashed_token_embedding_fallback=settings.memory.embedding_provider == "hashed-token",
         lora_adapter_missing_count=lora_adapter_missing_count,
+        adapter_lifecycle_consistent=bool(adapter_state["consistent"]),
+        incomplete_adapter_operation_count=(
+            adapter_state["incomplete_operation_count"]
+            if isinstance(adapter_state["incomplete_operation_count"], int)
+            else 0
+        ),
         overlay_eval_mode=(
             "deterministic_fixture_plus_real_runtime"
             if production_real_runtime_eval_required

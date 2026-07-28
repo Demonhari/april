@@ -418,9 +418,23 @@ def _groups_character_count(groups: list[ConversationTurn]) -> int:
 def _bound_recent_groups(groups: list[ConversationTurn], max_chars: int) -> list[Message]:
     selected: list[ConversationTurn] = []
     used = 0
+    newest_conversation = next(
+        (
+            group
+            for group in reversed(groups)
+            if group.kind == "conversation"
+        ),
+        None,
+    )
     for group in reversed(groups):
         size = group.character_count
+        if group is newest_conversation:
+            selected.append(group)
+            used += size
+            continue
         if used + size > max_chars:
+            if group.kind == "conversation" and group.complete:
+                break
             continue
         selected.append(group)
         used += size

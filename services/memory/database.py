@@ -277,25 +277,36 @@ class Database:
             self._write_lock.release()
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+    async def transaction_under_coordination(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Run a transaction while the caller holds this database's write fence."""
+
+        if self._key not in _ACTIVE_WRITE_PATHS.get():
+            raise RuntimeError("SQLite write coordination must be acquired first.")
         transaction_started = False
-        async with self.write_coordination():
-            begin = asyncio.create_task(self.connection.execute("BEGIN IMMEDIATE"))
-            try:
-                await asyncio.shield(begin)
-                transaction_started = True
-            except BaseException:
-                # aiosqlite work already queued on its worker cannot be cancelled.
-                # Wait for BEGIN to settle and roll it back before releasing locks.
-                await asyncio.shield(begin)
-                transaction_started = True
+        begin = asyncio.create_task(self.connection.execute("BEGIN IMMEDIATE"))
+        try:
+            await asyncio.shield(begin)
+            transaction_started = True
+        except BaseException:
+            # aiosqlite work already queued on its worker cannot be cancelled.
+            # Wait for BEGIN to settle and roll it back before releasing locks.
+            await asyncio.shield(begin)
+            transaction_started = True
+            await asyncio.shield(self.connection.rollback())
+            transaction_started = False
+            raise
+        try:
+            yield self.connection
+            await asyncio.shield(self.connection.commit())
+        except BaseException:
+            if transaction_started:
                 await asyncio.shield(self.connection.rollback())
-                transaction_started = False
-                raise
-            try:
-                yield self.connection
-                await asyncio.shield(self.connection.commit())
-            except BaseException:
-                if transaction_started:
-                    await asyncio.shield(self.connection.rollback())
-                raise
+            raise
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        async with (
+            self.write_coordination(),
+            self.transaction_under_coordination() as connection,
+        ):
+            yield connection

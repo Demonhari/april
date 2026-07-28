@@ -505,3 +505,31 @@ async def test_structured_output_prompt_fallback_is_reported(tmp_path: Path) -> 
         response.diagnostics["structured_output_fallback_reason"] == "structured_output_unsupported"
     )
     assert any("Structured output used prompt fallback" in item for item in response.warnings)
+
+
+@pytest.mark.asyncio
+async def test_direct_runtime_response_warns_when_history_drops_without_summary(
+    tmp_path: Path,
+) -> None:
+    lifecycle = ModelLifecycle(
+        registry(tmp_path),
+        backend_factory=lambda model: CountingBackend(),
+        root_backend="fake",
+    )
+    response = await lifecycle.generate(
+        ChatRequest(
+            model_id="april-brain",
+            messages=[
+                ChatMessage(role="system", content="system"),
+                ChatMessage(role="user", content="old " * 1200),
+                ChatMessage(role="assistant", content="answer " * 1200),
+                ChatMessage(role="user", content="current request"),
+            ],
+        )
+    )
+    budget = response.diagnostics["context_budget"]
+    assert budget["context_continuity"] == "message_window_only"
+    assert budget["context_warning_codes"] == [
+        "context_truncated_without_persisted_summary"
+    ]
+    assert any("no persisted Core conversation summary" in item for item in response.warnings)

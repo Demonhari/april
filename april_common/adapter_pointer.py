@@ -31,7 +31,7 @@ def active_adapter_path_from_pointer(root: Path, model_id: str) -> Path | None:
     pointer = read_adapter_pointer(root, model_id)
     if pointer is None:
         return None
-    active = _pointer_active_version(pointer)
+    active = _effective_active_version(pointer)
     if active is None:
         return None
     entry = _pointer_entry(pointer, active)
@@ -44,6 +44,21 @@ def active_adapter_path_from_pointer(root: Path, model_id: str) -> Path | None:
     if expanded.is_absolute():
         return expanded.resolve(strict=False)
     return (root / expanded).resolve(strict=False)
+
+
+def _effective_active_version(pointer: dict[str, Any]) -> int | None:
+    """Return only a committed adapter version.
+
+    New lifecycle operations publish a recoverable pending pointer before the
+    matching SQLite state is committed. Runtime deliberately continues using
+    the previous version during that window.
+    """
+
+    operation = pointer.get("pending_operation")
+    if isinstance(operation, dict):
+        previous = operation.get("previous_active_version")
+        return int(previous) if previous is not None else None
+    return _pointer_active_version(pointer)
 
 
 def sha256_file(path: Path) -> str:

@@ -39,8 +39,10 @@ class ContextResult:
     orphan_tool_message_count: int = 0
     complete_group_count: int = 0
     conversation_summary_included: bool = False
+    context_continuity: str = "message_window_only"
+    context_warning_codes: tuple[str, ...] = ()
 
-    def metadata(self) -> dict[str, int | bool]:
+    def metadata(self) -> dict[str, object]:
         return {
             "estimated_input_tokens": self.input_tokens,
             "reserved_output_tokens": self.reserved_output_tokens,
@@ -50,6 +52,8 @@ class ContextResult:
             "orphan_tool_message_count": self.orphan_tool_message_count,
             "complete_group_count": self.complete_group_count,
             "conversation_summary_included": self.conversation_summary_included,
+            "context_continuity": self.context_continuity,
+            "context_warning_codes": list(self.context_warning_codes),
             "selected_context_limit": self.selected_context_limit,
             "truncated": self.truncated,
         }
@@ -130,15 +134,7 @@ class ContextManager:
                 },
             )
 
-        priorities = [
-            *summary_groups,
-            *[
-                group
-                for group in reversed(selectable)
-                if not group.required and group.kind != "conversation_summary"
-            ],
-        ]
-        for group in priorities:
+        for group in summary_groups:
             if id(group) in selected:
                 continue
             candidate = {**selected, id(group): group}
@@ -149,9 +145,23 @@ class ContextManager:
             if candidate_total <= budget:
                 selected = candidate
                 total = candidate_total
+        newest_first = [
+            group
+            for group in reversed(selectable)
+            if not group.required and group.kind != "conversation_summary"
+        ]
+        for group in newest_first:
+            candidate = {**selected, id(group): group}
+            candidate_messages = _flatten_selected(groups, candidate)
+            candidate_total = await self._count_rendered_tokens(
+                model, backend, candidate_messages, metadata
+            )
+            if candidate_total <= budget:
+                selected = candidate
+                total = candidate_total
                 continue
             if not group.has_tool_result:
-                continue
+                break
             fitted = await self._fit_truncated_tool_group(
                 model=model,
                 backend=backend,
@@ -165,6 +175,8 @@ class ContextManager:
                 fitted_group, total, count = fitted
                 selected[id(group)] = fitted_group
                 truncated_tools += count
+                continue
+            break
 
         selected_messages = _flatten_selected(groups, selected)
         total = await self._count_rendered_tokens(
@@ -181,6 +193,11 @@ class ContextManager:
             group.kind == "conversation_summary" and id(group) in selected
             for group in groups
         )
+        warning_codes = (
+            ("context_truncated_without_persisted_summary",)
+            if removed_messages > 0 and not summary_included
+            else ()
+        )
         return ContextResult(
             messages=selected_messages,
             truncated=removed_messages > 0 or truncated_tools > 0,
@@ -192,6 +209,10 @@ class ContextManager:
             orphan_tool_message_count=orphan_tools,
             complete_group_count=complete_groups,
             conversation_summary_included=summary_included,
+            context_continuity=(
+                "summary_plus_recent" if summary_included else "message_window_only"
+            ),
+            context_warning_codes=warning_codes,
             selected_context_limit=budget,
         )
 

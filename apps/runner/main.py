@@ -290,6 +290,17 @@ def _same_file(left: Path, right: Path) -> bool:
 def _doctor() -> None:
     manager = _manager()
     home = manager.home
+    from services.evolution.adapters import inspect_adapter_state
+
+    try:
+        adapter_state = inspect_adapter_state(load_settings(root=home))
+        adapter_state_label = (
+            "consistent"
+            if adapter_state["consistent"]
+            else "reconciliation required"
+        )
+    except ConfigError:
+        adapter_state_label = "unavailable (configuration invalid)"
     local_bin = Path.home() / ".local" / "bin"
     run_path = local_bin / "run"
     april_run_path = local_bin / "april-run"
@@ -325,6 +336,10 @@ def _doctor() -> None:
     table.add_row(
         "command -v run points to ~/.local/bin/run",
         "yes" if command_points_to_expected else "no",
+    )
+    table.add_row(
+        "adapter pointer/database state",
+        adapter_state_label,
     )
     console.print(table)
     _print_status(manager.status())
