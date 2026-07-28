@@ -114,6 +114,10 @@ class ReadinessReport(BaseModel):
     sentinel_live_status: str = "not_verified"
     embedding_provider: str = "hashed-token"
     embedding_role_model_registered: bool = False
+    conversation_summarization_enabled: bool = True
+    reading_model_registered: bool = False
+    conversation_summarization_available: bool = False
+    conversation_summarization_degrades_safely: bool = True
     hashed_token_embedding_fallback: bool = False
     lora_adapter_missing_count: int = 0
     overlay_eval_mode: str = "deterministic_fixture"
@@ -264,7 +268,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                     path_exists=exists,
                 )
             )
-            if model.backend == "llama_cpp" and not exists:
+            if model.backend == "llama_cpp" and not exists and model.role != "reading":
                 missing_models.append(model.id)
         if missing_models:
             checks.append(
@@ -280,7 +284,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                 ReadinessCheck(
                     name="configured GGUF model files",
                     status="ok",
-                    detail="All configured llama_cpp model files are present.",
+                    detail="All required configured llama_cpp model files are present.",
                 )
             )
         else:
@@ -292,6 +296,50 @@ def build_readiness_report(home: Path) -> ReadinessReport:
                     action=_SETUP_MODELS,
                 )
             )
+
+    reading_models = (
+        [model for model in registry.list() if model.role == "reading"]
+        if registry is not None
+        else []
+    )
+    reading_available = bool(
+        reading_models
+        and registry is not None
+        and (
+            backend == "fake"
+            or any(
+                model.backend == "fake" or model.resolved_path(registry.root).is_file()
+                for model in reading_models
+            )
+        )
+    )
+    if not settings.conversation_context.summary_enabled:
+        summary_check = ReadinessCheck(
+            name="conversation summarization",
+            status="skipped",
+            detail=(
+                "Conversation summarization is disabled by configuration; "
+                "chat remains available."
+            ),
+        )
+    elif reading_available:
+        summary_check = ReadinessCheck(
+            name="conversation summarization",
+            status="ok",
+            detail="A configured local reading-role model is available.",
+        )
+    else:
+        summary_check = ReadinessCheck(
+            name="conversation summarization",
+            status="warning",
+            detail=(
+                "The optional local reading-role model is unavailable. Summary checkpoints "
+                "do not advance, and chat degrades safely to the previous summary plus "
+                "recent turns."
+            ),
+            action=_SETUP_MODELS,
+        )
+    checks.append(summary_check)
 
     # --- optional LoRA adapters (M15) ----------------------------------------
     if registry is not None:
@@ -802,6 +850,10 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         sentinel_live_status=sentinel_live_status,
         embedding_provider=settings.memory.embedding_provider,
         embedding_role_model_registered=bool(embedding_role_models),
+        conversation_summarization_enabled=settings.conversation_context.summary_enabled,
+        reading_model_registered=bool(reading_models),
+        conversation_summarization_available=reading_available,
+        conversation_summarization_degrades_safely=True,
         hashed_token_embedding_fallback=settings.memory.embedding_provider == "hashed-token",
         lora_adapter_missing_count=lora_adapter_missing_count,
         overlay_eval_mode=(

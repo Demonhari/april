@@ -135,6 +135,32 @@ Brain still selects the agent for natural `/chat`, but Coding, Reading,
 Reasoning, System Action, and tool-using Creative turns run as strict JSON
 iterations. General Agent chat remains a direct response path.
 
+## Conversation context quality
+
+Core owns persistent conversation compaction. Before adding the current user
+message, `ConversationContextService` loads the validated summary checkpoint and
+messages after its `(created_at, id)` pair, groups complete turns, preserves the
+newest four complete turns verbatim, and advances the oldest eligible batch at
+most once. It calls the Reading Agent through the typed Runtime client with a
+strict `ConversationSummaryContent` response format. Generation happens outside
+SQLite transactions; persistence re-reads and compare-and-swaps version,
+checkpoint, and source hash so stale requests cannot overwrite progress.
+
+The summary is explicitly machine-generated untrusted context. It is
+conversation-local, cascades on conversation deletion, and is distinct from
+durable memory. Invalid output, timeout, or an unavailable Reading model leaves
+both the existing summary and checkpoint untouched and emits only a safe warning
+code. Summary audit events contain version/count/hash-prefix/model metadata, not
+summary or message text.
+
+Core has independent character ceilings for summaries, conversation history,
+durable memory/user model, repository/document chunks, and tool output. File
+truncation retains citation metadata, and durable-memory allocation preserves
+record boundaries. Runtime then performs the authoritative tokenizer-based fit
+over system groups, the summary, complete conversation turns, and complete tool
+sequences. A tool result is never retained without its canonical assistant
+request; oversized results may be explicitly truncated inside the intact group.
+
 Natural chat code modification follows the structured tool boundary. The Coding
 Agent may inspect files, request `patch_generator`, request `patch_applier`,
 suspend for a Level 3 exact-action approval, and resume the same persisted run

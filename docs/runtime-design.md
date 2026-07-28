@@ -80,10 +80,20 @@ clear unsupported-template error instead of silently using a generic format.
 Context budgeting reserves configured output tokens before generation and
 estimates the rendered prompt, including role/template overhead. The governing
 system prompt and latest user request are required; if they cannot fit, Runtime
-fails clearly. Older low-priority turns are removed first, oversized tool
-results are truncated with a marker, and chat/stream responses expose structured
-`context_budget` metadata with estimated input tokens, reserved output tokens,
-removed message count, truncated tool-result count, and selected context limit.
+fails clearly. Runtime groups system messages, ordinary user turns, and
+assistant-request/tool-result/assistant-continuation sequences before selection.
+It prefers a supplied machine-generated conversation summary to older raw turns,
+never splits an optional group, and never keeps a tool result without its
+assistant request. Oversized tool results may be truncated with an explicit
+marker inside the intact group; if the minimal group cannot fit, the whole group
+is removed. Runtime makes no summarization model call.
+
+Chat/stream responses expose `context_budget` metadata with estimated input
+tokens, reserved output tokens, removed message/group counts, truncated
+tool-result count, orphan tool-message count, complete group count, summary
+inclusion, and selected context limit. Core’s per-category character ceilings
+are conservative pre-bounds only; Runtime’s exact tokenizer and final context
+window remain authoritative.
 
 `GET /runtime/health` is fast and does not load models. It reports process RSS
 when available, peak RSS, loaded model count, active inference count,

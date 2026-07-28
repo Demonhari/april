@@ -85,6 +85,22 @@ class BrainSettings(BaseModel):
     model_id: str = "april-brain"
 
 
+class ConversationContextSettings(BaseModel):
+    """Core-side character pre-bounds; Runtime remains the exact token authority."""
+
+    summary_enabled: bool = True
+    recent_turns_preserved: int = Field(default=4, ge=4, le=32)
+    older_turns_before_summary: int = Field(default=3, ge=1, le=100)
+    max_turns_per_summary: int = Field(default=8, ge=1, le=50)
+    summary_max_output_tokens: int = Field(default=512, ge=64, le=2048)
+    summary_timeout_seconds: float = Field(default=30.0, gt=0.0, le=120.0)
+    rendered_summary_max_chars: int = Field(default=4000, ge=500, le=20_000)
+    conversation_history_max_chars: int = Field(default=8000, ge=1000, le=40_000)
+    durable_memory_max_chars: int = Field(default=4000, ge=0, le=20_000)
+    file_document_max_chars: int = Field(default=6000, ge=0, le=40_000)
+    tool_output_max_chars: int = Field(default=3000, ge=0, le=20_000)
+
+
 class VoiceSettings(BaseModel):
     enabled: bool = False
     audio_cache_path: Path = Path("data/audio_cache")
@@ -326,6 +342,9 @@ class AprilSettings(BaseModel):
     paths: PathSettings = Field(default_factory=PathSettings)
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
+    conversation_context: ConversationContextSettings = Field(
+        default_factory=ConversationContextSettings
+    )
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
     wake: WakeSettings = Field(default_factory=WakeSettings)

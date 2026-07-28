@@ -150,6 +150,11 @@ def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
     response = client.get("/readiness", headers=auth(settings_tmp))
     assert response.status_code == 200
     voice = response.json()["voice"]
+    summarization = response.json()["conversation_summarization"]
+    assert summarization["enabled"] is True
+    assert summarization["reading_agent_configured"] is True
+    assert summarization["degrades_safely"] is True
+    assert summarization["status"] in {"available", "degraded"}
     # The composite readiness verdicts are surfaced and are honest booleans.
     for key in (
         "openwakeword_available",
@@ -346,6 +351,57 @@ def test_conversation_id_reuses_recent_history(settings_tmp) -> None:
     )
     assert "Recent conversation history" in prompt
     assert "April, plan my work today." in prompt
+
+
+def test_standard_chat_advances_and_uses_conversation_summary(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    first = client.post(
+        "/chat",
+        json={"message": "turn zero"},
+        headers=auth(settings_tmp),
+    ).json()
+    conversation_id = first["result"]["conversation_id"]
+    latest = first
+    for index in range(1, 8):
+        latest = client.post(
+            "/chat",
+            json={"message": f"turn {index}", "conversation_id": conversation_id},
+            headers=auth(settings_tmp),
+        ).json()
+
+    summary = anyio.run(
+        container.memory.get_conversation_summary,
+        conversation_id,
+    )
+    assert summary is not None
+    assert summary.version == 1
+    assert latest["result"]["metadata"]["summary_advanced"] is True
+    router_calls = [
+        call
+        for call in container.runtime_client.calls  # type: ignore[attr-defined]
+        if call and "Route the user request" in call[0].content
+    ]
+    assert any(
+        "[MACHINE-GENERATED CONVERSATION CONTEXT" in message.content
+        for message in router_calls[-1]
+    )
+    direct = client.post(
+        "/agents/run",
+        json={
+            "agent": "general_agent",
+            "message": "continue directly",
+            "conversation_id": conversation_id,
+        },
+        headers=auth(settings_tmp),
+    )
+    assert direct.status_code == 200
+    assert any(
+        "[MACHINE-GENERATED CONVERSATION CONTEXT" in message.content
+        for message in container.runtime_client.last_messages  # type: ignore[attr-defined]
+    )
 
 
 def test_read_only_coding_analysis(settings_tmp) -> None:
@@ -1700,6 +1756,14 @@ def test_patch_content_change_after_approval_is_rejected(settings_tmp) -> None:
     )
     assert approve_response.status_code == 200
     assert approve_response.json()["status"] == "failed"
+    suspended = anyio.run(
+        container.memory.get_suspended_agent_run_by_approval,
+        approval["approval_id"],
+    )
+    assert suspended is not None
+    assert suspended.messages[-2]["role"] == "assistant"
+    assert suspended.messages[-1]["role"] == "tool"
+    assert json.loads(suspended.messages[-1]["content"])["ok"] is False
     assert "tampered" not in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
     replay = client.post(
         "/tools/approve",
@@ -1834,6 +1898,7 @@ class UnsafePatchRuntimeClient(FakeRuntimeClient):
             "return exactly one json object with type final_answer" in lower
             and "apply the fix" in lower
             and "tool result" not in lower
+            and not ('"ok":' in lower and '"tool":' in lower)
         ):
             return response.model_copy(
                 update={

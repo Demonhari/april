@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -76,7 +77,7 @@ async def make_loop(settings_tmp, responses: list[str]):
 
 @pytest.mark.asyncio
 async def test_structured_agent_loop_allowed_tool_executes(settings_tmp) -> None:
-    loop, context, _memory, database, _runtime = await make_loop(
+    loop, context, _memory, database, runtime = await make_loop(
         settings_tmp,
         [
             '{"type":"tool_request","tool":"read_file","args":{"path":"README.md"},'
@@ -95,6 +96,11 @@ async def test_structured_agent_loop_allowed_tool_executes(settings_tmp) -> None
     assert len(rows) == 1
     iterations = await database.fetchall("SELECT * FROM agent_iterations")
     assert len(iterations) >= 2
+    assert [message.role for message in runtime.calls[1][-2:]] == ["assistant", "tool"]
+    request = json.loads(runtime.calls[1][-2].content)
+    result_payload = json.loads(runtime.calls[1][-1].content)
+    assert request["type"] == "tool_request"
+    assert result_payload["tool"] == "read_file"
     await database.close()
 
 
@@ -172,6 +178,12 @@ async def test_structured_agent_loop_level_three_suspends(settings_tmp) -> None:
     assert result.pending_approval is not None
     rows = await database.fetchall("SELECT * FROM approvals WHERE status = 'pending'")
     assert len(rows) == 1
+    suspended = await database.fetchone("SELECT messages_json FROM suspended_agent_runs")
+    assert suspended is not None
+    messages = json.loads(suspended["messages_json"])
+    assert messages[-1]["role"] == "assistant"
+    assert json.loads(messages[-1]["content"])["type"] == "tool_request"
+    assert all(message["role"] != "tool" for message in messages)
     await database.close()
 
 

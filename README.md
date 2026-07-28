@@ -1184,8 +1184,25 @@ is ignored by Git. Signed/notarized packaging remains future work.
 `POST /chat` accepts an optional `conversation_id`. If omitted, APRIL creates a
 local conversation and returns its ID in `result.conversation_id`. The
 interactive CLI creates one conversation ID per chat session and reuses it for
-every turn. Recent bounded history is included in the next agent prompt as
-context, not instructions.
+every turn. Older complete turns are incrementally compressed into one
+conversation-local “conversation so far” record. The most recent four complete
+turns remain verbatim by default, and the current or suspended turn is never
+summarized.
+
+Advancement uses the configured local Reading Agent (`april-reading`) with
+strict structured JSON. If that optional model is missing, times out, or returns
+invalid output, chat continues with the previous validated summary and recent
+complete turns; the checkpoint does not move. Summary records are not durable
+user memories, contain neither raw tool output nor secrets, and cascade when
+their conversation is deleted.
+
+Core applies separate character pre-bounds to rendered summary (4,000), recent
+history (8,000), durable memory/user model (4,000), files/documents (6,000), and
+tool output (3,000). These are category isolation limits, not token estimates.
+April Runtime remains authoritative for exact tokenizer-based fitting and the
+model context window. Runtime removes complete turns or tool sequences as units;
+an assistant tool request is retained with its tool result and continuation, or
+the whole optional sequence is removed.
 
 Conversations are bound to either a selected project ID or explicit no-project
 scope. APRIL rejects attempts to reuse a project conversation with a different

@@ -1572,6 +1572,10 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
     except Exception:
         database_available = False
     model_registry = _model_registry_readiness(active.settings)
+    summary_readiness = _conversation_summary_readiness(
+        active,
+        runtime_available=runtime_probe.ok,
+    )
     scheduler_required = active.settings.scheduler.enabled
     scheduler_available = active.scheduler is not None and active.scheduler.running
     failure_reasons = _readiness_failure_reasons(
@@ -1628,6 +1632,7 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "registry": model_registry,
         },
         "embeddings": embeddings,
+        "conversation_summarization": summary_readiness,
         "evolution": {
             "enabled": active.settings.evolution.enabled,
             "kill_switch_active": evolution_kill_switch_active(active.settings),
@@ -1765,6 +1770,51 @@ def _model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
         "required_model_available": bool(required_models) and not unavailable,
         "required_model_ids": [model.id for model in required_models],
         "unavailable_required_model_ids": unavailable,
+    }
+
+
+def _conversation_summary_readiness(
+    active: ApiContainer, *, runtime_available: bool
+) -> dict[str, Any]:
+    enabled = active.settings.conversation_context.summary_enabled
+    reading_agent = active.agent_registry.get("reading_agent")
+    model_id = reading_agent.model_id if reading_agent is not None else None
+    model_entry_exists = False
+    model_artifact_available = False
+    if model_id:
+        try:
+            registry = ModelRegistry.from_file(
+                active.settings.home / "configs" / "models.yaml",
+                root=active.settings.home,
+            )
+            model_entry_exists = registry.exists(model_id)
+            if model_entry_exists:
+                model = registry.get(model_id)
+                model_artifact_available = (
+                    active.settings.runtime.backend == "fake"
+                    or model.backend == "fake"
+                    or model.resolved_path(registry.root).is_file()
+                )
+        except AprilError:
+            pass
+    available = bool(
+        enabled
+        and model_id
+        and model_entry_exists
+        and model_artifact_available
+        and runtime_available
+    )
+    return {
+        "enabled": enabled,
+        "reading_agent_configured": reading_agent is not None,
+        "model_entry_exists": model_entry_exists,
+        "available": available,
+        "degrades_safely": True,
+        "status": (
+            "disabled"
+            if not enabled
+            else ("available" if available else "degraded")
+        ),
     }
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Project(BaseModel):
@@ -108,6 +108,50 @@ class Message(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
     content: str
     created_at: str
+
+
+SUMMARY_ITEM_MAX_CHARS = 500
+SUMMARY_GOAL_MAX_CHARS = 800
+SUMMARY_LIST_MAX_ITEMS = 20
+
+
+class ConversationSummaryContent(BaseModel):
+    """Validated, deliberately shallow conversation-summary payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    current_goal: str | None = Field(default=None, max_length=SUMMARY_GOAL_MAX_CHARS)
+    important_facts: list[str] = Field(default_factory=list, max_length=SUMMARY_LIST_MAX_ITEMS)
+    decisions: list[str] = Field(default_factory=list, max_length=SUMMARY_LIST_MAX_ITEMS)
+    constraints: list[str] = Field(default_factory=list, max_length=SUMMARY_LIST_MAX_ITEMS)
+    completed_actions: list[str] = Field(default_factory=list, max_length=SUMMARY_LIST_MAX_ITEMS)
+    open_loops: list[str] = Field(default_factory=list, max_length=SUMMARY_LIST_MAX_ITEMS)
+
+    @field_validator(
+        "important_facts",
+        "decisions",
+        "constraints",
+        "completed_actions",
+        "open_loops",
+    )
+    @classmethod
+    def bound_summary_items(cls, value: list[str]) -> list[str]:
+        if any(len(item) > SUMMARY_ITEM_MAX_CHARS for item in value):
+            raise ValueError(f"summary items must be at most {SUMMARY_ITEM_MAX_CHARS} characters")
+        return value
+
+
+class ConversationSummary(BaseModel):
+    conversation_id: str
+    content: ConversationSummaryContent
+    through_message_id: str
+    through_created_at: str
+    summarized_message_count: int = Field(ge=0)
+    source_hash: str = Field(min_length=64, max_length=64)
+    model_id: str | None = None
+    version: int = Field(ge=1)
+    created_at: str
+    updated_at: str
 
 
 class ApprovalRecord(BaseModel):

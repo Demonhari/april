@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 async def run_migrations(database: Database) -> None:
@@ -71,6 +71,20 @@ async def _run_migrations_locked(database: Database) -> None:
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_summaries (
+            conversation_id TEXT PRIMARY KEY
+                REFERENCES conversations(id) ON DELETE CASCADE,
+            summary_json TEXT NOT NULL,
+            through_message_id TEXT NOT NULL,
+            through_created_at TEXT NOT NULL,
+            summarized_message_count INTEGER NOT NULL,
+            source_hash TEXT NOT NULL,
+            model_id TEXT,
+            version INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS conversation_events (

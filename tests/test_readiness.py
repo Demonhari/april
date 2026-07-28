@@ -187,6 +187,9 @@ def test_default_repo_config_keeps_voice_out_of_blockers(tmp_path: Path) -> None
     home = tmp_path / "home"
     shutil.copytree(Path.cwd() / "configs", home / "configs")
     report = build_readiness_report(home)
+    assert report.conversation_summarization_enabled is True
+    assert report.reading_model_registered is True
+    assert report.conversation_summarization_degrades_safely is True
     assert report.voice_enabled is False
     voice_checks = [c for c in report.checks if c.name.startswith("voice:")]
     assert voice_checks

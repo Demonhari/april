@@ -244,6 +244,13 @@ passes.
 External actions such as git push, deployment, email, payment, and publishing
 remain out of scope and disabled; they must not be simulated as successful.
 
+Conversation-context verification uses the fake local Runtime client and
+temporary SQLite databases. It covers incremental summary calls, complete-turn
+checkpoints, stale compare-and-swap rejection, safe Reading-model degradation,
+secret/raw-output omission, complete structured tool sequences, independent Core
+category pre-bounds, and Runtime group diagnostics. These tests do not load or
+claim verification of a real Reading GGUF.
+
 The fake brain eval uses the deterministic fallback router and validates schema
 validity plus routing expectations for ordinary chat, planning, coding,
 reading, creative, reasoning, memory search/write, Git reads, patch proposals,

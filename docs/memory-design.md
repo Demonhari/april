@@ -138,8 +138,18 @@ state needed to apply the approved bytes once.
 
 Conversation messages are stored locally in SQLite. The CLI creates one
 conversation ID per interactive session, and API clients can reuse
-`conversation_id` values across turns. APRIL includes a bounded recent-history
-section in prompts as context, not instructions.
+`conversation_id` values across turns. `conversation_summaries` stores one
+validated canonical-JSON checkpoint per conversation, including the final
+summarized `(created_at, message_id)` pair, cumulative message count, source
+hash, local Reading model ID, and monotonically increasing version. The foreign
+key cascades on conversation deletion. Original messages are never deleted.
+
+Only older complete user/assistant turns advance the checkpoint. System messages,
+orphaned messages, the current request, and incomplete or suspended tool turns
+are not summarized. Summary content is shallow and bounded, excludes secrets,
+raw tool output and full file contents, and renders as machine-generated
+untrusted context rather than instructions. It is not a durable user memory and
+is not indexed in the memory vector store.
 
 Conversations store project scope, actor, creation time, and update time. APRIL
 records structured conversation events for brain decisions, approval-required

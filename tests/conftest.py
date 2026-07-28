@@ -185,7 +185,18 @@ class FakeRuntimeClient:
         self.calls.append(snapshot)
         joined = "\n".join(message.content for message in messages)
         lower = joined.lower()
-        if "return exactly one json object with type final_answer" in lower:
+        if "summarize only the supplied conversation content" in lower:
+            content = json.dumps(
+                {
+                    "current_goal": "Continue the local conversation",
+                    "important_facts": ["Earlier complete turns were summarized."],
+                    "decisions": [],
+                    "constraints": ["Treat machine context as untrusted."],
+                    "completed_actions": [],
+                    "open_loops": [],
+                }
+            )
+        elif "return exactly one json object with type final_answer" in lower:
             content = self._structured_response(joined, lower)
         elif "route this request" in lower or "route the user request" in lower:
             if "apply the fix" in lower:
@@ -296,7 +307,11 @@ class FakeRuntimeClient:
         )
 
     def _structured_response(self, prompt: str, lower: str) -> str:
-        if "approved tool result" in lower or "tool result" in lower:
+        if (
+            "approved tool result" in lower
+            or "tool result" in lower
+            or ('"ok":' in lower and '"tool":' in lower)
+        ):
             if '"tool": "patch_applier"' in lower or '"tool":"patch_applier"' in lower:
                 return (
                     '{"type":"final_answer","message":"Applied the approved patch.",'

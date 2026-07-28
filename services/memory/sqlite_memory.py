@@ -11,6 +11,8 @@ from services.brain.planner import TaskPlan, TaskStep
 from services.memory.database import Database
 from services.memory.schemas import (
     Conversation,
+    ConversationSummary,
+    ConversationSummaryContent,
     FeedbackEventRecord,
     MemoryContradictionRecord,
     MemoryRecord,
@@ -495,13 +497,180 @@ class SqliteMemory:
             SELECT *
             FROM messages
             WHERE conversation_id = ?
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
             (conversation_id, limit),
         )
         messages = [Message.model_validate(dict(row)) for row in rows]
         return list(reversed(messages))
+
+    async def list_messages_paginated(
+        self,
+        conversation_id: str,
+        *,
+        after_created_at: str | None = None,
+        after_message_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Message]:
+        """Return a deterministic page ordered by the checkpoint pair."""
+
+        if (after_created_at is None) != (after_message_id is None):
+            raise ValueError("both checkpoint fields must be supplied together")
+        if limit < 1:
+            return []
+        if after_created_at is None:
+            rows = await self.database.fetchall(
+                """
+                SELECT *
+                FROM messages
+                WHERE conversation_id = ?
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (conversation_id, limit),
+            )
+        else:
+            rows = await self.database.fetchall(
+                """
+                SELECT *
+                FROM messages
+                WHERE conversation_id = ?
+                  AND (created_at > ? OR (created_at = ? AND id > ?))
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (
+                    conversation_id,
+                    after_created_at,
+                    after_created_at,
+                    after_message_id,
+                    limit,
+                ),
+            )
+        return [Message.model_validate(dict(row)) for row in rows]
+
+    async def messages_after_summary_checkpoint(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[Message]:
+        summary = await self.get_conversation_summary(conversation_id)
+        return await self.list_messages_paginated(
+            conversation_id,
+            after_created_at=(summary.through_created_at if summary else None),
+            after_message_id=(summary.through_message_id if summary else None),
+            limit=limit,
+        )
+
+    async def get_conversation_summary(
+        self, conversation_id: str
+    ) -> ConversationSummary | None:
+        row = await self.database.fetchone(
+            "SELECT * FROM conversation_summaries WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        return self._conversation_summary_from_row(row) if row is not None else None
+
+    async def upsert_conversation_summary(
+        self,
+        *,
+        conversation_id: str,
+        content: ConversationSummaryContent,
+        through_message_id: str,
+        through_created_at: str,
+        summarized_message_count: int,
+        source_hash: str,
+        model_id: str | None,
+        expected_version: int | None,
+        expected_through_message_id: str | None = None,
+        expected_source_hash: str | None = None,
+    ) -> ConversationSummary | None:
+        """CAS a generated summary without holding a transaction during generation."""
+
+        summary_json = json.dumps(
+            content.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM conversation_summaries WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            existing = await cursor.fetchone()
+            if existing is None:
+                if expected_version is not None:
+                    return None
+                version = 1
+                await conn.execute(
+                    """
+                    INSERT INTO conversation_summaries(
+                        conversation_id, summary_json, through_message_id,
+                        through_created_at, summarized_message_count, source_hash,
+                        model_id, version, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        conversation_id,
+                        summary_json,
+                        through_message_id,
+                        through_created_at,
+                        summarized_message_count,
+                        source_hash,
+                        model_id,
+                        version,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                current = self._conversation_summary_from_row(existing)
+                if expected_version != current.version:
+                    return None
+                if (
+                    expected_through_message_id is not None
+                    and expected_through_message_id != current.through_message_id
+                ):
+                    return None
+                if expected_source_hash is not None and expected_source_hash != current.source_hash:
+                    return None
+                new_checkpoint = (through_created_at, through_message_id)
+                old_checkpoint = (current.through_created_at, current.through_message_id)
+                if new_checkpoint <= old_checkpoint:
+                    return None
+                version = current.version + 1
+                await conn.execute(
+                    """
+                    UPDATE conversation_summaries
+                    SET summary_json = ?, through_message_id = ?,
+                        through_created_at = ?, summarized_message_count = ?,
+                        source_hash = ?, model_id = ?, version = ?, updated_at = ?
+                    WHERE conversation_id = ?
+                    """,
+                    (
+                        summary_json,
+                        through_message_id,
+                        through_created_at,
+                        summarized_message_count,
+                        source_hash,
+                        model_id,
+                        version,
+                        now,
+                        conversation_id,
+                    ),
+                )
+        return await self.get_conversation_summary(conversation_id)
+
+    async def delete_conversation_summary(self, conversation_id: str) -> bool:
+        cursor = await self.database.execute(
+            "DELETE FROM conversation_summaries WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        return cursor.rowcount > 0
 
     async def delete_conversation(self, conversation_id: str) -> bool:
         async with self.database.transaction() as conn:
@@ -514,6 +683,20 @@ class SqliteMemory:
                 (conversation_id,),
             )
         return cursor.rowcount > 0
+
+    def _conversation_summary_from_row(self, row: Any) -> ConversationSummary:
+        return ConversationSummary(
+            conversation_id=str(row["conversation_id"]),
+            content=ConversationSummaryContent.model_validate_json(row["summary_json"]),
+            through_message_id=str(row["through_message_id"]),
+            through_created_at=str(row["through_created_at"]),
+            summarized_message_count=int(row["summarized_message_count"]),
+            source_hash=str(row["source_hash"]),
+            model_id=row["model_id"],
+            version=int(row["version"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
 
     async def record_conversation_event(
         self,
@@ -1119,6 +1302,36 @@ class SqliteMemory:
             suspended_status="failed",
             run_status="failed",
         )
+
+    async def fail_suspended_agent_run(
+        self,
+        *,
+        approval_id: str,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """Close a suspended run while retaining its actual sanitized failure."""
+
+        now = utc_now_iso()
+        async with self.database.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT agent_run_id FROM suspended_agent_runs WHERE approval_id = ?",
+                (approval_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return
+            await conn.execute(
+                """
+                UPDATE suspended_agent_runs
+                SET messages_json = ?, status = 'failed', completed_at = ?
+                WHERE approval_id = ?
+                """,
+                (json.dumps(messages, sort_keys=True), now, approval_id),
+            )
+            await conn.execute(
+                "UPDATE agent_runs SET status = 'failed', completed_at = ? WHERE id = ?",
+                (now, str(row["agent_run_id"])),
+            )
 
     async def create_session(
         self,
