@@ -48,6 +48,15 @@ class MemoryRecord(BaseModel):
     superseded_by: str | None = None
 
 
+class LexicalHit(BaseModel):
+    """Internal, content-safe lexical ranking evidence."""
+
+    memory: MemoryRecord
+    lexical_rank: int = Field(ge=1)
+    normalized_score: float = Field(ge=0.0, le=1.0)
+    matched_tokens: tuple[str, ...] = ()
+
+
 class MemoryContradictionRecord(BaseModel):
     """A contradictory memory pair kept for Dreamer adjudication."""
 

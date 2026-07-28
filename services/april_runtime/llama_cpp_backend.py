@@ -428,6 +428,27 @@ class LlamaCppBackend(RuntimeBackend):
         raw = await asyncio.to_thread(embedder, text)
         return _flatten_embedding(raw)
 
+    async def embed_many(self, texts: list[str]) -> list[list[float]]:
+        if self._llm is None:
+            raise RuntimeUnavailableError("Model is not loaded.")
+        if self._model is not None and self._model.role != "embedding":
+            raise RuntimeUnavailableError(
+                "Loaded model is not an embedding model; load a role=embedding model to embed."
+            )
+        embedder = getattr(self._llm, "embed", None)
+        if not callable(embedder):
+            raise RuntimeUnavailableError("backend does not support embeddings")
+        try:
+            raw = await asyncio.to_thread(embedder, texts)
+        except (TypeError, AttributeError):
+            self.supports_native_batch_embeddings = False
+            return await super().embed_many(texts)
+        vectors = _flatten_embedding_batch(raw)
+        if len(vectors) != len(texts):
+            raise ValueError("native embedding batch result count mismatch")
+        self.supports_native_batch_embeddings = True
+        return vectors
+
     async def health(self) -> BackendHealth:
         if self._llm is None:
             return BackendHealth(ok=False, message="not loaded")
@@ -559,3 +580,15 @@ def _flatten_embedding(raw: Any) -> list[float]:
     if values and isinstance(values[0], (list, tuple)):
         return [float(component) for component in values[0]]
     return [float(component) for component in values]
+
+
+def _flatten_embedding_batch(raw: Any) -> list[list[float]]:
+    value = raw
+    if isinstance(value, dict):
+        value = value.get("data", value.get("embeddings"))
+    rows = list(value)
+    if rows and isinstance(rows[0], dict):
+        rows = [row.get("embedding") for row in rows]
+    if not all(isinstance(row, (list, tuple)) for row in rows):
+        raise ValueError("native embedding batch result is malformed")
+    return [[float(component) for component in row] for row in rows]

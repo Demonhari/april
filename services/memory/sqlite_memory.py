@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any, Literal
 
 from april_common.errors import PermissionDeniedError
+from april_common.text_normalization import normalize_text, word_tokens
 from april_common.time import utc_now_iso
 from services.brain.planner import TaskPlan, TaskStep
 from services.memory.database import Database
@@ -14,6 +15,7 @@ from services.memory.schemas import (
     ConversationSummary,
     ConversationSummaryContent,
     FeedbackEventRecord,
+    LexicalHit,
     MemoryContradictionRecord,
     MemoryRecord,
     Message,
@@ -23,6 +25,19 @@ from services.memory.schemas import (
     SuspendedAgentRun,
     WakeEventRecord,
 )
+
+
+def _fts_query(tokens: list[str]) -> str:
+    """Build a bounded MATCH expression from tokenizer-produced literals only."""
+    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens[:16])
+
+
+def _escaped_like_value(value: str) -> str:
+    bounded = value[:512].strip()
+    if not bounded:
+        return ""
+    escaped = bounded.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 class SqliteMemory:
@@ -186,61 +201,116 @@ class SqliteMemory:
     async def search_memories(
         self, query: str, *, project_id: str | None = None
     ) -> list[MemoryRecord]:
+        return [
+            hit.memory
+            for hit in await self.search_memory_lexical_hits(query, project_id=project_id)
+        ]
+
+    async def search_memory_lexical_hits(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+        limit: int = 20,
+    ) -> list[LexicalHit]:
+        """Return bounded Unicode-safe FTS hits with deterministic rank metadata."""
+        capped_limit = max(1, min(limit, 100))
         if query.strip() in {"", "*"}:
-            return await self.list_memories(project_id=project_id)
-        active_sql = "superseded_by IS NULL AND (expires_at IS NULL OR expires_at > ?)"
+            memories = await self.list_memories(project_id=project_id)
+            return [
+                LexicalHit(
+                    memory=memory,
+                    lexical_rank=rank,
+                    normalized_score=1.0 / rank,
+                )
+                for rank, memory in enumerate(memories[:capped_limit], start=1)
+            ]
+        tokens = word_tokens(query, max_tokens=16)
+        fts_query = _fts_query(tokens)
         now = utc_now_iso()
-        if project_id is None:
-            rows = await self.database.fetchall(
-                """
-                SELECT m.*
-                FROM memories_fts f
-                JOIN memories m ON m.id = f.id
-                WHERE memories_fts MATCH ?
-                  AND m.superseded_by IS NULL
-                  AND (m.expires_at IS NULL OR m.expires_at > ?)
-                ORDER BY rank
-                LIMIT 20
-                """,
-                (query, now),
-            )
-        else:
-            rows = await self.database.fetchall(
-                """
-                SELECT m.*
-                FROM memories_fts f
-                JOIN memories m ON m.id = f.id
-                WHERE memories_fts MATCH ? AND m.project_id = ?
-                  AND m.superseded_by IS NULL
-                  AND (m.expires_at IS NULL OR m.expires_at > ?)
-                ORDER BY rank
-                LIMIT 20
-                """,
-                (query, project_id, now),
-            )
-        if not rows:
+        rows: list[Any] = []
+        if fts_query:
             if project_id is None:
                 rows = await self.database.fetchall(
-                    f"""
-                    SELECT * FROM memories
-                    WHERE ({active_sql}) AND (content LIKE ? OR reason LIKE ?)
-                    LIMIT 20
+                    """
+                    SELECT m.*, bm25(memories_fts) AS lexical_bm25
+                    FROM memories_fts
+                    JOIN memories m ON m.id = memories_fts.id
+                    WHERE memories_fts MATCH ?
+                      AND m.superseded_by IS NULL
+                      AND (m.expires_at IS NULL OR m.expires_at > ?)
+                    ORDER BY lexical_bm25 ASC, m.id ASC
+                    LIMIT ?
                     """,
-                    (now, f"%{query}%", f"%{query}%"),
+                    (fts_query, now, capped_limit),
                 )
             else:
                 rows = await self.database.fetchall(
                     """
-                    SELECT * FROM memories
-                    WHERE project_id = ?
-                      AND superseded_by IS NULL
-                      AND (expires_at IS NULL OR expires_at > ?)
-                      AND (content LIKE ? OR reason LIKE ?)
-                    LIMIT 20
+                    SELECT m.*, bm25(memories_fts) AS lexical_bm25
+                    FROM memories_fts
+                    JOIN memories m ON m.id = memories_fts.id
+                    WHERE memories_fts MATCH ?
+                      AND (m.project_id = ? OR m.project_id IS NULL)
+                      AND m.superseded_by IS NULL
+                      AND (m.expires_at IS NULL OR m.expires_at > ?)
+                    ORDER BY lexical_bm25 ASC, m.id ASC
+                    LIMIT ?
                     """,
-                    (project_id, now, f"%{query}%", f"%{query}%"),
+                    (fts_query, project_id, now, capped_limit),
                 )
-        return [MemoryRecord.model_validate(dict(row)) for row in rows]
+        if not rows:
+            like_value = _escaped_like_value(normalize_text(query))
+            if not like_value:
+                return []
+            if project_id is None:
+                rows = await self.database.fetchall(
+                    """
+                    SELECT m.*
+                    FROM memories m
+                    WHERE m.superseded_by IS NULL
+                      AND (m.expires_at IS NULL OR m.expires_at > ?)
+                      AND (
+                        lower(m.content) LIKE ? ESCAPE '\\'
+                        OR lower(m.reason) LIKE ? ESCAPE '\\'
+                      )
+                    ORDER BY m.created_at DESC, m.id ASC
+                    LIMIT ?
+                    """,
+                    (now, like_value, like_value, capped_limit),
+                )
+            else:
+                rows = await self.database.fetchall(
+                    """
+                    SELECT m.*
+                    FROM memories m
+                    WHERE (m.project_id = ? OR m.project_id IS NULL)
+                      AND m.superseded_by IS NULL
+                      AND (m.expires_at IS NULL OR m.expires_at > ?)
+                      AND (
+                        lower(m.content) LIKE ? ESCAPE '\\'
+                        OR lower(m.reason) LIKE ? ESCAPE '\\'
+                      )
+                    ORDER BY m.created_at DESC, m.id ASC
+                    LIMIT ?
+                    """,
+                    (project_id, now, like_value, like_value, capped_limit),
+                )
+
+        hits: list[LexicalHit] = []
+        for rank, row in enumerate(rows, start=1):
+            memory = MemoryRecord.model_validate(dict(row))
+            document_tokens = set(word_tokens(f"{memory.content} {memory.reason}", max_tokens=512))
+            matched = tuple(token for token in tokens if token in document_tokens)
+            hits.append(
+                LexicalHit(
+                    memory=memory,
+                    lexical_rank=rank,
+                    normalized_score=1.0 / rank,
+                    matched_tokens=tuple(dict.fromkeys(matched)),
+                )
+            )
+        return hits
 
     async def mark_memories_used(self, memory_ids: list[str]) -> None:
         if not memory_ids:
@@ -564,9 +634,7 @@ class SqliteMemory:
             limit=limit,
         )
 
-    async def get_conversation_summary(
-        self, conversation_id: str
-    ) -> ConversationSummary | None:
+    async def get_conversation_summary(self, conversation_id: str) -> ConversationSummary | None:
         row = await self.database.fetchone(
             "SELECT * FROM conversation_summaries WHERE conversation_id = ?",
             (conversation_id,),

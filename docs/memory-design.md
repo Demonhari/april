@@ -29,12 +29,28 @@ once a local embedding-role GGUF is registered in `configs/models.yaml`: set
 An unavailable embedding model falls back to hashed-token with an audit event.
 APRIL does not call cloud embedding APIs.
 
-Retrieval is two-stage: deterministic lexical + vector candidate collection
-(top 20), then an optional local rerank (top 5) through the runtime using the
-reading agent's model. When the runtime or model is unavailable the rerank is
-skipped — never faked — and the deterministic ranking is used with a
-`memory_rerank_fallback` audit event. Retrieved memories are marked used
-(`use_count`/`last_used_at`).
+Schema 18 rebuilds memory FTS from the authoritative `memories` table using
+FTS5 `unicode61` with diacritic removal disabled. Shared NFKC + Unicode
+casefolding preserves Tamil combining marks and identifier underscores. User
+text is converted to bounded quoted literal tokens before `MATCH`; punctuation
+and FTS operators never reach the query parser. A bounded escaped `LIKE`
+fallback remains available when no useful tokens can be produced.
+
+Retrieval independently collects lexical and semantic candidates (top 20) and
+uses weighted reciprocal-rank fusion with `k=60`, lexical weight `0.55`, and
+vector weight `0.45`. The selected project adds at most 3%, known source
+adjustments are within ±2%, confidence within ±2%, and recency within +2% with
+a configurable 180-day half-life. These adjustments multiply fused relevance,
+so metadata cannot rescue an irrelevant result. Selected-project and eligible
+global memories are included; unrelated projects are excluded.
+
+The optional local Reading Agent reranker runs only under deterministic
+uncertainty: top fused score below 0.60, top-two margin below 0.04,
+lexical/vector top disagreement when the top-two fused scores are within 0.15,
+or at least three candidates within 0.08 of the top. It never runs for fewer
+than two candidates or without a configured local reranker. Failure preserves
+fused order, and partial valid output is filled from that deterministic order.
+Retrieved memories are marked used.
 
 Inspect the active provider with:
 
@@ -104,9 +120,29 @@ are reused, and repeated indexing is idempotent.
 Full reindexing embeds records in conservative bounded batches, advances
 progress as embeddings complete, constructs one final matrix, publishes one
 generation and switches `CURRENT` once. Hashed-token batch output is identical
-to individual deterministic embeddings. Runtime-local currently uses bounded
-individual local Runtime calls inside each batch because no new Runtime batch
-endpoint is required.
+to individual deterministic embeddings. Runtime-local uses the typed
+`POST /runtime/embed/batch` endpoint. A request is limited to 64 items, 8,192
+characters per item, and 65,536 total characters. Runtime resolves and loads
+the embedding-role model once, preserves order, and validates exact count,
+consistent dimensions, and finite values. Compatibility fallback to individual
+`/runtime/embed` calls occurs only for an explicit unsupported endpoint (HTTP
+404/405 or typed unsupported capability), never for authentication, model,
+timeout, or malformed-vector failures.
+
+Manual recommended semantic setup:
+
+```bash
+run april model import --role embedding --id april-embedding \
+  --name nomic-embed-text-v1.5 \
+  --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf
+export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
+export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding
+run april memory doctor --verify-runtime-embedding
+run april memory reindex
+```
+
+APRIL never downloads this model. Hashed-token remains a clearly identified
+degraded semantic path for first-run development.
 
 Document ingestion uses typed local extractors. Text/source files are supported
 by default. PDF text extraction is optional through the `documents` extra

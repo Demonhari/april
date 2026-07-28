@@ -207,7 +207,8 @@ embedding-role model is registered, whether that model path exists, the active
 and effective generation, recovery state, and the last successful full reindex.
 It does not start Runtime or load a model unless
 `--verify-runtime-embedding` is passed, and that flag only probes
-`/runtime/embed`.
+`/runtime/embed`. Runtime health also reports the typed batch capability and
+its 64-item bound.
 
 Use `run april memory repair-index` to inspect a malformed/missing/corrupt
 `CURRENT` pointer without mutation. If it reports a validated recovery
@@ -216,6 +217,26 @@ candidate, apply exactly that repair with
 `run april memory reindex`. Recovery mode is degraded readiness even though
 SQLite memory remains available. Real semantic memory requires a runtime-local
 embedding-role model and a reindex after switching providers.
+
+Manual model guidance (APRIL does not download, register, or activate these
+automatically):
+
+```bash
+run april model import --role embedding --id april-embedding \
+  --name nomic-embed-text-v1.5 \
+  --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf
+export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
+export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding
+run april memory doctor --verify-runtime-embedding
+run april memory reindex
+
+run april model import --role reasoning --id april-reasoning \
+  --name qwen3-4b --path /absolute/path/qwen3-4b-Q4_K_M.gguf
+```
+
+Deep and Council reasoning use the reasoning-role model when available and
+otherwise report their Brain fallback honestly. Qwen3-4B Q4_K_M must be
+benchmarked on the Intel MacBook before becoming a recommended default.
 
 Fake soak is non-destructive and fake-backend-only:
 

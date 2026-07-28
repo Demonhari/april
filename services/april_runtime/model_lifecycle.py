@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -411,8 +412,7 @@ class ModelLifecycle:
         warnings = ["Context was truncated."] if context.truncated else []
         if "context_truncated_without_persisted_summary" in context.context_warning_codes:
             warnings.append(
-                "Older context was omitted and no persisted Core conversation "
-                "summary was supplied."
+                "Older context was omitted and no persisted Core conversation summary was supplied."
             )
         structured_fallback = bool(getattr(state.backend, "last_structured_output_fallback", False))
         if structured_fallback:
@@ -443,6 +443,15 @@ class ModelLifecycle:
         )
 
     async def embed(self, text: str, *, model_id: str | None = None) -> tuple[str, list[float]]:
+        resolved_id, vectors = await self.embed_many([text], model_id=model_id)
+        return resolved_id, vectors[0]
+
+    async def embed_many(
+        self,
+        texts: list[str],
+        *,
+        model_id: str | None = None,
+    ) -> tuple[str, list[list[float]]]:
         resolved_id = model_id or self.embedding_model_id()
         if resolved_id is None:
             raise ModelUnavailableError(
@@ -459,18 +468,32 @@ class ModelLifecycle:
         loaded = await self.load_model(resolved_id)
         if loaded.backend is None:
             raise ModelUnavailableError(resolved_id, "Model backend is not available.")
+        loaded.active_requests += 1
         try:
-            vector = await loaded.backend.embed(text)
+            vectors = await loaded.backend.embed_many(texts)
+            if len(vectors) != len(texts):
+                raise ValueError("embedding backend returned the wrong vector count")
+            dimensions = len(vectors[0]) if vectors else 0
+            if dimensions < 1:
+                raise ValueError("embedding backend returned a missing vector")
+            if any(len(vector) != dimensions for vector in vectors):
+                raise ValueError("embedding backend returned inconsistent dimensions")
+            if any(not math.isfinite(value) for vector in vectors for value in vector):
+                raise ValueError("embedding backend returned non-finite values")
         except AprilError:
             raise
         except Exception as exc:
             loaded.generation_errors += 1
             raise ModelUnavailableError(
-                resolved_id, "Embedding failed.", {"cause": str(exc)}
+                resolved_id,
+                "Embedding batch failed validation.",
+                {"cause": str(exc)},
             ) from exc
+        finally:
+            loaded.active_requests = max(0, loaded.active_requests - 1)
         loaded.last_used_at = utc_now_iso()
         loaded.last_used_monotonic = time.monotonic()
-        return resolved_id, vector
+        return resolved_id, vectors
 
     async def stream(
         self, request: ChatRequest

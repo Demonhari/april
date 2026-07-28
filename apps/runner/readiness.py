@@ -120,7 +120,14 @@ class ReadinessReport(BaseModel):
     sentinel_live_status: str = "not_verified"
     voice_conversation_live_status: str = "not_verified"
     embedding_provider: str = "hashed-token"
+    lexical_tokenizer_version: str = "unicode-nfkc-casefold-v1"
+    hashed_token_implementation_version: str = "hashed-token-unicode-v2"
+    hybrid_retrieval_enabled: bool = True
+    runtime_batch_embedding_supported: bool = True
+    runtime_batch_embedding_max_items: int = 64
     embedding_role_model_registered: bool = False
+    reasoning_role_model_registered: bool = False
+    reasoning_falls_back_to_brain: bool = True
     conversation_summarization_enabled: bool = True
     reading_model_registered: bool = False
     router_model_id: str | None = None
@@ -452,6 +459,11 @@ def build_readiness_report(home: Path) -> ReadinessReport:
 
     embedding_role_models = (
         [model for model in registry.list() if model.role == "embedding"]
+        if registry is not None
+        else []
+    )
+    reasoning_role_models = (
+        [model for model in registry.list() if model.role == "reasoning"]
         if registry is not None
         else []
     )
@@ -947,7 +959,14 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         sentinel_live_status=sentinel_live_status,
         voice_conversation_live_status=voice_conversation_live_status,
         embedding_provider=settings.memory.embedding_provider,
+        lexical_tokenizer_version="unicode-nfkc-casefold-v1",
+        hashed_token_implementation_version="hashed-token-unicode-v2",
+        hybrid_retrieval_enabled=True,
+        runtime_batch_embedding_supported=True,
+        runtime_batch_embedding_max_items=64,
         embedding_role_model_registered=bool(embedding_role_models),
+        reasoning_role_model_registered=bool(reasoning_role_models),
+        reasoning_falls_back_to_brain=not bool(reasoning_role_models),
         conversation_summarization_enabled=settings.conversation_context.summary_enabled,
         reading_model_registered=bool(reading_models),
         router_model_id=router_model_id,

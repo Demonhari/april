@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ModelRole = Literal[
     "brain",
@@ -23,6 +24,9 @@ FinishReason = Literal["stop", "length", "error", "cancelled"]
 # unbounded or pathologically nested document.
 MAX_RESPONSE_FORMAT_SCHEMA_BYTES = 16_384
 MAX_RESPONSE_FORMAT_SCHEMA_DEPTH = 24
+MAX_EMBED_BATCH_ITEMS = 64
+MAX_EMBED_ITEM_CHARACTERS = 8_192
+MAX_EMBED_BATCH_CHARACTERS = 65_536
 
 
 def _json_schema_depth(value: Any, depth: int = 0) -> int:
@@ -196,6 +200,8 @@ class RuntimeHealth(BaseModel):
     active_requests: int = 0
     generation_error_count: int = 0
     embedding_model_id: str | None = None
+    batch_embedding_supported: bool = True
+    batch_embedding_max_items: int = MAX_EMBED_BATCH_ITEMS
     lifecycle_policy: dict[str, Any] = Field(default_factory=dict)
     process_rss_bytes: int | None = None
     process_peak_rss_bytes: int | None = None
@@ -213,6 +219,52 @@ class EmbedResponse(BaseModel):
     model_id: str
     dimensions: int
     embedding: list[float]
+
+
+class EmbedBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    texts: list[str] = Field(min_length=1, max_length=MAX_EMBED_BATCH_ITEMS)
+    model_id: str | None = None
+    request_id: str | None = None
+
+    @field_validator("texts")
+    @classmethod
+    def validate_texts(cls, value: list[str]) -> list[str]:
+        if any(not text for text in value):
+            raise ValueError("embedding batch items must not be empty")
+        if any(len(text) > MAX_EMBED_ITEM_CHARACTERS for text in value):
+            raise ValueError(
+                f"embedding batch items must be at most {MAX_EMBED_ITEM_CHARACTERS} characters"
+            )
+        if sum(len(text) for text in value) > MAX_EMBED_BATCH_CHARACTERS:
+            raise ValueError(
+                f"embedding batch must be at most {MAX_EMBED_BATCH_CHARACTERS} characters"
+            )
+        return value
+
+
+class EmbedBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    model_id: str
+    count: int = Field(ge=1, le=MAX_EMBED_BATCH_ITEMS)
+    dimensions: int = Field(ge=1)
+    embeddings: list[list[float]]
+    item_indices: list[int]
+
+    @model_validator(mode="after")
+    def validate_matrix(self) -> EmbedBatchResponse:
+        if len(self.embeddings) != self.count or len(self.item_indices) != self.count:
+            raise ValueError("embedding batch response count does not match its matrix")
+        if self.item_indices != list(range(self.count)):
+            raise ValueError("embedding batch response order is invalid")
+        if any(len(vector) != self.dimensions for vector in self.embeddings):
+            raise ValueError("embedding batch response dimensions are inconsistent")
+        if any(not math.isfinite(value) for vector in self.embeddings for value in vector):
+            raise ValueError("embedding batch response contains non-finite values")
+        return self
 
 
 class StreamEvent(BaseModel):

@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import logging
 import math
-import re
 import threading
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Protocol
@@ -12,6 +11,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 
 from april_common.errors import AprilError, ConfigError
+from april_common.text_normalization import (
+    HASHED_TOKEN_IMPLEMENTATION_VERSION,
+    embedding_tokens,
+)
 
 if TYPE_CHECKING:
     from april_common.audit import AuditLogger
@@ -29,6 +32,11 @@ class EmbeddingProvider(ABC):
     @abstractmethod
     def dimensions(self) -> int:
         raise NotImplementedError
+
+    @property
+    def implementation_id(self) -> str:
+        """Stable vector-space implementation identifier."""
+        return self.name
 
     @abstractmethod
     def embed(self, text: str) -> np.ndarray:
@@ -53,6 +61,10 @@ class HashedTokenEmbedding(EmbeddingProvider):
     def dimensions(self) -> int:
         return self._dimensions
 
+    @property
+    def implementation_id(self) -> str:
+        return HASHED_TOKEN_IMPLEMENTATION_VERSION
+
     def embed(self, text: str) -> np.ndarray:
         vector = np.zeros(self.dimensions, dtype=np.float32)
         for token in self._tokens(text):
@@ -72,11 +84,15 @@ class HashedTokenEmbedding(EmbeddingProvider):
         return np.stack([self.embed(text) for text in texts]).astype(np.float32)
 
     def _tokens(self, text: str) -> list[str]:
-        return re.findall(r"[a-z0-9_]+", text.lower())
+        return embedding_tokens(text)
 
 
 class _RuntimeEmbedClient(Protocol):
     async def embed(self, text: str, *, model_id: str | None = ...) -> list[float]: ...
+
+    async def embed_many(
+        self, texts: list[str], *, model_id: str | None = ...
+    ) -> list[list[float]]: ...
 
 
 class RuntimeLocalEmbedding(EmbeddingProvider):
@@ -103,6 +119,10 @@ class RuntimeLocalEmbedding(EmbeddingProvider):
         assert self._dimensions is not None
         return self._dimensions
 
+    @property
+    def implementation_id(self) -> str:
+        return f"runtime-local:{self.model_id or 'registered-embedding-role'}"
+
     def ensure_ready(self) -> int:
         """Probe the runtime once, caching the embedding dimension.
 
@@ -119,8 +139,24 @@ class RuntimeLocalEmbedding(EmbeddingProvider):
         return array
 
     def embed_many(self, texts: list[str]) -> np.ndarray:
-        """Use bounded individual Runtime calls until a batch endpoint exists."""
-        return super().embed_many(texts)
+        if not texts:
+            dimensions = self._dimensions or 0
+            return np.empty((0, dimensions), dtype=np.float32)
+        batch_embed = getattr(self._client, "embed_many", None)
+        if not callable(batch_embed):
+            # Compatibility for injected pre-batch test/development clients.
+            return super().embed_many(texts)
+        vectors = _run_blocking(batch_embed(texts, model_id=self.model_id))
+        matrix = np.asarray(vectors, dtype=np.float32)
+        if matrix.ndim != 2 or matrix.shape[0] != len(texts) or matrix.shape[1] < 1:
+            raise ValueError("Runtime returned an unexpected embedding batch shape.")
+        if not bool(np.isfinite(matrix).all()):
+            raise ValueError("Runtime returned non-finite embedding values.")
+        if self._dimensions is None:
+            self._dimensions = int(matrix.shape[1])
+        elif matrix.shape[1] != self._dimensions:
+            raise ValueError("Runtime embedding dimensions changed within one provider.")
+        return matrix
 
 
 _loop_lock = threading.Lock()

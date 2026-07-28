@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from services.april_runtime.model_lifecycle import ModelLifecycle
-from services.april_runtime.schemas import RuntimeHealth
+from services.april_runtime.schemas import MAX_EMBED_BATCH_ITEMS, RuntimeHealth
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +58,8 @@ def runtime_health(
         active_requests=sum(model.active_requests for model in models),
         generation_error_count=sum(model.generation_errors for model in models),
         embedding_model_id=lifecycle.embedding_model_id(),
+        batch_embedding_supported=True,
+        batch_embedding_max_items=MAX_EMBED_BATCH_ITEMS,
         lifecycle_policy=lifecycle.policy_snapshot(),
         process_rss_bytes=metrics.rss_bytes,
         process_peak_rss_bytes=metrics.peak_rss_bytes,

@@ -325,6 +325,7 @@ class VectorMemory:
             provider == self.embedding.name
             and dimensions is not None
             and dimensions == self._configured_dimensions()
+            and self._implementation_compatible(metadata)
         )
         if require_compatible and provider is not None and provider != self.embedding.name:
             reasons.append("provider_mismatch")
@@ -334,6 +335,8 @@ class VectorMemory:
             and dimensions != self._configured_dimensions()
         ):
             reasons.append("dimension_mismatch")
+        if require_compatible and metadata and not self._implementation_compatible(metadata):
+            reasons.append("embedding_implementation_mismatch")
 
         unique_reasons = tuple(dict.fromkeys(reasons))
         return GenerationValidationResult(
@@ -721,7 +724,9 @@ class VectorMemory:
         )
         if has_index_artifacts:
             if require_compatible and (
-                "provider_mismatch" in failures or "dimension_mismatch" in failures
+                "provider_mismatch" in failures
+                or "dimension_mismatch" in failures
+                or "embedding_implementation_mismatch" in failures
             ):
                 self._raise_incompatible(failures)
             raise RuntimeError("No valid vector index generation is available.")
@@ -836,8 +841,15 @@ class VectorMemory:
         if require_compatible and (
             (provider is not None and provider != self.embedding.name)
             or dimensions != self._configured_dimensions()
+            or not self._implementation_compatible(metadata)
         ):
-            self._raise_incompatible(["provider_mismatch", "dimension_mismatch"])
+            self._raise_incompatible(
+                [
+                    "provider_mismatch",
+                    "dimension_mismatch",
+                    "embedding_implementation_mismatch",
+                ]
+            )
 
     def _legacy_metadata_unlocked(self) -> dict[str, Any]:
         if not self.metadata_path.is_file() or self.metadata_path.is_symlink():
@@ -879,6 +891,7 @@ class VectorMemory:
                 "format_version": FORMAT_VERSION,
                 "generation_id": generation_id,
                 "provider": self.embedding.name,
+                "embedding_implementation_id": self.embedding.implementation_id,
                 "dimensions": dimensions,
                 "record_count": len(records),
                 "vector_count": int(normalized.shape[0]),
@@ -1114,7 +1127,13 @@ class VectorMemory:
                 legacy_detected=self._legacy_detected_unlocked(),
                 abandoned_staging_count=len(self._abandoned_staging_ids_unlocked()),
                 compatible=not any(
-                    reason in {"provider_mismatch", "dimension_mismatch"} for reason in reasons
+                    reason
+                    in {
+                        "provider_mismatch",
+                        "dimension_mismatch",
+                        "embedding_implementation_mismatch",
+                    }
+                    for reason in reasons
                 ),
                 failure_reasons=list(dict.fromkeys(reason for reason in reasons if reason)),
             )
@@ -1137,7 +1156,9 @@ class VectorMemory:
             int(loaded.vectors.shape[1]) if loaded.vectors.ndim == 2 else None,
         )
         compatible = (
-            active_provider == configured_provider and active_dimensions == configured_dimensions
+            active_provider == configured_provider
+            and active_dimensions == configured_dimensions
+            and self._implementation_compatible(metadata)
         )
         fallback = loaded.fallback_active
         legacy = loaded.storage_mode.startswith("legacy")
@@ -1149,6 +1170,8 @@ class VectorMemory:
             reasons.append("provider_mismatch")
         if active_dimensions != configured_dimensions:
             reasons.append("dimension_mismatch")
+        if not self._implementation_compatible(metadata):
+            reasons.append("embedding_implementation_mismatch")
         status = "degraded" if degraded else "ok"
         return self._health_payload(
             status=status,
@@ -1211,6 +1234,7 @@ class VectorMemory:
             "status": status,
             "storage_mode": storage_mode,
             "configured_provider": configured_provider,
+            "configured_implementation_id": self.embedding.implementation_id,
             "active_provider": active_provider,
             "configured_dimensions": configured_dimensions,
             "active_dimensions": active_dimensions,
@@ -1289,6 +1313,12 @@ class VectorMemory:
             },
         )
 
+    def _implementation_compatible(self, metadata: dict[str, Any]) -> bool:
+        persisted = metadata.get("embedding_implementation_id")
+        if isinstance(self.embedding, HashedTokenEmbedding):
+            return persisted == self.embedding.implementation_id
+        return persisted is None or persisted == self.embedding.implementation_id
+
     def _audit_recovery(self, generation_id: str, reason: str) -> None:
         if self.audit is None:
             return
@@ -1306,6 +1336,7 @@ class VectorMemory:
             "format_version",
             "generation_id",
             "provider",
+            "embedding_implementation_id",
             "embedding_model_id",
             "dimensions",
             "record_count",

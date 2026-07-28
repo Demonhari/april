@@ -65,6 +65,32 @@ def backend_with(llm: FakeLlama) -> LlamaCppBackend:
 
 
 @pytest.mark.asyncio
+async def test_llama_backend_uses_native_embedding_batch_when_supported() -> None:
+    class NativeBatchLlama(FakeLlama):
+        def embed(self, value):  # type: ignore[no-untyped-def]
+            if isinstance(value, list):
+                return [[float(index), 1.0] for index, _text in enumerate(value)]
+            return [1.0, 0.0]
+
+    backend = backend_with(NativeBatchLlama())
+    assert await backend.embed_many(["a", "b"]) == [[0.0, 1.0], [1.0, 1.0]]
+    assert backend.supports_native_batch_embeddings is True
+
+
+@pytest.mark.asyncio
+async def test_llama_backend_batch_falls_back_sequentially_when_unsupported() -> None:
+    class SequentialOnlyLlama(FakeLlama):
+        def embed(self, value):  # type: ignore[no-untyped-def]
+            if isinstance(value, list):
+                raise TypeError("list input unsupported")
+            return [float(len(value)), 1.0]
+
+    backend = backend_with(SequentialOnlyLlama())
+    assert await backend.embed_many(["a", "bb"]) == [[1.0, 1.0], [2.0, 1.0]]
+    assert backend.supports_native_batch_embeddings is False
+
+
+@pytest.mark.asyncio
 async def test_llama_backend_prefers_chat_completion() -> None:
     llm = FakeLlama()
     backend = backend_with(llm)

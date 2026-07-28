@@ -555,6 +555,7 @@ def test_version_two_legacy_index_is_readable_and_migrates(tmp_path: Path) -> No
             {
                 "format_version": 2,
                 "provider": "hashed-token",
+                "embedding_implementation_id": provider.implementation_id,
                 "dimensions": 16,
                 "record_count": 1,
             }
@@ -570,7 +571,7 @@ def test_version_two_legacy_index_is_readable_and_migrates(tmp_path: Path) -> No
     assert memory.health()["storage_mode"] == "generation"
 
 
-def test_jsonl_legacy_index_is_readable(tmp_path: Path) -> None:
+def test_unversioned_jsonl_legacy_index_requires_reindex(tmp_path: Path) -> None:
     provider = HashedTokenEmbedding(16)
     record = {
         "id": "1",
@@ -581,7 +582,8 @@ def test_jsonl_legacy_index_is_readable(tmp_path: Path) -> None:
     (tmp_path / "records.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
     memory = VectorMemory(tmp_path, embedding=provider)
     assert memory.health()["storage_mode"] == "legacy-jsonl"
-    assert memory.search("legacy")[0].id == "1"
+    with pytest.raises(ConfigError, match="Refusing to mix vector spaces"):
+        memory.search("legacy")
 
 
 def test_failed_legacy_migration_leaves_legacy_files(tmp_path: Path, monkeypatch) -> None:
@@ -594,6 +596,16 @@ def test_failed_legacy_migration_leaves_legacy_files(tmp_path: Path, monkeypatch
     }
     legacy = tmp_path / "records.jsonl"
     legacy.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    (tmp_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "provider": provider.name,
+                "dimensions": provider.dimensions,
+                "embedding_implementation_id": provider.implementation_id,
+            }
+        ),
+        encoding="utf-8",
+    )
     memory = VectorMemory(tmp_path, embedding=provider)
     monkeypatch.setattr(
         memory,

@@ -48,12 +48,15 @@ models:
     idle_unload_seconds: 300
     priority: 40
 
-  # Optional: register a larger model for deep reasoning / architecture mode.
+  # Optional manual recommendation for deep reasoning / architecture mode:
+  # Qwen3-4B Q4_K_M. It must be benchmarked on this Intel MacBook before it can
+  # become a recommended default. Deep and Council modes use role=reasoning when
+  # available and honestly fall back to Brain otherwise.
   # The reasoning agent runs on the brain model by default and automatically
   # upgrades to a registered role: reasoning model whenever one is available.
   # Import a real GGUF with:
   #   run april model import --role reasoning --id april-reasoning \
-  #     --path models/your-reasoning-model-q4_k_m.gguf
+  #     --name qwen3-4b --path /absolute/path/qwen3-4b-Q4_K_M.gguf
   # then uncomment and adjust the entry below (commented out so it does not
   # point at a missing file and degrade runtime health).
   # reasoning:
@@ -89,11 +92,13 @@ models:
   #   idle_unload_seconds: 300
   #   priority: 70
 
-  # Optional: register a local embedding model to enable runtime-local semantic
+  # Optional manual recommendation: nomic-embed-text-v1.5 Q8 as role=embedding
+  # to enable runtime-local semantic
   # memory embeddings. Without it, memory uses deterministic hashed-token
   # embeddings (the default). Import a real GGUF embedding model with:
   #   run april model import --role embedding --id april-embedding \
-  #     --path models/your-embedding-model-q4_k_m.gguf
+  #     --name nomic-embed-text-v1.5 \
+  #     --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf
   # then set memory.embedding_provider=runtime-local (APRIL_MEMORY_EMBEDDING_PROVIDER)
   # and run `run april memory reindex`. Keep this commented out until a real file
   # exists so runtime health is not degraded by a missing path.

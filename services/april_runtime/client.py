@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -10,6 +11,8 @@ from services.april_runtime.schemas import (
     ChatMessage,
     ChatRequest,
     ChatResponse,
+    EmbedBatchRequest,
+    EmbedBatchResponse,
     EmbedRequest,
     EmbedResponse,
     GenerationOptions,
@@ -96,6 +99,53 @@ class RuntimeClient:
         if response.status_code >= 400:
             raise RuntimeUnavailableError("April Runtime returned an error.", response.json())
         return EmbedResponse.model_validate(response.json()).embedding
+
+    async def embed_many(
+        self,
+        texts: list[str],
+        *,
+        model_id: str | None = None,
+    ) -> list[list[float]]:
+        """Use the typed batch endpoint, with narrow legacy-endpoint fallback."""
+        request_id = str(uuid.uuid4())
+        request = EmbedBatchRequest(
+            texts=texts,
+            model_id=model_id,
+            request_id=request_id,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/runtime/embed/batch",
+                    json=request.model_dump(),
+                    headers=self.headers,
+                )
+        except httpx.HTTPError as exc:
+            raise RuntimeUnavailableError(
+                "April Runtime is offline.", {"url": self.base_url}
+            ) from exc
+        unsupported = response.status_code in {404, 405} or _unsupported_capability(response)
+        if unsupported:
+            return [await self.embed(text, model_id=model_id) for text in request.texts]
+        if response.status_code >= 400:
+            raise RuntimeUnavailableError(
+                "April Runtime returned an error.",
+                _response_payload(response),
+            )
+        try:
+            payload = EmbedBatchResponse.model_validate(response.json())
+        except Exception as exc:
+            raise RuntimeUnavailableError(
+                "April Runtime returned a malformed embedding batch response.",
+                {"status_code": response.status_code},
+            ) from exc
+        if payload.request_id != request_id:
+            raise RuntimeUnavailableError(
+                "April Runtime returned a mismatched embedding batch request ID."
+            )
+        if payload.count != len(request.texts):
+            raise RuntimeUnavailableError("April Runtime returned the wrong embedding count.")
+        return payload.embeddings
 
     async def models(self) -> dict[str, Any]:
         try:
@@ -211,3 +261,19 @@ class RuntimeClient:
             raise RuntimeUnavailableError(
                 "April Runtime is offline.", {"url": self.base_url}
             ) from exc
+
+
+def _response_payload(response: httpx.Response) -> dict[str, Any]:
+    try:
+        value = response.json()
+    except ValueError:
+        return {"status_code": response.status_code}
+    return value if isinstance(value, dict) else {"status_code": response.status_code}
+
+
+def _unsupported_capability(response: httpx.Response) -> bool:
+    if response.status_code < 400:
+        return False
+    payload = _response_payload(response)
+    error = payload.get("error")
+    return isinstance(error, dict) and error.get("code") == "UNSUPPORTED_CAPABILITY"

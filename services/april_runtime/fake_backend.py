@@ -7,6 +7,7 @@ import math
 import re
 from collections.abc import AsyncIterator
 
+from april_common.text_normalization import embedding_tokens
 from services.april_runtime.backend import BackendHealth, GenerationResult, RuntimeBackend
 from services.april_runtime.model_registry import ModelDefinition
 from services.april_runtime.schemas import ChatMessage, ResponseFormat
@@ -14,6 +15,7 @@ from services.april_runtime.schemas import ChatMessage, ResponseFormat
 
 class FakeBackend(RuntimeBackend):
     supports_concurrent_generation = False
+    supports_native_batch_embeddings = True
     EMBEDDING_DIMENSIONS = 64
 
     def __init__(self, *, fail_stream: bool = False, fail_generate: bool = False) -> None:
@@ -136,9 +138,13 @@ class FakeBackend(RuntimeBackend):
         await asyncio.sleep(0)
         return self._deterministic_embedding(text)
 
+    async def embed_many(self, texts: list[str]) -> list[list[float]]:
+        await asyncio.sleep(0)
+        return [self._deterministic_embedding(text) for text in texts]
+
     def _deterministic_embedding(self, text: str) -> list[float]:
         vector = [0.0] * self.EMBEDDING_DIMENSIONS
-        for token in re.findall(r"[a-z0-9_]+", text.lower()):
+        for token in embedding_tokens(text):
             digest = hashlib.sha256(token.encode("utf-8")).digest()
             index = int.from_bytes(digest[:8], "big") % self.EMBEDDING_DIMENSIONS
             sign = 1.0 if digest[8] % 2 == 0 else -1.0

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 async def run_migrations(database: Database) -> None:
@@ -53,7 +53,7 @@ async def _run_migrations_locked(database: Database) -> None:
             id UNINDEXED,
             content,
             reason,
-            tokenize = 'porter'
+            tokenize = "unicode61 remove_diacritics 0 tokenchars '_'"
         );
 
         CREATE TABLE IF NOT EXISTS conversations (
@@ -504,8 +504,67 @@ async def _run_migrations_locked(database: Database) -> None:
           AND (metadata_json IS NULL OR metadata_json = '' OR metadata_json = '{}')
         """
     )
+    await conn.commit()
+    await _migrate_memories_fts_v18(database)
     await conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, datetime('now'))",
         (SCHEMA_VERSION,),
     )
     await conn.commit()
+
+
+async def _migrate_memories_fts_v18(database: Database) -> None:
+    """Atomically replace the legacy Porter FTS index with Unicode61.
+
+    ``memories`` remains authoritative. The replacement is populated before the
+    old virtual table is dropped, and the complete swap is one SQLite
+    transaction. A leftover temporary table from an interrupted attempt is
+    harmless and is rebuilt on the next startup.
+    """
+    conn = database.connection
+    definition_cursor = await conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'"
+    )
+    definition_row = await definition_cursor.fetchone()
+    definition = str(definition_row[0] or "") if definition_row is not None else ""
+    memory_count_cursor = await conn.execute("SELECT COUNT(*) FROM memories")
+    memory_count_row = await memory_count_cursor.fetchone()
+    if memory_count_row is None:
+        raise RuntimeError("Unable to count authoritative memory rows during migration.")
+    memory_count = int(memory_count_row[0])
+    fts_count = -1
+    if definition:
+        try:
+            fts_count_cursor = await conn.execute("SELECT COUNT(*) FROM memories_fts")
+            fts_count_row = await fts_count_cursor.fetchone()
+            fts_count = int(fts_count_row[0]) if fts_count_row is not None else -1
+        except Exception:
+            fts_count = -1
+    if "unicode61" in definition.casefold() and fts_count == memory_count:
+        return
+
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+        await conn.execute("DROP TABLE IF EXISTS memories_fts_v18")
+        await conn.execute(
+            """
+            CREATE VIRTUAL TABLE memories_fts_v18 USING fts5(
+                id UNINDEXED,
+                content,
+                reason,
+                tokenize = "unicode61 remove_diacritics 0 tokenchars '_'"
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO memories_fts_v18(id, content, reason)
+            SELECT id, content, reason FROM memories ORDER BY rowid
+            """
+        )
+        await conn.execute("DROP TABLE IF EXISTS memories_fts")
+        await conn.execute("ALTER TABLE memories_fts_v18 RENAME TO memories_fts")
+        await conn.commit()
+    except Exception:
+        await conn.rollback()
+        raise

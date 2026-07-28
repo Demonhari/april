@@ -103,6 +103,10 @@ from april_common.config_validation import validate_configuration
 from april_common.effective_config import load_agents_file, load_permissions_file, load_tools_file
 from april_common.errors import ConfigError
 from april_common.settings import load_settings
+from april_common.text_normalization import (
+    HASHED_TOKEN_IMPLEMENTATION_VERSION,
+    LEXICAL_TOKENIZER_VERSION,
+)
 from april_common.token_setup import generate_tokens, write_token_env_file
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.model_registry import ModelRegistry
@@ -1259,6 +1263,11 @@ def _memory_doctor_report(
     report: dict[str, Any] = {
         "status": status,
         "configured_embedding_provider": configured_provider,
+        "lexical_tokenizer_version": LEXICAL_TOKENIZER_VERSION,
+        "hashed_token_implementation_version": HASHED_TOKEN_IMPLEMENTATION_VERSION,
+        "hybrid_retrieval_enabled": True,
+        "runtime_batch_embedding_capability": True,
+        "runtime_batch_embedding_max_items": 64,
         "active_vector_index_provider": active_provider,
         "dimensions": active_dimensions,
         "runtime_local_requested": runtime_local_requested,

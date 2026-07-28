@@ -17,6 +17,8 @@ from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelRegistry
 from services.april_runtime.schemas import (
     ChatRequest,
+    EmbedBatchRequest,
+    EmbedBatchResponse,
     EmbedRequest,
     EmbedResponse,
     LoadModelRequest,
@@ -106,6 +108,22 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
             model_id=model_id,
             dimensions=len(vector),
             embedding=vector,
+        )
+
+    @app.post("/runtime/embed/batch")
+    async def embed_batch(request: EmbedBatchRequest) -> EmbedBatchResponse:
+        request_id = request.request_id or str(uuid.uuid4())
+        model_id, vectors = await active_lifecycle.embed_many(
+            request.texts,
+            model_id=request.model_id,
+        )
+        return EmbedBatchResponse(
+            request_id=request_id,
+            model_id=model_id,
+            count=len(vectors),
+            dimensions=len(vectors[0]),
+            embeddings=vectors,
+            item_indices=list(range(len(vectors))),
         )
 
     @app.post("/runtime/models/load")

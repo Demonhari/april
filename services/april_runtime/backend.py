@@ -25,6 +25,7 @@ class GenerationResult:
 
 class RuntimeBackend(ABC):
     supports_concurrent_generation: bool = False
+    supports_native_batch_embeddings: bool = False
 
     @abstractmethod
     async def load(self, model: ModelDefinition) -> None:
@@ -124,6 +125,10 @@ class RuntimeBackend(ABC):
 
     async def embed(self, text: str) -> list[float]:
         raise RuntimeUnavailableError("backend does not support embeddings")
+
+    async def embed_many(self, texts: list[str]) -> list[list[float]]:
+        """Bounded sequential compatibility fallback; never runs concurrently."""
+        return [await self.embed(text) for text in texts]
 
     @abstractmethod
     async def health(self) -> BackendHealth:

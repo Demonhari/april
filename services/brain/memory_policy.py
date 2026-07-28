@@ -60,6 +60,7 @@ async def build_agent_memory_context(
             memory_retriever=memory_retriever,
             memory_queries=memory_queries,
             intent=intent,
+            project_id=project.id if project is not None else None,
         )
 
     project_chunks: list[SearchResult] = []
@@ -133,10 +134,15 @@ async def _safe_memory_results(
     memory_retriever: MemoryRetriever,
     memory_queries: list[str],
     intent: str,
+    project_id: str | None,
 ) -> list[SearchResult]:
     results: list[SearchResult] = []
     for query in memory_queries[:3]:
-        for result in await memory_retriever.hybrid_search(query, limit=3):
+        if project_id is None or not isinstance(memory_retriever, MemoryRetriever):
+            found = await memory_retriever.hybrid_search(query, limit=3)
+        else:
+            found = await memory_retriever.hybrid_search(query, limit=3, project_id=project_id)
+        for result in found:
             if result.id not in {existing.id for existing in results}:
                 results.append(result)
     if not results and intent in {"planning", "normal_conversation", "direct_agent_run"}:
@@ -174,17 +180,11 @@ def _bound_messages(messages: list[Message], limit: int) -> tuple[list[Message],
             continue
         selected_groups.append(group)
         used += size
-    selected = [
-        message
-        for group in reversed(selected_groups)
-        for message in group.messages
-    ]
+    selected = [message for group in reversed(selected_groups) for message in group.messages]
     return selected, len(selected) != len(messages)
 
 
-def _bound_results(
-    results: list[SearchResult], limit: int
-) -> tuple[list[SearchResult], bool]:
+def _bound_results(results: list[SearchResult], limit: int) -> tuple[list[SearchResult], bool]:
     selected: list[SearchResult] = []
     used = 0
     for result in results:
@@ -221,9 +221,7 @@ def _bound_file_results(
             destination.append(
                 result.model_copy(
                     update={
-                        "content": (
-                            result.content[: remaining - len(marker)].rstrip() + marker
-                        )
+                        "content": (result.content[: remaining - len(marker)].rstrip() + marker)
                     }
                 )
             )

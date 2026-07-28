@@ -262,6 +262,15 @@ APRIL never chooses or downloads an embedding model for you. Diagnose and set on
 up with explicit, dry-run-by-default commands:
 
 ```bash
+# Manual recommended embedding model (provide the local file yourself):
+run april model import --role embedding --id april-embedding \
+  --name nomic-embed-text-v1.5 \
+  --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf
+export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
+export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding
+run april memory doctor --verify-runtime-embedding
+run april memory reindex
+
 # Diagnose the active provider, configured model, file existence, index match,
 # whether a reindex is required, and the exact next command — read-only:
 run april memory doctor
@@ -274,6 +283,23 @@ run april memory doctor --verify-runtime-embedding
 # Register a local embedding GGUF and switch to runtime-local (dry-run unless --apply):
 run april setup embeddings --model /absolute/path/to/embedding.gguf --id april-embedding --apply
 ```
+
+The recommendation is `nomic-embed-text-v1.5` Q8, registered manually with
+`role=embedding`. Hashed-token remains the offline first-run fallback and is
+reported as a degraded semantic-memory path in hardened readiness. Its Unicode
+tokenizer implementation is versioned in vector-generation metadata; a change
+requires an explicit reindex instead of silently mixing vector spaces.
+
+For optional deeper local reasoning, manually register Qwen3-4B Q4_K_M:
+
+```bash
+run april model import --role reasoning --id april-reasoning \
+  --name qwen3-4b --path /absolute/path/qwen3-4b-Q4_K_M.gguf
+```
+
+Deep and Council reasoning use the registered `role=reasoning` model when it is
+available. Otherwise APRIL truthfully falls back to Brain. Qwen3-4B must be
+benchmarked on the Intel MacBook before it becomes a recommended default.
 
 Every reader and writer of the local vector index — the API container and the
 `repo_indexer`, `document_indexer`, and `document_search` tools — resolves the
