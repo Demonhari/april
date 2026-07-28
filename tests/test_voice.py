@@ -274,6 +274,11 @@ def test_voice_doctor_push_to_talk_ready_without_wake_word_model(
     assert report["wake_word_ready"] is False
     assert "wake-word model" in report["voice_readiness"]["wake_word_blocked_by"]
     assert report["full_voice_loop_ready"] is False
+    assert report["conversation_endpointing_configured"] is True
+    assert report["endpoint_silence_ms"] == 650
+    assert report["barge_in_trigger"] == "wake_word"
+    assert report["acoustic_echo_cancellation_available"] is False
+    assert "verify-conversation-live" in report["complete_live_conversation_command"]
 
 
 def test_voice_doctor_wake_word_ready_with_engine_and_model(
@@ -409,10 +414,10 @@ async def test_wake_word_loop_segments_fake_frames(settings_tmp, tmp_path: Path)
     api = FakeApi()
     loop = WakeWordConversationLoop(
         api_client=api,  # type: ignore[arg-type]
-        microphone=FakeMicrophone(
-            tmp_path / "unused.wav",
-            frames=[silent, loud, loud, loud, silent, silent, silent],
-        ),
+            microphone=FakeMicrophone(
+                tmp_path / "unused.wav",
+                frames=[silent, *([loud] * 30), *([silent] * 65)],
+            ),
         stt=FakeSpeechToText("April, inspect this"),
         tts=FakeTextToSpeech(),
         player=FakeAudioPlayer(),

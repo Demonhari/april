@@ -62,7 +62,7 @@ class WakeWordLiveSkippedCheck(BaseModel):
 
 
 class WakeWordLiveReport(BaseModel):
-    schema_version: int = 1
+    schema_version: int = 2
     report_type: Literal["wake_word_live"] = "wake_word_live"
     pipeline: Literal["wake_word_loop", "sentinel"] = "wake_word_loop"
     generated_at: str = ""
@@ -79,6 +79,12 @@ class WakeWordLiveReport(BaseModel):
     tts_success: bool = False
     playback_user_confirmed: bool = False
     retained_debug_audio: bool = False
+    endpoint_stop_reason: str | None = None
+    captured_duration_ms: int | None = None
+    speech_duration_ms: int | None = None
+    trailing_silence_ms: int | None = None
+    endpoint_latency_ms: int | None = None
+    minimum_duration_met: bool | None = None
     skipped: list[WakeWordLiveSkippedCheck] = Field(default_factory=list)
     summary: Literal["pass", "fail"] = "fail"
     # True only when every wake-word stage genuinely passed AND the operator
@@ -332,6 +338,14 @@ async def run_wake_word_live_verification(
 
     try:
         captured = await loop._capture_wake_utterance(utterance_path)
+        if loop.last_endpoint_metrics is not None:
+            metrics = loop.last_endpoint_metrics
+            report.endpoint_stop_reason = metrics.stop_reason
+            report.captured_duration_ms = metrics.captured_duration_ms
+            report.speech_duration_ms = metrics.speech_duration_ms
+            report.trailing_silence_ms = metrics.trailing_silence_ms
+            report.endpoint_latency_ms = metrics.endpoint_latency_ms
+            report.minimum_duration_met = metrics.minimum_duration_met
         report.recording_success = captured.exists()
         transcript = await loop.stt.transcribe(captured)
         report.transcript_length = len(transcript)
@@ -464,6 +478,14 @@ async def run_sentinel_live_verification(
     report.normalized_transcript_length = int(getattr(sentinel, "_april_live_transcript_length", 0))
     report.tts_success = False
     report.playback_user_confirmed = report.wake_word_detected
+    endpoint = getattr(sentinel, "last_endpoint_metrics", None)
+    if endpoint is not None:
+        report.endpoint_stop_reason = endpoint.stop_reason
+        report.captured_duration_ms = endpoint.captured_duration_ms
+        report.speech_duration_ms = endpoint.speech_duration_ms
+        report.trailing_silence_ms = endpoint.trailing_silence_ms
+        report.endpoint_latency_ms = endpoint.endpoint_latency_ms
+        report.minimum_duration_met = endpoint.minimum_duration_met
     _finalize_sentinel_summary(report)
     if report_path is not None:
         write_wake_word_live_report(report, report_path)

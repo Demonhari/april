@@ -58,6 +58,10 @@ _VERIFY_REAL = (
 )
 _VERIFY_VOICE = "run april voice verify-live --report data/verification/voice-live.json"
 _VERIFY_WAKE = "run april voice verify-wake-live --report data/verification/wake-live.json"
+_VERIFY_VOICE_CONVERSATION = (
+    "run april voice verify-conversation-live "
+    "--report data/verification/voice-conversation-live.json"
+)
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
@@ -112,6 +116,7 @@ class ReadinessReport(BaseModel):
     daemon_status: str = "unknown"
     daemon_details_available: bool = False
     sentinel_live_status: str = "not_verified"
+    voice_conversation_live_status: str = "not_verified"
     embedding_provider: str = "hashed-token"
     embedding_role_model_registered: bool = False
     conversation_summarization_enabled: bool = True
@@ -641,6 +646,28 @@ def build_readiness_report(home: Path) -> ReadinessReport:
             ),
         )
     )
+    voice_conversation_live_status = _voice_conversation_live_status(root)
+    checks.append(
+        ReadinessCheck(
+            name="complete live voice conversation",
+            status=(
+                "ok"
+                if voice_conversation_live_status == "verified"
+                else ("warning" if voice_enabled else "skipped")
+            ),
+            detail=(
+                "Two endpointed turns, session continuity, and production barge-in "
+                "were verified on real hardware."
+                if voice_conversation_live_status == "verified"
+                else "Complete two-turn live voice verification has not passed."
+            ),
+            action=(
+                None
+                if voice_conversation_live_status == "verified" or not voice_enabled
+                else _VERIFY_VOICE_CONVERSATION
+            ),
+        )
+    )
     if wake_enabled and not settings.voice.effective_wake_word_model_paths:
         checks.append(
             ReadinessCheck(
@@ -826,6 +853,8 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         next_actions.append(_VERIFY_VOICE)
     if voice_enabled and _VERIFY_WAKE not in next_actions:
         next_actions.append(_VERIFY_WAKE)
+    if voice_enabled and _VERIFY_VOICE_CONVERSATION not in next_actions:
+        next_actions.append(_VERIFY_VOICE_CONVERSATION)
 
     return ReadinessReport(
         generated_at=utc_now_iso(),
@@ -848,6 +877,7 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         daemon_status=daemon_status,
         daemon_details_available=daemon_details_available,
         sentinel_live_status=sentinel_live_status,
+        voice_conversation_live_status=voice_conversation_live_status,
         embedding_provider=settings.memory.embedding_provider,
         embedding_role_model_registered=bool(embedding_role_models),
         conversation_summarization_enabled=settings.conversation_context.summary_enabled,
@@ -972,3 +1002,18 @@ def _sentinel_live_status(home: Path) -> str:
     if latest is None:
         return "not_verified"
     return "verified" if latest[1] else "failed"
+
+
+def _voice_conversation_live_status(home: Path) -> str:
+    path = home / "data" / "verification" / "voice-conversation-live.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "not_verified"
+    if not isinstance(payload, dict) or payload.get("report_type") != "voice_conversation_live":
+        return "not_verified"
+    verified = (
+        payload.get("evidence_mode") == "real_hardware"
+        and payload.get("voice_conversation_live_verified") is True
+    )
+    return "verified" if verified else "failed"

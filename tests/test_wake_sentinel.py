@@ -919,7 +919,7 @@ async def test_sentinel_full_utterance_capture_preserves_pre_roll(settings_tmp) 
                 update={"enabled": True, "confirm_with_stt": True}
             ),
             "voice": settings_tmp.voice.model_copy(
-                update={"vad_required_frames": 2, "vad_energy_threshold": 0.01}
+                update={"vad_onset_frames": 2, "vad_energy_threshold": 0.01}
             ),
         }
     )
@@ -927,7 +927,7 @@ async def test_sentinel_full_utterance_capture_preserves_pre_roll(settings_tmp) 
     wake_frame = b"\x02\x00" * 160
     silence = b"\x00\x00" * 160
     microphone = FakeFrameMicrophone(
-        [pre_roll, wake_frame, LOUD_FRAME, LOUD_FRAME, silence, silence]
+        [pre_roll, wake_frame, *([LOUD_FRAME] * 30), *([silence] * 65)]
     )
     delivery = RecordingDelivery()
     full_stt = RecordingSpeechToText("april, restart the runtime after build")
@@ -967,7 +967,7 @@ async def test_sentinel_in_sentence_wake_candidate_preserves_semantic_april(
                 update={"enabled": True, "confirm_with_stt": True}
             ),
             "voice": settings_tmp.voice.model_copy(
-                update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+                update={"vad_onset_frames": 1, "vad_energy_threshold": 0.01}
             ),
         }
     )
@@ -975,7 +975,9 @@ async def test_sentinel_in_sentence_wake_candidate_preserves_semantic_april(
     full_stt = RecordingSpeechToText("could you ask April to restart after the build")
     sentinel = Sentinel(
         settings=tuned,
-        microphone=FakeFrameMicrophone([FRAME, LOUD_FRAME, b"\x00\x00" * 160]),
+        microphone=FakeFrameMicrophone(
+            [FRAME, *([LOUD_FRAME] * 30), *([b"\x00\x00" * 160] * 65)]
+        ),
         scorers=[ScriptedScorer([0.5])],
         deliver=delivery,
         confirmer=SttConfirmer(
@@ -1034,7 +1036,7 @@ async def test_sentinel_follow_up_window_wakes_on_speech(settings_tmp) -> None:
     tuned = settings_tmp.model_copy(
         update={
             "voice": settings_tmp.voice.model_copy(
-                update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+                update={"vad_onset_frames": 1, "vad_energy_threshold": 0.01}
             )
         }
     )
@@ -1054,7 +1056,7 @@ async def test_sentinel_follow_up_window_transcribes_same_session_command(settin
     tuned = settings_tmp.model_copy(
         update={
             "voice": settings_tmp.voice.model_copy(
-                update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+                update={"vad_onset_frames": 1, "vad_energy_threshold": 0.01}
             )
         }
     )
@@ -1062,7 +1064,9 @@ async def test_sentinel_follow_up_window_transcribes_same_session_command(settin
     full_stt = RecordingSpeechToText("continue with that plan")
     sentinel = Sentinel(
         settings=tuned,
-        microphone=FakeFrameMicrophone([LOUD_FRAME, b"\x00\x00" * 160]),
+        microphone=FakeFrameMicrophone(
+            [*([LOUD_FRAME] * 30), *([b"\x00\x00" * 160] * 65)]
+        ),
         scorers=[ScriptedScorer([])],
         deliver=delivery,
         transcriber=full_stt,
@@ -1094,7 +1098,7 @@ async def test_api_wake_delivery_speaks_then_opens_follow_up_window(
     tuned = settings_tmp.model_copy(
         update={
             "voice": settings_tmp.voice.model_copy(
-                update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+                update={"vad_onset_frames": 1, "vad_energy_threshold": 0.01}
             )
         }
     )
@@ -1150,7 +1154,7 @@ async def test_follow_up_delivery_uses_session_hint_for_active_session(
         tuned = settings_tmp.model_copy(
             update={
                 "voice": settings_tmp.voice.model_copy(
-                    update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+                    update={"vad_onset_frames": 1, "vad_energy_threshold": 0.01}
                 )
             }
         )
@@ -1197,7 +1201,7 @@ async def test_follow_up_delivery_uses_session_hint_for_active_session(
 async def test_sentinel_follow_up_window_expires(settings_tmp) -> None:
     clock = ManualClock()
     tuned = settings_tmp.model_copy(
-        update={"voice": settings_tmp.voice.model_copy(update={"vad_required_frames": 1})}
+        update={"voice": settings_tmp.voice.model_copy(update={"vad_onset_frames": 1})}
     )
     sentinel, _mic, delivery, _player = _sentinel(
         tuned, scores=[], frames=0, confirm_with_stt=False, clock=clock
@@ -1214,7 +1218,7 @@ async def test_sentinel_mute_blocks_follow_up_activation(settings_tmp) -> None:
     tuned = settings_tmp.model_copy(
         update={
             "voice": settings_tmp.voice.model_copy(
-                update={"vad_required_frames": 1, "vad_energy_threshold": 0.01}
+                update={"vad_onset_frames": 1, "vad_energy_threshold": 0.01}
             )
         }
     )
@@ -1274,7 +1278,8 @@ async def test_sentinel_barge_in_stops_playback(settings_tmp) -> None:
     )
     await sentinel.run_once()
     assert len(delivery.events) == 1
-    assert player.stop_calls == 1
+    # No assistant response is active, so this accepted wake is not barge-in.
+    assert player.stop_calls == 0
     assert player.duck_calls == 0
 
 
@@ -1285,7 +1290,8 @@ async def test_sentinel_barge_in_duck_mode(settings_tmp) -> None:
     sentinel.barge_in_mode = "duck"
     await sentinel.run_once()
     assert len(delivery.events) == 1
-    assert player.duck_calls == 1
+    # Duck is retained as an action but only applied to active playback.
+    assert player.duck_calls == 0
     assert player.stop_calls == 0
 
 
@@ -1314,7 +1320,9 @@ async def test_sentinel_live_verification_uses_sentinel_pipeline_with_fakes(
 
     sentinel = Sentinel(
         settings=tuned,
-        microphone=FakeFrameMicrophone([LOUD_FRAME, LOUD_FRAME, FRAME, FRAME, FRAME]),
+        microphone=FakeFrameMicrophone(
+            [*([LOUD_FRAME] * 31), *([b"\x00\x00" * 160] * 65)]
+        ),
         scorers=[ScriptedScorer([0.9])],
         deliver=deliver,
         transcriber=RecordingSpeechToText("april, open calendar"),

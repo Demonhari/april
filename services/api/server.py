@@ -153,6 +153,7 @@ _VERIFICATION_REPORT_TYPES = {
     "multi_model",
     "target_mac",
     "voice_live",
+    "voice_conversation_live",
     "workflow",
     "soak",
 }
@@ -324,7 +325,7 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         active: ApiContainer = Depends(authorized),
     ) -> object:
         # ?type=any (default) | real_model (multi_model+target_mac)
-        # | voice_live | workflow. An unknown/extra query value falls back to
+        # | voice_live | voice_conversation_live | workflow. Unknown values fall back to
         # "any", so existing callers (and the ignored-?path= probe) keep their
         # behaviour.
         return _latest_verification_report(active.settings, report_type=type)
@@ -1533,7 +1534,9 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
     live_flags = _latest_live_voice_flags(active.settings)
     voice_milestone = str(voice_readiness.get("voice_milestone", "not_configured"))
     if active.settings.voice.enabled:
-        if live_flags["wake_word_live_verified"]:
+        if live_flags["voice_conversation_live_verified"]:
+            voice_milestone = "conversation_live_verified"
+        elif live_flags["wake_word_live_verified"]:
             voice_milestone = "wake_live_verified"
         elif live_flags["voice_live_verified"]:
             voice_milestone = "live_verified"
@@ -1696,6 +1699,19 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "wake_word_ready": voice_readiness["wake_word_ready"],
             "full_voice_loop_ready": voice_readiness["full_voice_loop_ready"],
             "sentinel_live_verified": live_flags["wake_word_live_verified"],
+            "conversation_endpointing_configured": True,
+            "endpoint_silence_ms": active.settings.voice.endpoint_silence_ms,
+            "minimum_utterance_ms": active.settings.voice.minimum_utterance_ms,
+            "barge_in_trigger": active.settings.voice.barge_in_trigger,
+            "barge_in_action": active.settings.voice.barge_in_action,
+            "acoustic_echo_cancellation_available": False,
+            "complete_live_conversation_verified": live_flags[
+                "voice_conversation_live_verified"
+            ],
+            "complete_live_conversation_command": (
+                "run april voice verify-conversation-live "
+                "--report data/verification/voice-conversation-live.json"
+            ),
             "speaker_gate": {
                 "mode": active.settings.wake.speaker_gate,
                 "supported": False,
@@ -2120,7 +2136,10 @@ def _latest_verification_report(
     # absent/invalid. A newer voice-live report can never overwrite the latest
     # real-model report (or vice versa).
     filter_type = (
-        report_type if report_type in {"any", "real_model", "voice_live", "workflow"} else "any"
+        report_type
+        if report_type
+        in {"any", "real_model", "voice_live", "voice_conversation_live", "workflow"}
+        else "any"
     )
     candidates = _verification_report_files(settings)
     matching: list[tuple[Path, dict[str, Any]]] = []
@@ -2202,8 +2221,10 @@ def _latest_live_voice_flags(settings: AprilSettings) -> dict[str, bool]:
     """
     voice_verified = False
     wake_verified = False
+    conversation_verified = False
     voice_best: float | None = None
     wake_best: float | None = None
+    conversation_best: float | None = None
     for path in _verification_report_files(settings):
         payload = _read_safe_report(path)
         if payload is None:
@@ -2219,7 +2240,19 @@ def _latest_live_voice_flags(settings: AprilSettings) -> dict[str, bool]:
             if wake_best is None or key > wake_best:
                 wake_best = key
                 wake_verified = bool(payload.get("wake_word_live_verified", False))
-    return {"voice_live_verified": voice_verified, "wake_word_live_verified": wake_verified}
+        elif declared == "voice_conversation_live":
+            key = _report_order_key(path, payload)
+            if conversation_best is None or key > conversation_best:
+                conversation_best = key
+                conversation_verified = bool(
+                    payload.get("evidence_mode") == "real_hardware"
+                    and payload.get("voice_conversation_live_verified", False)
+                )
+    return {
+        "voice_live_verified": voice_verified,
+        "wake_word_live_verified": wake_verified,
+        "voice_conversation_live_verified": conversation_verified,
+    }
 
 
 def _verification_report_history(settings: AprilSettings) -> dict[str, Any]:
@@ -2270,6 +2303,7 @@ _BROWSER_REPORT_TYPES = {
     "mac_activation",
     "voice_live",
     "wake_word_live",
+    "voice_conversation_live",
     "multi_model",
     "workflow",
     "fake_soak",
@@ -2280,6 +2314,7 @@ _BROWSER_TYPE_ALIASES = {
     "mac_activation": "mac_activation",
     "voice_live": "voice_live",
     "wake_word_live": "wake_word_live",
+    "voice_conversation_live": "voice_conversation_live",
     "multi_model": "multi_model",
     "workflow": "workflow",
     "soak": "fake_soak",
@@ -2455,6 +2490,16 @@ def _safe_report_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
         safe["stt_success"] = bool(payload.get("stt_success", False))
         safe["tts_success"] = bool(payload.get("tts_success", False))
         safe["playback_user_confirmed"] = bool(payload.get("playback_user_confirmed", False))
+    if report_type == "voice_conversation_live":
+        safe["voice_conversation_live_verified"] = bool(
+            payload.get("voice_conversation_live_verified", False)
+        )
+        safe["evidence_mode"] = str(payload.get("evidence_mode", "unknown"))
+        safe["turn_count"] = _safe_int(payload.get("turn_count"))
+        safe["same_conversation"] = bool(payload.get("same_conversation", False))
+        safe["barge_in_detected"] = bool(payload.get("barge_in_detected", False))
+        safe["two_turns_completed"] = bool(payload.get("two_turns_completed", False))
+        safe["follow_up_opened"] = bool(payload.get("follow_up_opened", False))
     if report_type == "workflow":
         safe["real_model_exercised"] = bool(payload.get("real_model_exercised", False))
         safe["checks"] = _safe_workflow_checks(payload.get("checks"))

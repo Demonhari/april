@@ -23,6 +23,10 @@ def pcm16le_rms(frame: bytes) -> float:
 
 class VoiceActivityDetector:
     def __init__(self, *, energy_threshold: float = 0.01, required_frames: int = 3) -> None:
+        if not math.isfinite(energy_threshold) or not 0.0 < energy_threshold <= 1.0:
+            raise ValueError("VAD energy_threshold must be finite and within (0, 1].")
+        if required_frames < 1:
+            raise ValueError("VAD required_frames must be positive.")
         self.energy_threshold = energy_threshold
         self.required_frames = required_frames
         self._speech_frames = 0

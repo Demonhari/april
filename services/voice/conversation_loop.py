@@ -5,12 +5,17 @@ import contextlib
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 from apps.cli.client import AprilApiClient
 from april_common.settings import get_settings
 from services.voice.audio_player import AudioPlayer, SoundDeviceAudioPlayer
+from services.voice.endpointing import (
+    EndpointMetrics,
+    capture_streamed_utterance,
+    endpoint_detector_from_settings,
+)
 from services.voice.microphone import (
     Microphone,
     SoundDeviceMicrophone,
@@ -30,8 +35,24 @@ from services.voice.wake_word import OpenWakeWordDetector
 CaptureStrategy = Callable[[Path], Awaitable[Path]]
 
 
+async def _prepend_frame(
+    first_frame: bytes, frame_source: AsyncIterator[bytes]
+) -> AsyncIterator[bytes]:
+    yield first_frame
+    async for frame in frame_source:
+        yield frame
+
+
 class VoiceTimeout(RuntimeError):
     """Raised when no wake word arrives within the wake-word waiting timeout."""
+
+
+class VoiceUtteranceRejected(RuntimeError):
+    """A safe automatic-capture rejection that must not reach STT or Core."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"Voice utterance was not accepted ({reason}); please try again.")
+        self.reason = reason
 
 
 def interactive_capture_strategy(
@@ -114,7 +135,7 @@ class PushToTalkLoop:
         self.record_seconds = max_seconds
         self.vad = VoiceActivityDetector(
             energy_threshold=settings.voice.vad_energy_threshold,
-            required_frames=settings.voice.vad_required_frames,
+            required_frames=settings.voice.vad_onset_frames,
         )
 
     async def run_once(self) -> str:
@@ -160,29 +181,43 @@ class WakeWordConversationLoop(PushToTalkLoop):
             threshold=self.settings.voice.wake_word_threshold,
             cooldown_seconds=self.settings.voice.wake_word_cooldown_seconds,
         )
+        self.last_endpoint_metrics: EndpointMetrics | None = None
 
     async def run_once(self) -> str:
         if not self.detector.available():
             return await super().run_once()
         self.settings.audio_cache_path.mkdir(parents=True, exist_ok=True)
         audio_path = self.settings.audio_cache_path / f"{uuid.uuid4()}-utterance.wav"
-        spoken_path = await self._capture_wake_utterance(audio_path)
-        text = normalize_transcript(await self.stt.transcribe(spoken_path), wake_word="april")
-        if not text:
-            raise ValueError("Voice transcript was empty.")
-        response = await self.api_client.post(
-            "/voice/input",
-            {"message": text, "conversation_id": self.conversation_id},
-        )
-        answer = response["result"]["final_message"]
         tts_path = self.settings.audio_cache_path / f"{uuid.uuid4()}-reply.wav"
-        output_path = await self.tts.synthesize(answer, tts_path)
-        await self.player.play(output_path)
-        if not self.settings.voice.retain_debug_audio:
-            for path in (audio_path, tts_path):
-                if Path(path).exists():
-                    Path(path).unlink()
-        return answer
+        try:
+            spoken_path = await self._capture_wake_utterance(audio_path)
+            if self.last_endpoint_metrics is None or self.last_endpoint_metrics.stop_reason in {
+                "no_speech",
+                "too_short",
+                "muted",
+                "stopped",
+            }:
+                reason = (
+                    self.last_endpoint_metrics.stop_reason
+                    if self.last_endpoint_metrics is not None
+                    else "no_speech"
+                )
+                raise VoiceUtteranceRejected(reason)
+            text = normalize_transcript(await self.stt.transcribe(spoken_path), wake_word="april")
+            if not text:
+                raise ValueError("Voice transcript was empty.")
+            response = await self.api_client.post(
+                "/voice/input",
+                {"message": text, "conversation_id": self.conversation_id},
+            )
+            answer = response["result"]["final_message"]
+            output_path = await self.tts.synthesize(answer, tts_path)
+            await self.player.play(output_path)
+            return answer
+        finally:
+            if not self.settings.voice.retain_debug_audio:
+                for path in (audio_path, tts_path):
+                    Path(path).unlink(missing_ok=True)
 
     async def run_forever(self) -> None:
         try:
@@ -195,6 +230,7 @@ class WakeWordConversationLoop(PushToTalkLoop):
         self, output_path: Path, *, clock: Callable[[], float] = time.monotonic
     ) -> Path:
         voice = self.settings.voice
+        self.last_endpoint_metrics = None
         # Reset detector and VAD at the conversation boundary so a prior
         # utterance cannot leak into this one.
         self.vad.reset()
@@ -205,12 +241,9 @@ class WakeWordConversationLoop(PushToTalkLoop):
         pre_roll: deque[bytes] = deque(maxlen=max(0, voice.wake_pre_roll_frames))
         frames: list[bytes] = []
         wake_seen = False
-        speech_seen = False
-        silence_frames = 0
         # The wake-word waiting timeout runs from the start; the utterance timeout
         # only begins once the wake word (or push-to-talk) has activated.
         wake_deadline = clock() + voice.wake_wait_seconds
-        utterance_deadline: float | None = None
 
         frame_source = self.microphone.frames()
         try:
@@ -223,27 +256,28 @@ class WakeWordConversationLoop(PushToTalkLoop):
                         # was being confirmed, so the onset is not discarded.
                         frames.extend(pre_roll)
                         pre_roll.clear()
-                        self.vad.reset()
-                        utterance_deadline = clock() + voice.utterance_max_seconds
                     elif clock() >= wake_deadline:
                         raise VoiceTimeout("No wake word detected before the wake timeout.")
                     continue
-                # Capture every post-wake frame so the start of speech survives the
-                # VAD onset confirmation; VAD only decides when speech has ended.
-                frames.append(frame)
-                if self.vad.is_speech(frame):
-                    speech_seen = True
-                    silence_frames = 0
-                elif speech_seen:
-                    silence_frames += 1
-                    if silence_frames >= voice.vad_required_frames:
-                        break
-                if utterance_deadline is not None and clock() >= utterance_deadline:
-                    break
+                captured = await capture_streamed_utterance(
+                    _prepend_frame(frame, frame_source),
+                    endpoint_detector=endpoint_detector_from_settings(voice),
+                    pre_roll=frames,
+                    clock=clock,
+                    close_source=False,
+                )
+                frames = list(captured.frames)
+                self.last_endpoint_metrics = captured.metrics
+                break
         finally:
             # Release the microphone stream on every exit path (break, timeout,
             # cancellation, or shutdown).
             await aclose_frame_source(frame_source)
         if not frames:
             raise ValueError("Voice utterance was empty.")
+        if self.last_endpoint_metrics is None:
+            # This is reachable only when an injected source ends immediately
+            # after wake activation.
+            detector = endpoint_detector_from_settings(voice)
+            self.last_endpoint_metrics = detector.finish()
         return write_pcm_wav(output_path, frames, sample_rate=16_000)

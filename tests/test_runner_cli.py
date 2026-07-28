@@ -14,6 +14,7 @@ from apps.runner.model_tools import setup_model_set, setup_voice_stack
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
 from apps.runner.soak import SoakReport
 from apps.runner.verify import BenchmarkResult, VerifyCheck
+from apps.runner.voice_conversation_live import VoiceConversationLiveReport
 from apps.runner.voice_live import VoiceLiveReport
 from apps.runner.wake_live import WakeWordLiveReport
 from april_common.config_validation import validate_configuration
@@ -334,6 +335,45 @@ def test_run_april_voice_verify_wake_live_exits_nonzero_on_fail(
     monkeypatch.setattr("apps.runner.main.run_sentinel_live_verification", _fake_wake_live)
     result = CliRunner().invoke(app, ["april", "voice", "verify-wake-live"])
     assert result.exit_code == 1
+
+
+def test_run_april_voice_verify_conversation_live_uses_redacted_verifier(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = FakeManager(tmp_path)
+    manager.settings = load_settings(root=tmp_path)  # type: ignore[attr-defined]
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    captured: dict[str, object] = {}
+
+    async def fake_conversation(**kwargs: object) -> VoiceConversationLiveReport:
+        captured.update(kwargs)
+        return VoiceConversationLiveReport(
+            evidence_mode="real_hardware",
+            voice_stack_available=True,
+            wake_word_detected=True,
+            turn_count=2,
+            same_conversation=True,
+            barge_in_attempted=True,
+            barge_in_detected=True,
+            two_turns_completed=True,
+            summary="pass",
+            voice_conversation_live_verified=True,
+        )
+
+    monkeypatch.setattr(
+        "apps.runner.main.run_voice_conversation_live_verification",
+        fake_conversation,
+    )
+    out = tmp_path / "voice-conversation-live.json"
+    result = CliRunner().invoke(
+        app,
+        ["april", "voice", "verify-conversation-live", "--report", str(out)],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["settings"] is manager.settings
+    assert captured["report_path"] == out
+    assert "turns=2" in result.output
 
 
 def test_run_april_config_validate_reports_success(tmp_path: Path, monkeypatch) -> None:

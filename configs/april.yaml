@@ -68,6 +68,24 @@ voice:
   enabled: false
   audio_cache_path: data/audio_cache
   retain_debug_audio: false
+  # Calibrated energy confirms onset independently from sustained endpoint
+  # silence. The deprecated vad_required_frames key remains accepted as an
+  # onset alias, but does not control end-of-speech timing.
+  vad_energy_threshold: 0.01
+  vad_onset_frames: 3
+  endpoint_silence_ms: 650
+  minimum_utterance_ms: 300
+  noise_calibration_ms: 300
+  noise_threshold_multiplier: 2.5
+  noise_threshold_margin: 0.002
+  vad_hangover_ms: 100
+  utterance_max_seconds: 15.0
+  # wake_word is safest without acoustic echo cancellation. "speech" is an
+  # explicit energy-based opt-in; action controls stop versus duck separately.
+  barge_in_trigger: wake_word
+  barge_in_action: stop
+  barge_in_speech_onset_frames: 6
+  barge_in_playback_grace_ms: 400
   whisper_binary_path: null
   whisper_model_path: null
   # Optional two-stage overrides. Null inherits the two legacy paths above.

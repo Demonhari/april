@@ -80,6 +80,13 @@ confirmation; the confirmer never opens another microphone stream. The
 file-backed mute switch closes the active stream and prevents capture until it
 is cleared. Wake and voice remain off by default.
 
+Wake capture and Sentinel share one calibrated-energy endpoint state machine.
+Speech onset is consecutive-frame confirmation; end-of-speech is a separately
+configured sustained-silence interval (650 ms by default). Sentinel owns one
+generation-tagged response task so microphone consumption continues during Core
+API, TTS, and playback. Accepted barge-in supersedes stale response generations;
+Runtime/model execution never owns microphone or playback policy.
+
 Accepted events use `services/wake/schemas.py` and enter session continuity
 through `services/wake/session_manager.py`. Other local surfaces can submit the
 same bounded event over the owner-only Unix socket in

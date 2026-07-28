@@ -78,6 +78,10 @@ def test_classify_known_and_alias_and_unknown() -> None:
     assert classify_report({"report_type": "acceptance"}) == "acceptance"
     assert classify_report({"report_type": "go_live"}) == "go_live"
     assert classify_report({"report_type": "soak"}) == "fake_soak"
+    assert (
+        classify_report({"report_type": "voice_conversation_live"})
+        == "voice_conversation_live"
+    )
     assert classify_report({"verification_level": "all", "models": []}) == "multi_model"
     assert classify_report({"iterations": 3, "latency_ms": {}}) == "fake_soak"
     assert classify_report({"something_else": 1}) == "unknown"

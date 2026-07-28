@@ -8,7 +8,16 @@ from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
 from services.evolution.write_guard import EvolutionWriteGuard
 
-WakeListeningState = Literal["idle", "listening", "muted"]
+WakeListeningState = Literal[
+    "idle",
+    "listening",
+    "capturing",
+    "thinking",
+    "speaking",
+    "interrupted",
+    "degraded",
+    "muted",
+]
 
 
 def wake_status_path(settings: AprilSettings) -> Path:
@@ -33,7 +42,16 @@ def read_wake_status(settings: AprilSettings) -> dict[str, str | int | None]:
     if not isinstance(payload, dict):
         return {"schema_version": 1, "state": "idle", "updated_at": None}
     state = payload.get("state")
-    if state not in {"idle", "listening", "muted"}:
+    if state not in {
+        "idle",
+        "listening",
+        "capturing",
+        "thinking",
+        "speaking",
+        "interrupted",
+        "degraded",
+        "muted",
+    }:
         state = "idle"
     updated_at = payload.get("updated_at")
     return {

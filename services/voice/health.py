@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import platform
 from pathlib import Path
@@ -423,6 +424,12 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         output_devices_present=bool(devices["output_devices"]),
         openwakeword=openwakeword,
     )
+    conversation_live_verified = _conversation_live_verified(settings)
+    speaker_verification_available = bool(
+        settings.wake.speaker_verifier_model_path is not None
+        and _path_present(settings, settings.wake.speaker_verifier_model_path)
+        and importlib.util.find_spec("onnxruntime") is not None
+    )
     components = [
         VoiceComponentHealth(
             name="voice enabled",
@@ -516,6 +523,18 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
         "wake_input_ready": readiness["wake_input_ready"],
         "wake_word_ready": readiness["wake_word_ready"],
         "full_voice_loop_ready": readiness["full_voice_loop_ready"],
+        "conversation_endpointing_configured": True,
+        "endpoint_silence_ms": settings.voice.endpoint_silence_ms,
+        "minimum_utterance_ms": settings.voice.minimum_utterance_ms,
+        "barge_in_trigger": settings.voice.barge_in_trigger,
+        "barge_in_action": settings.voice.barge_in_action,
+        "acoustic_echo_cancellation_available": False,
+        "speaker_verification_available": speaker_verification_available,
+        "complete_live_conversation_verified": conversation_live_verified,
+        "complete_live_conversation_command": (
+            "run april voice verify-conversation-live "
+            "--report data/verification/voice-conversation-live.json"
+        ),
         "voice_readiness": readiness,
         "input_devices": devices["input_devices"],
         "output_devices": devices["output_devices"],
@@ -534,3 +553,17 @@ def voice_doctor(settings: AprilSettings) -> dict[str, Any]:
             "Push-to-talk (run april voice ptt) works without any wake-word model."
         ),
     }
+
+
+def _conversation_live_verified(settings: AprilSettings) -> bool:
+    path = settings.home / "data" / "verification" / "voice-conversation-live.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("report_type") == "voice_conversation_live"
+        and payload.get("evidence_mode") == "real_hardware"
+        and payload.get("voice_conversation_live_verified") is True
+    )

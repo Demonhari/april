@@ -179,6 +179,38 @@ def test_readiness_detects_verified_sentinel_report(tmp_path: Path) -> None:
     assert next(c for c in report.checks if c.name == "Sentinel live verification").status == ("ok")
 
 
+def test_readiness_requires_real_hardware_for_complete_voice_report(tmp_path: Path) -> None:
+    home = _write_home(tmp_path, backend="fake")
+    verification = home / "data" / "verification"
+    verification.mkdir(parents=True)
+    report_path = verification / "voice-conversation-live.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "report_type": "voice_conversation_live",
+                "evidence_mode": "injected_test",
+                "voice_conversation_live_verified": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    injected = build_readiness_report(home)
+    assert injected.voice_conversation_live_status == "failed"
+
+    report_path.write_text(
+        json.dumps(
+            {
+                "report_type": "voice_conversation_live",
+                "evidence_mode": "real_hardware",
+                "voice_conversation_live_verified": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    real = build_readiness_report(home)
+    assert real.voice_conversation_live_status == "verified"
+
+
 def test_default_repo_config_keeps_voice_out_of_blockers(tmp_path: Path) -> None:
     # Guard the *shipped* configs/april.yaml end-to-end: with voice off by default
     # and no voice artifacts present, every voice row is skipped (never a blocker),

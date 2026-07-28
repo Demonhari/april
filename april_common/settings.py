@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 from functools import lru_cache
@@ -108,13 +109,26 @@ class VoiceSettings(BaseModel):
     input_device: str | int | None = None
     output_device: str | int | None = None
     max_record_seconds: float = 30.0
-    vad_energy_threshold: float = 0.01
-    vad_required_frames: int = 3
+    vad_energy_threshold: float = Field(default=0.01, gt=0.0, le=0.5)
+    # ``vad_required_frames`` is the deprecated onset alias.  A before
+    # validator copies it only when the explicit setting is absent.
+    vad_onset_frames: int = Field(default=3, ge=1, le=50)
+    vad_required_frames: int = Field(default=3, ge=1, le=50)
+    endpoint_silence_ms: int = Field(default=650, ge=300, le=2_000)
+    minimum_utterance_ms: int = Field(default=300, ge=50, le=5_000)
+    noise_calibration_ms: int = Field(default=300, ge=0, le=2_000)
+    noise_threshold_multiplier: float = Field(default=2.5, ge=1.0, le=10.0)
+    noise_threshold_margin: float = Field(default=0.002, ge=0.0, le=0.1)
+    vad_hangover_ms: int = Field(default=100, ge=0, le=1_000)
+    barge_in_trigger: Literal["wake_word", "speech", "off"] = "wake_word"
+    barge_in_action: Literal["stop", "duck"] = "stop"
+    barge_in_speech_onset_frames: int = Field(default=6, ge=3, le=100)
+    barge_in_playback_grace_ms: int = Field(default=400, ge=0, le=5_000)
     wake_word_threshold: float = 0.5
     wake_word_cooldown_seconds: float = 2.0
     # Separate, independently bounded timeouts for the wake/listen lifecycle.
     wake_wait_seconds: float = 30.0
-    utterance_max_seconds: float = 15.0
+    utterance_max_seconds: float = Field(default=15.0, gt=0.0, le=60.0)
     # Bounded pre-roll so the onset of speech is not lost while VAD confirms it.
     wake_pre_roll_frames: int = 8
     whisper_binary_path: Path | None = None
@@ -132,6 +146,35 @@ class VoiceSettings(BaseModel):
     # wake_word_model_path stays honoured; effective_wake_word_model_paths merges
     # both without duplicates so old configs keep working unchanged.
     wake_word_model_paths: list[Path] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _honour_deprecated_vad_onset_alias(cls, value: object) -> object:
+        if isinstance(value, dict):
+            normalized = dict(value)
+            if "vad_onset_frames" not in normalized and "vad_required_frames" in normalized:
+                normalized["vad_onset_frames"] = normalized["vad_required_frames"]
+            return normalized
+        return value
+
+    @model_validator(mode="after")
+    def _validate_turn_taking(self) -> VoiceSettings:
+        values = (
+            self.vad_energy_threshold,
+            self.noise_threshold_multiplier,
+            self.noise_threshold_margin,
+            self.utterance_max_seconds,
+        )
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("Voice turn-taking numeric settings must be finite.")
+        maximum_ms = self.utterance_max_seconds * 1_000
+        if self.minimum_utterance_ms > maximum_ms:
+            raise ValueError("minimum_utterance_ms cannot exceed utterance_max_seconds.")
+        if self.vad_hangover_ms > self.endpoint_silence_ms:
+            raise ValueError("vad_hangover_ms cannot exceed endpoint_silence_ms.")
+        if self.noise_calibration_ms > maximum_ms:
+            raise ValueError("noise_calibration_ms cannot exceed utterance_max_seconds.")
+        return self
 
     @property
     def effective_confirmation_whisper_binary_path(self) -> Path | None:
@@ -448,6 +491,29 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_VOICE_INPUT_DEVICE": ("voice", "input_device"),
     "APRIL_VOICE_OUTPUT_DEVICE": ("voice", "output_device"),
     "APRIL_VOICE_MAX_RECORD_SECONDS": ("voice", "max_record_seconds"),
+    "APRIL_VOICE_VAD_ENERGY_THRESHOLD": ("voice", "vad_energy_threshold"),
+    "APRIL_VOICE_VAD_ONSET_FRAMES": ("voice", "vad_onset_frames"),
+    "APRIL_VOICE_VAD_REQUIRED_FRAMES": ("voice", "vad_required_frames"),
+    "APRIL_VOICE_ENDPOINT_SILENCE_MS": ("voice", "endpoint_silence_ms"),
+    "APRIL_VOICE_MINIMUM_UTTERANCE_MS": ("voice", "minimum_utterance_ms"),
+    "APRIL_VOICE_NOISE_CALIBRATION_MS": ("voice", "noise_calibration_ms"),
+    "APRIL_VOICE_NOISE_THRESHOLD_MULTIPLIER": (
+        "voice",
+        "noise_threshold_multiplier",
+    ),
+    "APRIL_VOICE_NOISE_THRESHOLD_MARGIN": ("voice", "noise_threshold_margin"),
+    "APRIL_VOICE_VAD_HANGOVER_MS": ("voice", "vad_hangover_ms"),
+    "APRIL_VOICE_UTTERANCE_MAX_SECONDS": ("voice", "utterance_max_seconds"),
+    "APRIL_VOICE_BARGE_IN_TRIGGER": ("voice", "barge_in_trigger"),
+    "APRIL_VOICE_BARGE_IN_ACTION": ("voice", "barge_in_action"),
+    "APRIL_VOICE_BARGE_IN_SPEECH_ONSET_FRAMES": (
+        "voice",
+        "barge_in_speech_onset_frames",
+    ),
+    "APRIL_VOICE_BARGE_IN_PLAYBACK_GRACE_MS": (
+        "voice",
+        "barge_in_playback_grace_ms",
+    ),
     "APRIL_WHISPER_BINARY_PATH": ("voice", "whisper_binary_path"),
     "APRIL_WHISPER_MODEL_PATH": ("voice", "whisper_model_path"),
     "APRIL_WAKE_CONFIRMATION_WHISPER_BINARY_PATH": (

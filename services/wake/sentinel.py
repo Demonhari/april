@@ -12,12 +12,20 @@ from typing import Any, Literal, Protocol
 
 from april_common.settings import AprilSettings
 from services.voice.audio_player import AudioPlayer
+from services.voice.endpointing import (
+    EndpointMetrics,
+    PcmFormat,
+    capture_streamed_utterance,
+    endpoint_detector_from_settings,
+    pcm_frame_duration_ms,
+)
 from services.voice.microphone import Microphone, aclose_frame_source, write_pcm_wav
 from services.voice.speech_to_text import SpeechToText
 from services.voice.text_to_speech import TextToSpeech
 from services.voice.vad import VoiceActivityDetector
 from services.wake.confirmer import SttConfirmer, strip_vocative
 from services.wake.control import SentinelControlServer, sentinel_control_path
+from services.wake.response_coordinator import ResponseCoordinator, ResponseState
 from services.wake.ring_buffer import AudioRingBuffer
 from services.wake.schemas import WakeEvent
 from services.wake.speaker import (
@@ -96,7 +104,7 @@ class Sentinel:
         sample_rate: int = 16_000,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] | None = None,
-        barge_in_mode: Literal["stop", "duck"] = "stop",
+        barge_in_mode: Literal["stop", "duck"] | None = None,
         mute_poll_seconds: float = 0.5,
     ) -> None:
         self.settings = settings
@@ -110,7 +118,7 @@ class Sentinel:
         self.sample_rate = sample_rate
         self.vad = vad or VoiceActivityDetector(
             energy_threshold=settings.voice.vad_energy_threshold,
-            required_frames=settings.voice.vad_required_frames,
+            required_frames=settings.voice.vad_onset_frames,
         )
         self.mute = mute or MuteSwitch(settings.mute_flag_path)
         self.speaker_verifier = speaker_verifier
@@ -122,7 +130,8 @@ class Sentinel:
         self.audit = audit
         self.clock = clock
         self._sleep = sleep or asyncio.sleep
-        self.barge_in_mode = barge_in_mode
+        self.barge_in_mode = barge_in_mode or settings.voice.barge_in_action
+        self.barge_in_trigger = settings.voice.barge_in_trigger
         self.mute_poll_seconds = mute_poll_seconds
         self.ring_buffer = AudioRingBuffer(seconds=settings.wake.ring_buffer_seconds)
         self._stopped = False
@@ -133,6 +142,23 @@ class Sentinel:
         self.last_rejection_reason: str | None = None
         self._speaker_gate_started = False
         self._speaker_gate_degraded = False
+        self.voice_state: WakeListeningState = "idle"
+        self.last_endpoint_metrics: EndpointMetrics | None = None
+        self.completed_endpoint_metrics: list[EndpointMetrics] = []
+        self.accepted_transcript_lengths: list[int] = []
+        self._barge_vad = VoiceActivityDetector(
+            energy_threshold=settings.voice.vad_energy_threshold,
+            required_frames=settings.voice.barge_in_speech_onset_frames,
+        )
+        self.response_coordinator = ResponseCoordinator(
+            deliver=deliver,
+            player=player,
+            action=self.barge_in_mode,
+            on_state=self._set_response_state,
+            on_complete=self.notify_assistant_response,
+            audit=self._audit,
+            clock=clock,
+        )
 
     def stop(self) -> None:
         self._stopped = True
@@ -150,13 +176,17 @@ class Sentinel:
     async def run(self) -> None:
         """Own the microphone until stopped. Mute fully releases the stream."""
         self._start_speaker_gate()
-        while not self._stopped:
-            if self.mute.is_muted():
-                self._set_status("muted")
-                self._follow_up_until = None
-                await self._sleep(self.mute_poll_seconds)
-                continue
-            await self.run_once()
+        try:
+            while not self._stopped:
+                if self.mute.is_muted():
+                    self._set_status("muted")
+                    self._follow_up_until = None
+                    await self.response_coordinator.interrupt(reason="muted")
+                    await self._sleep(self.mute_poll_seconds)
+                    continue
+                await self.run_once()
+        finally:
+            await self.response_coordinator.shutdown()
 
     async def run_once(self) -> None:
         """Consume one microphone stream until mute/stop/stream end."""
@@ -176,10 +206,35 @@ class Sentinel:
             # Every exit path (mute, stop, exhaustion, error) releases the mic.
             await aclose_frame_source(frame_source)
             self._set_status("muted" if self.mute.is_muted() else "idle")
+        if self.mute.is_muted() or self._stopped:
+            await self.response_coordinator.interrupt(
+                reason="muted" if self.mute.is_muted() else "stopped"
+            )
+        else:
+            # A finite source is a test/device exhaustion boundary. Drain its
+            # one bounded response task so exceptions are collected.
+            await self.response_coordinator.drain()
+            self._set_status("idle")
 
     async def _handle_frame(self, frame: bytes, frame_source: AsyncIterator[bytes]) -> None:
         self.ring_buffer.append(frame)
         now = self.clock()
+        if self.response_coordinator.active:
+            if self.barge_in_trigger == "off":
+                return
+            if (
+                self.barge_in_trigger == "speech"
+                and self._speech_barge_in_allowed(now)
+                and self._barge_vad.is_speech(frame)
+            ):
+                await self._accept(
+                    score=None,
+                    reason="speech_barge_in",
+                    text=None,
+                    frame_source=frame_source,
+                    speech_seen=True,
+                )
+                return
         if self._follow_up_window_open(now) and self.vad.is_speech(frame):
             self._follow_up_until = None
             await self._accept(
@@ -281,7 +336,7 @@ class Sentinel:
         speech_seen: bool = False,
     ) -> None:
         pre_roll = self.ring_buffer.snapshot()
-        self._set_status("listening")
+        self._set_status("capturing")
         if not self._speaker_allowed(pre_roll):
             self._cooldown_until = self.clock() + self.settings.voice.wake_word_cooldown_seconds
             self._reset_detection_state()
@@ -295,13 +350,9 @@ class Sentinel:
             )
             self._set_status("muted" if self.mute.is_muted() else "idle")
             return
-        if self.player is not None:
-            # Barge-in: the user speaking over APRIL always interrupts playback
-            # before APRIL emits the short acknowledgement earcon.
-            if self.barge_in_mode == "duck":
-                await self.player.duck()
-            else:
-                await self.player.stop()
+        if self._barge_in_matches(reason):
+            self.response_coordinator.action = self.barge_in_mode
+            await self.response_coordinator.interrupt(reason=reason)
         await self._play_earcon()
         if self.transcriber is not None:
             text = await self._transcribe_full_utterance(
@@ -310,16 +361,25 @@ class Sentinel:
                 fallback_text=text,
                 speech_seen=speech_seen,
             )
+            if self.last_endpoint_metrics is not None:
+                self._audit_endpoint(self.last_endpoint_metrics, source_type=reason)
+                if self.last_endpoint_metrics.stop_reason in {
+                    "no_speech",
+                    "too_short",
+                    "muted",
+                    "stopped",
+                }:
+                    self._reject(score or 0.0, self.last_endpoint_metrics.stop_reason)
+                    self._set_status("muted" if self.mute.is_muted() else "listening")
+                    return
         self._cooldown_until = self.clock() + self.settings.voice.wake_word_cooldown_seconds
         self._reset_detection_state()
         event = WakeEvent(source="voice", score=score, text=text, reason=reason)
         self.accepted_wakes += 1
-        try:
-            await self.deliver(event)
-        except Exception as exc:  # delivery failure must not kill the mic loop
-            logger.warning("Wake delivery failed: %s", exc)
-        finally:
-            self._set_status("muted" if self.mute.is_muted() else "idle")
+        self.accepted_transcript_lengths.append(len(text or ""))
+        self.response_coordinator.deliver = self.deliver
+        self._set_status("listening")
+        await self.response_coordinator.submit(event)
 
     def _start_speaker_gate(self) -> None:
         if self._speaker_gate_started:
@@ -361,6 +421,7 @@ class Sentinel:
     def _reset_detection_state(self) -> None:
         self.ring_buffer.clear()
         self.vad.reset()
+        self._barge_vad.reset()
         for scorer in self.scorers:
             reset = getattr(scorer, "reset", None)
             if callable(reset):
@@ -413,7 +474,27 @@ class Sentinel:
         if transcriber is None:
             return fallback_text
         frames = list(pre_roll)
-        frames.extend(await self._capture_post_wake_frames(frame_source, speech_seen=speech_seen))
+        initial_speech_duration_ms = 0.0
+        if speech_seen and pre_roll:
+            onset_frames = self.settings.voice.vad_onset_frames
+            initial_speech_duration_ms = sum(
+                pcm_frame_duration_ms(frame, PcmFormat(sample_rate=self.sample_rate))
+                for frame in pre_roll[-onset_frames:]
+            )
+        frames.extend(
+            await self._capture_post_wake_frames(
+                frame_source,
+                speech_seen=speech_seen,
+                initial_speech_duration_ms=initial_speech_duration_ms,
+            )
+        )
+        if self.last_endpoint_metrics is not None and self.last_endpoint_metrics.stop_reason in {
+            "no_speech",
+            "too_short",
+            "muted",
+            "stopped",
+        }:
+            return fallback_text
         if not frames:
             return fallback_text
         capture_path = self.settings.audio_cache_path / f"wake-utterance-{uuid.uuid4()}.wav"
@@ -430,29 +511,66 @@ class Sentinel:
         return cleaned or fallback_text
 
     async def _capture_post_wake_frames(
-        self, frame_source: AsyncIterator[bytes], *, speech_seen: bool
+        self,
+        frame_source: AsyncIterator[bytes],
+        *,
+        speech_seen: bool,
+        initial_speech_duration_ms: float = 0.0,
     ) -> list[bytes]:
-        vad = VoiceActivityDetector(
-            energy_threshold=self.settings.voice.vad_energy_threshold,
-            required_frames=self.settings.voice.vad_required_frames,
+        captured = await capture_streamed_utterance(
+            frame_source,
+            endpoint_detector=endpoint_detector_from_settings(
+                self.settings.voice,
+                initial_speech=speech_seen,
+                initial_speech_duration_ms=initial_speech_duration_ms,
+            ),
+            stop_requested=lambda: self._stopped,
+            muted=self.mute.is_muted,
+            clock=self.clock,
+            close_source=False,
         )
-        frames: list[bytes] = []
-        silence_frames = 0
-        deadline = self.clock() + self.settings.voice.utterance_max_seconds
-        async for frame in frame_source:
-            if self._stopped or self.mute.is_muted():
-                break
-            frames.append(frame)
-            if vad.is_speech(frame):
-                speech_seen = True
-                silence_frames = 0
-            elif speech_seen:
-                silence_frames += 1
-                if silence_frames >= self.settings.voice.vad_required_frames:
-                    break
-            if self.clock() >= deadline:
-                break
-        return frames
+        self.last_endpoint_metrics = captured.metrics
+        return list(captured.frames)
+
+    def _barge_in_matches(self, reason: str) -> bool:
+        if not self.response_coordinator.active:
+            return False
+        if self.barge_in_trigger == "off":
+            return False
+        if self.barge_in_trigger == "speech":
+            return reason == "speech_barge_in"
+        return reason != "follow_up"
+
+    def _speech_barge_in_allowed(self, now: float) -> bool:
+        started = self.response_coordinator.playback_started_at
+        if started is None:
+            # Energy barge-in is only meaningful once playback actually starts.
+            return False
+        grace = self.settings.voice.barge_in_playback_grace_ms / 1_000
+        return now - started >= grace
+
+    def _set_response_state(self, state: ResponseState) -> None:
+        self._set_status(state)
+
+    def _audit_endpoint(self, metrics: EndpointMetrics, *, source_type: str) -> None:
+        self.completed_endpoint_metrics.append(metrics)
+        event_type = {
+            "end_of_speech": "voice_utterance_completed",
+            "max_duration": "voice_utterance_max_duration",
+        }.get(metrics.stop_reason, "voice_utterance_rejected")
+        self._audit(
+            {
+                "event_type": event_type,
+                "actor": "sentinel",
+                "stop_reason": metrics.stop_reason,
+                "captured_duration_ms": metrics.captured_duration_ms,
+                "speech_duration_ms": metrics.speech_duration_ms,
+                "trailing_silence_ms": metrics.trailing_silence_ms,
+                "effective_energy_threshold": metrics.effective_energy_threshold,
+                "minimum_duration_met": metrics.minimum_duration_met,
+                "source_type": source_type,
+            }
+        )
 
     def _reject(self, score: float, reason: str) -> None:
         self.rejected_candidates += 1
@@ -460,6 +578,7 @@ class Sentinel:
         logger.debug("Wake candidate rejected (score=%.3f): %s", score, reason)
 
     def _set_status(self, state: WakeListeningState) -> None:
+        self.voice_state = state
         try:
             write_wake_status(self.settings, state)
         except Exception as exc:
@@ -525,12 +644,31 @@ class ApiWakeDelivery:
         self.player = player
         self.on_assistant_response_complete = on_assistant_response_complete
         self.session_hint = session_hint
+        self.session_ids: list[str] = []
+        self.conversation_ids: list[str] = []
+        self.generation_stages: dict[int, set[str]] = {}
 
     async def __call__(self, event: WakeEvent) -> None:
+        await self.deliver_generation(
+            event,
+            generation=0,
+            is_current=lambda _generation: True,
+            set_state=lambda _state, _generation: None,
+        )
+
+    async def deliver_generation(
+        self,
+        event: WakeEvent,
+        *,
+        generation: int,
+        is_current: Callable[[int], bool],
+        set_state: Callable[[ResponseState, int], None],
+    ) -> None:
         import httpx
 
         if self.session_hint and event.session_hint is None:
             event = event.model_copy(update={"session_hint": self.session_hint})
+        set_state("thinking", generation)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/wake",
@@ -538,9 +676,34 @@ class ApiWakeDelivery:
                 headers={"Authorization": f"Bearer {self.token}"},
             )
             response.raise_for_status()
-        await self._speak_response(response.json())
+        payload = response.json()
+        stages = self.generation_stages.setdefault(generation, set())
+        stages.add("api_success")
+        if isinstance(payload, dict):
+            session_id = payload.get("session_id")
+            conversation_id = payload.get("conversation_id")
+            if isinstance(session_id, str):
+                self.session_ids.append(session_id)
+                self.session_hint = session_id
+            if isinstance(conversation_id, str):
+                self.conversation_ids.append(conversation_id)
+        if not is_current(generation):
+            return
+        await self._speak_response(
+            payload,
+            generation=generation,
+            is_current=is_current,
+            set_state=set_state,
+        )
 
-    async def _speak_response(self, payload: object) -> None:
+    async def _speak_response(
+        self,
+        payload: object,
+        *,
+        generation: int = 0,
+        is_current: Callable[[int], bool] = lambda _generation: True,
+        set_state: Callable[[ResponseState, int], None] = lambda _state, _generation: None,
+    ) -> None:
         if self.settings is None or self.tts is None or self.player is None:
             return
         if not isinstance(payload, dict):
@@ -555,14 +718,23 @@ class ApiWakeDelivery:
         output_path = self.settings.audio_cache_path / f"sentinel-reply-{uuid.uuid4()}.wav"
         try:
             spoken_path = await self.tts.synthesize(final_message, output_path)
+            self.generation_stages.setdefault(generation, set()).add("tts_success")
+            if not is_current(generation):
+                return
+            set_state("speaking", generation)
+            self.generation_stages.setdefault(generation, set()).add("playback_started")
             await self.player.play(spoken_path)
+            self.generation_stages.setdefault(generation, set()).add("playback_completed")
         except Exception as exc:
-            logger.warning("Assistant voice response playback failed: %s", exc)
-            return
+            logger.warning(
+                "Assistant voice response playback failed: %s",
+                type(exc).__name__,
+            )
+            raise RuntimeError("assistant_voice_output_failed") from exc
         finally:
             if not self.settings.voice.retain_debug_audio:
                 output_path.unlink(missing_ok=True)
-        if self.on_assistant_response_complete is not None:
+        if is_current(generation) and self.on_assistant_response_complete is not None:
             self.on_assistant_response_complete()
 
 
@@ -676,12 +848,6 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
     player = (
         SoundDeviceAudioPlayer(device=settings.voice.output_device) if tts is not None else None
     )
-    sentinel_ref: Sentinel | None = None
-
-    def assistant_response_complete() -> None:
-        if sentinel_ref is not None:
-            sentinel_ref.notify_assistant_response()
-
     audit = AuditLogger(settings.audit_path)
     speaker_verifier, speaker_degrade_reason = configured_speaker_verifier(settings)
     delivery = ApiWakeDelivery(
@@ -690,7 +856,6 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
         settings=settings,
         tts=tts,
         player=player,
-        on_assistant_response_complete=assistant_response_complete,
         session_hint=session_hint,
     )
     sentinel = Sentinel(
@@ -716,13 +881,14 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
                 "reason": "piper_binary_or_model_missing",
             }
         )
-    sentinel_ref = sentinel
     control = SentinelControlServer(
         sentinel_control_path(settings),
         set_session_hint=lambda value: setattr(delivery, "session_hint", value),
         status=lambda: {
-            "state": "muted" if sentinel.mute.is_muted() else "listening",
+            "state": "muted" if sentinel.mute.is_muted() else sentinel.voice_state,
             "voice_output": "available" if tts is not None else "degraded",
+            "barge_in_trigger": sentinel.barge_in_trigger,
+            "barge_in_action": sentinel.barge_in_mode,
         },
     )
     try:

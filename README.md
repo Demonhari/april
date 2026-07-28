@@ -1359,7 +1359,19 @@ run april setup voice \
   --piper-model data/voice_artifacts/piper/en_US-lessac-medium.onnx \
   --apply --enable
 run april voice verify-live --report data/verification/voice-live.json
+run april voice verify-wake-live --report data/verification/wake-live.json
+run april voice verify-conversation-live \
+  --report data/verification/voice-conversation-live.json
 ```
+
+Automatic wake capture confirms speech onset independently from utterance end.
+The default endpoint requires 650 ms of continuous calibrated silence after at
+least 300 ms of valid speech; short natural pauses remain in the same turn.
+Sentinel keeps reading microphone frames during Core response generation, Piper
+synthesis, and playback. Wake-word barge-in is the safe default without
+acoustic echo cancellation; trigger (`wake_word`/`speech`/`off`) and action
+(`stop`/`duck`) are configured separately. APRIL does not claim semantic
+endpointing, pitch detection, echo cancellation, or speaker authentication.
 
 `run april voice ptt` (no `--seconds`) is genuinely interactive: press Enter to
 start capture and Enter again to stop. Capture also ends on the configured

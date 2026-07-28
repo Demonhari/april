@@ -12,6 +12,7 @@ from services.voice.audio_player import FakeAudioPlayer
 from services.voice.conversation_loop import (
     PushToTalkLoop,
     VoiceTimeout,
+    VoiceUtteranceRejected,
     WakeWordConversationLoop,
     interactive_capture_strategy,
 )
@@ -92,7 +93,11 @@ def _wake_loop(settings_tmp, microphone, detector, tmp_path: Path) -> WakeWordCo
 
 
 class _FakeApi:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def post(self, path: str, payload: dict[str, str]) -> dict[str, object]:
+        self.calls += 1
         return {"result": {"final_message": "ok"}}
 
 
@@ -199,6 +204,28 @@ async def test_capture_cancellation_closes_frame_source(settings_tmp, tmp_path: 
     with pytest.raises(asyncio.CancelledError):
         await task
     assert mic.closed is True
+
+
+async def test_no_speech_capture_never_calls_stt_or_core(settings_tmp, tmp_path: Path) -> None:
+    class ForbiddenStt(FakeSpeechToText):
+        async def transcribe(self, audio_path: Path) -> str:
+            raise AssertionError("STT must not run for no_speech")
+
+    api = _FakeApi()
+    loop = WakeWordConversationLoop(
+        api_client=api,  # type: ignore[arg-type]
+        microphone=FakeMicrophone(
+            tmp_path / "unused.wav",
+            frames=[_chunk(0)] * 70,
+        ),
+        stt=ForbiddenStt("unused"),
+        tts=FakeTextToSpeech(),
+        player=FakeAudioPlayer(),
+        detector=ScriptedWake(fire_on=0),  # type: ignore[arg-type]
+    )
+    with pytest.raises(VoiceUtteranceRejected, match="no_speech"):
+        await loop.run_once()
+    assert api.calls == 0
 
 
 # --- microphone overflow + push-to-talk -------------------------------------

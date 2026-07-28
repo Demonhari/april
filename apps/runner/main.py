@@ -95,6 +95,7 @@ from apps.runner.verify import (
     run_workflow_verification,
     write_workflow_report,
 )
+from apps.runner.voice_conversation_live import run_voice_conversation_live_verification
 from apps.runner.voice_live import VoiceLiveReport, run_voice_live_verification
 from apps.runner.wake_live import WakeWordLiveReport, run_sentinel_live_verification
 from april_common.config_fingerprint import config_fingerprint_digest
@@ -1642,6 +1643,58 @@ def voice_verify_wake_live(
             f"[green]Wrote wake-word verification report to {report.expanduser()}[/green]"
         )
     if result.summary != "pass":
+        raise typer.Exit(1)
+
+
+@voice_app.command("verify-conversation-live")
+def voice_verify_conversation_live(
+    report: Path = typer.Option(
+        Path("data/verification/voice-conversation-live.json"),
+        "--report",
+        help="Write the redacted two-turn live conversation report here.",
+    ),
+    timeout_seconds: float = typer.Option(
+        180.0,
+        "--timeout-seconds",
+        min=30.0,
+        max=600.0,
+        help="Overall operator interaction timeout.",
+    ),
+    retain_debug_audio: bool = typer.Option(
+        False,
+        "--retain-debug-audio",
+        help="Keep temporary utterance/reply audio for this explicit run.",
+    ),
+) -> None:
+    """Verify two endpointed turns and real production barge-in on this Mac."""
+    settings = _manager().settings
+    console.print(
+        "Turn 1: say “April” and a request, including a natural 300-500 ms pause. "
+        "When playback begins, use the configured barge-in trigger and complete Turn 2."
+    )
+    console.print(
+        "The report stores timing, lengths, booleans, and reason codes only—never "
+        "transcripts, responses, audio, tokens, device names, or absolute paths."
+    )
+
+    result = asyncio.run(
+        run_voice_conversation_live_verification(
+            settings=settings,
+            confirm_microphone=lambda message: typer.confirm(message, default=False),
+            report_path=report,
+            timeout_seconds=timeout_seconds,
+            retain_debug_audio=retain_debug_audio,
+        )
+    )
+    console.print(
+        "Voice conversation live verification: "
+        f"{result.summary} (turns={result.turn_count}, "
+        f"same_conversation={result.same_conversation}, "
+        f"barge_in={result.barge_in_detected}, "
+        f"verified={result.voice_conversation_live_verified})"
+    )
+    console.print(f"[green]Wrote voice conversation report to {report.expanduser()}[/green]")
+    if not result.voice_conversation_live_verified:
         raise typer.Exit(1)
 
 

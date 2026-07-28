@@ -7,8 +7,9 @@ Pipeline:
 ```mermaid
 flowchart LR
   Mic[Microphone] --> Wake[Wake word]
-  Wake --> VAD[VAD]
-  VAD --> STT[whisper.cpp adapter]
+  Wake --> Onset[Calibrated speech onset]
+  Onset --> Endpoint[Sustained-silence endpoint]
+  Endpoint --> STT[whisper.cpp adapter]
   STT --> API[APRIL API]
   API --> TTS[Piper adapter]
   TTS --> Speaker[Audio player]
@@ -29,10 +30,12 @@ Implemented adapters:
   16 kHz mono 16-bit PCM WAV and reports actionable macOS permission errors.
 - `SoundDeviceAudioPlayer` validates WAV input, supports a configured output
   device, and plays through `sounddevice` only when explicitly invoked.
-- `VoiceActivityDetector` provides deterministic energy-based VAD with
-  configurable threshold and required speech frames. It computes signed 16-bit
-  little-endian PCM RMS locally and does not depend on Python's removed
-  `audioop` module.
+- `VoiceActivityDetector` confirms speech onset from consecutive energy frames.
+  `UtteranceEndpointDetector` is a separate state machine
+  (`calibrating → waiting_for_speech → in_speech → ending → complete`) that ends
+  a valid utterance after 650 ms of continuous calibrated silence by default.
+  It derives frame duration from the PCM format, uses a 300 ms minimum
+  utterance, and learns a bounded robust noise floor only before speech.
 - `OpenWakeWordDetector` lazily imports openWakeWord, requires an explicitly
   configured local ONNX model, validates 16-bit PCM frames, and never downloads
   models.
@@ -56,6 +59,9 @@ run april setup voice \
   --wake-word-model /path/to/april.onnx \
   --dry-run
 run april voice verify-live --report data/verification/voice-live.json
+run april voice verify-wake-live --report data/verification/wake-live.json
+run april voice verify-conversation-live \
+  --report data/verification/voice-conversation-live.json
 ```
 
 `run april setup voice` is a non-recording configuration helper. It validates
@@ -89,6 +95,17 @@ a custom local openWakeWord model at `voice.wake_word_model_path`; APRIL never
 downloads or trains one, and `voice doctor` says so explicitly. These paths are
 verified with synthetic PCM, a fake microphone, and mocked input only; a live
 microphone, whisper.cpp, Piper, and openWakeWord are not exercised here.
+
+Sentinel and the wake conversation loop use the same streamed-capture helper.
+After transcription, one bounded response coordinator owns Core API, Piper, and
+playback work while Sentinel continues consuming microphone frames. A newer
+accepted turn supersedes the old generation, stops or ducks active playback,
+and prevents stale work from speaking or opening follow-up mode.
+`voice.barge_in_trigger` (`wake_word`, `speech`, `off`) is independent from
+`voice.barge_in_action` (`stop`, `duck`). `wake_word` is the default because
+APRIL has no acoustic echo cancellation. Speech triggering is a conservative
+energy-based opt-in, not speaker authentication. SoundDevice ducking falls back
+truthfully to stop because its playback API has no live gain control.
 
 ## Speaker gate (local adapter; real model operator blocker)
 
@@ -141,3 +158,23 @@ recording/STT/TTS/playback booleans, skipped checks, and final
 or full paths. Temporary audio is deleted by default and retained only with
 `--retain-debug-audio` or `voice.retain_debug_audio`. Tests use fake microphone,
 STT, TTS, and player adapters only.
+
+The complete live gate is:
+
+```bash
+run april voice verify-conversation-live \
+  --report data/verification/voice-conversation-live.json
+```
+
+It requires two endpointed turns in one Core conversation/session, playback
+barge-in, and completion of the second response. Only `real_hardware` evidence
+can set `voice_conversation_live_verified`; injected tests are labelled
+`injected_test`. Reports store safe durations, stop reasons, stage booleans,
+transcript lengths, and continuity/barge-in measurements—never transcript or
+response text, PCM, tokens, device names, or paths. Temporary audio is deleted
+unless debug retention is explicitly enabled. The older one-turn
+`verify-live` and `verify-wake-live` commands retain their meanings.
+
+APRIL currently implements calibrated energy and sustained silence. It does not
+implement semantic sentence completion, pitch analysis, acoustic echo
+cancellation, or speaker authentication.

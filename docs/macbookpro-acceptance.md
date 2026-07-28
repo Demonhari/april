@@ -209,6 +209,8 @@ Until that actual ONNX model exists and the live wake-word command passes,
 
 ```bash
 run april voice verify-live --report data/verification/voice-live.json
+run april voice verify-conversation-live \
+  --report data/verification/voice-conversation-live.json
 ```
 
 Records a short push-to-talk sample, transcribes it with whisper.cpp, synthesizes

@@ -29,6 +29,9 @@ run april task list --fake
 run april voice health --fake
 run april voice doctor --fake
 run april voice verify-live --report data/verification/voice-live.json
+run april voice verify-wake-live --report data/verification/wake-live.json
+run april voice verify-conversation-live \
+  --report data/verification/voice-conversation-live.json
 run april memory doctor
 run april eval brain --fake
 ```
@@ -233,6 +236,14 @@ It runs voice doctor, shows macOS microphone guidance, asks before recording,
 uses push-to-talk only, runs local whisper.cpp and Piper if configured, stores
 transcript length rather than transcript text, deletes temporary audio by
 default, and never starts wake-word listening or uploads audio.
+
+The conversation-live command is a separate, stricter real-hardware gate. It
+guides two turns through wake detection, calibrated automatic endpointing,
+whisper.cpp, the authenticated loopback Core API, Piper, playback, production
+barge-in, and follow-up/session continuity. A natural 300–500 ms pause should
+remain inside the first utterance; the default endpoint is 650 ms continuous
+silence. Its report is redacted and only real-hardware evidence can set the
+production verification flag. Existing one-turn reports are not upgraded.
 
 `run april setup voice` never enables voice unless both `--apply --enable` are
 present. `run april setup voice ... --apply` without `--enable` leaves

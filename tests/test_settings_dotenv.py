@@ -66,6 +66,21 @@ def test_default_applies_without_env_or_yaml(
     assert settings.api.token == "local-dev-token"
 
 
+def test_voice_onset_env_alias_and_explicit_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("APRIL_VOICE_VAD_REQUIRED_FRAMES", "7")
+    legacy = load_settings(root=tmp_path)
+    assert legacy.voice.vad_onset_frames == 7
+
+    monkeypatch.setenv("APRIL_VOICE_VAD_ONSET_FRAMES", "4")
+    reset_settings_cache()
+    explicit = load_settings(root=tmp_path)
+    assert explicit.voice.vad_onset_frames == 4
+    assert explicit.voice.endpoint_silence_ms == 650
+
+
 def test_speaker_model_and_governor_recheck_env_mappings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
