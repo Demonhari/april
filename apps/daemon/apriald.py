@@ -13,8 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from april_common.audit import AuditLogger
-from april_common.process_environment import ProcessCategory, build_process_environment
+from april_common.audit import AuditLogger, audit_logger_for_settings
+from april_common.process_environment import (
+    ProcessCategory,
+    build_process_environment,
+    without_raw_credentials,
+)
 from april_common.service_health import probe_service_health
 from april_common.settings import AprilSettings, get_settings
 from april_common.time import utc_now_iso
@@ -153,7 +157,7 @@ class AprialdSupervisor:
         self.sleep = sleep
         self.clock = clock
         self.stable_after_seconds = stable_after_seconds
-        self.audit = audit or AuditLogger(settings.audit_path)
+        self.audit = audit or audit_logger_for_settings(settings)
         self.lock = DaemonLock(daemon_lock_path(settings))
         self.children: dict[str, ChildRuntime] = {
             spec.name: ChildRuntime(spec=spec) for spec in default_child_specs(settings)
@@ -410,6 +414,7 @@ class AprialdSupervisor:
     async def _spawn_process(self, spec: ChildSpec) -> ProcessHandle:
         env = build_process_environment(
             spec.process_category,
+            source=without_raw_credentials(),
             april_home=self.settings.home,
             overrides=dict(spec.environment_overrides),
         )
@@ -658,7 +663,11 @@ def start_daemon_background(
         return current
     settings.logs_path.mkdir(parents=True, exist_ok=True)
     log_path = settings.logs_path / "apriald.log"
-    env = build_process_environment(ProcessCategory.DAEMON, april_home=settings.home)
+    env = build_process_environment(
+        ProcessCategory.DAEMON,
+        source=without_raw_credentials(),
+        april_home=settings.home,
+    )
     with log_path.open("ab") as log_file, Path(os.devnull).open("rb") as devnull:
         process = subprocess.Popen(
             [sys.executable, "-m", "apps.daemon.apriald"],

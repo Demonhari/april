@@ -33,6 +33,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from apps.runner.mac_report import redact_reason
+from april_common.audit import audit_logger_for_settings
+from april_common.credentials import CredentialStore
 from april_common.errors import ConfigError
 from april_common.settings import (
     KNOWN_DEFAULT_API_TOKENS,
@@ -43,8 +45,10 @@ from april_common.settings import (
     load_settings,
 )
 from april_common.time import utc_now_iso
+from april_common.token_setup import legacy_plaintext_credentials_detected
 from services.april_runtime.model_registry import ModelRegistry
 from services.evolution.adapters import inspect_adapter_state
+from services.memory.maintenance import check_database
 
 CheckStatus = Literal["ok", "warning", "blocker", "skipped"]
 
@@ -113,6 +117,13 @@ class ReadinessReport(BaseModel):
     voice_artifacts: list[VoiceArtifact] = Field(default_factory=list)
     api_token_status: str = "missing"
     runtime_token_status: str = "missing"
+    credential_store_selected: str = "unknown"
+    legacy_plaintext_credential_detected: bool = False
+    audit_chain_status: str = "unknown"
+    database_quick_check: str = "not_run"
+    database_foreign_key_consistent: bool = False
+    database_wal_state: str = "unknown"
+    last_successful_backup: dict[str, object] | None = None
     speaker_gate: str = "off"
     speaker_gate_supported: bool = False
     daemon_status: str = "unknown"
@@ -197,12 +208,14 @@ def _voice_artifact(
     )
 
 
-def build_readiness_report(home: Path) -> ReadinessReport:
+def build_readiness_report(
+    home: Path, *, credential_store: CredentialStore | None = None
+) -> ReadinessReport:
     root = home.expanduser().resolve()
     checks: list[ReadinessCheck] = []
 
     try:
-        settings = load_settings(root=root)
+        settings = load_settings(root=root, credential_store=credential_store)
     except ConfigError as exc:
         # A broken config blocks everything; report it honestly rather than crash.
         return ReadinessReport(
@@ -636,6 +649,58 @@ def build_readiness_report(home: Path) -> ReadinessReport:
     else:
         checks.append(ReadinessCheck(name="api/runtime tokens", status="ok", detail="configured"))
 
+    credential_store_selected: str = settings.security.credential_store
+    if credential_store_selected == "auto":
+        credential_store_selected = (
+            "macos-keychain"
+            if settings.environment == "production" and platform.system() == "Darwin"
+            else "legacy-development-default"
+        )
+    legacy_plaintext = legacy_plaintext_credentials_detected(settings.home)
+    checks.append(
+        ReadinessCheck(
+            name="credential store",
+            status="warning" if legacy_plaintext else "ok",
+            detail=(
+                f"{credential_store_selected}; legacy plaintext credential detected"
+                if legacy_plaintext
+                else credential_store_selected
+            ),
+            action=("run april security credentials migrate" if legacy_plaintext else None),
+        )
+    )
+    try:
+        audit_size = settings.audit_path.stat().st_size if settings.audit_path.exists() else 0
+        if audit_size <= 4 * 1024 * 1024:
+            audit_status = audit_logger_for_settings(settings).verify().status
+        else:
+            audit_status = "explicit_verification_required"
+    except (OSError, RuntimeError):
+        audit_status = "unavailable"
+    checks.append(
+        ReadinessCheck(
+            name="audit chain",
+            status=("ok" if audit_status in {"valid", "anchor_lagged"} else "warning"),
+            detail=audit_status,
+            action=(
+                "run april audit verify" if audit_status not in {"valid", "anchor_lagged"} else None
+            ),
+        )
+    )
+    database_status = check_database(settings.database_path, home=settings.home)
+    checks.append(
+        ReadinessCheck(
+            name="database quick integrity",
+            status="ok" if database_status.ok else "warning",
+            detail=(
+                f"quick_check={database_status.quick_check}; "
+                f"foreign_keys={'ok' if database_status.foreign_key_consistent else 'failed'}; "
+                f"journal={database_status.journal_mode}"
+            ),
+            action="run april database check" if not database_status.ok else None,
+        )
+    )
+
     # --- voice artifacts (optional) -----------------------------------------
     voice_enabled = settings.voice.enabled
     voice_specs = (
@@ -952,6 +1017,13 @@ def build_readiness_report(home: Path) -> ReadinessReport:
         voice_artifacts=voice_artifacts,
         api_token_status=api_status,
         runtime_token_status=runtime_status,
+        credential_store_selected=credential_store_selected,
+        legacy_plaintext_credential_detected=legacy_plaintext,
+        audit_chain_status=audit_status,
+        database_quick_check=database_status.quick_check,
+        database_foreign_key_consistent=database_status.foreign_key_consistent,
+        database_wal_state=database_status.journal_mode,
+        last_successful_backup=database_status.last_successful_backup,
         speaker_gate=settings.wake.speaker_gate,
         speaker_gate_supported=speaker_gate_supported,
         daemon_status=daemon_status,

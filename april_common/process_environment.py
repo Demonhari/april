@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
 
-PROCESS_ENVIRONMENT_POLICY_VERSION = "phase4a-env-v1"
+PROCESS_ENVIRONMENT_POLICY_VERSION = "phase4b-credential-id-v2"
 
 
 class ProcessCategory(StrEnum):
@@ -23,6 +23,7 @@ class ProcessCategory(StrEnum):
     MODEL_VERIFICATION = "model_verification"
     BENCHMARKING = "benchmarking"
     VERIFICATION_SUBPROCESS = "verification_subprocess"
+    CLI = "cli"
 
 
 _BASE_KEYS = frozenset(
@@ -42,10 +43,7 @@ _BASE_KEYS = frozenset(
         "SYSTEMROOT",  # Windows compatibility; harmless when absent.
     }
 )
-_SERVICE_TOKEN_KEYS: dict[ProcessCategory, frozenset[str]] = {
-    ProcessCategory.CORE_API: frozenset({"APRIL_API_TOKEN", "APRIL_RUNTIME_TOKEN"}),
-    ProcessCategory.RUNTIME: frozenset({"APRIL_RUNTIME_TOKEN"}),
-}
+_SERVICE_TOKEN_KEYS: dict[ProcessCategory, frozenset[str]] = {}
 _CATEGORY_APRIL_KEYS: dict[ProcessCategory, frozenset[str]] = {
     ProcessCategory.DAEMON: frozenset(
         {
@@ -94,7 +92,6 @@ _CATEGORY_APRIL_KEYS: dict[ProcessCategory, frozenset[str]] = {
             "APRIL_MEMORY_EMBEDDING_MODEL_ID",
             "APRIL_MEMORY_EMBEDDING_PROVIDER",
             "APRIL_RUNTIME_BACKEND",
-            "APRIL_RUNTIME_TOKEN",
             "APRIL_RUNTIME_URL",
             "APRIL_VECTOR_INDEX_PATH",
         }
@@ -125,7 +122,23 @@ _CATEGORY_APRIL_KEYS: dict[ProcessCategory, frozenset[str]] = {
             "APRIL_VECTOR_INDEX_PATH",
         }
     ),
+    ProcessCategory.CLI: frozenset(
+        {
+            "APRIL_API_HOST",
+            "APRIL_API_PORT",
+            "APRIL_ENVIRONMENT",
+        }
+    ),
 }
+_CREDENTIAL_IDENTIFIER_KEYS = frozenset(
+    {
+        "APRIL_CREDENTIAL_STORE",
+        "APRIL_CREDENTIAL_FILE_PATH",
+        "APRIL_API_CREDENTIAL_ID",
+        "APRIL_RUNTIME_CREDENTIAL_ID",
+        "APRIL_AUDIT_ANCHOR_CREDENTIAL_ID",
+    }
+)
 _NETWORK_DENIED = frozenset(
     {
         ProcessCategory.TOOL_WORKER,
@@ -167,6 +180,15 @@ def build_process_environment(
     allowed.update(key for key in parent if key.startswith("LC_"))
     allowed.update(_SERVICE_TOKEN_KEYS.get(category, frozenset()))
     allowed.update(_CATEGORY_APRIL_KEYS.get(category, frozenset()))
+    if category in {
+        ProcessCategory.DAEMON,
+        ProcessCategory.CORE_API,
+        ProcessCategory.RUNTIME,
+        ProcessCategory.SENTINEL_VOICE,
+        ProcessCategory.JOB_WORKER,
+        ProcessCategory.CLI,
+    }:
+        allowed.update(_CREDENTIAL_IDENTIFIER_KEYS)
     if april_home is not None:
         allowed.add("APRIL_HOME")
     if category in _NETWORK_DENIED:
@@ -182,6 +204,16 @@ def build_process_environment(
             )
         environment[key] = value
     return environment
+
+
+def without_raw_credentials(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Copy an environment while excluding APRIL's raw service credentials."""
+    parent = source if source is not None else os.environ
+    return {
+        key: value
+        for key, value in parent.items()
+        if key not in {"APRIL_API_TOKEN", "APRIL_RUNTIME_TOKEN"}
+    }
 
 
 def allowed_environment_names(

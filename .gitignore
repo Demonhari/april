@@ -1,6 +1,9 @@
 .env
+.env.april-credentials-rollback
+.*.april-credentials-rollback
 data/*.db
 data/*.db-*
+data/backups/
 data/vector_index/
 data/patches/
 data/artifacts/
@@ -17,6 +20,8 @@ data/apriald.pid
 data/apriald.status.json
 logs/*.log
 logs/*.jsonl
+logs/*.anchor
+logs/*.lock
 models/*.gguf
 models/*.bin
 tools/voice/
@@ -26,6 +31,7 @@ tools/voice/
 *.bin
 audio_cache/
 dist/
+*.april/
 *.app/
 .april_tmp/
 __pycache__/

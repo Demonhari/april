@@ -59,7 +59,7 @@ def client() -> AprilApiClient:
     settings = get_settings()
     return AprilApiClient(
         f"http://{settings.api.host}:{settings.api.port}",
-        settings.api.token,
+        settings.api.token or "",
         timeout=settings.runtime.request_timeout_seconds,
     )
 

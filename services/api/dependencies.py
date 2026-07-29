@@ -4,7 +4,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 
 from agents.registry import AgentRegistry
-from april_common.audit import AuditLogger
+from april_common.audit import audit_logger_for_settings
 from april_common.config_validation import validate_configuration
 from april_common.effective_config import (
     build_agent_registry_from_config,
@@ -127,7 +127,7 @@ async def build_container(settings: AprilSettings | None = None) -> ApiContainer
 
 async def _assemble_container(active_settings: AprilSettings, database: Database) -> ApiContainer:
     await run_migrations(database)
-    audit = AuditLogger(active_settings.audit_path)
+    audit = audit_logger_for_settings(active_settings)
     await AdapterLifecycleManager(
         active_settings,
         database,

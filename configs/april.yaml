@@ -1,7 +1,6 @@
 api:
   host: 127.0.0.1
   port: 8765
-  token: local-dev-token
   cors_enabled: false
   max_request_bytes: 1048576
 
@@ -9,11 +8,20 @@ runtime:
   host: 127.0.0.1
   port: 8766
   url: http://127.0.0.1:8766
-  token: local-dev-runtime-token
   backend: llama_cpp
   preload_keep_loaded: true
   request_timeout_seconds: 120
   max_loaded_specialist_models: 2
+
+# Secrets are resolved from the credential store. `auto` selects macOS
+# Keychain for production and retains development compatibility until the
+# explicit credential migration command is run.
+security:
+  credential_store: auto
+  credential_file_path: null
+  api_credential_id: core-api-token
+  runtime_credential_id: runtime-auth-token
+  audit_anchor_credential_id: audit-terminal-anchor
 
 memory:
   database_path: data/april.db

@@ -94,6 +94,7 @@ class SetupChecklist(BaseModel):
     generated_at: str
     steps: list[ChecklistStep] = Field(default_factory=list)
     next_command: str | None = None
+    security_integrity_commands: list[str] = Field(default_factory=list)
 
 
 def _desktop_stub_step(home: Path, command: str) -> ChecklistStep:
@@ -154,6 +155,13 @@ def build_setup_checklist(home: Path, *, daily: DailyDriverReport | None = None)
         generated_at=utc_now_iso(),
         steps=steps,
         next_command=_headline_next(steps),
+        security_integrity_commands=[
+            "run april security credentials migrate",
+            "run april security credentials rotate --all",
+            "run april audit verify",
+            "run april database check",
+            "run april database backup --output /private/backups/april-initial.april",
+        ],
     )
 
 

@@ -5,12 +5,15 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from april_common.errors import ConfigError
+
+if TYPE_CHECKING:
+    from april_common.credentials import CredentialStore
 
 KNOWN_DEFAULT_API_TOKENS = {"local-dev-token"}
 KNOWN_DEFAULT_RUNTIME_TOKENS = {"local-dev-runtime-token"}
@@ -37,7 +40,7 @@ class ApiSettings(BaseModel):
     # repr=False keeps the bearer token out of repr()/str() so it cannot leak
     # into logs, tracebacks or diagnostics. model_dump() still includes it so
     # callers that need it (and redact explicitly) keep working.
-    token: str = Field(default="local-dev-token", repr=False)
+    token: str | None = Field(default="local-dev-token", repr=False)
     cors_enabled: bool = False
     max_request_bytes: int = 1_048_576
 
@@ -85,6 +88,14 @@ class PermissionSettings(BaseModel):
 class WorkerSettings(BaseModel):
     tool_worker_enabled: bool = True
     job_worker_enabled: bool = True
+
+
+class SecuritySettings(BaseModel):
+    credential_store: Literal["auto", "keychain", "file", "memory"] = "auto"
+    credential_file_path: Path | None = None
+    api_credential_id: Literal["core-api-token"] = "core-api-token"
+    runtime_credential_id: Literal["runtime-auth-token"] = "runtime-auth-token"
+    audit_anchor_credential_id: Literal["audit-terminal-anchor"] = "audit-terminal-anchor"
 
 
 class BrainSettings(BaseModel):
@@ -394,6 +405,7 @@ class AprilSettings(BaseModel):
     paths: PathSettings = Field(default_factory=PathSettings)
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
     workers: WorkerSettings = Field(default_factory=WorkerSettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
     conversation_context: ConversationContextSettings = Field(
         default_factory=ConversationContextSettings
@@ -481,6 +493,14 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_RUNTIME_MAX_LOADED_SPECIALIST_MODELS": (
         "runtime",
         "max_loaded_specialist_models",
+    ),
+    "APRIL_CREDENTIAL_STORE": ("security", "credential_store"),
+    "APRIL_CREDENTIAL_FILE_PATH": ("security", "credential_file_path"),
+    "APRIL_API_CREDENTIAL_ID": ("security", "api_credential_id"),
+    "APRIL_RUNTIME_CREDENTIAL_ID": ("security", "runtime_credential_id"),
+    "APRIL_AUDIT_ANCHOR_CREDENTIAL_ID": (
+        "security",
+        "audit_anchor_credential_id",
     ),
     "APRIL_DATABASE_PATH": ("memory", "database_path"),
     "APRIL_VECTOR_INDEX_PATH": ("memory", "vector_index_path"),
@@ -624,6 +644,7 @@ _DOTENV_SUPPORTED_KEYS = frozenset(ENV_OVERRIDES) - {"APRIL_HOME"}
 _OPTIONAL_BLANK_IS_NONE: frozenset[str] = frozenset(
     {
         "APRIL_RUNTIME_TOKEN",
+        "APRIL_CREDENTIAL_FILE_PATH",
         "APRIL_MEMORY_EMBEDDING_MODEL_ID",
         "APRIL_VOICE_INPUT_DEVICE",
         "APRIL_VOICE_OUTPUT_DEVICE",
@@ -724,7 +745,13 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def load_settings(config_path: Path | None = None, *, root: Path | None = None) -> AprilSettings:
+def load_settings(
+    config_path: Path | None = None,
+    *,
+    root: Path | None = None,
+    credential_store: CredentialStore | None = None,
+    legacy_credential_migration: bool = False,
+) -> AprilSettings:
     home = Path(os.environ.get("APRIL_HOME", root or project_root()))
     # Effective-settings precedence, highest first:
     #   1. process environment   2. ${APRIL_HOME}/.env   3. YAML   4. model defaults
@@ -746,6 +773,9 @@ def load_settings(config_path: Path | None = None, *, root: Path | None = None) 
             value = _parse_env_value(raw)
         _set_nested(data, field_path, value)
     settings = AprilSettings.model_validate(data)
+    if legacy_credential_migration:
+        return settings
+    settings = _resolve_stored_credentials(settings, credential_store=credential_store)
     _validate_default_tokens(settings)
     return settings
 
@@ -757,6 +787,48 @@ def get_settings() -> AprilSettings:
 
 def reset_settings_cache() -> None:
     get_settings.cache_clear()
+
+
+def _resolve_stored_credentials(
+    settings: AprilSettings,
+    *,
+    credential_store: CredentialStore | None,
+) -> AprilSettings:
+    """Resolve secrets after non-secret configuration has been validated.
+
+    Legacy environment/YAML tokens remain readable in development until the
+    explicit migration command is run. An explicitly configured credential
+    backend, an injected test store, and every production load use only the
+    credential store and never fall back to plaintext.
+    """
+    use_store = (
+        credential_store is not None
+        or settings.security.credential_store != "auto"
+        or settings.environment == "production"
+    )
+    if not use_store:
+        return settings
+    if credential_store is None:
+        from april_common.credentials import select_credential_store
+
+        file_path = settings.security.credential_file_path
+        resolved_file = settings.resolve_path(file_path) if file_path is not None else None
+        credential_store = select_credential_store(
+            backend=settings.security.credential_store,
+            environment=settings.environment,
+            repository_root=settings.home,
+            file_path=resolved_file,
+        )
+    from april_common.credentials import CredentialKey
+
+    api_token = credential_store.get(CredentialKey.API_TOKEN)
+    runtime_token = credential_store.get(CredentialKey.RUNTIME_TOKEN)
+    return settings.model_copy(
+        update={
+            "api": settings.api.model_copy(update={"token": api_token}),
+            "runtime": settings.runtime.model_copy(update={"token": runtime_token}),
+        }
+    )
 
 
 def _validate_default_tokens(settings: AprilSettings) -> None:

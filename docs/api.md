@@ -210,6 +210,7 @@ run april voice listen
 run april verify --fake
 run april verify --target-mac
 run april setup tokens --output .env
+run april security credentials migrate
 ```
 
 `--fake` affects only newly started child services by setting
@@ -218,8 +219,8 @@ run april setup tokens --output .env
 `run april config validate` validates YAML shape, model references, agent
 references, tool references, and loopback defaults. `run april config inspect`
 prints effective non-secret config with the API token redacted. `run april
-setup tokens --output .env` generates random local API/Runtime tokens, writes
-them only to the chosen local env file, and does not print full token values.
+setup tokens --output .env` generates random local API/Runtime tokens in the
+selected credential store and writes only non-secret identifiers to `.env`.
 `run april verify --fake` uses isolated temporary data paths and dynamic ports so it can
 exercise the local structured specialist workflow without modifying user
 projects or requiring GGUF files.

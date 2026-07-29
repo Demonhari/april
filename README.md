@@ -4,25 +4,6 @@ APRIL is a private, local-first AI assistant MVP for macOS. It is CLI-first, use
 
 No model files are downloaded automatically. No cloud AI APIs, Ollama integration, telemetry, or unrestricted shell execution are included.
 
-## Durable jobs and Tool Worker
-
-Schema 19 adds durable background jobs plus separate Job Worker and Tool Worker
-processes. Repository indexing, memory reindexing, document indexing, approved
-configured tests, and self-checks can survive Core API restarts.
-
-```bash
-run april jobs submit self_check --payload '{}' --wait
-run april jobs list
-run april jobs show JOB_ID
-run april jobs cancel JOB_ID
-run april jobs retry JOB_ID
-```
-
-Ctrl-C during `--wait` stops polling but does not cancel or delete the job.
-Command, test, patch, and Git-commit mutations execute only in the owner-only
-Unix-socket Tool Worker and fail closed when it is unavailable. See
-[Durable jobs and isolated tool execution](docs/background-jobs.md).
-
 ## Architecture
 
 ```mermaid
@@ -216,22 +197,10 @@ real models, live audio, or native Mac packaging.
 | Scoped log/cache cleanup (plan + Level 4 approved apply) | Implemented, security-tested |
 | Secure first-run bootstrap (`setup bootstrap`) | Implemented, tested with temp homes |
 | Interactive push-to-talk (stop-controlled capture) | Implemented, tested with fake mic + mocked input |
-| Wake feedback verbs, earcon path, and listening status | Implemented, fake-audio/API/SPA tested; live wake still requires target-Mac `verify-wake-live` |
-| Learned-guidance synthesis (deterministic Tier A; optional local model-drafted Tier B) | Implemented, fake-runtime tested; Dreamer remains off and Tier B defaults off |
-| Stable agent identity cards and base-first overlay ordering | Implemented, prompt/overlay tested |
-| LoRA adapter lifecycle (`april evolve adapter`) | Implemented, fake/mock tested; activation requires local perplexity evidence and production real-model report |
-| Ladder thresholds, gated threshold overlays, council mode, reminder reflex | Implemented, fake-backend tested |
 | Real GGUF model load/chat/stream/unload | Implemented; verified only by target-Mac `--require-real-model` reports with local GGUFs |
 | Live microphone, whisper.cpp, Piper, wake-word | **Not verified here** — requires your local binaries/models |
-| Speaker soft gate | Adapter/runbook implemented; target Mac still needs an operator-supplied local speaker-embedding ONNX |
 | Real-model target-Mac acceptance report | Implemented; runs real checks only when you supply a GGUF |
 | Signed/notarized packaging, launch-at-login | Out of scope (see below) |
-
-Production blockers are explicit, not hidden by fake tests: GGUF files are not
-committed, no wake-word or speaker-embedding ONNX model ships in the repo,
-`wake.speaker_gate: soft` degrades to off until its configured local model loads, LoRA training
-remains a manual local runbook, and a fake-backend verification is never
-production readiness.
 
 CI and fake verification are not proof of real GGUF readiness. Real-model
 readiness is proven only by a target-Mac report that loads, chats, streams, and
@@ -281,44 +250,14 @@ APRIL never chooses or downloads an embedding model for you. Diagnose and set on
 up with explicit, dry-run-by-default commands:
 
 ```bash
-# Manual recommended embedding model (provide the local file yourself):
-run april model import --role embedding --id april-embedding \
-  --name nomic-embed-text-v1.5 \
-  --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf
-export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
-export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding
-run april memory doctor --verify-runtime-embedding
-run april memory reindex
-
 # Diagnose the active provider, configured model, file existence, index match,
 # whether a reindex is required, and the exact next command — read-only:
 run april memory doctor
-# Inspect pointer/recovery state without changing it:
-run april memory repair-index
-# Apply only the reported pointer repair and safe generation cleanup:
-run april memory repair-index --apply
 # Optionally prove the local embedding actually serves vectors via /runtime/embed:
 run april memory doctor --verify-runtime-embedding
 # Register a local embedding GGUF and switch to runtime-local (dry-run unless --apply):
 run april setup embeddings --model /absolute/path/to/embedding.gguf --id april-embedding --apply
 ```
-
-The recommendation is `nomic-embed-text-v1.5` Q8, registered manually with
-`role=embedding`. Hashed-token remains the offline first-run fallback and is
-reported as a degraded semantic-memory path in hardened readiness. Its Unicode
-tokenizer implementation is versioned in vector-generation metadata; a change
-requires an explicit reindex instead of silently mixing vector spaces.
-
-For optional deeper local reasoning, manually register Qwen3-4B Q4_K_M:
-
-```bash
-run april model import --role reasoning --id april-reasoning \
-  --name qwen3-4b --path /absolute/path/qwen3-4b-Q4_K_M.gguf
-```
-
-Deep and Council reasoning use the registered `role=reasoning` model when it is
-available. Otherwise APRIL truthfully falls back to Brain. Qwen3-4B must be
-benchmarked on the Intel MacBook before it becomes a recommended default.
 
 Every reader and writer of the local vector index — the API container and the
 `repo_indexer`, `document_indexer`, and `document_search` tools — resolves the
@@ -331,17 +270,6 @@ go-live hardening warnings, and the Desktop Readiness screen. **Switching
 embedding providers changes the vector space and requires a
 `run april memory reindex`** — `memory doctor` and `/readiness` always print the
 exact reindex command.
-
-Vector-index writes publish immutable generations under
-`data/vector_index/generations/`. APRIL fsyncs and validates the complete
-`records.json`/`vectors.npy`/`metadata.json` set before atomically replacing the
-newline-terminated `CURRENT` pointer. Readers therefore use one complete old or
-new generation, never a mixture. The active generation plus one validated
-recovery generation are retained. If `CURRENT` is missing, malformed, or names
-a corrupt generation, reads may use the newest compatible generation in
-degraded mode without changing `CURRENT`; use the dry-run repair command above
-to inspect it, then opt in with `--apply`. If no valid generation exists, use
-`run april memory reindex`.
 
 ## Backends, Verification, and Honest Status
 
@@ -678,8 +606,8 @@ real thing and make the readiness ladder explicit on this Mac:
 1. fake/local plumbing works,
 2. real GGUF models are installed,
 3. real models load / chat / stream / unload,
-4. ambiguous requests produce strict-JSON routing with the configured local
-   router model (the Brain alias by default, with no fallback),
+4. the Brain produces strict-JSON routing with the **real** brain model (no
+   fallback),
 5. specialist model switching keeps the brain resident, and
 6. APRIL is actually ready on this Mac.
 
@@ -1062,19 +990,7 @@ run april voice test-tts "Hello Hari"
 run april voice ptt
 run april voice listen
 run april memory doctor
-run april memory repair-index
-run april memory repair-index --apply
-run april memory inspect --state machine
 run april eval brain --fake
-run april sessions
-run april good
-run april bad "wrong file"
-run april agent pool
-run april evolve status
-run april evolve history
-run april evolve pending
-run april evolve off
-run april evolve dataset export
 ```
 
 `run april --fake` starts missing services with `APRIL_RUNTIME_BACKEND=fake`
@@ -1229,25 +1145,8 @@ is ignored by Git. Signed/notarized packaging remains future work.
 `POST /chat` accepts an optional `conversation_id`. If omitted, APRIL creates a
 local conversation and returns its ID in `result.conversation_id`. The
 interactive CLI creates one conversation ID per chat session and reuses it for
-every turn. Older complete turns are incrementally compressed into one
-conversation-local “conversation so far” record. The most recent four complete
-turns remain verbatim by default, and the current or suspended turn is never
-summarized.
-
-Advancement uses the configured local Reading Agent (`april-reading`) with
-strict structured JSON. If that optional model is missing, times out, or returns
-invalid output, chat continues with the previous validated summary and recent
-complete turns; the checkpoint does not move. Summary records are not durable
-user memories, contain neither raw tool output nor secrets, and cascade when
-their conversation is deleted.
-
-Core applies separate character pre-bounds to rendered summary (4,000), recent
-history (8,000), durable memory/user model (4,000), files/documents (6,000), and
-tool output (3,000). These are category isolation limits, not token estimates.
-April Runtime remains authoritative for exact tokenizer-based fitting and the
-model context window. Runtime removes complete turns or tool sequences as units;
-an assistant tool request is retained with its tool result and continuation, or
-the whole optional sequence is removed.
+every turn. Recent bounded history is included in the next agent prompt as
+context, not instructions.
 
 Conversations are bound to either a selected project ID or explicit no-project
 scope. APRIL rejects attempts to reuse a project conversation with a different
@@ -1341,10 +1240,8 @@ hashed-token embeddings** instead of crashing.
 `run april memory doctor --json` reports the configured embedding provider,
 active vector-index provider, dimensions, whether runtime-local was requested,
 fallback/reindex risk, whether an embedding-role model is registered, and
-whether that model path exists. It also reports the active/effective generation,
-last successful full reindex, recovery status, and the exact repair or rebuild
-command. It does not start Runtime or load a model unless you explicitly pass
-`--verify-runtime-embedding`, which probes `/runtime/embed`.
+whether that model path exists. It does not start Runtime or load a model unless
+you explicitly pass `--verify-runtime-embedding`, which probes `/runtime/embed`.
 Real semantic memory requires a runtime-local embedding model plus
 `run april memory reindex` after switching providers.
 
@@ -1352,9 +1249,8 @@ Switching embedding providers changes the vector space, so APRIL refuses to
 silently mix spaces: searches/writes against an index built with a different
 provider/dimension raise an actionable error pointing you to
 `run april memory reindex`. Reindexing re-embeds existing memories and known
-sources in bounded batches, writes one complete generation, and switches
-`CURRENT` once. An embedding or publication failure leaves the previous
-generation active.
+sources under the current provider — it never wipes your index without this
+explicit command.
 
 Document ingestion is offline. Text/source files are supported by default; PDF
 text extraction is local and optional via `pip install -e '.[documents]'`.
@@ -1368,13 +1264,6 @@ Voice is optional and disabled by default. Configure local `whisper.cpp`,
 Piper, optional `sounddevice`, and optional openWakeWord model paths in
 `configs/april.yaml` or environment variables. No voice model, speech model,
 wake-word model, or binary is downloaded by APRIL.
-
-Sentinel supports separate local whisper.cpp adapters for wake confirmation and
-full utterance transcription via
-`voice.wake_confirmation_whisper_{binary,model}_path` and
-`voice.transcription_whisper_{binary,model}_path`. Existing configurations that
-set only `voice.whisper_binary_path` and `voice.whisper_model_path` remain valid:
-those legacy paths are used for both stages.
 
 ```bash
 .venv/bin/python -m pip install -e '.[voice,dev,runtime]' -c constraints-dev.txt
@@ -1390,7 +1279,6 @@ april voice health
 april voice devices
 april voice ptt
 april voice listen
-april --listen        # top-level alias: hands this terminal to the Sentinel
 run april setup voice \
   --whisper-binary data/voice_artifacts/whisper.cpp/build/bin/whisper-cli \
   --whisper-model data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin \
@@ -1404,19 +1292,7 @@ run april setup voice \
   --piper-model data/voice_artifacts/piper/en_US-lessac-medium.onnx \
   --apply --enable
 run april voice verify-live --report data/verification/voice-live.json
-run april voice verify-wake-live --report data/verification/wake-live.json
-run april voice verify-conversation-live \
-  --report data/verification/voice-conversation-live.json
 ```
-
-Automatic wake capture confirms speech onset independently from utterance end.
-The default endpoint requires 650 ms of continuous calibrated silence after at
-least 300 ms of valid speech; short natural pauses remain in the same turn.
-Sentinel keeps reading microphone frames during Core response generation, Piper
-synthesis, and playback. Wake-word barge-in is the safe default without
-acoustic echo cancellation; trigger (`wake_word`/`speech`/`off`) and action
-(`stop`/`duck`) are configured separately. APRIL does not claim semantic
-endpointing, pitch detection, echo cancellation, or speaker authentication.
 
 `run april voice ptt` (no `--seconds`) is genuinely interactive: press Enter to
 start capture and Enter again to stop. Capture also ends on the configured
@@ -1442,10 +1318,6 @@ model, missing Piper binary, missing Piper voice model, the **openWakeWord engin
 model** being missing. It then reports three escalating, redaction-safe readiness
 verdicts (also surfaced on the Desktop Readiness screen via `/readiness`):
 
-- `text_voice_input_ready` — microphone and transcription STT are usable; this
-  remains true when Piper is missing, so text/API delivery can continue.
-- `wake_input_ready` — text voice input plus confirmation STT, openWakeWord, and
-  a configured wake model; spoken output is not required for this rung.
 - `push_to_talk_ready` — a usable microphone plus whisper.cpp (STT) and Piper
   (TTS). **It passes without any wake-word model.**
 - `wake_word_ready` — everything push-to-talk needs **plus** the openWakeWord
@@ -1468,20 +1340,7 @@ Until that real ONNX model exists and the live wake check passes,
 `wake_word_live_verified` remains false.
 
 Push-to-talk starts only from explicit CLI invocation. API, Runtime, desktop, and
-normal CLI startup never activate the microphone. `apriald` is the sole owner of
-the resident Sentinel and its microphone. `april voice listen` and `april
---listen` attach a terminal session over the owner-only local control socket;
-they never instantiate a second Sentinel or silently open another microphone.
-Only one terminal controller lease is accepted at a time. If autostart is
-enabled, attachment waits for bounded Core API health and reports the daemon log
-and status paths on timeout.
-
-**Speaker gating needs an operator-supplied local model.** `wake.speaker_gate`
-accepts `off` and `soft`, and APRIL ships the bounded local ONNX adapter plus
-`scripts/speaker_verifier/README.md`. No embedding model ships with APRIL. Until
-`wake.speaker_verifier_model_path` names a compatible model, soft mode emits one
-audited degradation and behaves as off. `april voice enroll` records local
-samples; enrollment alone never claims verification or changes wake behavior.
+normal CLI startup never activate the microphone.
 
 `run april voice verify-live` is the explicit live hardware check. It runs voice
 doctor, prints macOS microphone permission guidance, asks before recording a
@@ -1543,122 +1402,6 @@ run april briefing
 This calls the authenticated `GET /scheduler/briefing/preview` endpoint and
 renders the title and body. `GET /health` reports the scheduler block
 (`enabled`, `running`, `briefing_enabled`, `fired_reminders`).
-
-## v2 Control Plane (sessions, feedback, evolution, pool)
-
-**Sessions & Archive reflection.** Every surface (terminal, voice, desktop,
-hotkey, socket) converges on one continuity-aware session stream. Closing a
-session — `POST /sessions/{id}/close`, quitting the CLI REPL (`/quit`, `/exit`,
-Ctrl-D, Ctrl-C), or the idle sweep once `session.continuity_minutes` elapses
-(scheduler-driven) — triggers local Archive reflection, which may write bounded,
-policy-filtered machine memories. Inspect sessions with `april sessions` or the
-Desktop *Sessions* screen.
-
-**Feedback.** `april good` / `april bad "reason"` (or the 👍/👎 buttons on
-Desktop chat answers) record explicit feedback bound to the latest agent run.
-Denying an approval records an `approval_denied` negative signal automatically.
-A deliberately conservative, deterministic prefix classifier (no model) records
-`implicit_correction` feedback only for unambiguous correction openers such as
-"That's wrong…" inside an existing conversation.
-
-**Memory lifecycle.** Machine-written memories decay deterministically when
-unused (confidence shrinks; low-confidence rows start *fading* with a future
-`expires_at`). Nothing is silently deleted — inspect any state with
-`april memory inspect --state machine|superseded|expired|fading|active`.
-
-**Self-evolution (Dreamer) controls.** The nightly Dreamer stays OFF by default
-and is additionally gated by AC power (`pmset`), user idleness (`ioreg`
-HIDIdleTime), a wall-clock budget (`evolution.max_minutes`), and a local kill
-switch. By default, the same governor is rechecked between phases; if the Mac
-becomes busy, remaining work phases pause while D6 still records the reason:
-
-```bash
-april evolve status            # enabled, kill switch, last run, overlay counts
-april evolve history           # past runs, newest first
-april evolve report            # latest nightly report (newest by created_at)
-april evolve pending           # write-capable overlays awaiting approval
-april evolve approve AGENT SHA256   # approve exact overlay bytes
-april evolve diff AGENT [--from N --to M]
-april evolve rollback AGENT VERSION
-april evolve off               # hard kill switch (data/evolution/DISABLED)
-april evolve on                # clear the kill switch
-april evolve dataset export --name my-dataset   # reviewable JSONL (M15)
-april evolve adapter list [--model-id april-brain]
-april evolve adapter activate april-brain /absolute/path/adapter.gguf \
-  --evidence data/evolution/adapters/evidence/april-brain.json \
-  --verification-report data/verification/mac-readiness.json
-april evolve adapter rollback april-brain [--version N]
-```
-
-Overlays are advisory prose only: structural tool/permission content is
-rejected at generation, at approval, and again at load. Write-capable agents
-(Forge/Hand) never auto-apply — their overlays wait in `evolve pending`.
-Tier A learned guidance is always deterministic: it combines recent
-Archive/Dreamer correction memories, the surviving facts from adjudicated
-memory contradictions, and negative-feedback reasons. Evidence is ordered by
-recency and confidence, deduplicated, and attributed to its originating agent
-run when session provenance is available (otherwise Prime/general). Optional
-Tier B is enabled only with `evolution.model_drafted_overlays: true`; Archive
-then asks the configured local Runtime for at most one advisory draft from the
-same inputs. Runtime/model failure is audited and skipped, never replaced with
-fabricated prose. Tier B uses the same structural guard, D5 eval ratchet, and
-Forge/Hand exact approval requirement as Tier A. Both tiers share the existing
-two-candidate nightly cap and `prompt_overlay_max_chars` budget.
-
-Each `agents/*/prompt.md` begins with a stable identity card (call sign,
-mandate, and non-goals): Prime/general, Forge/coding, Scout/reading,
-Muse/creative, Sage/reasoning, Hand/system action, and Archive/memory. Prompt
-assembly always preserves those base bytes first and appends `Learned guidance`
-after the base contract; active overlays never rewrite prompt files.
-
-The Dreamer may also propose a bounded, deterministic ladder-threshold overlay
-under `data/evolution/config/`; it can contain only
-`deep_confidence_threshold` and `verified_confidence_threshold`, activates only
-when the routing eval score is at least the running baseline, and disappears by
-deleting `data/evolution/`.
-
-LoRA adapters can be served either by explicit `adapter_path` in
-`configs/models.yaml` (manual override) or by an active fenced pointer under
-`data/evolution/adapters/`. Runtime never opens the API SQLite database:
-resolution is `adapter_path` > active pointer file > no adapter. Activation
-requires local perplexity evidence (`adapter_ppl <= base_ppl`) and, in
-`APRIL_ENV=production`, a fresh real-model verification report that loaded the
-same adapter hash. Rollback is a pointer flip and every state change is audited.
-Runtime pointer resolution lives in the leaf-only
-`april_common.adapter_pointer` module, so importing April Runtime does not pull
-`services.evolution`, `services.memory`, or the Core API SQLite graph into the
-Runtime process. `services.evolution.adapters` re-exports the pointer helpers
-for API compatibility.
-Training and perplexity measurement remain a manual local runbook (see
-`scripts/finetune/README.md`); a configured/pointer-selected but missing adapter
-fails the model load hard instead of silently serving the base model.
-
-**Wake feedback and state.** Exact wake feedback phrases such as "that was
-wrong" and "good job" are recorded as feedback for the latest run in that wake
-session's conversation instead of being sent to the Brain. Near misses still
-route normally. Sentinel plays a generated short earcon on accepted wakes when
-audio dependencies are present, writes `idle | listening | muted` status under
-`data/evolution/wake/`, and the authenticated wake status plus Desktop header
-surface that state.
-
-**Cold fake verification.** `run april verify --fake` sends one unscored
-tool-routing warm-up after service readiness and project registration. The
-first scored tool-routing chat gets one bounded retry only when its response is
-missing the normal `result` envelope; all other assertions and scored totals
-are unchanged. A final missing-result failure includes a bounded response-body
-snippet for diagnosis instead of a bare key lookup error.
-
-**Ladder alignment.** `deep_mode.council_mode` defaults to the existing
-`reasoning_n` best-of-N behavior. `multi_agent` uses one responder each from the
-reasoning, general, and creative agents' configured models when at least two
-distinct model IDs resolve; otherwise it falls back to `reasoning_n` and records
-that fallback in metadata. Exact reminder-list phrases are answered from the
-local reminder store at R0 without a model call.
-
-**Named agent pool.** `april agent pool` (or `GET /pool/agents`) shows each
-specialist's call sign (Prime, Sage, Muse, Scout, Forge, Hand) with honest
-rolling stats aggregated from persisted `agent_runs` and `feedback_events` —
-no synthesized scores.
 
 ## Quality Gates
 
@@ -1794,11 +1537,6 @@ milestones rather than hidden gaps:
 - cloud sync, telemetry, and any automatic model downloading
 - signed/notarized macOS application packaging and launch-at-login
 - external connectors
-- a target-Mac speaker-embedding model (the adapter/runbook ship; soft mode
-  degrades to off until the operator supplies and validates the model)
-- automatic LoRA training (the supervised local runbook remains manual)
-- Governor thread throttling
-- a dedicated SPA adapters screen
 
 Model files are never committed to this repository and are never downloaded
 automatically; you provide them locally.

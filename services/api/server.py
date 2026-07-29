@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import platform
 import re
 import uuid
 from collections.abc import AsyncIterator
@@ -38,6 +39,7 @@ from april_common.settings import (
     get_settings,
 )
 from april_common.time import utc_now
+from april_common.token_setup import legacy_plaintext_credentials_detected
 from services.api.auth import require_bearer_token
 from services.api.dependencies import ApiContainer, build_container
 from services.api.schemas import (
@@ -95,6 +97,7 @@ from services.jobs.schemas import (
     JobSubmission,
 )
 from services.jobs.store import JobNotFoundError, JobTransitionError
+from services.memory.maintenance import check_database
 from services.memory.migrations import SCHEMA_VERSION
 from services.memory.writer import MemoryWriter
 from services.pool.agent_pool import AgentPool
@@ -202,7 +205,13 @@ def _read_activity_events(audit_path: Path, limit: int) -> list[dict[str, Any]]:
             continue
         if not isinstance(record, dict):
             continue
-        projected = {key: value for key, value in record.items() if key in _ACTIVITY_ALLOWED_KEYS}
+        safe_source = dict(record)
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            safe_source.update(payload)
+        projected = {
+            key: value for key, value in safe_source.items() if key in _ACTIVITY_ALLOWED_KEYS
+        }
         if projected:
             events.append(projected)
         if len(events) >= limit:
@@ -1733,6 +1742,30 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         database_available = (await active.database.fetchone("SELECT 1")) is not None
     except Exception:
         database_available = False
+    database_integrity = await asyncio.to_thread(
+        check_database,
+        active.settings.database_path,
+        home=active.settings.home,
+    )
+    try:
+        audit_size = (
+            active.settings.audit_path.stat().st_size if active.settings.audit_path.exists() else 0
+        )
+        audit_chain_status = (
+            active.approvals.audit.verify().status
+            if audit_size <= 4 * 1024 * 1024
+            else "explicit_verification_required"
+        )
+    except (OSError, RuntimeError, AprilError):
+        audit_chain_status = "unavailable"
+    legacy_plaintext = legacy_plaintext_credentials_detected(active.settings.home)
+    credential_store_selected: str = active.settings.security.credential_store
+    if credential_store_selected == "auto":
+        credential_store_selected = (
+            "macos-keychain"
+            if active.settings.environment == "production" and platform.system() == "Darwin"
+            else "legacy-development-default"
+        )
     model_registry = _model_registry_readiness(active.settings)
     summary_readiness = _conversation_summary_readiness(
         active,
@@ -1989,6 +2022,16 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             "api_token": {"status": "configured" if active.settings.api.token else "missing"},
             "runtime_token": {
                 "status": "configured" if active.settings.runtime.token else "missing"
+            },
+            "credential_store": credential_store_selected,
+            "legacy_plaintext_credential_detected": legacy_plaintext,
+            "audit_chain_status": audit_chain_status,
+            "database_integrity": {
+                "quick_check": database_integrity.quick_check,
+                "foreign_key_consistent": database_integrity.foreign_key_consistent,
+                "wal_state": database_integrity.journal_mode,
+                "last_successful_backup": database_integrity.last_successful_backup,
+                "checked_at": database_integrity.checked_at,
             },
             "api_localhost_binding": api_localhost,
             "runtime_localhost_binding": runtime_localhost,

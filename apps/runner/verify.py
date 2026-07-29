@@ -40,15 +40,18 @@ from apps.runner.multi_model_report import (
     SpecialistSwitchReport,
     build_multi_model_report,
 )
+from april_common.audit import audit_logger_for_settings
 from april_common.errors import ConfigError
 from april_common.process_environment import ProcessCategory, build_process_environment
 from april_common.process_runner import run_restricted_process_sync
 from april_common.service_health import ServiceHealthResult, probe_service_health
 from april_common.settings import load_settings
+from april_common.token_setup import legacy_plaintext_credentials_detected
 from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
 from services.brain.schemas import BrainDecision
 from services.evolution.adapters import sha256_file
 from services.memory.database import connect_sqlite, sqlite_write_transaction
+from services.memory.maintenance import check_database
 from services.voice.health import query_audio_devices, voice_doctor
 
 VerifyStatus = Literal["pass", "fail", "skip", "manual"]
@@ -83,6 +86,71 @@ def _verification_health_failure(
 def run_fake_verification(home: Path) -> list[VerifyCheck]:
     verifier = LauncherVerifier(home=home)
     return verifier.run()
+
+
+def run_local_security_integrity_verification(home: Path) -> list[VerifyCheck]:
+    """Explicit local Phase 4B checks; never exposes credential values or payloads."""
+    try:
+        settings = load_settings(root=home)
+    except (ConfigError, RuntimeError) as exc:
+        return [
+            VerifyCheck(
+                name="security configuration",
+                ok=False,
+                detail=f"unavailable ({type(exc).__name__})",
+            )
+        ]
+    store_name: str = settings.security.credential_store
+    if store_name == "auto":
+        store_name = (
+            "macos-keychain"
+            if settings.environment == "production" and platform.system() == "Darwin"
+            else "legacy-development-default"
+        )
+    legacy = legacy_plaintext_credentials_detected(settings.home)
+    audit_result = audit_logger_for_settings(settings).verify()
+    database = check_database(settings.database_path, home=settings.home, full=False)
+    backup = database.last_successful_backup
+    backup_detail = str(backup.get("creation_timestamp", "known")) if backup else "none recorded"
+    return [
+        VerifyCheck("credential store selected", True, store_name),
+        VerifyCheck(
+            "API credential available",
+            bool(settings.api.token),
+            "available" if settings.api.token else "missing",
+        ),
+        VerifyCheck(
+            "Runtime credential available",
+            bool(settings.runtime.token),
+            "available" if settings.runtime.token else "missing",
+        ),
+        VerifyCheck(
+            "legacy plaintext credential",
+            not legacy,
+            "detected; run security credentials migrate" if legacy else "not detected",
+        ),
+        VerifyCheck(
+            "audit chain",
+            not audit_result.corrupt,
+            audit_result.status,
+        ),
+        VerifyCheck(
+            "database quick_check",
+            database.quick_check == "ok",
+            database.quick_check,
+        ),
+        VerifyCheck(
+            "database foreign keys",
+            database.foreign_key_consistent,
+            (
+                "ok"
+                if database.foreign_key_consistent
+                else f"{database.foreign_key_violations} violation(s)"
+            ),
+        ),
+        VerifyCheck("database WAL state", database.journal_mode == "wal", database.journal_mode),
+        VerifyCheck("last successful backup", True, backup_detail),
+    ]
 
 
 def run_workflow_verification(

@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from apps.runner.readiness import ReadinessReport, build_readiness_report
+from april_common.credentials import CredentialKey, InMemoryCredentialStore
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +60,13 @@ def _write_home(
         }
     (configs / "models.yaml").write_text(yaml.safe_dump({"models": models}), encoding="utf-8")
     return home
+
+
+def _production_store() -> InMemoryCredentialStore:
+    store = InMemoryCredentialStore()
+    store.set(CredentialKey.API_TOKEN, "prod-api-token-for-readiness")
+    store.set(CredentialKey.RUNTIME_TOKEN, "prod-runtime-token-for-readiness")
+    return store
 
 
 def test_fake_backend_without_models_is_not_ready(tmp_path: Path) -> None:
@@ -131,11 +139,10 @@ def test_production_readiness_warns_without_runtime_local_embedding_role(
         backend="llama_cpp",
         extra={
             "environment": "production",
-            "api": {"token": "prod-api-token-for-test"},
-            "runtime": {"backend": "llama_cpp", "token": "prod-runtime-token-for-test"},
+            "runtime": {"backend": "llama_cpp"},
         },
     )
-    report = build_readiness_report(home)
+    report = build_readiness_report(home, credential_store=_production_store())
     assert "runtime-local embedding hardening" in report.warnings
     assert "embedding-role model registration" in report.warnings
 
@@ -420,11 +427,10 @@ def test_hashed_token_embeddings_warn_in_production(tmp_path: Path) -> None:
         tmp_path,
         extra={
             "environment": "production",
-            "api": {"token": "prod-api-token-3f9c2a71b4d8"},
-            "runtime": {"backend": "fake", "token": "prod-runtime-token-8e1d5c92aa07"},
+            "runtime": {"backend": "fake"},
         },
     )
-    report = build_readiness_report(home)
+    report = build_readiness_report(home, credential_store=_production_store())
     check = _check(report, "embedding provider hardening")
     assert check is not None
     assert check.status == "warning"
@@ -621,8 +627,7 @@ def test_production_readiness_reports_overlay_eval_blockers_redacted(
         backend="fake",
         extra={
             "environment": "production",
-            "api": {"token": "prod-api-token-3f9c2a71b4d8"},
-            "runtime": {"backend": "fake", "token": "prod-runtime-token-8e1d5c92aa07"},
+            "runtime": {"backend": "fake"},
         },
     )
     report_dir = home / "data" / "evolution" / "reports"
@@ -648,7 +653,7 @@ def test_production_readiness_reports_overlay_eval_blockers_redacted(
         encoding="utf-8",
     )
 
-    report = build_readiness_report(home)
+    report = build_readiness_report(home, credential_store=_production_store())
 
     assert report.production_real_runtime_eval_required is True
     assert report.overlay_eval_mode == "deterministic_fixture_plus_real_runtime"

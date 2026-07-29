@@ -237,7 +237,7 @@ def _build_loop(
 async def _default_api_caller(settings: AprilSettings, conversation_id: str, message: str) -> str:
     client = AprilApiClient(
         f"http://{settings.api.host}:{settings.api.port}",
-        settings.api.token,
+        settings.api.token or "",
         timeout=settings.runtime.request_timeout_seconds,
     )
     response = await client.post(
@@ -552,7 +552,7 @@ def _build_live_sentinel(settings: AprilSettings) -> Any:
     )
     api_delivery = ApiWakeDelivery(
         base_url=f"http://{settings.api.host}:{settings.api.port}",
-        token=settings.api.token,
+        token=settings.api.token or "",
     )
     sentinel_box: dict[str, Any] = {}
 

@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from agents.registry import AgentRegistry
-from april_common.audit import AuditLogger
+from april_common.audit import AuditLogger, audit_logger_for_settings
 from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
 from services.evolution.consolidate import consolidate_memories
@@ -535,7 +535,6 @@ async def run_standalone(settings: AprilSettings, now: datetime) -> DreamerRunRe
     This is the only path that applies governor.dreamer_nice — it deprioritizes
     a process whose whole job is the nightly dream, never the shared Core API.
     """
-    from april_common.audit import AuditLogger
     from services.april_runtime.client import RuntimeClient
     from services.memory.database import Database
     from services.memory.migrations import run_migrations
@@ -546,7 +545,7 @@ async def run_standalone(settings: AprilSettings, now: datetime) -> DreamerRunRe
     try:
         await run_migrations(database)
         memory = SqliteMemory(database)
-        audit = AuditLogger(settings.audit_path)
+        audit = audit_logger_for_settings(settings)
         governor = ResourceGovernor(settings)
         gate = EvolutionSchedulerGate(settings, memory, governor=governor)
         dreamer = DreamerService(

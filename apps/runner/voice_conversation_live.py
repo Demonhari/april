@@ -62,9 +62,7 @@ class VoiceConversationLiveReport(BaseModel):
     warning_codes: list[str] = Field(default_factory=list, max_length=16)
 
 
-def write_voice_conversation_live_report(
-    report: VoiceConversationLiveReport, path: Path
-) -> Path:
+def write_voice_conversation_live_report(report: VoiceConversationLiveReport, path: Path) -> Path:
     resolved = path.expanduser()
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -102,11 +100,7 @@ async def run_voice_conversation_live_verification(
         try:
             if retain_debug_audio and not settings.voice.retain_debug_audio:
                 settings = settings.model_copy(
-                    update={
-                        "voice": settings.voice.model_copy(
-                            update={"retain_debug_audio": True}
-                        )
-                    }
+                    update={"voice": settings.voice.model_copy(update={"retain_debug_audio": True})}
                 )
             sentinel, delivery = _build_production_verifier(settings)
         except RuntimeUnavailableError:
@@ -230,7 +224,7 @@ def _build_production_verifier(settings: AprilSettings) -> tuple[Any, Any]:
     player = SoundDeviceAudioPlayer(device=voice.output_device)
     delivery = ApiWakeDelivery(
         base_url=f"http://{settings.api.host}:{settings.api.port}",
-        token=settings.api.token,
+        token=settings.api.token or "",
         settings=settings,
         tts=tts,
         player=player,

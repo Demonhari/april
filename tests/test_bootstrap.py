@@ -68,17 +68,13 @@ def test_bootstrap_generates_tokens_without_printing(home_with_configs: Path) ->
     env_file = home_with_configs / ".env"
     assert env_file.exists()
     content = env_file.read_text(encoding="utf-8")
-    assert "APRIL_API_TOKEN=" in content
-    assert "APRIL_RUNTIME_TOKEN=" in content
-    assert "local-dev-token" not in content  # real tokens, not the dev defaults
+    assert "APRIL_API_TOKEN=" not in content
+    assert "APRIL_RUNTIME_TOKEN=" not in content
+    assert "APRIL_API_CREDENTIAL_ID=core-api-token" in content
+    assert "APRIL_RUNTIME_CREDENTIAL_ID=runtime-auth-token" in content
     assert report["tokens"]["action"] == "generated"
-    # The report must never carry the actual token values.
-    api_value = next(
-        line.split("=", 1)[1]
-        for line in content.splitlines()
-        if line.startswith("APRIL_API_TOKEN=")
-    )
-    assert api_value not in json.dumps(report)
+    assert report["tokens"]["api_token_set"] is True
+    assert report["tokens"]["runtime_token_set"] is True
 
 
 def test_bootstrap_keeps_existing_tokens_without_force(home_with_configs: Path) -> None:
@@ -87,7 +83,7 @@ def test_bootstrap_keeps_existing_tokens_without_force(home_with_configs: Path) 
         "APRIL_API_TOKEN=existing-api\nAPRIL_RUNTIME_TOKEN=existing-runtime\n", encoding="utf-8"
     )
     report = bootstrap(home_with_configs)
-    assert report["tokens"]["action"] == "kept"
+    assert report["tokens"]["action"] == "migration_required"
     assert "existing-api" in env_file.read_text(encoding="utf-8")
 
 
@@ -97,8 +93,8 @@ def test_bootstrap_force_regenerates_tokens(home_with_configs: Path) -> None:
         "APRIL_API_TOKEN=existing-api\nAPRIL_RUNTIME_TOKEN=existing-runtime\n", encoding="utf-8"
     )
     report = bootstrap(home_with_configs, force=True)
-    assert report["tokens"]["action"] == "regenerated"
-    assert "existing-api" not in env_file.read_text(encoding="utf-8")
+    assert report["tokens"]["action"] == "migration_required"
+    assert "existing-api" in env_file.read_text(encoding="utf-8")
 
 
 def test_bootstrap_recommends_profile_without_applying(home_with_configs: Path) -> None:
@@ -127,27 +123,27 @@ def test_bootstrap_reports_models_voice_roots_and_validation(home_with_configs: 
 
 
 def test_bootstrap_warns_about_dev_tokens_when_env_not_loaded(home_with_configs: Path) -> None:
-    # Write tokens to a side env file that load_settings will not read, so the
-    # effective config still uses the development tokens from configs/april.yaml.
+    # Secure defaults do not retain development tokens in configuration.
     side_env = home_with_configs / "side.env"
     report = bootstrap(home_with_configs, env_file=side_env)
     assert side_env.exists()
-    assert report["dev_token_warnings"]  # effective config still on dev tokens
+    assert report["dev_token_warnings"] == []
 
 
 def test_bootstrap_warns_for_placeholder_tokens_without_printing_values(
     home_with_configs: Path,
 ) -> None:
     config = home_with_configs / "configs" / "april.yaml"
-    text = config.read_text(encoding="utf-8")
-    text = text.replace("local-dev-token", "change-me-local-token")
-    text = text.replace("local-dev-runtime-token", "change-me-runtime-token")
-    config.write_text(text, encoding="utf-8")
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data.setdefault("api", {})["token"] = "change-me-local-token"
+    data.setdefault("runtime", {})["token"] = "change-me-runtime-token"
+    config.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     report = bootstrap(home_with_configs, env_file=home_with_configs / "side.env")
 
     warnings = " ".join(report["dev_token_warnings"])
     assert "placeholder" in warnings
+    assert report["tokens"]["action"] == "migration_required"
     blob = json.dumps(report)
     assert "change-me-local-token" not in blob
     assert "change-me-runtime-token" not in blob
@@ -161,9 +157,8 @@ def test_bootstrap_warns_for_blank_or_missing_tokens(
 
     report = bootstrap(home_with_configs, env_file=home_with_configs / "side.env")
 
-    warnings = " ".join(report["dev_token_warnings"])
-    assert "APRIL_API_TOKEN is blank" in warnings
-    assert "APRIL_RUNTIME_TOKEN is blank or missing" in warnings
+    assert report["dev_token_warnings"] == []
+    assert report["tokens"]["action"] == "generated"
 
 
 def test_bootstrap_output_does_not_contain_existing_token_values(home_with_configs: Path) -> None:

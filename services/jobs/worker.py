@@ -10,7 +10,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from april_common.audit import AuditLogger
+from april_common.audit import audit_logger_for_settings
 from april_common.settings import AprilSettings, load_settings
 from april_common.time import utc_now_iso
 from services.jobs.registry import JobRegistry, default_job_registry
@@ -149,10 +149,10 @@ class JobWorker:
             memory = SqliteMemory(self.database)
             vector = vector_memory_from_settings(
                 self.settings,
-                audit=AuditLogger(self.settings.audit_path),
+                audit=audit_logger_for_settings(self.settings),
             )
             repository = MemoryRepository(
-                memory, vector, audit=AuditLogger(self.settings.audit_path)
+                memory, vector, audit=audit_logger_for_settings(self.settings)
             )
             count = await repository.rebuild()
             return {

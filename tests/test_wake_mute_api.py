@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import anyio
@@ -33,13 +34,15 @@ def test_mute_route_flips_flag_and_audits(settings_tmp) -> None:
     assert unmuted.json() == {"muted": False, "state": "idle", "audited": True}
     assert not settings_tmp.mute_flag_path.exists()
 
-    audit_text = settings_tmp.audit_path.read_text(encoding="utf-8")
-    assert audit_text.count('"event_type": "wake_mute_changed"') == 2
-    assert '"muted": true' in audit_text
-    assert '"muted": false' in audit_text
-    assert '"actor": "local-user"' in audit_text
+    audit_events = [
+        json.loads(line)
+        for line in settings_tmp.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert sum(event["event_type"] == "wake_mute_changed" for event in audit_events) == 2
+    assert {event["muted"] for event in audit_events} == {True, False}
+    assert all(event["actor"] == "local-user" for event in audit_events)
     # The mute flag path must never leak through the API or audit surface.
-    assert str(settings_tmp.mute_flag_path) not in audit_text
+    assert str(settings_tmp.mute_flag_path) not in json.dumps(audit_events)
 
 
 def test_mute_route_requires_authentication(settings_tmp) -> None:

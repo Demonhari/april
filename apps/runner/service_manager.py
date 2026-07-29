@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import IO, Protocol
 from urllib.parse import urlparse
 
-from april_common.process_environment import ProcessCategory, build_process_environment
+from april_common.process_environment import (
+    ProcessCategory,
+    build_process_environment,
+    without_raw_credentials,
+)
 from april_common.service_health import probe_service_health
 from april_common.settings import AprilSettings, load_settings, project_root
 
@@ -242,7 +246,11 @@ class AprilServiceManager:
         fake_backend: bool,
         category: ProcessCategory = ProcessCategory.CORE_API,
     ) -> dict[str, str]:
-        env = build_process_environment(category, april_home=self.home)
+        env = build_process_environment(
+            category,
+            source=without_raw_credentials(),
+            april_home=self.home,
+        )
         if fake_backend and category is ProcessCategory.RUNTIME:
             env["APRIL_RUNTIME_BACKEND"] = "fake"
         return env

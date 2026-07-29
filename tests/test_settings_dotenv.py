@@ -272,15 +272,16 @@ def test_production_rejects_blank_tokens(tmp_path: Path, monkeypatch: pytest.Mon
     reset_settings_cache()
 
 
-def test_production_accepts_strong_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_production_rejects_plaintext_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("APRIL_ENV", "production")
     monkeypatch.setenv("APRIL_HOME", str(tmp_path))
     monkeypatch.setenv("APRIL_API_TOKEN", "a-strong-real-api-token-value-123456")
     monkeypatch.setenv("APRIL_RUNTIME_TOKEN", "a-strong-real-runtime-token-value-654321")
     reset_settings_cache()
-    settings = load_settings(root=tmp_path)
-    assert settings.api.token == "a-strong-real-api-token-value-123456"
-    assert settings.runtime.token == "a-strong-real-runtime-token-value-654321"
+    with pytest.raises(ConfigError):
+        load_settings(root=tmp_path)
     reset_settings_cache()
 
 

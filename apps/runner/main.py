@@ -26,8 +26,10 @@ from apps.runner.acceptance import (
     validate_acceptance_flags,
     write_acceptance_report,
 )
+from apps.runner.audit_commands import audit_app
 from apps.runner.bootstrap import bootstrap as run_bootstrap
 from apps.runner.daily_driver import DailyDriverReport, build_daily_driver_report
+from apps.runner.database_commands import database_app
 from apps.runner.evals import run_fake_brain_eval, run_real_brain_eval
 from apps.runner.go_live import (
     GoLiveReport,
@@ -80,6 +82,7 @@ from apps.runner.reports import (
     list_report_summaries,
     summarize_path,
 )
+from apps.runner.security_commands import security_app
 from apps.runner.service_manager import AprilServiceManager, ServiceStatus
 from apps.runner.setup_checklist import SetupChecklist, build_setup_checklist
 from apps.runner.soak import run_fake_soak, write_soak_report
@@ -90,6 +93,7 @@ from apps.runner.verify import (
     build_workflow_report,
     run_all_configured_models_verification,
     run_fake_verification,
+    run_local_security_integrity_verification,
     run_model_benchmark,
     run_real_model_verification,
     run_workflow_verification,
@@ -104,12 +108,16 @@ from april_common.effective_config import load_agents_file, load_permissions_fil
 from april_common.errors import ConfigError
 from april_common.process_environment import ProcessCategory
 from april_common.process_runner import run_restricted_process_sync
-from april_common.settings import load_settings
+from april_common.settings import load_settings, project_root
 from april_common.text_normalization import (
     HASHED_TOKEN_IMPLEMENTATION_VERSION,
     LEXICAL_TOKENIZER_VERSION,
 )
-from april_common.token_setup import generate_tokens, write_token_env_file
+from april_common.token_setup import (
+    legacy_plaintext_credentials_detected,
+    provision_credentials,
+    write_credential_store_reference,
+)
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.model_registry import ModelRegistry
 from services.memory.database import Database
@@ -153,6 +161,9 @@ april_app.add_typer(setup_app, name="setup")
 april_app.add_typer(user_profile_app, name="profile")
 april_app.add_typer(reports_app, name="reports")
 april_app.add_typer(jobs_app, name="jobs")
+april_app.add_typer(security_app, name="security")
+april_app.add_typer(audit_app, name="audit")
+april_app.add_typer(database_app, name="database")
 
 
 @jobs_app.command(
@@ -253,7 +264,7 @@ def _run_april_cli(args: list[str]) -> int:
     completed = run_restricted_process_sync(
         [sys.executable, "-m", "apps.cli.main", *args],
         cwd=home,
-        category=ProcessCategory.CORE_API,
+        category=ProcessCategory.CLI,
         timeout_seconds=24 * 60 * 60,
         max_stdout_bytes=10_000_000,
         max_stderr_bytes=10_000_000,
@@ -2017,6 +2028,9 @@ def _print_setup_checklist(checklist: SetupChecklist) -> None:
         console.print(f"  {checklist.next_command}", markup=False)
     else:
         console.print("[green]All recommended setup steps are complete.[/green]")
+    console.print("[bold]Security and integrity follow-up:[/bold]")
+    for command in checklist.security_integrity_commands:
+        console.print(f"  {command}", markup=False)
 
 
 @setup_app.command("checklist")
@@ -2482,12 +2496,42 @@ def setup_app_stub(
 
 @setup_app.command("tokens")
 def setup_tokens(
-    output: Path = typer.Option(Path(".env"), "--output", help="Local env file to update."),
+    output: Path = typer.Option(
+        Path(".env"),
+        "--output",
+        help="Non-secret credential-store identifiers file.",
+    ),
+    backend: str | None = typer.Option(None, "--store"),
+    credential_file: Path | None = typer.Option(None, "--credential-file"),
 ) -> None:
-    target = output if output.is_absolute() else _manager().home / output
-    write_token_env_file(target, generate_tokens())
-    console.print(f"Generated APRIL API and Runtime tokens in {target}.")
-    console.print("Full token values were not printed.")
+    from apps.runner.security_commands import _store_for_command
+    from april_common.credentials import CredentialStoreError
+
+    home = Path(os.environ.get("APRIL_HOME", project_root())).expanduser().resolve()
+    settings = load_settings(root=home, legacy_credential_migration=True)
+    target = output if output.is_absolute() else home / output
+    try:
+        if legacy_plaintext_credentials_detected(home):
+            console.print(
+                "[red]Legacy plaintext credentials detected. Run "
+                "`run april security credentials migrate` first.[/red]"
+            )
+            raise typer.Exit(1)
+        store = _store_for_command(
+            settings,
+            backend=backend,
+            file_path=credential_file,
+        )
+        result = provision_credentials(store)
+        write_credential_store_reference(target, store)
+    except (ConfigError, CredentialStoreError, OSError) as exc:
+        console.print(f"[red]Credential setup failed ({type(exc).__name__}).[/red]")
+        raise typer.Exit(1) from exc
+    console.print(
+        f"Generated APRIL API and Runtime credentials in {result.store}; "
+        f"wrote non-secret identifiers to {target}."
+    )
+    console.print("Credential values were not printed or written to .env.")
 
 
 @setup_app.command("bootstrap")
@@ -2758,8 +2802,14 @@ def verify(
             raise typer.Exit(1)
         raise typer.Exit(0)
     if not fake:
-        console.print("[red]Use --fake for deterministic local verification.[/red]")
-        raise typer.Exit(1)
+        checks = run_local_security_integrity_verification(_manager().home)
+        if json_output:
+            console.print_json(data={"checks": [asdict(check) for check in checks]})
+        else:
+            _print_verification_table("APRIL Local Security and Integrity", checks)
+        if not all(check.ok for check in checks):
+            raise typer.Exit(1)
+        raise typer.Exit(0)
     checks = run_fake_verification(_manager().home)
     if json_output:
         console.print_json(data={"checks": [asdict(check) for check in checks]})

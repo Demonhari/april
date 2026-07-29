@@ -102,6 +102,39 @@ def connect_sqlite(path: Path) -> sqlite3.Connection:
 
 
 @contextmanager
+def sqlite_write_fence(path: Path) -> Iterator[Path]:
+    """Acquire APRIL's existing cross-process write fence without opening SQLite."""
+    if _is_memory_path(path):
+        yield path
+        return
+
+    import fcntl
+
+    key = _database_key(path)
+    lock_path = key.with_name(f"{key.name}.write.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + (SQLITE_BUSY_TIMEOUT_MS / 1000)
+    try:
+        while True:
+            try:
+                fcntl.flock(file_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise sqlite3.OperationalError(
+                        "Timed out waiting for APRIL SQLite write coordination"
+                    ) from None
+                time.sleep(0.01)
+        yield key
+    finally:
+        try:
+            fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(file_descriptor)
+
+
+@contextmanager
 def sqlite_write_transaction(path: Path) -> Iterator[sqlite3.Connection]:
     """Coordinate a synchronous APRIL write transaction with async processes."""
     if _is_memory_path(path):
@@ -117,40 +150,17 @@ def sqlite_write_transaction(path: Path) -> Iterator[sqlite3.Connection]:
             memory_connection.close()
         return
 
-    import fcntl
-
-    key = _database_key(path)
-    lock_path = key.with_name(f"{key.name}.write.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    file_descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    connection: sqlite3.Connection | None = None
-    deadline = time.monotonic() + (SQLITE_BUSY_TIMEOUT_MS / 1000)
-    try:
-        while True:
-            try:
-                fcntl.flock(file_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise sqlite3.OperationalError(
-                        "Timed out waiting for APRIL SQLite write coordination"
-                    ) from None
-                time.sleep(0.01)
+    with sqlite_write_fence(path) as key:
         connection = connect_sqlite(key)
-        connection.execute("BEGIN IMMEDIATE")
         try:
+            connection.execute("BEGIN IMMEDIATE")
             yield connection
             connection.commit()
         except BaseException:
             connection.rollback()
             raise
-    finally:
-        if connection is not None:
-            connection.close()
-        try:
-            fcntl.flock(file_descriptor, fcntl.LOCK_UN)
         finally:
-            os.close(file_descriptor)
+            connection.close()
 
 
 class Database:

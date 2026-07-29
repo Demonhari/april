@@ -246,11 +246,11 @@ def test_process_environments_are_explicit_and_service_tokens_are_isolated(
         environment = build_process_environment(category, april_home=tmp_path)
         assert not set(sentinels).intersection(environment)
     runtime = build_process_environment(ProcessCategory.RUNTIME, april_home=tmp_path)
-    assert runtime["APRIL_RUNTIME_TOKEN"] == "runtime-sentinel"
+    assert "APRIL_RUNTIME_TOKEN" not in runtime
     assert "APRIL_API_TOKEN" not in runtime
     core = build_process_environment(ProcessCategory.CORE_API, april_home=tmp_path)
-    assert core["APRIL_RUNTIME_TOKEN"] == "runtime-sentinel"
-    assert core["APRIL_API_TOKEN"] == "api-sentinel"
+    assert "APRIL_RUNTIME_TOKEN" not in core
+    assert "APRIL_API_TOKEN" not in core
     assert "OPENAI_API_KEY" not in core
 
 

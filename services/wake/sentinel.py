@@ -783,7 +783,7 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
     Requires ``voice.enabled`` and ``wake.enabled`` plus at least one wake model.
     Raises rather than pretending to listen when prerequisites are missing.
     """
-    from april_common.audit import AuditLogger
+    from april_common.audit import audit_logger_for_settings
     from april_common.errors import RuntimeUnavailableError
     from services.voice.audio_player import SoundDeviceAudioPlayer
     from services.voice.microphone import SoundDeviceMicrophone
@@ -848,11 +848,11 @@ async def run_sentinel(settings: AprilSettings, *, session_hint: str | None = No
     player = (
         SoundDeviceAudioPlayer(device=settings.voice.output_device) if tts is not None else None
     )
-    audit = AuditLogger(settings.audit_path)
+    audit = audit_logger_for_settings(settings)
     speaker_verifier, speaker_degrade_reason = configured_speaker_verifier(settings)
     delivery = ApiWakeDelivery(
         base_url=f"http://{settings.api.host}:{settings.api.port}",
-        token=settings.api.token,
+        token=settings.api.token or "",
         settings=settings,
         tts=tts,
         player=player,

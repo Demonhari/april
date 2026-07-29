@@ -47,4 +47,23 @@ Controls:
   `/usr/bin/open -a` argv execution
 - `open_url` is restricted to normalized `http`/`https` URLs without embedded
   credentials and macOS `/usr/bin/open` argv execution
-- bearer tokens and credential-like values are redacted from audit logs
+- API/Runtime credentials and the protected audit anchor live behind a typed
+  credential-store interface; macOS production uses Keychain and fails closed
+  when it is unavailable
+- child-service environments are allowlisted and carry credential-store
+  identifiers rather than raw API/Runtime tokens; test runners, repository
+  tools, proxy variables, SSH variables, and unrelated cloud secrets are
+  excluded
+- bearer tokens, prompts, transcripts, audio, secret environment values, and
+  credential-like values are redacted before audit hashing and persistence
+- audit records form a cross-process-serialized SHA-256 chain with a protected
+  terminal anchor, so modification, reordering, middle deletion, and terminal
+  truncation are detectable
+- database backups use SQLite's backup API under the existing write fence and
+  restores require manifest/hash/integrity/schema validation plus automatic
+  rollback
+
+Phase 4B does not defend against a compromised logged-in user session, malware
+that can use an unlocked Keychain, an unlocked stolen machine, or deletion of
+both the audit file and its Keychain anchor. It does not add disk encryption,
+native signing/notarization, remote attestation, or off-device backup.

@@ -1925,7 +1925,7 @@ def test_doctor_reports_actionable_worker_states(settings_tmp, tmp_path: Path, m
 
     missing = CliRunner().invoke(app, ["doctor"])
     assert missing.exit_code == 0
-    assert "phase4a-env-v1" in missing.output
+    assert "phase4b-credential-id-v2" in missing.output
     assert missing.output.count("not running; start APRIL services") == 2
 
     monkeypatch.setenv("APRIL_TOOL_WORKER_ENABLED", "false")

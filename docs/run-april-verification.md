@@ -7,6 +7,23 @@ completion, the Tool Worker self-check and socket permissions, restricted
 process timeout/output behavior, and service-token isolation. Unix-socket tests
 may need an offline rerun outside a sandbox that denies local socket binding.
 
+Phase 4B adds local credential, audit-chain, and SQLite lifecycle gates:
+
+```bash
+run april security credentials migrate
+run april verify
+run april audit verify
+run april audit verify --json
+run april database check
+run april database check --full
+run april database backup --output /private/backups/april-current.april
+run april database restore --input /private/backups/april-current.april \
+  --stop-services
+```
+
+`run april verify` without a model/fake/workflow flag is the bounded local
+security and integrity report. Full SQLite `integrity_check` remains explicit.
+
 ```bash
 run april config validate
 run april config inspect
@@ -58,14 +75,14 @@ Run target-Mac setup and real verification in this order:
    `run april voice doctor`,
    `run april voice verify-live --report data/verification/voice-live.json`
 
-Blank API tokens never authenticate. If `APRIL_API_TOKEN` is empty, protected
-Core API endpoints fail closed with an auth/config error; token values are not
-printed in responses. The local development default `local-dev-token` remains
-valid in development/test.
+Blank API credentials never authenticate. Production resolves API and Runtime
+credentials from macOS Keychain and fails closed if Keychain is unavailable.
+Legacy plaintext values are detected and must be moved with
+`run april security credentials migrate`; token values are never printed.
 
-`run april setup bootstrap` warns on known development tokens, placeholder
-tokens, blank API tokens, and blank/missing Runtime tokens without printing token
-values. JSON output redacts local absolute paths by default; use `--show-paths`
+`run april setup bootstrap` provisions secure credentials when the selected
+platform/store is available and writes only non-secret store identifiers to
+`.env`. JSON output redacts local absolute paths by default; use `--show-paths`
 only when a local operator needs exact paths. The setup shell scripts use
 `constraints-dev.txt` for reproducible base/dev editable installs and still do
 not use sudo, Homebrew, model downloads, or automatic voice/runtime setup.

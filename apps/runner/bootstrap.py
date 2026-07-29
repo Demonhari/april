@@ -1,9 +1,9 @@
 """Safe, non-destructive first-run bootstrap for APRIL.
 
 ``run april setup bootstrap`` prepares a local APRIL home: it creates the data /
-logs / models / index / audit / audio-cache directories, generates local API and
-Runtime tokens into a chosen ``.env`` (without printing them or overwriting
-existing secrets unless ``--force``), inspects the machine, recommends (but does
+logs / models / index / audit / audio-cache directories, provisions local API and
+Runtime credentials in an explicit secure store (writing only identifiers to
+``.env``), inspects the machine, recommends (but does
 not silently apply) a model profile, and reports model / voice / llama.cpp / root
 status plus the exact next verification commands.
 
@@ -17,12 +17,15 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import os
+import platform
 import re
 from pathlib import Path
 from typing import Any
 
 from apps.runner.model_tools import apply_model_profile, model_doctor, recommend_model_profile
 from april_common.config_validation import validate_configuration
+from april_common.credentials import CredentialKey, CredentialStoreError, select_credential_store
+from april_common.errors import ConfigError
 from april_common.settings import (
     INSECURE_API_TOKENS,
     INSECURE_RUNTIME_TOKENS,
@@ -33,9 +36,12 @@ from april_common.settings import (
     AprilSettings,
     load_settings,
 )
-from april_common.token_setup import GeneratedTokens, generate_tokens, write_token_env_file
+from april_common.token_setup import (
+    legacy_plaintext_credentials_detected,
+    provision_credentials,
+    write_credential_store_reference,
+)
 
-TOKEN_KEYS = ("APRIL_API_TOKEN", "APRIL_RUNTIME_TOKEN")
 _PATH_TEXT_RE = re.compile(r"~?(?:/[\w.\-]+){2,}/?")
 
 
@@ -55,11 +61,52 @@ def bootstrap(
     target_env = target_env.resolve(strict=False)
 
     directories = _ensure_directories_for(root, show_paths=show_paths)
-    tokens = _ensure_tokens(target_env, force=force)
+    bootstrap_settings = load_settings(root=root, legacy_credential_migration=True)
+    store = None
+    try:
+        backend = (
+            "file"
+            if bootstrap_settings.environment == "test"
+            else "keychain"
+            if platform.system() == "Darwin"
+            else bootstrap_settings.security.credential_store
+        )
+        test_file_path = (
+            root.parent / f".{root.name}.april-test-credentials.json"
+            if bootstrap_settings.environment == "test"
+            else bootstrap_settings.security.credential_file_path
+        )
+        store = select_credential_store(
+            backend=backend,
+            environment=bootstrap_settings.environment,
+            repository_root=root,
+            file_path=test_file_path,
+        )
+        if legacy_plaintext_credentials_detected(root, env_file=target_env):
+            tokens = {
+                "action": "migration_required",
+                "api_token_set": False,
+                "runtime_token_set": False,
+                "guidance": "run april security credentials migrate",
+            }
+            store = None
+        else:
+            tokens = _ensure_credentials(target_env, store=store, force=force)
+    except (ConfigError, CredentialStoreError):
+        tokens = {
+            "action": "required",
+            "api_token_set": False,
+            "runtime_token_set": False,
+            "guidance": "run april setup tokens with an explicit secure store",
+        }
 
     # Reload after writing .env so the report reflects the post-bootstrap state
     # (when the env file is the home .env that load_settings reads).
-    settings = load_settings(root=root)
+    settings = (
+        load_settings(root=root, credential_store=store)
+        if store is not None
+        else bootstrap_settings
+    )
     doctor = model_doctor(root)
     recommendation = recommend_model_profile(root)
 
@@ -119,7 +166,7 @@ def bootstrap(
 
 
 def _ensure_directories_for(root: Path, *, show_paths: bool) -> list[dict[str, Any]]:
-    settings = load_settings(root=root)
+    settings = load_settings(root=root, legacy_credential_migration=True)
     raw = [
         settings.resolve_path(Path("data")),
         settings.resolve_path(Path("data/run")),
@@ -147,28 +194,23 @@ def _ensure_directories_for(root: Path, *, show_paths: bool) -> list[dict[str, A
     return results
 
 
-def _parse_env_tokens(env_file: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not env_file.exists():
-        return values
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key.strip() in TOKEN_KEYS and value.strip():
-            values[key.strip()] = value.strip()
-    return values
-
-
-def _ensure_tokens(env_file: Path, *, force: bool) -> dict[str, Any]:
-    existing = _parse_env_tokens(env_file)
-    has_api = "APRIL_API_TOKEN" in existing
-    has_runtime = "APRIL_RUNTIME_TOKEN" in existing
+def _ensure_credentials(
+    env_file: Path,
+    *,
+    store: Any,
+    force: bool,
+) -> dict[str, Any]:
+    has_api = store.exists(CredentialKey.API_TOKEN)
+    has_runtime = store.exists(CredentialKey.RUNTIME_TOKEN)
     if has_api and has_runtime and not force:
-        # Non-destructive: never overwrite existing secrets without --force.
+        write_credential_store_reference(env_file, store)
         return {"action": "kept", "api_token_set": True, "runtime_token_set": True}
-    new = generate_tokens()
-    api = new.api_token if (force or not has_api) else existing["APRIL_API_TOKEN"]
-    runtime = new.runtime_token if (force or not has_runtime) else existing["APRIL_RUNTIME_TOKEN"]
-    write_token_env_file(env_file, GeneratedTokens(api_token=api, runtime_token=runtime))
+    if has_api != has_runtime and not force:
+        raise CredentialStoreError(
+            "Credential setup refused an unsafe partial existing credential set."
+        )
+    provision_credentials(store)
+    write_credential_store_reference(env_file, store)
     return {
         "action": "regenerated" if force else "generated",
         "api_token_set": True,
@@ -182,33 +224,33 @@ def _dev_token_warnings(settings: AprilSettings) -> list[str]:
     runtime_token = settings.runtime.token
     if not api_token:
         warnings.append(
-            "Effective APRIL_API_TOKEN is blank. Load the generated .env or set a "
-            "strong local token before any non-development use."
+            "Core API credential is missing. Provision the selected secure store "
+            "before any non-development use."
         )
     elif api_token in KNOWN_DEFAULT_API_TOKENS:
         warnings.append(
-            "Effective APRIL_API_TOKEN is a known development token. Load the generated .env "
-            "or set a strong local token before any non-development use."
+            "Core API credential is a known development default. Run secure credential "
+            "setup before any non-development use."
         )
     elif api_token in PLACEHOLDER_API_TOKENS or api_token in INSECURE_API_TOKENS:
         warnings.append(
-            "Effective APRIL_API_TOKEN is a placeholder token. Load the generated .env "
-            "or set a strong local token before any non-development use."
+            "Core API credential is a placeholder. Run secure credential setup before "
+            "any non-development use."
         )
     if runtime_token is None or runtime_token == "":
         warnings.append(
-            "Effective APRIL_RUNTIME_TOKEN is blank or missing. Load the generated .env "
-            "or set a strong local runtime token before any non-development use."
+            "Runtime credential is missing. Provision the selected secure store before "
+            "any non-development use."
         )
     elif runtime_token in KNOWN_DEFAULT_RUNTIME_TOKENS:
         warnings.append(
-            "Effective APRIL_RUNTIME_TOKEN is a known development token. Load the generated "
-            ".env or set a strong local runtime token before any non-development use."
+            "Runtime credential is a known development default. Run secure credential "
+            "setup before any non-development use."
         )
     elif runtime_token in PLACEHOLDER_RUNTIME_TOKENS or runtime_token in INSECURE_RUNTIME_TOKENS:
         warnings.append(
-            "Effective APRIL_RUNTIME_TOKEN is a placeholder token. Load the generated "
-            ".env or set a strong local runtime token before any non-development use."
+            "Runtime credential is a placeholder. Run secure credential setup before "
+            "any non-development use."
         )
     return warnings
 
