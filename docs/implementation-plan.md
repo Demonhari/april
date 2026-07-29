@@ -162,11 +162,13 @@ native packaging.
   model definition. `llama-cpp-python` fixes `n_threads` at model construction,
   so a changed budget takes effect on the next safe model load/reload rather
   than changing an in-flight generation.
-- **Desktop: local SPA / optional native wrapper, not signed/notarized.** The UI
+- **Desktop: local SPA / optional native wrapper plus explicit production packaging.** The UI
   is plain static HTML/CSS/JS served over authenticated loopback. The optional
   `dist/APRIL.app` stub is a development launcher only — no signing, no
-  notarization, no bundled models/voice/tokens, ignored by Git. Signed/notarized
-  packaging and launch-at-login remain future work.
+  notarization, no bundled models/voice/tokens, ignored by Git. The separate
+  `run april package` path builds and validates a production bundle and exposes
+  operator-driven signing, notarization, stapling, Gatekeeper, and owner
+  LaunchAgent commands without storing Apple credentials.
 - **Memory vector search defaults to hashed-token embeddings.** Semantic
   `runtime-local` embeddings are used only when a local embedding-role GGUF is
   registered and `memory.embedding_provider=runtime-local` is set and verified.

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import platform
 import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,32 @@ MODEL_RUNTIME_FIELDS = {
     "idle_unload_seconds",
     "temperature",
     "max_output_tokens",
+}
+_BUNDLED_RUNTIME_DEFAULTS: dict[str, dict[str, Any]] = {
+    "brain": {
+        "threads": 8,
+        "context_size": 8192,
+        "temperature": 0.3,
+        "max_output_tokens": 1024,
+        "keep_loaded": True,
+        "idle_unload_seconds": None,
+    },
+    "coding": {
+        "threads": 8,
+        "context_size": 8192,
+        "temperature": 0.2,
+        "max_output_tokens": 2048,
+        "keep_loaded": False,
+        "idle_unload_seconds": 300,
+    },
+    "reading": {
+        "threads": 6,
+        "context_size": 4096,
+        "temperature": 0.2,
+        "max_output_tokens": 1024,
+        "keep_loaded": False,
+        "idle_unload_seconds": 300,
+    },
 }
 
 
@@ -592,7 +620,13 @@ def load_model_profiles(home: Path) -> dict[str, Any]:
     return profiles
 
 
-def apply_model_profile(*, home: Path, profile_name: str) -> Path:
+def apply_model_profile(
+    *,
+    home: Path,
+    profile_name: str,
+    selection_source: str = "explicit",
+    detection_evidence: dict[str, Any] | None = None,
+) -> Path:
     root = home.expanduser().resolve()
     profiles = load_model_profiles(root)
     profile = profiles.get(profile_name)
@@ -621,7 +655,64 @@ def apply_model_profile(*, home: Path, profile_name: str) -> Path:
     except Exception:
         shutil.copy2(backup, config_path)
         raise
+    _write_profile_selection(
+        root,
+        {
+            "schema_version": 1,
+            "selected_profile": profile_name,
+            "selection_source": selection_source,
+            "selected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "detection_evidence": detection_evidence or {},
+        },
+    )
     return backup
+
+
+def profile_selection_path(home: Path) -> Path:
+    return home.expanduser().resolve() / "data" / "setup" / "model-profile.json"
+
+
+def profile_was_selected(home: Path) -> bool:
+    return profile_selection_path(home).is_file()
+
+
+def manual_model_runtime_overrides_present(home: Path) -> bool:
+    """Detect deviations from the shipped model runtime fields before first run."""
+    data = _read_yaml(_config_path(home.expanduser().resolve()))
+    models = data.get("models")
+    if not isinstance(models, dict):
+        return True
+    for model in models.values():
+        if not isinstance(model, dict):
+            return True
+        role = str(model.get("role", ""))
+        expected = _BUNDLED_RUNTIME_DEFAULTS.get(role)
+        if expected is None:
+            # Optional operator-added roles are themselves manual configuration.
+            return True
+        for field in MODEL_RUNTIME_FIELDS:
+            if field in model and field in expected and model[field] != expected[field]:
+                return True
+            if field in model and field not in expected:
+                return True
+    return False
+
+
+def _write_profile_selection(home: Path, payload: dict[str, Any]) -> None:
+    path = profile_selection_path(home)
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def redact_token(value: str | None) -> str:

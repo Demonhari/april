@@ -107,6 +107,10 @@ class MemoryRepository:
         return count
 
     async def _index_after_commit(self, record: MemoryRecord, *, operation: str) -> None:
+        if record.content_encrypted:
+            await self._clear_repair(record.id)
+            self._audit("sensitive_memory_index_skipped", record.id, None)
+            return
         try:
             self.vector_memory.upsert(
                 record_id=record.id,

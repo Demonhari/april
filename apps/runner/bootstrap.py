@@ -22,7 +22,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-from apps.runner.model_tools import apply_model_profile, model_doctor, recommend_model_profile
+from apps.runner.model_tools import (
+    apply_model_profile,
+    manual_model_runtime_overrides_present,
+    model_doctor,
+    profile_was_selected,
+    recommend_model_profile,
+)
 from april_common.config_validation import validate_configuration
 from april_common.credentials import CredentialKey, CredentialStoreError, select_credential_store
 from april_common.errors import ConfigError
@@ -51,6 +57,7 @@ def bootstrap(
     env_file: Path | None = None,
     force: bool = False,
     apply_profile: bool = False,
+    no_auto_profile: bool = False,
     show_paths: bool = False,
 ) -> dict[str, Any]:
     """Run the bootstrap and return a structured, secret-free report."""
@@ -112,9 +119,28 @@ def bootstrap(
 
     applied_profile: str | None = None
     profile_error: str | None = None
-    if apply_profile:
+    auto_profile_eligible = (
+        not apply_profile
+        and not no_auto_profile
+        and platform.system() == "Darwin"
+        and platform.machine().casefold() in {"x86_64", "amd64", "i386", "i686"}
+        and recommendation["recommended_profile"] == "intel_macbook_cpu_low"
+        and not profile_was_selected(root)
+        and not manual_model_runtime_overrides_present(root)
+    )
+    if apply_profile or auto_profile_eligible:
         try:
-            apply_model_profile(home=root, profile_name=recommendation["recommended_profile"])
+            apply_model_profile(
+                home=root,
+                profile_name=recommendation["recommended_profile"],
+                selection_source="explicit" if apply_profile else "intel_first_run_auto",
+                detection_evidence={
+                    "system": platform.system(),
+                    "machine": platform.machine(),
+                    "manual_runtime_overrides": manual_model_runtime_overrides_present(root),
+                    "previous_selection": profile_was_selected(root),
+                },
+            )
             applied_profile = recommendation["recommended_profile"]
         except Exception as exc:  # surfaced, never raised, so bootstrap stays safe
             profile_error = _display_text(str(exc), show_paths=show_paths)
@@ -140,6 +166,8 @@ def bootstrap(
         "available_profiles": recommendation["available_profiles"],
         "expected_backend": recommendation["expected_backend"],
         "profile_applied": applied_profile is not None,
+        "profile_auto_applied": bool(applied_profile and not apply_profile),
+        "auto_profile_suppressed": no_auto_profile,
         "applied_profile": applied_profile,
         "profile_error": profile_error,
         "llama_cpp_available": bool(doctor["llama_cpp_python_installed"]),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 async def run_migrations(database: Database) -> None:
@@ -46,7 +46,9 @@ async def _run_migrations_locked(database: Database) -> None:
             last_used_at TEXT,
             use_count INTEGER NOT NULL DEFAULT 0,
             expires_at TEXT,
-            superseded_by TEXT REFERENCES memories(id)
+            superseded_by TEXT REFERENCES memories(id),
+            content_encrypted INTEGER NOT NULL DEFAULT 0
+                CHECK (content_encrypted IN (0, 1))
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -498,6 +500,7 @@ async def _run_migrations_locked(database: Database) -> None:
         "use_count": "INTEGER NOT NULL DEFAULT 0",
         "expires_at": "TEXT",
         "superseded_by": "TEXT REFERENCES memories(id)",
+        "content_encrypted": "INTEGER NOT NULL DEFAULT 0",
     }
     for column, definition in memory_column_defs.items():
         if column not in memory_columns:

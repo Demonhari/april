@@ -975,9 +975,7 @@ async def test_sentinel_in_sentence_wake_candidate_preserves_semantic_april(
     full_stt = RecordingSpeechToText("could you ask April to restart after the build")
     sentinel = Sentinel(
         settings=tuned,
-        microphone=FakeFrameMicrophone(
-            [FRAME, *([LOUD_FRAME] * 30), *([b"\x00\x00" * 160] * 65)]
-        ),
+        microphone=FakeFrameMicrophone([FRAME, *([LOUD_FRAME] * 30), *([b"\x00\x00" * 160] * 65)]),
         scorers=[ScriptedScorer([0.5])],
         deliver=delivery,
         confirmer=SttConfirmer(
@@ -1064,9 +1062,7 @@ async def test_sentinel_follow_up_window_transcribes_same_session_command(settin
     full_stt = RecordingSpeechToText("continue with that plan")
     sentinel = Sentinel(
         settings=tuned,
-        microphone=FakeFrameMicrophone(
-            [*([LOUD_FRAME] * 30), *([b"\x00\x00" * 160] * 65)]
-        ),
+        microphone=FakeFrameMicrophone([*([LOUD_FRAME] * 30), *([b"\x00\x00" * 160] * 65)]),
         scorers=[ScriptedScorer([])],
         deliver=delivery,
         transcriber=full_stt,
@@ -1320,9 +1316,7 @@ async def test_sentinel_live_verification_uses_sentinel_pipeline_with_fakes(
 
     sentinel = Sentinel(
         settings=tuned,
-        microphone=FakeFrameMicrophone(
-            [*([LOUD_FRAME] * 31), *([b"\x00\x00" * 160] * 65)]
-        ),
+        microphone=FakeFrameMicrophone([*([LOUD_FRAME] * 31), *([b"\x00\x00" * 160] * 65)]),
         scorers=[ScriptedScorer([0.9])],
         deliver=deliver,
         transcriber=RecordingSpeechToText("april, open calendar"),

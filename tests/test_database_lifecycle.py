@@ -104,9 +104,7 @@ async def test_shared_path_write_coordination_and_rollback(tmp_path: Path) -> No
             await connection.execute("INSERT INTO writes(value) VALUES(?)", (value,))
             await asyncio.sleep(0)
 
-    await asyncio.gather(
-        *(write(first if value % 2 else second, value) for value in range(40))
-    )
+    await asyncio.gather(*(write(first if value % 2 else second, value) for value in range(40)))
     assert (await first.fetchone("SELECT COUNT(*) FROM writes"))[0] == 40
 
     async def failing_transaction() -> None:

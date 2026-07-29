@@ -22,6 +22,7 @@ class ProcessCategory(StrEnum):
     DOCUMENT_PROCESSING = "document_processing"
     MODEL_VERIFICATION = "model_verification"
     BENCHMARKING = "benchmarking"
+    FINETUNE = "finetune"
     VERIFICATION_SUBPROCESS = "verification_subprocess"
     CLI = "cli"
 
@@ -104,12 +105,12 @@ _CATEGORY_APRIL_KEYS: dict[ProcessCategory, frozenset[str]] = {
     ProcessCategory.DOCUMENT_PROCESSING: frozenset(),
     ProcessCategory.MODEL_VERIFICATION: frozenset({"APRIL_RUNTIME_BACKEND"}),
     ProcessCategory.BENCHMARKING: frozenset({"APRIL_RUNTIME_BACKEND"}),
+    ProcessCategory.FINETUNE: frozenset(),
     ProcessCategory.VERIFICATION_SUBPROCESS: frozenset(
         {
             "APRIL_ALLOWED_FILESYSTEM_ROOTS",
             "APRIL_API_HOST",
             "APRIL_API_PORT",
-            "APRIL_API_TOKEN",
             "APRIL_AUDIT_PATH",
             "APRIL_DATABASE_PATH",
             "APRIL_LOGS_PATH",
@@ -117,7 +118,6 @@ _CATEGORY_APRIL_KEYS: dict[ProcessCategory, frozenset[str]] = {
             "APRIL_RUNTIME_HOST",
             "APRIL_RUNTIME_PORT",
             "APRIL_RUNTIME_PRELOAD_KEEP_LOADED",
-            "APRIL_RUNTIME_TOKEN",
             "APRIL_RUNTIME_URL",
             "APRIL_VECTOR_INDEX_PATH",
         }
@@ -137,6 +137,7 @@ _CREDENTIAL_IDENTIFIER_KEYS = frozenset(
         "APRIL_API_CREDENTIAL_ID",
         "APRIL_RUNTIME_CREDENTIAL_ID",
         "APRIL_AUDIT_ANCHOR_CREDENTIAL_ID",
+        "APRIL_MEMORY_ENCRYPTION_CREDENTIAL_ID",
     }
 )
 _NETWORK_DENIED = frozenset(
@@ -186,6 +187,7 @@ def build_process_environment(
         ProcessCategory.RUNTIME,
         ProcessCategory.SENTINEL_VOICE,
         ProcessCategory.JOB_WORKER,
+        ProcessCategory.VERIFICATION_SUBPROCESS,
         ProcessCategory.CLI,
     }:
         allowed.update(_CREDENTIAL_IDENTIFIER_KEYS)

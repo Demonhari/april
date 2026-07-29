@@ -86,29 +86,21 @@ class ContextManager:
             for group in groups
             if group.kind != "orphan"
             and (
-                group.required
-                or group.complete
-                or group.kind in {"system", "conversation_summary"}
+                group.required or group.complete or group.kind in {"system", "conversation_summary"}
             )
         ]
         required = [group for group in selectable if group.required]
-        summary_groups = [
-            group for group in selectable if group.kind == "conversation_summary"
-        ]
+        summary_groups = [group for group in selectable if group.kind == "conversation_summary"]
 
         selected: dict[int, ContextGroup] = {id(group): group for group in required}
         selected_messages = _flatten_selected(groups, selected)
-        total = await self._count_rendered_tokens(
-            model, backend, selected_messages, metadata
-        )
+        total = await self._count_rendered_tokens(model, backend, selected_messages, metadata)
         truncated_tools = 0
         if total > budget:
             for group in required:
                 if not group.has_tool_result:
                     continue
-                without_group = {
-                    key: value for key, value in selected.items() if key != id(group)
-                }
+                without_group = {key: value for key, value in selected.items() if key != id(group)}
                 fitted = await self._fit_truncated_tool_group(
                     model=model,
                     backend=backend,
@@ -179,19 +171,14 @@ class ContextManager:
             break
 
         selected_messages = _flatten_selected(groups, selected)
-        total = await self._count_rendered_tokens(
-            model, backend, selected_messages, metadata
-        )
+        total = await self._count_rendered_tokens(model, backend, selected_messages, metadata)
         selected_original_message_count = sum(
-            len(group.messages)
-            for group in groups
-            if id(group) in selected
+            len(group.messages) for group in groups if id(group) in selected
         )
         removed_messages = len(messages) - selected_original_message_count
         removed_groups = sum(id(group) not in selected for group in groups)
         summary_included = any(
-            group.kind == "conversation_summary" and id(group) in selected
-            for group in groups
+            group.kind == "conversation_summary" and id(group) in selected for group in groups
         )
         warning_codes = (
             ("context_truncated_without_persisted_summary",)
@@ -265,9 +252,7 @@ class ContextManager:
             )
             candidate_selected = {**selected, id(group): candidate_group}
             flattened = _flatten_selected(all_groups, candidate_selected)
-            total = await self._count_rendered_tokens(
-                model, backend, flattened, metadata
-            )
+            total = await self._count_rendered_tokens(model, backend, flattened, metadata)
             if total <= budget:
                 best = candidate_group, total
                 low = midpoint + 1

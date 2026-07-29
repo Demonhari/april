@@ -46,6 +46,7 @@ class MemoryRecord(BaseModel):
     use_count: int = 0
     expires_at: str | None = None
     superseded_by: str | None = None
+    content_encrypted: bool = False
 
 
 class LexicalHit(BaseModel):

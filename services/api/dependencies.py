@@ -26,6 +26,10 @@ from services.jobs.store import JobStore
 from services.memory.archive import ArchiveReflectionService
 from services.memory.database import Database
 from services.memory.embeddings import embedding_provider_from_config
+from services.memory.encryption import (
+    MemoryEncryptionError,
+    sensitive_encryption_for_settings,
+)
 from services.memory.migrations import run_migrations
 from services.memory.repository import MemoryRepository
 from services.memory.retriever import MemoryRetriever, RuntimeMemoryReranker
@@ -133,7 +137,15 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         database,
         audit=audit,
     ).reconcile_incomplete_operations()
-    memory = SqliteMemory(database)
+    try:
+        sensitive_encryption = sensitive_encryption_for_settings(active_settings)
+    except MemoryEncryptionError:
+        sensitive_encryption = None
+    memory = SqliteMemory(
+        database,
+        sensitive_encryption=sensitive_encryption,
+        sensitive_encryption_enabled=active_settings.memory.sensitive_encryption_enabled,
+    )
     governor = ResourceGovernor(active_settings)
     runtime_client = RuntimeClient(
         active_settings.runtime.url,
@@ -191,7 +203,13 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         audit,
         expiry_seconds=active_settings.permissions.approval_expiry_seconds,
     )
-    job_store = JobStore(database, default_job_registry())
+    job_store = JobStore(
+        database,
+        default_job_registry(
+            finetune_enabled=active_settings.finetune.enabled,
+            evolution_enabled=active_settings.evolution.enabled,
+        ),
+    )
     tool_worker_manager: ToolWorkerProcessManager | None = None
     tool_worker_client: ToolWorkerClient | None
     if active_settings.workers.tool_worker_enabled:

@@ -60,6 +60,8 @@ AGENT_OUTPUT_ADAPTER: TypeAdapter[AgentIterationOutput] = TypeAdapter(AgentItera
 AGENT_OUTPUT_RESPONSE_FORMAT = ResponseFormat(
     type="json_object", json_schema=AGENT_OUTPUT_ADAPTER.json_schema()
 )
+
+
 class StructuredAgentLoop:
     def __init__(
         self,
@@ -145,9 +147,7 @@ class StructuredAgentLoop:
         loop_messages.append(
             ChatMessage(
                 role="tool",
-                content=self._format_tool_result(
-                    str(suspended.tool_request["tool"]), tool_result
-                ),
+                content=self._format_tool_result(str(suspended.tool_request["tool"]), tool_result),
             )
         )
         return await self._continue_run(
@@ -171,9 +171,7 @@ class StructuredAgentLoop:
         loop_messages.append(
             ChatMessage(
                 role="tool",
-                content=self._format_tool_result(
-                    str(suspended.tool_request["tool"]), tool_result
-                ),
+                content=self._format_tool_result(str(suspended.tool_request["tool"]), tool_result),
             )
         )
         await self.memory.fail_suspended_agent_run(
@@ -394,9 +392,7 @@ class StructuredAgentLoop:
                     ),
                 )
             )
-        messages.extend(
-            ChatMessage(role=item.role, content=item.content) for item in history
-        )
+        messages.extend(ChatMessage(role=item.role, content=item.content) for item in history)
         if remaining_sections:
             prompt += "\n\n" + "\n\n".join(remaining_sections)
         messages.append(ChatMessage(role="user", content=prompt))
@@ -431,9 +427,7 @@ class StructuredAgentLoop:
         if len(encoded) <= self.max_tool_result_chars:
             return encoded
         payload["data"] = {"truncated": True}
-        payload["output"] = (
-            text[: self.max_tool_result_chars // 2].rstrip() + "\n[TRUNCATED]"
-        )
+        payload["output"] = text[: self.max_tool_result_chars // 2].rstrip() + "\n[TRUNCATED]"
         return json.dumps(
             payload,
             sort_keys=True,

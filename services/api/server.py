@@ -16,7 +16,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 
@@ -42,29 +42,28 @@ from april_common.time import utc_now
 from april_common.token_setup import legacy_plaintext_credentials_detected
 from services.api.auth import require_bearer_token
 from services.api.dependencies import ApiContainer, build_container
+from services.api.routes.chat import register_chat_routes
+from services.api.routes.diagnostics import register_diagnostic_routes
+from services.api.routes.health import register_health_routes
+from services.api.routes.jobs import register_job_routes
+from services.api.routes.memory import register_memory_routes
+from services.api.routes.tools import register_tool_routes
+from services.api.routes.voice import register_voice_routes
 from services.api.schemas import (
     AdapterActivateRequest,
     AdapterRollbackRequest,
-    AgentRunRequest,
-    ChatRequest,
-    ChatResponse,
     DatasetExportRequest,
     DocumentCreateRequest,
     EvalPromoteRequest,
     EvalRejectRequest,
     EvolutionRollbackRequest,
     FeedbackRequest,
-    MemoryCreateRequest,
     OverlayApprovalRequest,
     PlaybookResumeRequest,
     PlaybookRunRequest,
     ProjectCreateRequest,
     ReminderCreateRequest,
-    SessionAttachRequest,
     ToolApprovalAction,
-    ToolRequestEnvelope,
-    WakeMuteRequest,
-    WakeRequest,
 )
 from services.april_runtime.model_registry import ModelRegistry
 from services.april_runtime.schemas import LoadModelRequest
@@ -91,28 +90,18 @@ from services.evolution.inspect import (
 from services.evolution.playbook_miner import mine_playbook_candidates
 from services.evolution.versions import PromptOverlayManager
 from services.evolution.write_guard import EvolutionWriteGuard
-from services.jobs.schemas import (
-    DEFAULT_JOB_LIST_LIMIT,
-    MAX_JOB_LIST_LIMIT,
-    JobSubmission,
-)
-from services.jobs.store import JobNotFoundError, JobTransitionError
 from services.memory.maintenance import check_database
 from services.memory.migrations import SCHEMA_VERSION
-from services.memory.writer import MemoryWriter
 from services.pool.agent_pool import AgentPool
 from services.scheduler import compose_briefing, compute_repo_activity
 from services.tool_worker.limits import UnsafeToolWorkerSocket, validate_live_socket
 from services.voice.health import (
     microphone_access,
     query_audio_devices,
-    voice_health,
     voice_readiness_summary,
 )
 from services.wake.feedback import WakeFeedback, classify_wake_feedback
 from services.wake.schemas import WakeEvent
-from services.wake.sentinel import MuteSwitch
-from services.wake.status import read_wake_status
 from services.wake.wake_bus import WakeBus
 from skills.playbooks import (
     PlaybookAdoptionService,
@@ -160,20 +149,6 @@ _ACTIVITY_ALLOWED_KEYS = frozenset(
         "case_id",
     }
 )
-
-
-async def _scoped_job(active: ApiContainer, job_id: str) -> Any:
-    if active.job_store is None:
-        raise HTTPException(status_code=503, detail="job_store_unavailable")
-    try:
-        job = await active.job_store.require(job_id)
-    except (JobNotFoundError, ValueError) as exc:
-        raise HTTPException(status_code=404, detail="job_not_found") from exc
-    if job.owner != "local-user":
-        raise HTTPException(status_code=404, detail="job_not_found")
-    if job.project_id is not None and await active.memory.get_project(job.project_id) is None:
-        raise HTTPException(status_code=404, detail="job_not_found")
-    return job
 
 
 _PATH_TEXT_RE = re.compile(r"~?(?:/[\w.\-]+){2,}/?")
@@ -300,640 +275,26 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
         await require_bearer_token(active.settings, authorization)
         return active
 
-    @app.get("/health")
-    async def health() -> object:
-        return {"status": "ok", "service": "april-core-api"}
+    register_health_routes(app)
+    register_job_routes(app, authorized)
+    register_diagnostic_routes(
+        app,
+        authorized,
+        activity_reader=_read_activity_events,
+        activity_max_limit=_ACTIVITY_MAX_LIMIT,
+        readiness_payload=_readiness_payload,
+        latest_verification_report=_latest_verification_report,
+        verification_report_history=_verification_report_history,
+        verification_report_detail=_verification_report_detail,
+        browser_reports=_browser_reports,
+        browser_latest=_browser_latest,
+        browser_report_types=_BROWSER_REPORT_TYPES,
+    )
 
-    @app.post("/jobs")
-    async def submit_job(
-        request: JobSubmission,
-        http_request: Request,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        if active.job_store is None:
-            raise HTTPException(status_code=503, detail="job_store_unavailable")
-        if request.project_id is not None:
-            project = await active.memory.get_project(request.project_id)
-            if project is None:
-                raise HTTPException(status_code=404, detail="project_not_found")
-        if request.conversation_id is not None:
-            conversation = await active.memory.get_conversation(request.conversation_id)
-            if conversation is None:
-                raise HTTPException(status_code=404, detail="conversation_not_found")
-            if (
-                request.project_id is not None
-                and conversation.project_id is not None
-                and conversation.project_id != request.project_id
-            ):
-                raise HTTPException(status_code=409, detail="conversation_project_mismatch")
-        try:
-            definition = active.job_store.registry.require(request.job_type)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        approved = False
-        approval_id = request.approval_id
-        request_id = http_request.headers.get("x-request-id") or str(uuid.uuid4())
-        if definition.approval_required:
-            if approval_id is None:
-                raise HTTPException(status_code=409, detail="approval_required")
-            record = await active.approvals.get(approval_id)
-            if request.job_type != "configured_test" or record.tool != "test_runner":
-                raise HTTPException(status_code=409, detail="approval_action_mismatch")
-            expected_payload = {
-                "argv": list(record.args.get("argv", ["pytest"])),
-                "cwd": str(record.args.get("repo_path", "")),
-            }
-            validated_payload = definition.validate_payload(request.payload)
-            if validated_payload != expected_payload:
-                raise HTTPException(status_code=409, detail="approval_action_mismatch")
-            await active.approvals.approve_exact(
-                approval_id=approval_id,
-                tool=record.tool,
-                args=record.args,
-                actor="local-user",
-                request_id=request_id,
-            )
-            approved = True
-        try:
-            job = await active.job_store.submit(
-                job_type=request.job_type,
-                payload=request.payload,
-                owner="local-user",
-                conversation_id=request.conversation_id,
-                project_id=request.project_id,
-                approved=approved,
-            )
-        except (ValueError, JobTransitionError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if approval_id is not None and approved:
-            await active.approvals.consume(
-                approval_id=approval_id,
-                result={"ok": True, "job_id": job.id, "status": job.status.value},
-                actor="local-user",
-                request_id=request_id,
-            )
-        return job.model_dump(mode="json")
-
-    @app.get("/jobs")
-    async def list_jobs(
-        project_id: str | None = None,
-        limit: int = DEFAULT_JOB_LIST_LIMIT,
-        offset: int = 0,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        if active.job_store is None:
-            raise HTTPException(status_code=503, detail="job_store_unavailable")
-        if not 1 <= limit <= MAX_JOB_LIST_LIMIT or not 0 <= offset <= 10_000:
-            raise HTTPException(status_code=400, detail="pagination_out_of_bounds")
-        jobs = await active.job_store.list(
-            owner="local-user",
-            project_id=project_id,
-            limit=limit,
-            offset=offset,
-        )
-        return {
-            "jobs": [job.model_dump(mode="json") for job in jobs],
-            "limit": limit,
-            "offset": offset,
-        }
-
-    @app.get("/jobs/{job_id}")
-    async def show_job(
-        job_id: str,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        job = await _scoped_job(active, job_id)
-        return job.model_dump(mode="json")
-
-    @app.post("/jobs/{job_id}/cancel")
-    async def cancel_job(
-        job_id: str,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        await _scoped_job(active, job_id)
-        assert active.job_store is not None
-        job, already_terminal = await active.job_store.request_cancel(job_id)
-        return {
-            "job": job.model_dump(mode="json"),
-            "already_terminal": already_terminal,
-        }
-
-    @app.post("/jobs/{job_id}/retry")
-    async def retry_job(
-        job_id: str,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        await _scoped_job(active, job_id)
-        assert active.job_store is not None
-        try:
-            job, already_queued = await active.job_store.retry(job_id)
-        except JobTransitionError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {
-            "job": job.model_dump(mode="json"),
-            "already_queued": already_queued,
-        }
-
-    @app.get("/diagnostics")
-    async def diagnostics(active: ApiContainer = Depends(authorized)) -> object:
-        diagnostic_status = "ok"
-        memory_index = await active.memory_repository.health()
-        if memory_index.repair_required:
-            diagnostic_status = "degraded"
-        try:
-            runtime = await active.runtime_client.health(timeout=1.0)
-            if str(runtime.get("status", "ok")) not in {"ok", "degraded"}:
-                diagnostic_status = "degraded"
-        except AprilError as exc:
-            runtime = {"status": "unavailable", "error": exc.message}
-            diagnostic_status = "degraded"
-        return {
-            "status": diagnostic_status,
-            "database": {"ok": active.database.path.exists(), "path": str(active.database.path)},
-            "vector_index": active.vector_memory.health(),
-            "memory_index": asdict(memory_index),
-            "voice": voice_health(active.settings).model_dump(),
-            "wake": {
-                "enabled": active.settings.wake.enabled,
-                "muted": active.settings.mute_flag_path.exists(),
-                "state": read_wake_status(active.settings)["state"],
-            },
-            "scheduler": {
-                "enabled": active.settings.scheduler.enabled,
-                "running": active.scheduler.running if active.scheduler else False,
-                "briefing_enabled": active.settings.scheduler.briefing_enabled,
-                "fired_reminders": (
-                    active.scheduler.fired_reminder_count if active.scheduler else 0
-                ),
-            },
-            "runtime_url": active.settings.runtime.url,
-            "runtime": runtime,
-        }
-
-    @app.get("/diagnostics/activity")
-    async def diagnostics_activity(
-        limit: int = 50,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        capped = max(1, min(limit, _ACTIVITY_MAX_LIMIT))
-        events = _read_activity_events(active.settings.audit_path, capped)
-        return {"events": events, "count": len(events)}
-
-    @app.get("/readiness")
-    async def readiness(active: ApiContainer = Depends(authorized)) -> object:
-        return await _readiness_payload(active)
-
-    @app.get("/verification/report/latest")
-    async def verification_report_latest(
-        type: str = "any",
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        # ?type=any (default) | real_model (multi_model+target_mac)
-        # | voice_live | voice_conversation_live | workflow. Unknown values fall back to
-        # "any", so existing callers (and the ignored-?path= probe) keep their
-        # behaviour.
-        return _latest_verification_report(active.settings, report_type=type)
-
-    @app.get("/verification/reports")
-    async def verification_reports(
-        request: Request,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        if request.query_params:
-            raise HTTPException(status_code=400, detail="query parameters are not supported")
-        return _verification_report_history(active.settings)
-
-    @app.get("/verification/reports/{report_basename}")
-    async def verification_report_by_basename(
-        report_basename: str,
-        request: Request,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        if request.query_params:
-            raise HTTPException(status_code=400, detail="query parameters are not supported")
-        return _verification_report_detail(active.settings, report_basename)
-
-    @app.get("/reports")
-    async def reports_index(
-        request: Request,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        if request.query_params:
-            raise HTTPException(status_code=400, detail="query parameters are not supported")
-        return _browser_reports(active.settings)
-
-    @app.get("/reports/latest")
-    async def reports_latest_any(
-        request: Request,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        if request.query_params:
-            raise HTTPException(status_code=400, detail="query parameters are not supported")
-        return _browser_latest(active.settings)
-
-    @app.get("/reports/latest/{report_type}")
-    async def reports_latest_typed(
-        report_type: str,
-        request: Request,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        if request.query_params:
-            raise HTTPException(status_code=400, detail="query parameters are not supported")
-        if report_type not in _BROWSER_REPORT_TYPES:
-            raise HTTPException(status_code=404, detail="unknown report type")
-        return _browser_latest(active.settings, report_type=report_type)
-
-    @app.post("/chat")
-    async def chat(
-        request: ChatRequest,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> ChatResponse:
-        request_id = x_request_id or str(uuid.uuid4())
-        async with active.require_session_manager().interaction(request.conversation_id):
-            result = await active.orchestrator.chat(
-                request.message,
-                conversation_id=request.conversation_id,
-                request_id=request_id,
-                project_id=request.project_id,
-                repo_path=request.repo_path,
-                mode=request.mode,
-            )
-        return ChatResponse(request_id=request_id, result=result)
-
-    @app.post("/chat/stream")
-    async def chat_stream(
-        request: ChatRequest,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> StreamingResponse:
-        request_id = x_request_id or str(uuid.uuid4())
-        interaction = active.require_session_manager().interaction(request.conversation_id)
-        # Enter before returning the response: request acceptance itself is
-        # activity, even if streaming later fails or the client disconnects.
-        await interaction.__aenter__()
-
-        async def events() -> AsyncIterator[str]:
-            try:
-                async for event_name, payload in active.orchestrator.stream_chat(
-                    request.message,
-                    conversation_id=request.conversation_id,
-                    request_id=request_id,
-                    project_id=request.project_id,
-                    repo_path=request.repo_path,
-                    mode=request.mode,
-                ):
-                    yield _sse_event(event_name, request_id, payload)
-            finally:
-                await interaction.__aexit__(None, None, None)
-
-        return StreamingResponse(events(), media_type="text/event-stream")
-
-    @app.post("/voice/input")
-    async def voice_input(
-        request: ChatRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> ChatResponse:
-        request_id = str(uuid.uuid4())
-        async with active.require_session_manager().interaction(request.conversation_id):
-            result = await active.orchestrator.chat(
-                request.message,
-                conversation_id=request.conversation_id,
-                request_id=request_id,
-                project_id=request.project_id,
-                repo_path=request.repo_path,
-                mode=request.mode,
-            )
-        return ChatResponse(request_id=request_id, result=result)
-
-    @app.post("/wake")
-    async def wake(
-        request: WakeRequest,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        request_id = x_request_id or str(uuid.uuid4())
-        event = WakeEvent(
-            source=request.source,
-            score=request.score,
-            text=request.text,
-            reason=request.reason,
-            captured_at=request.captured_at,
-            session_hint=request.session_hint,
-        )
-        return await _handle_wake_event(active, event, request_id=request_id)
-
-    @app.get("/wake/mute")
-    async def wake_mute_status(active: ApiContainer = Depends(authorized)) -> object:
-        # Redacted state only; the flag/status paths themselves are never exposed.
-        return {
-            "muted": MuteSwitch(active.settings.mute_flag_path).is_muted(),
-            "state": read_wake_status(active.settings)["state"],
-        }
-
-    @app.post("/wake/mute")
-    async def wake_mute_set(
-        request: WakeMuteRequest,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        switch = MuteSwitch(active.settings.mute_flag_path)
-        if request.muted:
-            switch.mute()
-        else:
-            switch.unmute()
-        active.approvals.audit.write(
-            {
-                "event_type": "wake_mute_changed",
-                "request_id": x_request_id or str(uuid.uuid4()),
-                "actor": "local-user",
-                "muted": request.muted,
-            }
-        )
-        return {
-            "muted": switch.is_muted(),
-            "state": read_wake_status(active.settings)["state"],
-            "audited": True,
-        }
-
-    @app.get("/sessions")
-    async def sessions(
-        limit: int = 50,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        records = await active.memory.list_sessions(limit=limit)
-        return {"sessions": [record.model_dump() for record in records]}
-
-    @app.post("/sessions")
-    async def session_attach(
-        request: SessionAttachRequest,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        request_id = x_request_id or str(uuid.uuid4())
-        event = WakeEvent(source=request.source, reason="session_attach")
-        return await _handle_wake_event(active, event, request_id=request_id)
-
-    @app.post("/sessions/{session_id}/close")
-    async def session_close(
-        session_id: str,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        request_id = x_request_id or str(uuid.uuid4())
-        session_manager = active.require_session_manager()
-        record = await active.memory.get_session(session_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="session not found")
-        closed = await session_manager.close(session_id)
-        active.approvals.audit.write(
-            {
-                "event_type": "session_closed",
-                "request_id": request_id,
-                "actor": "local-user",
-                "reference_id": session_id,
-                "outcome": "closed" if closed else "already_closed",
-            }
-        )
-        return {"session_id": session_id, "closed": closed}
-
-    @app.post("/agents/run")
-    async def agents_run(
-        request: AgentRunRequest,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> ChatResponse:
-        request_id = x_request_id or str(uuid.uuid4())
-        if not request.options.structured:
-            raise PermissionDeniedError(
-                "Direct agent runs only support structured execution.",
-                {"agent": request.agent},
-            )
-        async with active.require_session_manager().interaction(request.conversation_id):
-            result = await active.orchestrator.run_agent(
-                agent_id=request.agent,
-                message=request.message,
-                conversation_id=request.conversation_id,
-                request_id=request_id,
-                project_id=request.project_id,
-                repo_path=request.repo_path,
-            )
-        return ChatResponse(request_id=request_id, result=result)
-
-    @app.post("/tools/request")
-    async def tool_request(
-        request: ToolRequestEnvelope,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        request_id = x_request_id or str(uuid.uuid4())
-        context = await active.tool_executor.context(
-            request_id=request_id,
-            actor="local-user",
-            agent_id=request.agent,
-            project_id=str(request.args["project_id"]) if request.args.get("project_id") else None,
-            source="api",
-        )
-        outcome = await active.tool_executor.request_or_execute(
-            tool=request.tool,
-            args=request.args,
-            context=context,
-        )
-        if outcome.approval is not None:
-            return {"status": "pending_approval", "approval": outcome.approval}
-        return {"status": outcome.status, "result": outcome.result}
-
-    @app.post("/tools/approve")
-    async def approve(
-        request: ToolApprovalAction,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        request_id = x_request_id or str(uuid.uuid4())
-        approval = await active.approvals.get(request.approval_id)
-        playbook_run_id = approval.metadata.get("playbook_run_id")
-        if isinstance(playbook_run_id, str):
-            if request.tool is not None:
-                raise PermissionDeniedError(
-                    "Playbook approvals resume only their persisted exact action."
-                )
-            result = await PlaybookRunner(active.tool_executor, memory=active.memory).resume(
-                playbook_run_id,
-                approval_id=request.approval_id,
-                actor="local-user",
-            )
-            return {"playbook_run": asdict(result)}
-        return await active.orchestrator.approve_tool(
-            approval_id=request.approval_id,
-            actor="local-user",
-            request_id=request_id,
-            tool=request.tool,
-            args=request.args if request.tool is not None else None,
-        )
-
-    @app.post("/tools/deny")
-    async def deny(
-        request: ToolApprovalAction,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        approval = await active.approvals.get(request.approval_id)
-        result = await active.orchestrator.deny_tool(
-            approval_id=request.approval_id,
-            actor="local-user",
-            request_id=x_request_id or str(uuid.uuid4()),
-        )
-        playbook_run_id = approval.metadata.get("playbook_run_id")
-        if isinstance(playbook_run_id, str):
-            playbook = await PlaybookRunner(active.tool_executor, memory=active.memory).mark_denied(
-                playbook_run_id, approval_id=request.approval_id
-            )
-            return {"approval": result, "playbook_run": asdict(playbook)}
-        return result
-
-    @app.get("/approvals")
-    async def approvals(active: ApiContainer = Depends(authorized)) -> object:
-        return {
-            "approvals": [record.model_dump() for record in await active.approvals.list_pending()]
-        }
-
-    @app.post("/memory")
-    async def memory_create(
-        request: MemoryCreateRequest,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
-    ) -> object:
-        if (
-            request.project_id is not None
-            and await active.memory.get_project(request.project_id) is None
-        ):
-            raise PermissionDeniedError(
-                "Unknown project for project-scoped memory.",
-                {"project_id": request.project_id},
-            )
-        if request.source_conversation_id is not None:
-            conversation = await active.memory.get_conversation(request.source_conversation_id)
-            if conversation is None:
-                raise PermissionDeniedError(
-                    "Unknown source conversation for memory write.",
-                    {"conversation_id": request.source_conversation_id},
-                )
-            if conversation.project_id != request.project_id:
-                raise PermissionDeniedError(
-                    "Memory source conversation project scope does not match.",
-                    {
-                        "conversation_project_id": conversation.project_id,
-                        "memory_project_id": request.project_id,
-                    },
-                )
-
-        writer = MemoryWriter(active.memory_repository)
-        record = await writer.write(
-            request.content,
-            reason=request.reason,
-            memory_type=request.memory_type,
-            requested_by_user=True,
-            project_id=request.project_id,
-        )
-        await active.memory_repository.set_provenance(
-            record.id,
-            source_conversation_id=request.source_conversation_id,
-        )
-        index_health = await active.memory_repository.health()
-        active.approvals.audit.write(
-            {
-                "event_type": "memory_written",
-                "request_id": x_request_id or str(uuid.uuid4()),
-                "actor": "local-user",
-                "memory_id": record.id,
-                "memory_type": record.kind,
-                "project_id": record.project_id,
-                "source_conversation_id": request.source_conversation_id,
-                "content_length": len(record.content),
-                "reason_length": len(record.reason),
-            }
-        )
-        return {
-            "memory": record.model_dump(),
-            "stored": f"Stored {record.kind} memory.",
-            "index_repair_required": index_health.repair_required,
-        }
-
-    @app.get("/memory/search")
-    async def memory_search(
-        q: str,
-        project_id: str | None = None,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        if project_id is not None and await active.memory.get_project(project_id) is None:
-            raise PermissionDeniedError(
-                "Unknown project for memory search.", {"project_id": project_id}
-            )
-        results = await active.memory.search_memories(q, project_id=project_id)
-        return {"results": [result.model_dump() for result in results]}
-
-    @app.delete("/memory/{memory_id}")
-    async def memory_delete(memory_id: str, active: ApiContainer = Depends(authorized)) -> object:
-        deleted = await active.memory_repository.delete_memory(memory_id)
-        index_health = await active.memory_repository.health()
-        return {
-            "deleted": deleted,
-            "index_repair_required": index_health.repair_required,
-        }
-
-    @app.get("/memory/inspect")
-    async def memory_inspect(
-        state: str = "machine",
-        limit: int = 100,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        try:
-            records = await active.memory.list_memories_by_state(state, limit=limit)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {
-            "state": state,
-            "memories": [record.model_dump() for record in records],
-        }
-
-    @app.get("/memory/export")
-    async def memory_export(
-        project_id: str | None = None, active: ApiContainer = Depends(authorized)
-    ) -> object:
-        if project_id is not None and await active.memory.get_project(project_id) is None:
-            raise PermissionDeniedError(
-                "Unknown project for memory export.", {"project_id": project_id}
-            )
-        return {"export": await active.memory.export_memories(project_id=project_id)}
-
-    @app.post("/memory/reindex")
-    async def memory_reindex(active: ApiContainer = Depends(authorized)) -> object:
-        reindexed = await active.memory_repository.rebuild()
-        configured_provider = active.settings.memory.embedding_provider
-        active_provider = active.vector_memory.embedding.name
-        vector_health = active.vector_memory.health()
-        # A degraded index is one where the configured provider fell back to
-        # hashed-token, or the persisted index does not match the active
-        # provider. Callers must never see a silent mix.
-        fallback_active = configured_provider == "runtime-local" and (
-            active_provider == "hashed-token"
-        )
-        return {
-            "reindexed": reindexed,
-            "provider": active_provider,
-            "configured_provider": configured_provider,
-            "dimensions": active.vector_memory.embedding.dimensions,
-            "index_compatible": bool(vector_health.get("compatible", True)),
-            "fallback_active": fallback_active,
-            "degraded": fallback_active or not bool(vector_health.get("compatible", True)),
-        }
-
-    @app.post("/memory/repair-index")
-    async def memory_repair_index(
-        apply: bool = False,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        return active.vector_memory.repair_index(apply=apply)
+    register_chat_routes(app, authorized, sse_event=_sse_event)
+    register_voice_routes(app, authorized, wake_handler=_handle_wake_event)
+    register_tool_routes(app, authorized)
+    register_memory_routes(app, authorized)
 
     @app.post("/feedback")
     async def feedback(

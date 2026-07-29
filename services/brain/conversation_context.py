@@ -110,9 +110,7 @@ def group_persisted_conversation_turns(
     for message in messages:
         if message.role == "system":
             finish_active(final=False)
-            groups.append(
-                ConversationTurn(messages=(message,), kind="system", complete=True)
-            )
+            groups.append(ConversationTurn(messages=(message,), kind="system", complete=True))
         elif message.role == "user":
             finish_active(final=False)
             active = [message]
@@ -136,9 +134,7 @@ def group_persisted_conversation_turns(
     return groups, warnings
 
 
-def render_conversation_summary(
-    content: ConversationSummaryContent, *, max_chars: int
-) -> str:
+def render_conversation_summary(content: ConversationSummaryContent, *, max_chars: int) -> str:
     labels = (
         ("Current goal", [content.current_goal] if content.current_goal else []),
         ("Important facts", content.important_facts),
@@ -185,9 +181,13 @@ class ConversationContextService:
         messages = await self._all_after_checkpoint(conversation_id, summary)
         groups, warnings = group_persisted_conversation_turns(messages)
         eligible, recent = self._partition_groups(groups)
-        should_advance = self.settings.summary_enabled and bool(eligible) and (
-            len(eligible) >= self.settings.older_turns_before_summary
-            or _groups_character_count(groups) > self.settings.conversation_history_max_chars
+        should_advance = (
+            self.settings.summary_enabled
+            and bool(eligible)
+            and (
+                len(eligible) >= self.settings.older_turns_before_summary
+                or _groups_character_count(groups) > self.settings.conversation_history_max_chars
+            )
         )
         if not should_advance:
             return self._prepared(summary, recent, warnings, advanced=False)
@@ -290,8 +290,7 @@ class ConversationContextService:
             group for group in groups if group.kind == "conversation" and group.complete
         ]
         keep_ids = {
-            id(group)
-            for group in complete_conversations[-self.settings.recent_turns_preserved :]
+            id(group) for group in complete_conversations[-self.settings.recent_turns_preserved :]
         }
         eligible = [
             group
@@ -312,8 +311,7 @@ class ConversationContextService:
         payload = {
             "previous_summary": summary.content.model_dump(mode="json") if summary else None,
             "new_complete_turns": [
-                [_summary_input_message(message) for message in group.messages]
-                for group in groups
+                [_summary_input_message(message) for message in group.messages] for group in groups
             ],
         }
         response = await self.runtime_client.chat(
@@ -344,9 +342,7 @@ class ConversationContextService:
         *,
         advanced: bool,
     ) -> PreparedConversationContext:
-        recent_messages = _bound_recent_groups(
-            groups, self.settings.conversation_history_max_chars
-        )
+        recent_messages = _bound_recent_groups(groups, self.settings.conversation_history_max_chars)
         bounded_groups, _ = group_persisted_conversation_turns(recent_messages)
         return PreparedConversationContext(
             summary=(
@@ -359,9 +355,7 @@ class ConversationContextService:
             ),
             recent_messages=recent_messages,
             summarized_message_count=summary.summarized_message_count if summary else 0,
-            recent_turn_count=sum(
-                group.kind == "conversation" for group in bounded_groups
-            ),
+            recent_turn_count=sum(group.kind == "conversation" for group in bounded_groups),
             summary_version=summary.version if summary else None,
             summary_advanced=advanced,
             warnings=list(dict.fromkeys(warnings)),
@@ -419,11 +413,7 @@ def _bound_recent_groups(groups: list[ConversationTurn], max_chars: int) -> list
     selected: list[ConversationTurn] = []
     used = 0
     newest_conversation = next(
-        (
-            group
-            for group in reversed(groups)
-            if group.kind == "conversation"
-        ),
+        (group for group in reversed(groups) if group.kind == "conversation"),
         None,
     )
     for group in reversed(groups):

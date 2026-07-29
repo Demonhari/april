@@ -25,8 +25,20 @@ class MemoryPolicy:
             pattern.search(content) for pattern in SENSITIVE_PATTERNS
         )
 
-    def evaluate(self, content: str, *, requested_by_user: bool = False) -> MemoryPolicyDecision:
+    def evaluate(
+        self,
+        content: str,
+        *,
+        requested_by_user: bool = False,
+        explicitly_sensitive: bool = False,
+        sensitive_encryption_available: bool = False,
+    ) -> MemoryPolicyDecision:
         if self.is_sensitive(content):
+            if requested_by_user and explicitly_sensitive and sensitive_encryption_available:
+                return MemoryPolicyDecision(
+                    True,
+                    "User explicitly requested encrypted durable memory.",
+                )
             return MemoryPolicyDecision(
                 False, "Sensitive-looking content is not stored as durable memory."
             )

@@ -22,6 +22,7 @@ security:
   api_credential_id: core-api-token
   runtime_credential_id: runtime-auth-token
   audit_anchor_credential_id: audit-terminal-anchor
+  memory_encryption_credential_id: memory-encryption-key
 
 memory:
   database_path: data/april.db
@@ -35,6 +36,32 @@ memory:
   # audited fallback to hashed-token and flags it in `run april memory doctor`.
   embedding_provider: hashed-token
   embedding_model_id: null
+  # Explicit sensitive-memory encryption is opt-in. Enabling it additionally
+  # requires APRIL's security extra and a Keychain-backed encryption key.
+  sensitive_encryption_enabled: false
+
+# External local trainers and evaluators are never discovered or installed by
+# APRIL. Configure reviewed absolute executables and fixed argument templates,
+# then explicitly enable this section before submitting an approved job.
+finetune:
+  enabled: false
+  minimum_samples: 32
+  evaluation_fraction: 0.2
+  trainer_executable: null
+  trainer_arguments: []
+  evaluator_executable: null
+  evaluator_arguments: []
+  timeout_seconds: 14400
+  max_output_bytes: 65536
+  max_memory_bytes: 8589934592
+  max_cpu_seconds: 14400
+
+benchmark:
+  runs: 3
+  maximum_decline_fraction: 0.15
+  minimum_structured_json_reliability: 0.9
+  minimum_routing_accuracy: 0.8
+  minimum_coding_pass_rate: 0.8
 
 paths:
   logs_path: logs

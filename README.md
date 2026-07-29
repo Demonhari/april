@@ -1,5 +1,11 @@
 # APRIL
 
+> The remaining production-readiness workflow—durable model/training jobs,
+> guided fine-tuning, Intel profile selection, model comparison, live speaker
+> acceptance, locked dependencies, production macOS packaging, release
+> exclusion, and optional sensitive-memory encryption—is documented in
+> [docs/production-readiness-roadmap.md](docs/production-readiness-roadmap.md).
+
 APRIL is a private, local-first AI assistant MVP for macOS. It is CLI-first, uses a separate local model service called April Runtime, supports specialist agents, stores inspectable local memory, and enforces deterministic tool permissions with exact-action approvals.
 
 No model files are downloaded automatically. No cloud AI APIs, Ollama integration, telemetry, or unrestricted shell execution are included.
@@ -200,7 +206,7 @@ real models, live audio, or native Mac packaging.
 | Real GGUF model load/chat/stream/unload | Implemented; verified only by target-Mac `--require-real-model` reports with local GGUFs |
 | Live microphone, whisper.cpp, Piper, wake-word | **Not verified here** — requires your local binaries/models |
 | Real-model target-Mac acceptance report | Implemented; runs real checks only when you supply a GGUF |
-| Signed/notarized packaging, launch-at-login | Out of scope (see below) |
+| Production app packaging/sign/notary/LaunchAgent commands | Implemented; real Apple execution not verified here |
 
 CI and fake verification are not proof of real GGUF readiness. Real-model
 readiness is proven only by a target-Mac report that loads, chats, streams, and
@@ -211,7 +217,7 @@ run april verify --all-configured-models --require-real-model \
   --report data/verification/mac-readiness.json
 ```
 
-Live microphone/wake-word and signed native packaging remain separate
+Live microphone/wake-word and Apple signing/notarization remain separate
 target-Mac checks.
 
 ### Offline readiness check
@@ -1138,7 +1144,9 @@ run april setup app-stub
 
 Both create `dist/APRIL.app` around `run april desktop` without sudo, signing,
 notarization, launch-at-login, models, tokens, or secrets. The generated bundle
-is ignored by Git. Signed/notarized packaging remains future work.
+is ignored by Git. A separate production path is available through
+`run april package`; see `docs/production-readiness-roadmap.md`. No real signing
+or notarization success is claimed until the corresponding Apple command passes.
 
 ## Conversations
 
@@ -1535,7 +1543,6 @@ milestones rather than hidden gaps:
 - arbitrary package installation and unrestricted command execution
 - broad/recursive file deletion
 - cloud sync, telemetry, and any automatic model downloading
-- signed/notarized macOS application packaging and launch-at-login
 - external connectors
 
 Model files are never committed to this repository and are never downloaded

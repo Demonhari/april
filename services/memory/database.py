@@ -276,9 +276,7 @@ class Database:
         active_paths_token: contextvars.Token[frozenset[Path]] | None = None
         try:
             process_lock = await self._acquire_process_lock()
-            active_paths_token = _ACTIVE_WRITE_PATHS.set(
-                _ACTIVE_WRITE_PATHS.get() | {self._key}
-            )
+            active_paths_token = _ACTIVE_WRITE_PATHS.set(_ACTIVE_WRITE_PATHS.get() | {self._key})
             yield
         finally:
             if active_paths_token is not None:

@@ -246,7 +246,7 @@ async def test_schema_17_and_no_history_neutral_prior(tmp_path) -> None:
     version = await database.fetchone(
         "SELECT version FROM schema_migrations WHERE version = ?", (SCHEMA_VERSION,)
     )
-    assert SCHEMA_VERSION == 19
+    assert SCHEMA_VERSION == 20
     assert version is not None
     service = RoutingReliabilityService(database, BrainSettings())
     calibrated = await service.calibrate(_route(raw=0.9))

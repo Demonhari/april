@@ -41,6 +41,7 @@ from apps.runner.multi_model_report import (
     build_multi_model_report,
 )
 from april_common.audit import audit_logger_for_settings
+from april_common.credentials import CredentialKey, FileCredentialStore
 from april_common.errors import ConfigError
 from april_common.process_environment import ProcessCategory, build_process_environment
 from april_common.process_runner import run_restricted_process_sync
@@ -908,11 +909,13 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         model_path: Path,
         max_output_tokens: int = 32,
         timeout: float = 180.0,
+        inherit_process_group: bool = False,
     ) -> None:
         self.repo_home = home.expanduser().resolve()
         self.model_path = model_path.expanduser().resolve()
         self.max_output_tokens = max_output_tokens
         self.timeout = timeout
+        self.inherit_process_group = inherit_process_group
         self.temp = Path(tempfile.mkdtemp(prefix="april-real-verify-"))
         self.verify_home = self.temp / "april_home"
         self.runtime_port = _free_port()
@@ -1015,6 +1018,12 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         )
 
     def _env(self) -> dict[str, str]:
+        credential_environment = _verification_credential_environment(
+            verify_home=self.verify_home,
+            temporary_root=self.temp,
+            api_token=self.api_token,
+            runtime_token=self.runtime_token,
+        )
         return build_process_environment(
             ProcessCategory.VERIFICATION_SUBPROCESS,
             april_home=self.verify_home,
@@ -1026,8 +1035,7 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
                 "APRIL_RUNTIME_PORT": str(self.runtime_port),
                 "APRIL_API_PORT": str(self.api_port),
                 "APRIL_RUNTIME_URL": self.runtime_url,
-                "APRIL_RUNTIME_TOKEN": self.runtime_token,
-                "APRIL_API_TOKEN": self.api_token,
+                **credential_environment,
                 "APRIL_DATABASE_PATH": str(self.temp / "data" / "april.db"),
                 "APRIL_VECTOR_INDEX_PATH": str(self.temp / "data" / "vector_index"),
                 "APRIL_AUDIT_PATH": str(self.temp / "logs" / "audit.jsonl"),
@@ -1055,7 +1063,7 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
                 env=child_env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
+                start_new_session=not self.inherit_process_group,
             )
 
     def _wait_json(self, url: str, *, auth_runtime: bool = False) -> dict[str, Any]:
@@ -1288,12 +1296,14 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
         runs: int,
         max_output_tokens: int,
         keep_loaded: bool,
+        inherit_process_group: bool = False,
     ) -> None:
         super().__init__(
             home=home,
             model_path=model_path,
             max_output_tokens=max_output_tokens,
             timeout=180.0,
+            inherit_process_group=inherit_process_group,
         )
         self.prompt = prompt
         self.runs = runs
@@ -1502,6 +1512,12 @@ class LauncherVerifier:
         _git(self.project, "commit", "-m", "initial")
 
     def _env(self) -> dict[str, str]:
+        credential_environment = _verification_credential_environment(
+            verify_home=self.verify_home,
+            temporary_root=self.temp,
+            api_token=self.api_token,
+            runtime_token=self.runtime_token,
+        )
         return build_process_environment(
             ProcessCategory.VERIFICATION_SUBPROCESS,
             april_home=self.verify_home,
@@ -1512,8 +1528,7 @@ class LauncherVerifier:
                 "APRIL_RUNTIME_PORT": str(self.runtime_port),
                 "APRIL_API_PORT": str(self.api_port),
                 "APRIL_RUNTIME_URL": self.runtime_url,
-                "APRIL_RUNTIME_TOKEN": self.runtime_token,
-                "APRIL_API_TOKEN": self.api_token,
+                **credential_environment,
                 "APRIL_DATABASE_PATH": str(self.temp / "data" / "april.db"),
                 "APRIL_VECTOR_INDEX_PATH": str(self.temp / "data" / "vector_index"),
                 "APRIL_AUDIT_PATH": str(self.temp / "logs" / "audit.jsonl"),
@@ -3229,6 +3244,26 @@ def _llama_cpp_installed() -> bool:
     import importlib.util
 
     return importlib.util.find_spec("llama_cpp") is not None
+
+
+def _verification_credential_environment(
+    *,
+    verify_home: Path,
+    temporary_root: Path,
+    api_token: str,
+    runtime_token: str,
+) -> dict[str, str]:
+    """Provision ephemeral test credentials without putting values in child env."""
+    credential_path = temporary_root / "verification-credentials.json"
+    store = FileCredentialStore(credential_path, repository_root=verify_home)
+    store.set(CredentialKey.API_TOKEN, api_token)
+    store.set(CredentialKey.RUNTIME_TOKEN, runtime_token)
+    return {
+        "APRIL_CREDENTIAL_STORE": "file",
+        "APRIL_CREDENTIAL_FILE_PATH": str(credential_path),
+        "APRIL_API_CREDENTIAL_ID": CredentialKey.API_TOKEN.value,
+        "APRIL_RUNTIME_CREDENTIAL_ID": CredentialKey.RUNTIME_TOKEN.value,
+    }
 
 
 def _process_rss_bytes(pid: int | None) -> int | None:

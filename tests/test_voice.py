@@ -414,10 +414,10 @@ async def test_wake_word_loop_segments_fake_frames(settings_tmp, tmp_path: Path)
     api = FakeApi()
     loop = WakeWordConversationLoop(
         api_client=api,  # type: ignore[arg-type]
-            microphone=FakeMicrophone(
-                tmp_path / "unused.wav",
-                frames=[silent, *([loud] * 30), *([silent] * 65)],
-            ),
+        microphone=FakeMicrophone(
+            tmp_path / "unused.wav",
+            frames=[silent, *([loud] * 30), *([silent] * 65)],
+        ),
         stt=FakeSpeechToText("April, inspect this"),
         tts=FakeTextToSpeech(),
         player=FakeAudioPlayer(),

@@ -98,16 +98,72 @@ def test_bootstrap_force_regenerates_tokens(home_with_configs: Path) -> None:
 
 
 def test_bootstrap_recommends_profile_without_applying(home_with_configs: Path) -> None:
-    report = bootstrap(home_with_configs)
+    report = bootstrap(home_with_configs, no_auto_profile=True)
     assert report["recommended_profile"]
     assert report["profile_applied"] is False
     assert report["applied_profile"] is None
+    assert report["auto_profile_suppressed"] is True
 
 
 def test_bootstrap_applies_profile_only_with_flag(home_with_configs: Path) -> None:
     report = bootstrap(home_with_configs, apply_profile=True)
     assert report["profile_applied"] is True
     assert report["applied_profile"] == report["recommended_profile"]
+
+
+def test_bootstrap_auto_applies_intel_profile_once(
+    home_with_configs: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("apps.runner.bootstrap.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("apps.runner.bootstrap.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        "apps.runner.bootstrap.recommend_model_profile",
+        lambda _home: {
+            "recommended_profile": "intel_macbook_cpu_low",
+            "available_profiles": ["intel_macbook_cpu_low"],
+            "expected_backend": "CPU-only",
+            "architecture": "x86_64",
+            "platform": "Darwin",
+            "cpu_count": 8,
+            "available_memory": None,
+            "arm64_python": False,
+        },
+    )
+    report = bootstrap(home_with_configs)
+    assert report["profile_auto_applied"] is True
+    rerun = bootstrap(home_with_configs)
+    assert rerun["profile_auto_applied"] is False
+
+
+def test_bootstrap_preserves_manual_runtime_override(
+    home_with_configs: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models_path = home_with_configs / "configs" / "models.yaml"
+    data = yaml.safe_load(models_path.read_text(encoding="utf-8"))
+    first = next(iter(data["models"].values()))
+    first["threads"] = 13
+    models_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr("apps.runner.bootstrap.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("apps.runner.bootstrap.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        "apps.runner.bootstrap.recommend_model_profile",
+        lambda _home: {
+            "recommended_profile": "intel_macbook_cpu_low",
+            "available_profiles": ["intel_macbook_cpu_low"],
+            "expected_backend": "CPU-only",
+            "architecture": "x86_64",
+            "platform": "Darwin",
+            "cpu_count": 8,
+            "available_memory": None,
+            "arm64_python": False,
+        },
+    )
+    report = bootstrap(home_with_configs)
+    assert report["profile_applied"] is False
+    updated = yaml.safe_load(models_path.read_text(encoding="utf-8"))
+    assert next(iter(updated["models"].values()))["threads"] == 13
 
 
 def test_bootstrap_reports_models_voice_roots_and_validation(home_with_configs: Path) -> None:

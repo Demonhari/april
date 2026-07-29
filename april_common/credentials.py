@@ -25,12 +25,14 @@ class CredentialKey(StrEnum):
     API_TOKEN = "core-api-token"
     RUNTIME_TOKEN = "runtime-auth-token"
     AUDIT_ANCHOR = "audit-terminal-anchor"
+    MEMORY_ENCRYPTION_KEY = "memory-encryption-key"
 
 
 KEYCHAIN_ACCOUNTS = {
     CredentialKey.API_TOKEN: "april.core-api",
     CredentialKey.RUNTIME_TOKEN: "april.runtime",
     CredentialKey.AUDIT_ANCHOR: "april.audit-anchor",
+    CredentialKey.MEMORY_ENCRYPTION_KEY: "april.memory-encryption",
 }
 
 

@@ -10,6 +10,10 @@ from april_common.text_normalization import normalize_text, word_tokens
 from april_common.time import utc_now_iso
 from services.brain.planner import TaskPlan, TaskStep
 from services.memory.database import Database
+from services.memory.encryption import (
+    UNAVAILABLE_CONTENT,
+    SensitiveMemoryEncryption,
+)
 from services.memory.schemas import (
     Conversation,
     ConversationSummary,
@@ -41,8 +45,16 @@ def _escaped_like_value(value: str) -> str:
 
 
 class SqliteMemory:
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        sensitive_encryption: SensitiveMemoryEncryption | None = None,
+        sensitive_encryption_enabled: bool = False,
+    ) -> None:
         self.database = database
+        self.sensitive_encryption = sensitive_encryption
+        self.sensitive_encryption_enabled = sensitive_encryption_enabled
 
     async def add_project(self, path: str, name: str | None = None) -> Project:
         existing = await self.get_project_by_path(path)
@@ -84,46 +96,60 @@ class SqliteMemory:
         source: str = "user",
         expires_at: str | None = None,
         superseded_by: str | None = None,
+        sensitive: bool = False,
     ) -> MemoryRecord:
         memory_id = str(uuid.uuid4())
         created_at = utc_now_iso()
+        if sensitive and self.sensitive_encryption is None:
+            raise PermissionDeniedError(
+                "Sensitive-memory encryption is disabled or its key is unavailable."
+            )
+        stored_content = (
+            self.sensitive_encryption.encrypt(memory_id, content)
+            if sensitive and self.sensitive_encryption is not None
+            else content
+        )
+        stored_reason = "Explicitly encrypted local memory." if sensitive else reason
+        indexed_content = "" if sensitive else content
         async with self.database.transaction() as conn:
             await conn.execute(
                 """
                 INSERT INTO memories(
                     id, project_id, kind, content, reason, created_at,
-                    confidence, source, expires_at, superseded_by
+                    confidence, source, expires_at, superseded_by, content_encrypted
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
                     project_id,
                     kind,
-                    content,
-                    reason,
+                    stored_content,
+                    stored_reason,
                     created_at,
                     confidence,
                     source,
                     expires_at,
                     superseded_by,
+                    int(sensitive),
                 ),
             )
             await conn.execute(
                 "INSERT INTO memories_fts(id, content, reason) VALUES(?, ?, ?)",
-                (memory_id, content, reason),
+                (memory_id, indexed_content, stored_reason),
             )
         return MemoryRecord(
             id=memory_id,
             content=content,
             kind=kind,
             project_id=project_id,
-            reason=reason,
+            reason=stored_reason,
             created_at=created_at,
             confidence=confidence,
             source=source,
             expires_at=expires_at,
             superseded_by=superseded_by,
+            content_encrypted=sensitive,
         )
 
     async def get_memory(
@@ -143,7 +169,7 @@ class SqliteMemory:
             )
         if row is None:
             return None
-        return MemoryRecord.model_validate(dict(row))
+        return self._memory_record(row)
 
     async def find_duplicate_memory(
         self,
@@ -162,7 +188,7 @@ class SqliteMemory:
             (kind, project_id, project_id),
         )
         for row in rows:
-            record = MemoryRecord.model_validate(dict(row))
+            record = self._memory_record(row)
             if " ".join(record.content.casefold().split()) == normalized:
                 return record
         return None
@@ -196,7 +222,7 @@ class SqliteMemory:
                 """,
                 params,
             )
-        return [MemoryRecord.model_validate(dict(row)) for row in rows]
+        return [self._memory_record(row) for row in rows]
 
     async def search_memories(
         self, query: str, *, project_id: str | None = None
@@ -299,7 +325,7 @@ class SqliteMemory:
 
         hits: list[LexicalHit] = []
         for rank, row in enumerate(rows, start=1):
-            memory = MemoryRecord.model_validate(dict(row))
+            memory = self._memory_record(row)
             document_tokens = set(word_tokens(f"{memory.content} {memory.reason}", max_tokens=512))
             matched = tuple(token for token in tokens if token in document_tokens)
             hits.append(
@@ -398,7 +424,21 @@ class SqliteMemory:
             f"SELECT * FROM memories WHERE {where} ORDER BY created_at DESC LIMIT ?",
             params,
         )
-        return [MemoryRecord.model_validate(dict(row)) for row in rows]
+        return [self._memory_record(row) for row in rows]
+
+    def _memory_record(self, row: Any) -> MemoryRecord:
+        payload = dict(row)
+        encrypted = bool(payload.get("content_encrypted", False))
+        if encrypted:
+            if self.sensitive_encryption is None:
+                payload["content"] = UNAVAILABLE_CONTENT
+            else:
+                payload["content"] = self.sensitive_encryption.decrypt(
+                    str(payload["id"]),
+                    str(payload["content"]),
+                )
+        payload["content_encrypted"] = encrypted
+        return MemoryRecord.model_validate(payload)
 
     async def supersede_memory(self, memory_id: str, *, superseded_by: str) -> bool:
         """Mark a memory as superseded without deleting the row."""

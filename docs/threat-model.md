@@ -63,7 +63,11 @@ Controls:
   restores require manifest/hash/integrity/schema validation plus automatic
   rollback
 
-Phase 4B does not defend against a compromised logged-in user session, malware
+Phase 4B and the later production-readiness controls do not defend against a compromised logged-in user session, malware
 that can use an unlocked Keychain, an unlocked stolen machine, or deletion of
-both the audit file and its Keychain anchor. It does not add disk encryption,
-native signing/notarization, remote attestation, or off-device backup.
+both the audit file and its Keychain anchor. Optional field encryption does not
+hide metadata or protect plaintext after an authorized process decrypts it.
+Production packaging adds operator-driven native signing/notarization commands,
+but this repository does not contain Apple credentials and automated tests are
+not proof of a signed/notarized artifact. APRIL does not add full-disk
+encryption, remote attestation, or off-device backup.

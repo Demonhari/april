@@ -58,6 +58,15 @@ _SETUP_MODELS = "run april setup models"
 _SETUP_VOICE = "run april setup voice"
 _SETUP_TOKENS = "run april setup tokens"
 _SETUP_EMBEDDINGS = "run april setup embeddings --model /absolute/path/to/embedding.gguf --apply"
+_IMPORT_REASONING = (
+    "run april model import --role reasoning --id april-reasoning "
+    "--name qwen3-4b --path /absolute/path/Qwen3-4B-Q4_K_M.gguf"
+)
+_IMPORT_EMBEDDING = (
+    "run april model import --role embedding --id april-embedding "
+    "--name nomic-embed-text-v1.5 "
+    "--path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf"
+)
 _VERIFY_REAL = (
     "run april verify --all-configured-models --require-real-model "
     "--report data/verification/mac-readiness.json"
@@ -206,6 +215,42 @@ def _voice_artifact(
         detail=redact_reason(f"Missing: {resolved}"),
         action=_SETUP_VOICE if required else None,
     )
+
+
+def _verified_model_ids(home: Path) -> set[str]:
+    path = home / "data" / "verification" / "mac-readiness.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return set()
+    if payload.get("report_type") != "multi_model":
+        return set()
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return set()
+    return {
+        str(model["model_id"])
+        for model in models
+        if isinstance(model, dict)
+        and model.get("available") is True
+        and model.get("load_success") is True
+        and model.get("chat_success") is True
+        and isinstance(model.get("model_id"), str)
+    }
+
+
+def _active_vector_provider(path: Path) -> str | None:
+    try:
+        generation_id = (path / "CURRENT").read_text(encoding="utf-8").strip()
+        if not generation_id or "/" in generation_id or "\\" in generation_id:
+            return None
+        metadata = json.loads(
+            (path / "generations" / generation_id / "metadata.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    provider = metadata.get("provider") if isinstance(metadata, dict) else None
+    return str(provider) if isinstance(provider, str) else None
 
 
 def build_readiness_report(
@@ -480,6 +525,36 @@ def build_readiness_report(
         if registry is not None
         else []
     )
+    verified_model_ids = _verified_model_ids(root)
+    if not reasoning_role_models:
+        checks.append(
+            ReadinessCheck(
+                name="reasoning role readiness",
+                status="warning",
+                detail="Reasoning role is supported, but no local artifact is registered.",
+                action=_IMPORT_REASONING,
+            )
+        )
+    else:
+        unverified_reasoning = [
+            model.id for model in reasoning_role_models if model.id not in verified_model_ids
+        ]
+        checks.append(
+            ReadinessCheck(
+                name="reasoning role readiness",
+                status="warning" if unverified_reasoning else "ok",
+                detail=(
+                    "Registered reasoning artifact has not passed real-model verification."
+                    if unverified_reasoning
+                    else "Registered reasoning artifact is present in a real-model report."
+                ),
+                action=(
+                    "run april verify --all-configured-models --require-real-model"
+                    if unverified_reasoning
+                    else None
+                ),
+            )
+        )
 
     # --- runtime-local embeddings ------------------------------------------
     if settings.memory.embedding_provider == "runtime-local":
@@ -538,6 +613,47 @@ def build_readiness_report(
                 name="runtime-local embedding model",
                 status="skipped",
                 detail="memory.embedding_provider is hashed-token; no embedding GGUF required.",
+            )
+        )
+
+    active_vector_provider = _active_vector_provider(settings.vector_index_path)
+    if settings.memory.embedding_provider == "hashed-token":
+        checks.append(
+            ReadinessCheck(
+                name="semantic embedding generation",
+                status="warning",
+                detail="Hashed-token embeddings are active; semantic embedding is not enabled.",
+                action=_IMPORT_EMBEDDING,
+            )
+        )
+    elif embedding_role_models and active_vector_provider != "runtime-local":
+        checks.append(
+            ReadinessCheck(
+                name="semantic embedding generation",
+                status="warning",
+                detail=(
+                    "A semantic embedding model is registered, but the active vector "
+                    "generation was not rebuilt with runtime-local embeddings."
+                ),
+                action="run april memory reindex",
+            )
+        )
+    elif embedding_role_models:
+        embedding_verified = all(model.id in verified_model_ids for model in embedding_role_models)
+        checks.append(
+            ReadinessCheck(
+                name="semantic embedding generation",
+                status="ok" if embedding_verified else "warning",
+                detail=(
+                    "Semantic embedding model and active vector generation are verified."
+                    if embedding_verified
+                    else "Semantic vector generation is active; model verification is pending."
+                ),
+                action=(
+                    None
+                    if embedding_verified
+                    else "run april verify --all-configured-models --require-real-model"
+                ),
             )
         )
 

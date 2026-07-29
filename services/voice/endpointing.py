@@ -252,9 +252,7 @@ class UtteranceEndpointDetector:
             raise RuntimeError("Endpoint metrics are available only after completion.")
         minimum_met = self.speech_duration_ms >= self.minimum_utterance_ms
         latency = (
-            round(self.trailing_silence_ms)
-            if self._complete_reason == "end_of_speech"
-            else None
+            round(self.trailing_silence_ms) if self._complete_reason == "end_of_speech" else None
         )
         return EndpointMetrics(
             stop_reason=self._complete_reason,

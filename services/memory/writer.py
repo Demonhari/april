@@ -16,11 +16,16 @@ class MemoryPersistence(Protocol):
 
 class MemoryWriter:
     def __init__(
-        self, memory: SqliteMemory | MemoryPersistence, policy: MemoryPolicy | None = None
+        self,
+        memory: SqliteMemory | MemoryPersistence,
+        policy: MemoryPolicy | None = None,
+        *,
+        sensitive_encryption_available: bool = False,
     ) -> None:
         self.persistence = memory
         self.memory = memory.memory if hasattr(memory, "memory") else memory
         self.policy = policy or MemoryPolicy()
+        self.sensitive_encryption_available = sensitive_encryption_available
 
     async def write(
         self,
@@ -32,8 +37,14 @@ class MemoryWriter:
         project_id: str | None = None,
         confidence: float = 0.7,
         source: str = "user",
+        sensitive: bool = False,
     ) -> MemoryRecord:
-        decision = self.policy.evaluate(content, requested_by_user=requested_by_user)
+        decision = self.policy.evaluate(
+            content,
+            requested_by_user=requested_by_user,
+            explicitly_sensitive=sensitive,
+            sensitive_encryption_available=self.sensitive_encryption_available,
+        )
         if not decision.allowed:
             raise PermissionDeniedError(decision.reason)
         duplicate = await self.memory.find_duplicate_memory(
@@ -50,4 +61,5 @@ class MemoryWriter:
             project_id=project_id,
             confidence=confidence,
             source=source,
+            sensitive=sensitive,
         )

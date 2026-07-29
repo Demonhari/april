@@ -34,6 +34,7 @@ class ResourceLimitProfile(StrEnum):
     PATCH = "patch"
     INDEXING = "indexing"
     MODEL_UTILITY = "model_utility"
+    TRAINING = "training"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,13 @@ _LIMITS: dict[ResourceLimitProfile, _LimitValues] = {
     ResourceLimitProfile.PATCH: _LimitValues(60, 1024**3, 128, 32, 16 * 1024**2),
     ResourceLimitProfile.INDEXING: _LimitValues(1800, 4 * 1024**3, 512, 64, 64 * 1024**2),
     ResourceLimitProfile.MODEL_UTILITY: _LimitValues(3600, 16 * 1024**3, 512, 64, 128 * 1024**2),
+    ResourceLimitProfile.TRAINING: _LimitValues(
+        14_400,
+        8 * 1024**3,
+        512,
+        64,
+        1024 * 1024**2,
+    ),
 }
 
 

@@ -61,6 +61,7 @@ class MemorySettings(BaseModel):
     vector_index_path: Path = Path("data/vector_index")
     embedding_provider: str = "hashed-token"
     embedding_model_id: str | None = None
+    sensitive_encryption_enabled: bool = False
 
     @field_validator("embedding_provider")
     @classmethod
@@ -96,6 +97,49 @@ class SecuritySettings(BaseModel):
     api_credential_id: Literal["core-api-token"] = "core-api-token"
     runtime_credential_id: Literal["runtime-auth-token"] = "runtime-auth-token"
     audit_anchor_credential_id: Literal["audit-terminal-anchor"] = "audit-terminal-anchor"
+    memory_encryption_credential_id: Literal["memory-encryption-key"] = "memory-encryption-key"
+
+
+class FinetuneSettings(BaseModel):
+    """Reviewed local trainer/evaluator configuration. Disabled by default."""
+
+    enabled: bool = False
+    minimum_samples: int = Field(default=32, ge=4, le=1_000_000)
+    evaluation_fraction: float = Field(default=0.2, gt=0.0, lt=0.5)
+    trainer_executable: Path | None = None
+    trainer_arguments: list[str] = Field(default_factory=list, max_length=64)
+    evaluator_executable: Path | None = None
+    evaluator_arguments: list[str] = Field(default_factory=list, max_length=64)
+    timeout_seconds: float = Field(default=14_400.0, ge=60.0, le=172_800.0)
+    max_output_bytes: int = Field(default=65_536, ge=1_024, le=1_048_576)
+    max_memory_bytes: int = Field(default=8 * 1024**3, ge=256 * 1024**2)
+    max_cpu_seconds: int = Field(default=14_400, ge=60, le=172_800)
+
+    @field_validator("trainer_arguments", "evaluator_arguments")
+    @classmethod
+    def validate_argument_templates(cls, value: list[str]) -> list[str]:
+        allowed = {
+            "{base_model}",
+            "{train_dataset}",
+            "{eval_dataset}",
+            "{output_adapter}",
+            "{candidate_adapter}",
+        }
+        for argument in value:
+            if "\x00" in argument or len(argument) > 4096:
+                raise ValueError("Fine-tune argument templates must be bounded text.")
+            fields = set(re.findall(r"\{[^{}]+\}", argument))
+            if not fields.issubset(allowed):
+                raise ValueError("Fine-tune argument template contains an unsupported field.")
+        return value
+
+
+class BenchmarkSettings(BaseModel):
+    runs: int = Field(default=3, ge=2, le=20)
+    maximum_decline_fraction: float = Field(default=0.15, ge=0.0, le=1.0)
+    minimum_structured_json_reliability: float = Field(default=0.9, ge=0.0, le=1.0)
+    minimum_routing_accuracy: float = Field(default=0.8, ge=0.0, le=1.0)
+    minimum_coding_pass_rate: float = Field(default=0.8, ge=0.0, le=1.0)
 
 
 class BrainSettings(BaseModel):
@@ -406,6 +450,8 @@ class AprilSettings(BaseModel):
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
     workers: WorkerSettings = Field(default_factory=WorkerSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    finetune: FinetuneSettings = Field(default_factory=FinetuneSettings)
+    benchmark: BenchmarkSettings = Field(default_factory=BenchmarkSettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
     conversation_context: ConversationContextSettings = Field(
         default_factory=ConversationContextSettings
@@ -502,10 +548,18 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
         "security",
         "audit_anchor_credential_id",
     ),
+    "APRIL_MEMORY_ENCRYPTION_CREDENTIAL_ID": (
+        "security",
+        "memory_encryption_credential_id",
+    ),
     "APRIL_DATABASE_PATH": ("memory", "database_path"),
     "APRIL_VECTOR_INDEX_PATH": ("memory", "vector_index_path"),
     "APRIL_MEMORY_EMBEDDING_PROVIDER": ("memory", "embedding_provider"),
     "APRIL_MEMORY_EMBEDDING_MODEL_ID": ("memory", "embedding_model_id"),
+    "APRIL_MEMORY_SENSITIVE_ENCRYPTION_ENABLED": (
+        "memory",
+        "sensitive_encryption_enabled",
+    ),
     "APRIL_LOGS_PATH": ("paths", "logs_path"),
     "APRIL_AUDIT_PATH": ("paths", "audit_path"),
     "APRIL_ALLOWED_FILESYSTEM_ROOTS": ("paths", "allowed_filesystem_roots"),

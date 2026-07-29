@@ -309,6 +309,8 @@ def test_verifier_helpers_use_temp_environment(tmp_path: Path, monkeypatch) -> N
         assert env["APRIL_RUNTIME_BACKEND"] == "fake"
         assert str(verifier.project) in env["APRIL_ALLOWED_FILESYSTEM_ROOTS"]
         assert str(verifier.second_project) in env["APRIL_ALLOWED_FILESYSTEM_ROOTS"]
+        assert "APRIL_API_TOKEN" not in env
+        assert "APRIL_RUNTIME_TOKEN" not in env
     finally:
         verifier._stop()
 
@@ -459,7 +461,8 @@ def test_real_model_verifier_prepare_and_env(tmp_path: Path, monkeypatch) -> Non
         env = verifier._env()
         assert env["APRIL_RUNTIME_BACKEND"] == "llama_cpp"
         assert env["APRIL_RUNTIME_PRELOAD_KEEP_LOADED"] == "false"
-        assert env["APRIL_RUNTIME_TOKEN"] == verifier.runtime_token
+        assert "APRIL_RUNTIME_TOKEN" not in env
+        assert env["APRIL_RUNTIME_CREDENTIAL_ID"] == "runtime-auth-token"
         assert env["APRIL_RUNTIME_URL"] == verifier.runtime_url
     finally:
         shutil.rmtree(verifier.temp, ignore_errors=True)

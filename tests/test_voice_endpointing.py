@@ -212,9 +212,7 @@ class _InfiniteSource(_Source):
 
 async def test_capture_cancellation_closes_owned_source() -> None:
     source = _InfiniteSource()
-    task = asyncio.create_task(
-        capture_streamed_utterance(source, endpoint_detector=_detector())
-    )
+    task = asyncio.create_task(capture_streamed_utterance(source, endpoint_detector=_detector()))
     await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

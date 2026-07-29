@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import platform
 from pathlib import Path
 
@@ -21,10 +22,19 @@ from april_common.credentials import (
 from april_common.errors import ConfigError
 from april_common.settings import AprilSettings, load_settings, reset_settings_cache
 from april_common.token_setup import migrate_legacy_credentials, rotate_credentials
+from services.memory.database import Database
+from services.memory.encryption import (
+    MemoryEncryptionError,
+    provision_memory_key,
+    rotate_memory_key,
+)
+from services.memory.migrations import run_migrations
 
 security_app = typer.Typer(help="Local credential and security operations.")
 credentials_app = typer.Typer(help="Migrate and rotate APRIL credentials.")
+memory_encryption_app = typer.Typer(help="Manage optional sensitive-memory encryption.")
 security_app.add_typer(credentials_app, name="credentials")
+security_app.add_typer(memory_encryption_app, name="memory-encryption")
 
 
 def _store_for_command(
@@ -159,3 +169,74 @@ def credentials_rotate(
     else:
         console.print(f"Restart required: {', '.join(result.restart_services)}.")
     console.print("Credential values were not displayed.")
+
+
+@memory_encryption_app.command("provision")
+def memory_encryption_provision(
+    backend: str | None = typer.Option(None, "--store"),
+    credential_file: Path | None = typer.Option(None, "--credential-file"),
+) -> None:
+    """Provision an authenticated-encryption key without enabling the feature."""
+    try:
+        settings = _base_settings()
+        store = _store_for_command(
+            settings,
+            backend=backend,
+            file_path=credential_file,
+        )
+        provision_memory_key(store)
+    except (ConfigError, CredentialStoreError, MemoryEncryptionError, OSError) as exc:
+        console.print(
+            f"[red]Memory encryption key provisioning failed ({type(exc).__name__}).[/red]"
+        )
+        raise typer.Exit(1) from exc
+    console.print(f"Memory encryption key is available in {store.backend_name}.")
+    console.print(
+        "No memory was changed. Set memory.sensitive_encryption_enabled=true "
+        "after reviewing the local configuration."
+    )
+
+
+@memory_encryption_app.command("rotate")
+def memory_encryption_rotate(
+    backend: str | None = typer.Option(None, "--store"),
+    credential_file: Path | None = typer.Option(None, "--credential-file"),
+) -> None:
+    """Re-encrypt protected memory rows under a new staged key."""
+
+    async def operation() -> dict[str, int | str]:
+        settings = _base_settings()
+        if not settings.memory.sensitive_encryption_enabled:
+            raise ConfigError("Sensitive-memory encryption is disabled.")
+        store = _store_for_command(
+            settings,
+            backend=backend,
+            file_path=credential_file,
+        )
+        database = Database(settings.database_path)
+        await database.connect()
+        try:
+            await run_migrations(database)
+            result = await rotate_memory_key(settings, database, store=store)
+        finally:
+            await database.close()
+        audit = AuditLogger(settings.audit_path, anchor=CredentialAuditAnchor(store))
+        audit.write(
+            {
+                "event_type": "sensitive_memory_key_rotated",
+                "actor": "local-operator",
+                "rotated_records": result["rotated_records"],
+            }
+        )
+        return result
+
+    try:
+        result = asyncio.run(operation())
+    except (ConfigError, CredentialStoreError, MemoryEncryptionError, OSError) as exc:
+        console.print(
+            f"[red]Memory encryption key rotation failed ({type(exc).__name__}); "
+            "encrypted rows were not discarded.[/red]"
+        )
+        raise typer.Exit(1) from exc
+    console.print(f"Rotated {result['rotated_records']} encrypted memory row(s).")
+    console.print("No key or plaintext value was displayed.")

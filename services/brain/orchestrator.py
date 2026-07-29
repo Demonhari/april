@@ -5,7 +5,6 @@ import os
 import re
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from agents.base import BaseAgent
@@ -20,6 +19,7 @@ from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions
 from services.brain.agent_loop import StructuredAgentLoop
 from services.brain.conversation_context import ConversationContextService
+from services.brain.execution import PreparedTurn
 from services.brain.feedback_classifier import classify_implicit_correction
 from services.brain.intelligence_ladder import (
     ChatMode,
@@ -70,30 +70,6 @@ StreamEventName = Literal[
     "done",
     "error",
 ]
-
-
-@dataclass(slots=True)
-class PreparedTurn:
-    request_id: str
-    conversation_id: str
-    decision: BrainDecision
-    route_result: RouteResult
-    agent_name: str
-    model_id: str
-    messages: list[ChatMessage]
-    citations: list[LocalCitation] = field(default_factory=list)
-    pending_approval: dict[str, Any] | None = None
-    warnings: list[str] = field(default_factory=list)
-    final_message: str | None = None
-    final_status: Literal["ok", "error"] = "error"
-    proposed_changes: list[ProposedChange] = field(default_factory=list)
-    project_id: str | None = None
-    actor: str = "local-user"
-    history: list[Message] = field(default_factory=list)
-    context_sections: list[str] = field(default_factory=list)
-    structured_agent: bool = False
-    task_plan_id: str | None = None
-    run_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class AprilOrchestrator:

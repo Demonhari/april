@@ -28,6 +28,7 @@ dependencies = [
 runtime = ["llama-cpp-python>=0.2.90"]
 documents = ["pypdf>=4.0.0"]
 desktop = ["pywebview>=5.0"]
+security = ["cryptography>=43.0.0"]
 voice = [
   "sounddevice>=0.4.7",
   "openwakeword>=0.6.0",

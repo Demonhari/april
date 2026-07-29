@@ -73,9 +73,7 @@ async def test_oversized_tool_result_is_bounded_and_marked() -> None:
             ),
             ChatMessage(
                 role="tool",
-                content='{"tool":"read_file","ok":true,"output":"'
-                + ("tool-output " * 200)
-                + '"}',
+                content='{"tool":"read_file","ok":true,"output":"' + ("tool-output " * 200) + '"}',
             ),
             ChatMessage(role="assistant", content="tool continuation"),
             ChatMessage(role="user", content="latest request"),
@@ -120,9 +118,7 @@ async def test_assistant_continuation_without_tool_result_is_removed() -> None:
         max_output_tokens=128,
     )
     assert request in [message.content for message in result.messages]
-    assert "detached continuation" not in [
-        message.content for message in result.messages
-    ]
+    assert "detached continuation" not in [message.content for message in result.messages]
 
 
 @pytest.mark.asyncio
@@ -209,9 +205,7 @@ async def test_direct_runtime_context_reports_missing_persisted_summary() -> Non
     metadata = result.metadata()
     assert metadata["conversation_summary_included"] is False
     assert metadata["context_continuity"] == "message_window_only"
-    assert metadata["context_warning_codes"] == [
-        "context_truncated_without_persisted_summary"
-    ]
+    assert metadata["context_warning_codes"] == ["context_truncated_without_persisted_summary"]
 
 
 @pytest.mark.asyncio

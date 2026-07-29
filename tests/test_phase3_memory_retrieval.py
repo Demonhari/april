@@ -59,7 +59,7 @@ async def _memory(path: Path) -> tuple[Database, SqliteMemory]:
 async def test_schema_18_unicode_fts_and_safe_queries(tmp_path: Path) -> None:
     database, memory = await _memory(tmp_path / "memory.db")
     try:
-        assert SCHEMA_VERSION == 19
+        assert SCHEMA_VERSION == 20
         english = await memory.create_memory("Local English memory", reason="English")
         tamil = await memory.create_memory("தமிழ் நினைவகம் பாதுகாப்பானது", reason="தமிழ்")
         mixed = await memory.create_memory("APRIL தமிழ் assistant", reason="mixed")

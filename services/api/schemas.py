@@ -73,6 +73,7 @@ class MemoryCreateRequest(BaseModel):
     project_id: str | None = None
     source_conversation_id: str | None = None
     reason: str = Field(min_length=1, max_length=500)
+    sensitive: bool = False
 
 
 class WakeRequest(BaseModel):

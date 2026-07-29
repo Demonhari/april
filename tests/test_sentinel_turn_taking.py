@@ -94,9 +94,7 @@ async def test_microphone_consumes_frames_while_api_delivery_is_pending(settings
     delivery = _PendingGenerationDelivery()
     tuned = settings_tmp.model_copy(
         update={
-            "voice": settings_tmp.voice.model_copy(
-                update={"wake_word_cooldown_seconds": 30.0}
-            ),
+            "voice": settings_tmp.voice.model_copy(update={"wake_word_cooldown_seconds": 30.0}),
             "wake": settings_tmp.wake.model_copy(
                 update={"enabled": True, "confirm_with_stt": False}
             ),
@@ -124,9 +122,7 @@ async def test_microphone_consumes_frames_while_playback_state_is_active(setting
     delivery = _PendingGenerationDelivery(speaking=True)
     tuned = settings_tmp.model_copy(
         update={
-            "voice": settings_tmp.voice.model_copy(
-                update={"wake_word_cooldown_seconds": 30.0}
-            ),
+            "voice": settings_tmp.voice.model_copy(update={"wake_word_cooldown_seconds": 30.0}),
             "wake": settings_tmp.wake.model_copy(
                 update={"enabled": True, "confirm_with_stt": False}
             ),

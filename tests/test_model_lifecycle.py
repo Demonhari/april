@@ -529,7 +529,5 @@ async def test_direct_runtime_response_warns_when_history_drops_without_summary(
     )
     budget = response.diagnostics["context_budget"]
     assert budget["context_continuity"] == "message_window_only"
-    assert budget["context_warning_codes"] == [
-        "context_truncated_without_persisted_summary"
-    ]
+    assert budget["context_warning_codes"] == ["context_truncated_without_persisted_summary"]
     assert any("no persisted Core conversation summary" in item for item in response.warnings)

@@ -13,6 +13,8 @@ from typing import Any
 from april_common.audit import audit_logger_for_settings
 from april_common.settings import AprilSettings, load_settings
 from april_common.time import utc_now_iso
+from services.jobs.finetune_job import FinetuneJobError, run_finetune_job
+from services.jobs.model_jobs import ModelJobError, run_model_utility_job
 from services.jobs.registry import JobRegistry, default_job_registry
 from services.jobs.schemas import DEFAULT_LEASE_SECONDS, ClaimedJob, JobStatus
 from services.jobs.store import JobStore, JobTransitionError
@@ -102,7 +104,7 @@ class JobWorker:
             raise
         except JobTransitionError:
             raise
-        except Exception:
+        except Exception as exc:
             if not execution.done():
                 execution.cancel()
                 with suppress(asyncio.CancelledError):
@@ -111,7 +113,7 @@ class JobWorker:
                 job.id,
                 worker_id=self.worker_id,
                 status=JobStatus.FAILED,
-                error_code="job_handler_failed",
+                error_code=_safe_job_error_code(exc),
             )
         finally:
             self._write_status(ready=True, active_job_id=None)
@@ -178,6 +180,57 @@ class JobWorker:
                 "stdout_truncated": response.stdout_truncated,
                 "stderr_truncated": response.stderr_truncated,
             }
+        if job.job_type in {"model_import_verification", "model_benchmark"}:
+            await self.store.heartbeat(
+                job.id,
+                worker_id=self.worker_id,
+                lease_seconds=self.lease_seconds,
+                progress_percent=5,
+                progress_code="model_artifact_validation",
+            )
+            return await run_model_utility_job(
+                self.settings,
+                model_id=str(job.payload["model_id"]),
+                mode="verify" if job.job_type == "model_import_verification" else "benchmark",
+                cancellation_event=asyncio.Event(),
+                timeout_seconds=(900.0 if job.job_type == "model_import_verification" else 3600.0),
+            )
+        if job.job_type == "finetune":
+
+            async def report_progress(percent: int, code: str) -> None:
+                await self.store.heartbeat(
+                    job.id,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.lease_seconds,
+                    progress_percent=percent,
+                    progress_code=code,
+                )
+
+            return await run_finetune_job(
+                self.settings,
+                plan_id=str(job.payload["plan_id"]),
+                cancellation_event=asyncio.Event(),
+                progress=report_progress,
+            )
+        if job.job_type == "dream_cycle":
+            if not self.settings.evolution.enabled:
+                raise RuntimeError("dream_cycle_disabled")
+            from april_common.time import utc_now
+            from services.evolution.dreamer import run_standalone
+
+            await self.store.heartbeat(
+                job.id,
+                worker_id=self.worker_id,
+                lease_seconds=self.lease_seconds,
+                progress_percent=5,
+                progress_code="dream_cycle_gates",
+            )
+            dream_result = await run_standalone(self.settings, utc_now())
+            return {
+                "status": dream_result.status,
+                "reason_code": _safe_reason_code(dream_result.reason),
+                "activated_candidate": False,
+            }
         raise RuntimeError("job_type_unavailable")
 
     async def _cancel_execution(
@@ -215,7 +268,10 @@ class JobWorker:
 
 async def _run(args: argparse.Namespace) -> None:
     settings = load_settings(root=Path(args.april_home))
-    registry: JobRegistry = default_job_registry()
+    registry: JobRegistry = default_job_registry(
+        finetune_enabled=settings.finetune.enabled,
+        evolution_enabled=settings.evolution.enabled,
+    )
     database = Database(settings.database_path)
     await database.connect()
     await run_migrations(database)
@@ -246,6 +302,25 @@ def main() -> None:
     parser.add_argument("--april-home", required=True)
     parser.add_argument("--status-file", required=True)
     asyncio.run(_run(parser.parse_args()))
+
+
+def _safe_job_error_code(exc: Exception) -> str:
+    if isinstance(exc, (FinetuneJobError, ModelJobError)):
+        value = str(exc)
+        if value and len(value) <= 160 and value.replace("_", "").isalnum():
+            return value
+    value = str(exc)
+    if value in {"dream_cycle_disabled", "job_type_unavailable"}:
+        return value
+    return "job_handler_failed"
+
+
+def _safe_reason_code(value: str) -> str:
+    normalized = "_".join(value.casefold().split())
+    safe_value = "".join(
+        character for character in normalized if character.isalnum() or character == "_"
+    )
+    return safe_value[:160]
 
 
 if __name__ == "__main__":

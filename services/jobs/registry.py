@@ -47,6 +47,12 @@ class BenchmarkPayload(BaseModel):
     model_id: str = Field(min_length=1, max_length=128)
 
 
+class FinetunePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str = Field(min_length=16, max_length=64, pattern=r"^[a-f0-9]+$")
+
+
 @dataclass(frozen=True, slots=True)
 class JobTypeDefinition:
     name: str
@@ -87,7 +93,11 @@ class JobRegistry:
         return tuple(self._definitions.values())
 
 
-def default_job_registry() -> JobRegistry:
+def default_job_registry(
+    *,
+    finetune_enabled: bool = False,
+    evolution_enabled: bool = False,
+) -> JobRegistry:
     def safe(
         name: str,
         payload_model: type[BaseModel],
@@ -133,8 +143,7 @@ def default_job_registry() -> JobRegistry:
                 default_timeout_seconds=900.0,
                 maximum_attempts=2,
                 cancellation_behavior="process_group",
-                available=False,
-                unavailable_code="model_verification_job_unavailable",
+                available=True,
             ),
             JobTypeDefinition(
                 "model_benchmark",
@@ -144,10 +153,22 @@ def default_job_registry() -> JobRegistry:
                 idempotent=True,
                 restart_safe=True,
                 default_timeout_seconds=3600.0,
-                maximum_attempts=1,
+                maximum_attempts=2,
                 cancellation_behavior="process_group",
-                available=False,
-                unavailable_code="benchmark_job_unavailable",
+                available=True,
+            ),
+            JobTypeDefinition(
+                "finetune",
+                FinetunePayload,
+                permission_level=4,
+                approval_required=True,
+                idempotent=True,
+                restart_safe=False,
+                default_timeout_seconds=172_800.0,
+                maximum_attempts=2,
+                cancellation_behavior="process_group",
+                available=finetune_enabled,
+                unavailable_code="finetune_job_disabled",
             ),
             JobTypeDefinition(
                 "dream_cycle",
@@ -159,7 +180,7 @@ def default_job_registry() -> JobRegistry:
                 default_timeout_seconds=1800.0,
                 maximum_attempts=1,
                 cancellation_behavior="cooperative",
-                available=False,
+                available=evolution_enabled,
                 unavailable_code="dream_cycle_job_unavailable",
             ),
         ]

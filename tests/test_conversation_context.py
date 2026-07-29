@@ -63,9 +63,7 @@ async def _add_turns(
 ) -> None:
     for index in range(start, start + count):
         user_id = await memory.add_message(conversation_id, "user", f"user {index}")
-        assistant_id = await memory.add_message(
-            conversation_id, "assistant", f"assistant {index}"
-        )
+        assistant_id = await memory.add_message(conversation_id, "assistant", f"assistant {index}")
         for message_id, suffix in ((user_id, "0"), (assistant_id, "1")):
             await memory.database.execute(
                 "UPDATE messages SET created_at = ? WHERE id = ?",
@@ -128,9 +126,10 @@ async def test_incremental_summary_advances_once_and_keeps_four_turns(
     summary = await memory.get_conversation_summary(conversation_id)
     assert summary is not None
     assert summary.summarized_message_count == 6
-    assert summary.through_message_id == (
-        await memory.list_messages_paginated(conversation_id, limit=6)
-    )[-1].id
+    assert (
+        summary.through_message_id
+        == (await memory.list_messages_paginated(conversation_id, limit=6))[-1].id
+    )
 
     again = await service.prepare(conversation_id=conversation_id, request_id="r2")
     assert len(runtime.calls) == 1
@@ -287,9 +286,7 @@ async def test_recent_bound_preserves_current_request_and_drops_older_after_over
         ),
     )
     prepared = await service.prepare(conversation_id=conversation_id)
-    assert [message.content for message in prepared.recent_messages] == [
-        "current request"
-    ]
+    assert [message.content for message in prepared.recent_messages] == ["current request"]
     await database.close()
 
 

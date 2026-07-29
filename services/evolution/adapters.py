@@ -107,17 +107,11 @@ def inspect_adapter_state(settings: AprilSettings) -> dict[str, object]:
             continue
         active_ids = active_by_model.get(model_id, [])
         database_version = (
-            _adapter_id_version(active_ids[0], model_id)
-            if len(active_ids) == 1
-            else None
+            _adapter_id_version(active_ids[0], model_id) if len(active_ids) == 1 else None
         )
         if len(active_ids) > 1 or database_version != pointer_version:
             disagreement_count += 1
-    consistent = (
-        not pending
-        and disagreement_count == 0
-        and invalid_pointer_count == 0
-    )
+    consistent = not pending and disagreement_count == 0 and invalid_pointer_count == 0
     return {
         "status": "ok" if consistent else "degraded",
         "consistent": consistent,
@@ -231,9 +225,7 @@ class AdapterLifecycleManager:
         async with self.database.write_coordination():
             await self._reconcile_incomplete_locked(model_id=model_id)
             previous_pointer = read_adapter_pointer(self.settings.home, model_id)
-            target_pointer = _copy_pointer(
-                previous_pointer or _empty_pointer(model_id)
-            )
+            target_pointer = _copy_pointer(previous_pointer or _empty_pointer(model_id))
             previous = _pointer_active_version(target_pointer)
             version = _next_pointer_version(target_pointer)
             created_at = utc_now_iso()
@@ -314,9 +306,7 @@ class AdapterLifecycleManager:
                     reason="target adapter version not found",
                 )
             try:
-                target_path = self._normalize_existing_path(
-                    Path(str(target_entry["adapter_path"]))
-                )
+                target_path = self._normalize_existing_path(Path(str(target_entry["adapter_path"])))
             except (AprilError, OSError) as exc:
                 return AdapterActionResult(
                     status="blocked",
@@ -412,17 +402,11 @@ class AdapterLifecycleManager:
                 continue
             active_ids = active_by_model.get(model_id, [])
             database_version = (
-                _adapter_id_version(active_ids[0], model_id)
-                if len(active_ids) == 1
-                else None
+                _adapter_id_version(active_ids[0], model_id) if len(active_ids) == 1 else None
             )
             if len(active_ids) > 1 or database_version != pointer_version:
                 disagreement_count += 1
-        consistent = (
-            not pending_rows
-            and disagreement_count == 0
-            and invalid_pointer_count == 0
-        )
+        consistent = not pending_rows and disagreement_count == 0 and invalid_pointer_count == 0
         return {
             "status": "ok" if consistent else "degraded",
             "consistent": consistent,
@@ -636,9 +620,7 @@ class AdapterLifecycleManager:
         previous_pointer = _load_pointer_json(row["previous_pointer_json"])
         model_id = str(row["model_id"])
         status = str(row["status"])
-        target_path = Path(str(row["target_adapter_path"])).expanduser().resolve(
-            strict=False
-        )
+        target_path = Path(str(row["target_adapter_path"])).expanduser().resolve(strict=False)
         target_sha = str(row["target_sha256"])
 
         if (
@@ -735,17 +717,13 @@ class AdapterLifecycleManager:
             error_code="operation_interrupted",
         )
 
-    def _restore_pointer(
-        self, model_id: str, pointer: dict[str, Any] | None
-    ) -> None:
+    def _restore_pointer(self, model_id: str, pointer: dict[str, Any] | None) -> None:
         if pointer is not None:
             restored = _copy_pointer(pointer)
             restored.pop("pending_operation", None)
             self._write_pointer(model_id, restored)
             return
-        self.guard.remove_file(
-            adapter_pointer_path(self.settings.home, model_id)
-        )
+        self.guard.remove_file(adapter_pointer_path(self.settings.home, model_id))
 
     def _audit_recovery(
         self,
@@ -1027,14 +1005,9 @@ def _safe_previous_pointer(
     if entry is None:
         return None
     path = Path(str(entry.get("adapter_path") or "")).expanduser()
-    path = (
-        path.resolve(strict=False)
-        if path.is_absolute()
-        else (root / path).resolve(strict=False)
-    )
+    path = path.resolve(strict=False) if path.is_absolute() else (root / path).resolve(strict=False)
     within_allowed_root = any(
-        _is_relative_to(path, allowed_root.resolve(strict=False))
-        for allowed_root in allowed_roots
+        _is_relative_to(path, allowed_root.resolve(strict=False)) for allowed_root in allowed_roots
     )
     if not within_allowed_root:
         return None

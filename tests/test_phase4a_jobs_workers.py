@@ -46,7 +46,7 @@ async def test_schema_19_job_store_claim_cancel_and_terminal_protection(tmp_path
     await database.connect()
     await run_migrations(database)
     try:
-        assert SCHEMA_VERSION == 19
+        assert SCHEMA_VERSION == 20
         store = JobStore(database, default_job_registry())
         job = await store.submit(job_type="self_check", payload={}, owner="local-user")
         first, second = await asyncio.gather(

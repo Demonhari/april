@@ -78,9 +78,7 @@ def test_daemon_runtime_probe_uses_endpoint_and_token(
 ) -> None:
     settings = settings_tmp.model_copy(
         update={
-            "runtime": settings_tmp.runtime.model_copy(
-                update={"token": "daemon-runtime-secret"}
-            )
+            "runtime": settings_tmp.runtime.model_copy(update={"token": "daemon-runtime-secret"})
         }
     )
     runtime = default_child_specs(settings)[0]
