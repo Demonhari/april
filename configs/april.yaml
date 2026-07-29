@@ -77,6 +77,13 @@ permissions:
   external_actions_enabled: false
   tool_timeout_seconds: 15
 
+workers:
+  tool_worker_enabled: true
+  job_worker_enabled: true
+  # DEVELOPMENT ONLY. When false (the default), risky subprocess operations
+  # fail closed if the host has no supported OS-enforced sandbox.
+  development_unsandboxed_override: false
+
 brain:
   model_id: april-brain
   # Null aliases routing to the Brain without a duplicate registry entry or

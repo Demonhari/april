@@ -494,6 +494,14 @@ def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
                     str(tool_socket),
                     "--capability-file",
                     str(capability_file),
+                    "--environment",
+                    settings.environment,
+                    *(
+                        ("--development-unsandboxed-override",)
+                        if settings.workers.development_unsandboxed_override
+                        and settings.environment == "development"
+                        else ()
+                    ),
                     *tuple(
                         part
                         for root in settings.allowed_roots

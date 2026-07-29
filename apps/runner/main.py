@@ -30,6 +30,7 @@ from apps.runner.audit_commands import audit_app
 from apps.runner.bootstrap import bootstrap as run_bootstrap
 from apps.runner.commands.finetune import finetune_app
 from apps.runner.commands.model_compare import register_model_compare
+from apps.runner.commands.model_import import register_model_import_commands
 from apps.runner.commands.packaging import package_app
 from apps.runner.commands.speaker import register_speaker_commands
 from apps.runner.daily_driver import DailyDriverReport, build_daily_driver_report
@@ -171,6 +172,7 @@ april_app.add_typer(database_app, name="database")
 april_app.add_typer(finetune_app, name="finetune")
 april_app.add_typer(package_app, name="package")
 register_model_compare(model_app)
+register_model_import_commands(model_app)
 register_speaker_commands(voice_app)
 
 

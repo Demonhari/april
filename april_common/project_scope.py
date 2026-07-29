@@ -13,6 +13,7 @@ from april_common.process_runner import (
     ResourceLimitProfile,
     run_restricted_process,
 )
+from april_common.process_sandbox import NetworkPolicy, SandboxOperation, SandboxPolicy
 
 GIT_TIMEOUT_SECONDS = 15.0
 MAX_GIT_CAPTURE_BYTES = 2_000_000
@@ -111,7 +112,13 @@ async def inspect_patch_file(*, patch_path: str | Path, repo_root: str | Path) -
     )
 
 
-async def inspect_patch_bytes(*, patch_bytes: bytes, repo_root: str | Path) -> PatchArtifact:
+async def inspect_patch_bytes(
+    *,
+    patch_bytes: bytes,
+    repo_root: str | Path,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
+) -> PatchArtifact:
     root = normalize_project_root(repo_root)
     text = patch_bytes.decode("utf-8", errors="replace")
     affected_paths = validate_patch_text(text, root)
@@ -120,22 +127,45 @@ async def inspect_patch_bytes(*, patch_bytes: bytes, repo_root: str | Path) -> P
         patch_byte_length=len(patch_bytes),
         affected_paths=affected_paths,
         repo_root=str(root),
-        repo_head=await git_head(root),
-        repo_state_digest=await git_worktree_digest(root),
+        repo_head=await git_head(
+            root,
+            sandbox_environment=sandbox_environment,
+            development_unsandboxed_override=development_unsandboxed_override,
+        ),
+        repo_state_digest=await git_worktree_digest(
+            root,
+            sandbox_environment=sandbox_environment,
+            development_unsandboxed_override=development_unsandboxed_override,
+        ),
     )
 
 
-async def git_head(repo_root: str | Path) -> str | None:
+async def git_head(
+    repo_root: str | Path,
+    *,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
+) -> str | None:
     root = normalize_project_root(repo_root)
     if not (root / ".git").exists():
         return None
-    code, stdout, _stderr = await _run_git(root, ["rev-parse", "HEAD"])
+    code, stdout, _stderr = await _run_git(
+        root,
+        ["rev-parse", "HEAD"],
+        sandbox_environment=sandbox_environment,
+        development_unsandboxed_override=development_unsandboxed_override,
+    )
     if code != 0:
         return None
     return stdout.strip() or None
 
 
-async def git_worktree_digest(repo_root: str | Path) -> str | None:
+async def git_worktree_digest(
+    repo_root: str | Path,
+    *,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
+) -> str | None:
     root = normalize_project_root(repo_root)
     if not (root / ".git").exists():
         return None
@@ -145,7 +175,12 @@ async def git_worktree_digest(repo_root: str | Path) -> str | None:
         ["diff", "--binary"],
         ["diff", "--cached", "--binary"],
     ):
-        code, stdout, stderr = await _run_git_bytes(root, args)
+        code, stdout, stderr = await _run_git_bytes(
+            root,
+            args,
+            sandbox_environment=sandbox_environment,
+            development_unsandboxed_override=development_unsandboxed_override,
+        )
         if code != 0:
             raise PermissionDeniedError(
                 "Unable to calculate Git repository state.",
@@ -155,21 +190,41 @@ async def git_worktree_digest(repo_root: str | Path) -> str | None:
     return sha256_bytes(b"\0".join(chunks))
 
 
-async def git_staged_digest(repo_root: str | Path) -> str:
+async def git_staged_digest(
+    repo_root: str | Path,
+    *,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
+) -> str:
     root = normalize_project_root(repo_root)
     if not (root / ".git").exists():
         raise PermissionDeniedError("Git commit approval requires a Git repository.")
-    code, stdout, stderr = await _run_git_bytes(root, ["diff", "--cached", "--binary"])
+    code, stdout, stderr = await _run_git_bytes(
+        root,
+        ["diff", "--cached", "--binary"],
+        sandbox_environment=sandbox_environment,
+        development_unsandboxed_override=development_unsandboxed_override,
+    )
     if code != 0:
         raise PermissionDeniedError("Unable to calculate staged Git digest.", {"stderr": stderr})
     return sha256_bytes(stdout)
 
 
-async def git_staged_tree_id(repo_root: str | Path) -> str:
+async def git_staged_tree_id(
+    repo_root: str | Path,
+    *,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
+) -> str:
     root = normalize_project_root(repo_root)
     if not (root / ".git").exists():
         raise PermissionDeniedError("Git commit approval requires a Git repository.")
-    code, stdout, stderr = await _run_git(root, ["write-tree"])
+    code, stdout, stderr = await _run_git(
+        root,
+        ["write-tree"],
+        sandbox_environment=sandbox_environment,
+        development_unsandboxed_override=development_unsandboxed_override,
+    )
     if code != 0:
         raise PermissionDeniedError("Unable to calculate staged Git tree.", {"stderr": stderr})
     return stdout.strip()
@@ -193,6 +248,8 @@ async def git_apply_check_bytes(
     *,
     timeout_seconds: float = GIT_TIMEOUT_SECONDS,
     cancellation_event: asyncio.Event | None = None,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
 ) -> tuple[bool, str, str]:
     root = normalize_project_root(repo_root)
     code, stdout, stderr = await _run_git_bytes_with_input(
@@ -201,6 +258,8 @@ async def git_apply_check_bytes(
         patch_bytes,
         timeout_seconds=timeout_seconds,
         cancellation_event=cancellation_event,
+        sandbox_environment=sandbox_environment,
+        development_unsandboxed_override=development_unsandboxed_override,
     )
     return (
         code == 0,
@@ -215,6 +274,8 @@ async def git_apply_bytes(
     *,
     timeout_seconds: float = GIT_TIMEOUT_SECONDS,
     cancellation_event: asyncio.Event | None = None,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
 ) -> tuple[int, str, str]:
     root = normalize_project_root(repo_root)
     code, stdout, stderr = await _run_git_bytes_with_input(
@@ -223,6 +284,8 @@ async def git_apply_bytes(
         patch_bytes,
         timeout_seconds=timeout_seconds,
         cancellation_event=cancellation_event,
+        sandbox_environment=sandbox_environment,
+        development_unsandboxed_override=development_unsandboxed_override,
     )
     return (
         code,
@@ -231,8 +294,19 @@ async def git_apply_bytes(
     )
 
 
-async def _run_git(repo_root: Path, args: list[str]) -> tuple[int, str, str]:
-    code, stdout, stderr = await _run_git_bytes(repo_root, args)
+async def _run_git(
+    repo_root: Path,
+    args: list[str],
+    *,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
+) -> tuple[int, str, str]:
+    code, stdout, stderr = await _run_git_bytes(
+        repo_root,
+        args,
+        sandbox_environment=sandbox_environment,
+        development_unsandboxed_override=development_unsandboxed_override,
+    )
     return (
         code,
         stdout.decode("utf-8", errors="replace"),
@@ -240,7 +314,13 @@ async def _run_git(repo_root: Path, args: list[str]) -> tuple[int, str, str]:
     )
 
 
-async def _run_git_bytes(repo_root: Path, args: list[str]) -> tuple[int, bytes, bytes]:
+async def _run_git_bytes(
+    repo_root: Path,
+    args: list[str],
+    *,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
+) -> tuple[int, bytes, bytes]:
     result = await run_restricted_process(
         ["git", "-C", str(repo_root), *args],
         cwd=repo_root,
@@ -249,6 +329,11 @@ async def _run_git_bytes(repo_root: Path, args: list[str]) -> tuple[int, bytes, 
         max_stdout_bytes=MAX_GIT_CAPTURE_BYTES,
         max_stderr_bytes=MAX_GIT_CAPTURE_BYTES,
         resource_limit_profile=ResourceLimitProfile.COMMAND,
+        sandbox_policy=_git_sandbox_policy(repo_root, SandboxOperation.GIT_MUTATION)
+        if sandbox_environment is not None
+        else None,
+        sandbox_environment=sandbox_environment or "development",
+        development_unsandboxed_override=development_unsandboxed_override,
     )
     if result.status is ProcessStatus.TIMED_OUT:
         return 124, b"", b"Git command timed out."
@@ -270,6 +355,8 @@ async def _run_git_bytes_with_input(
     *,
     timeout_seconds: float = GIT_TIMEOUT_SECONDS,
     cancellation_event: asyncio.Event | None = None,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
 ) -> tuple[int, bytes, bytes]:
     result = await run_restricted_process(
         ["git", "-C", str(repo_root), *args],
@@ -281,6 +368,11 @@ async def _run_git_bytes_with_input(
         resource_limit_profile=ResourceLimitProfile.PATCH,
         stdin_bytes=stdin,
         cancellation_event=cancellation_event,
+        sandbox_policy=_git_sandbox_policy(repo_root, SandboxOperation.PATCH)
+        if sandbox_environment is not None
+        else None,
+        sandbox_environment=sandbox_environment or "development",
+        development_unsandboxed_override=development_unsandboxed_override,
     )
     if result.status is ProcessStatus.TIMED_OUT:
         return 124, b"", b"Git command timed out."
@@ -292,6 +384,15 @@ async def _run_git_bytes_with_input(
         result.returncode or 0,
         result.stdout.encode(),
         result.stderr.encode(),
+    )
+
+
+def _git_sandbox_policy(repo_root: Path, operation: SandboxOperation) -> SandboxPolicy:
+    return SandboxPolicy(
+        operation=operation,
+        network=NetworkPolicy.DENY_ALL,
+        readable_roots=(repo_root,),
+        writable_roots=(repo_root,),
     )
 
 

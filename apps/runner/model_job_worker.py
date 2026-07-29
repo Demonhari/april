@@ -67,6 +67,10 @@ def _benchmark(home: Path, model_id: str) -> dict[str, Any]:
                 "output_tokens": run.output_tokens,
                 "tokens_per_second": run.tokens_per_second,
                 "unload_success": run.unload_success,
+                "process_rss_bytes": run.process_rss_bytes,
+                "peak_process_rss_bytes": run.peak_process_rss_bytes,
+                "prompt_token_count": run.prompt_token_count,
+                "prompt_eval_duration_seconds": run.prompt_eval_duration_seconds,
             }
             for run in runs
         ],
@@ -74,8 +78,12 @@ def _benchmark(home: Path, model_id: str) -> dict[str, Any]:
             "prompt_processing_tokens_per_second",
             "peak_rss_bytes",
             "thermal_throttling",
-            "fixture_quality",
+            "routing_accuracy",
+            "structured_json_reliability",
+            "coding_fixture_pass_rate",
+            "context_handling_reliability",
         ],
+        "simulated": settings.runtime.backend == "fake",
     }
 
 

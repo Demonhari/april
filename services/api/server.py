@@ -10,7 +10,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +23,12 @@ from starlette.middleware.cors import CORSMiddleware
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.errors import (
     AprilError,
-    PermissionDeniedError,
     RequestTooLargeError,
     error_payload,
 )
-from april_common.path_security import PathPolicy, normalize_existing_path
 from april_common.process_environment import PROCESS_ENVIRONMENT_POLICY_VERSION
 from april_common.process_runner import ResourceLimitProfile, resource_limit_report
+from april_common.process_sandbox import SandboxBackend, sandbox_capabilities
 from april_common.report_freshness import freshness_from_payload
 from april_common.service_health import ServiceHealthResult, probe_service_health
 from april_common.settings import (
@@ -38,62 +37,31 @@ from april_common.settings import (
     AprilSettings,
     get_settings,
 )
-from april_common.time import utc_now
 from april_common.token_setup import legacy_plaintext_credentials_detected
 from services.api.auth import require_bearer_token
 from services.api.dependencies import ApiContainer, build_container
 from services.api.routes.chat import register_chat_routes
 from services.api.routes.diagnostics import register_diagnostic_routes
+from services.api.routes.evolution import register_evolution_routes
 from services.api.routes.health import register_health_routes
 from services.api.routes.jobs import register_job_routes
 from services.api.routes.memory import register_memory_routes
+from services.api.routes.models import register_model_routes
+from services.api.routes.projects import register_project_routes
+from services.api.routes.scheduler import register_scheduler_routes
 from services.api.routes.tools import register_tool_routes
 from services.api.routes.voice import register_voice_routes
-from services.api.schemas import (
-    AdapterActivateRequest,
-    AdapterRollbackRequest,
-    DatasetExportRequest,
-    DocumentCreateRequest,
-    EvalPromoteRequest,
-    EvalRejectRequest,
-    EvolutionRollbackRequest,
-    FeedbackRequest,
-    OverlayApprovalRequest,
-    PlaybookResumeRequest,
-    PlaybookRunRequest,
-    ProjectCreateRequest,
-    ReminderCreateRequest,
-    ToolApprovalAction,
-)
 from services.april_runtime.model_registry import ModelRegistry
-from services.april_runtime.schemas import LoadModelRequest
 from services.evolution.adapters import AdapterLifecycleManager
 from services.evolution.approval import PromptOverlayApprovalService
-from services.evolution.dataset_export import export_finetune_dataset
 from services.evolution.dreamer import latest_report
-from services.evolution.eval_review import (
-    EvalReviewError,
-    get_pending_case,
-    list_pending_cases,
-    promote_pending_case,
-    reject_pending_case,
-)
 from services.evolution.feedback_eval import count_pending_eval_cases, stage_feedback_eval_case
 from services.evolution.inspect import (
     count_pending_write_capable_overlay_candidates,
-    evolution_history,
     evolution_kill_switch_active,
-    evolution_status,
-    overlay_diff,
-    set_evolution_kill_switch,
 )
-from services.evolution.playbook_miner import mine_playbook_candidates
-from services.evolution.versions import PromptOverlayManager
-from services.evolution.write_guard import EvolutionWriteGuard
 from services.memory.maintenance import check_database
 from services.memory.migrations import SCHEMA_VERSION
-from services.pool.agent_pool import AgentPool
-from services.scheduler import compose_briefing, compute_repo_activity
 from services.tool_worker.limits import UnsafeToolWorkerSocket, validate_live_socket
 from services.voice.health import (
     microphone_access,
@@ -103,12 +71,6 @@ from services.voice.health import (
 from services.wake.feedback import WakeFeedback, classify_wake_feedback
 from services.wake.schemas import WakeEvent
 from services.wake.wake_bus import WakeBus
-from skills.playbooks import (
-    PlaybookAdoptionService,
-    PlaybookDefinition,
-    PlaybookLoader,
-    PlaybookRunner,
-)
 
 _DESKTOP_WEB_DIR = Path(__file__).resolve().parents[2] / "apps" / "desktop" / "web"
 
@@ -296,532 +258,10 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     register_tool_routes(app, authorized)
     register_memory_routes(app, authorized)
 
-    @app.post("/feedback")
-    async def feedback(
-        request: FeedbackRequest,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        request_id = x_request_id or str(uuid.uuid4())
-        conversation_id = request.conversation_id
-        session_id: str | None = None
-        if conversation_id is None:
-            # Bind to the active session's conversation when one exists.
-            session = await active.memory.latest_open_session()
-            if session is not None:
-                session_id = session.id
-                conversation_id = session.conversation_id
-        agent_run_id = request.agent_run_id
-        if agent_run_id is None:
-            agent_run_id = await active.memory.latest_agent_run_id(conversation_id=conversation_id)
-        record = await active.memory.record_feedback_event(
-            rating=request.rating,
-            reason=request.reason,
-            session_id=session_id,
-            conversation_id=conversation_id,
-            agent_run_id=agent_run_id,
-        )
-        if record.rating == "bad" and record.agent_run_id is not None:
-            await active.orchestrator.routing_reliability.mark_negative_feedback(
-                agent_run_id=record.agent_run_id
-            )
-        active.approvals.audit.write(
-            {
-                "event_type": "feedback_recorded",
-                "request_id": request_id,
-                "actor": "local-user",
-                "rating": record.rating,
-                "reason_length": len(record.reason or ""),
-                "agent_run_bound": record.agent_run_id is not None,
-            }
-        )
-        if record.rating == "bad":
-            # Stage a reviewable pending eval case; never let staging failures
-            # break feedback recording itself.
-            with contextlib.suppress(Exception):
-                await stage_feedback_eval_case(
-                    active.settings,
-                    active.memory,
-                    record,
-                    kind="explicit_feedback",
-                    audit=active.approvals.audit,
-                )
-        return {"feedback": record.model_dump()}
-
-    @app.get("/reminders")
-    async def reminders(active: ApiContainer = Depends(authorized)) -> object:
-        return {
-            "reminders": [
-                reminder.model_dump() for reminder in await active.memory.list_reminders()
-            ]
-        }
-
-    @app.post("/reminders")
-    async def reminder_create(
-        request: ReminderCreateRequest, active: ApiContainer = Depends(authorized)
-    ) -> object:
-        reminder = await active.memory.create_reminder(request.content, due_at=request.due_at)
-        return {"reminder": reminder.model_dump()}
-
-    @app.delete("/reminders/{reminder_id}")
-    async def reminder_delete(
-        reminder_id: str, active: ApiContainer = Depends(authorized)
-    ) -> object:
-        return {"deleted": await active.memory.delete_reminder(reminder_id)}
-
-    @app.get("/tasks")
-    async def tasks(active: ApiContainer = Depends(authorized)) -> object:
-        return {"tasks": [task.model_dump() for task in await active.memory.list_tasks()]}
-
-    @app.get("/playbooks")
-    async def playbooks(active: ApiContainer = Depends(authorized)) -> object:
-        loader = PlaybookLoader(active.settings.playbooks_path)
-        return {"playbooks": [playbook.model_dump() for playbook in loader.list()]}
-
-    @app.post("/playbooks/adopt")
-    async def playbook_adopt(
-        request: PlaybookDefinition,
-        approval_id: str | None = None,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        # Level 3+ playbooks require an exact-action adoption approval: the
-        # first call returns pending_approval; re-posting the identical
-        # definition with ?approval_id=... completes adoption.
-        adoption = PlaybookAdoptionService(
-            loader=PlaybookLoader(active.settings.playbooks_path),
-            tool_registry=active.tool_registry,
-            approvals=active.approvals,
-            memory=active.memory,
-            approval_required_at=active.permission_engine.approval_required_at,
-        )
-        return await adoption.adopt(
-            request,
-            actor="local-user",
-            request_id=x_request_id or str(uuid.uuid4()),
-            approval_id=approval_id,
-        )
-
-    @app.post("/playbooks/mine")
-    async def playbook_mine(
-        support_threshold: int = 3,
-        lookback_days: int = 14,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        report = await mine_playbook_candidates(
-            active.memory,
-            active.settings,
-            guard=EvolutionWriteGuard(active.settings, audit=active.approvals.audit),
-            support_threshold=max(2, support_threshold),
-            lookback_days=max(1, lookback_days),
-        )
-        return {"mine": report.to_payload()}
-
-    @app.post("/playbooks/{playbook_id}/run")
-    async def playbook_run(
-        playbook_id: str,
-        request: PlaybookRunRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        loader = PlaybookLoader(active.settings.playbooks_path)
-        playbook = loader.get(playbook_id)
-        if playbook is None:
-            raise HTTPException(status_code=404, detail="playbook not found")
-        async with active.require_session_manager().interaction(request.conversation_id):
-            result = await PlaybookRunner(active.tool_executor, memory=active.memory).run(
-                playbook,
-                conversation_id=request.conversation_id,
-                project_id=request.project_id,
-            )
-        return {"run": asdict(result)}
-
-    @app.get("/playbooks/{playbook_id}/runs")
-    async def playbook_runs(
-        playbook_id: str,
-        limit: int = 50,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        runs = await active.memory.list_playbook_runs(playbook_id=playbook_id, limit=limit)
-        return {"runs": runs}
-
-    @app.post("/playbooks/runs/{run_id}/resume")
-    async def playbook_resume(
-        run_id: str,
-        request: PlaybookResumeRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        row = await active.memory.get_playbook_run(run_id)
-        conversation_id = (
-            str(row["conversation_id"])
-            if row is not None and row["conversation_id"] is not None
-            else None
-        )
-        async with active.require_session_manager().interaction(conversation_id):
-            result = await PlaybookRunner(active.tool_executor, memory=active.memory).resume(
-                run_id, approval_id=request.approval_id
-            )
-        return {"run": asdict(result)}
-
-    @app.get("/evolution/versions")
-    async def evolution_versions(
-        agent: str | None = None,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        manager = PromptOverlayManager(
-            active.settings,
-            active.database,
-            audit=active.approvals.audit,
-        )
-        return {"versions": await manager.versions(agent=agent)}
-
-    @app.post("/evolution/rollback")
-    async def evolution_rollback(
-        request: EvolutionRollbackRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        manager = PromptOverlayManager(
-            active.settings,
-            active.database,
-            audit=active.approvals.audit,
-        )
-        result = await manager.rollback(agent=request.agent, version=request.version)
-        payload = asdict(result)
-        if payload.get("path") is not None:
-            payload["path"] = str(payload["path"])
-        return {"rollback": payload}
-
-    @app.get("/evolution/adapters")
-    async def evolution_adapters(
-        model_id: str | None = None,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        manager = AdapterLifecycleManager(
-            active.settings,
-            active.database,
-            audit=active.approvals.audit,
-        )
-        return {"adapters": await manager.list(model_id=model_id)}
-
-    @app.post("/evolution/adapters/activate")
-    async def evolution_adapters_activate(
-        request: AdapterActivateRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        manager = AdapterLifecycleManager(
-            active.settings,
-            active.database,
-            audit=active.approvals.audit,
-        )
-        result = await manager.activate(
-            model_id=request.model_id,
-            adapter_path=Path(request.adapter_path),
-            evidence_path=(Path(request.evidence_path) if request.evidence_path else None),
-            verification_report_path=(
-                Path(request.verification_report_path) if request.verification_report_path else None
-            ),
-        )
-        return {"activation": result.to_payload()}
-
-    @app.post("/evolution/adapters/rollback")
-    async def evolution_adapters_rollback(
-        request: AdapterRollbackRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        manager = AdapterLifecycleManager(
-            active.settings,
-            active.database,
-            audit=active.approvals.audit,
-        )
-        result = await manager.rollback(model_id=request.model_id, version=request.version)
-        return {"rollback": result.to_payload()}
-
-    @app.get("/evolution/report/latest")
-    async def evolution_report_latest(active: ApiContainer = Depends(authorized)) -> object:
-        return {"report": latest_report(active.settings)}
-
-    @app.get("/evolution/status")
-    async def evolution_status_endpoint(active: ApiContainer = Depends(authorized)) -> object:
-        status = await evolution_status(active.settings, active.database)
-        status["scheduler_running"] = active.scheduler.running if active.scheduler else False
-        return {"status": status}
-
-    @app.get("/evolution/history")
-    async def evolution_history_endpoint(
-        limit: int = 20,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        return {"runs": await evolution_history(active.database, limit=limit)}
-
-    @app.get("/evolution/diff")
-    async def evolution_diff_endpoint(
-        agent: str,
-        from_version: int | None = None,
-        to_version: int | None = None,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        return await overlay_diff(
-            active.settings,
-            active.database,
-            agent=agent,
-            from_version=from_version,
-            to_version=to_version,
-        )
-
-    @app.post("/evolution/off")
-    async def evolution_off(
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        result = set_evolution_kill_switch(active.settings, disabled=True)
-        active.approvals.audit.write(
-            {
-                "event_type": "evolution_kill_switch_set",
-                "request_id": x_request_id or str(uuid.uuid4()),
-                "actor": "local-user",
-                "outcome": "disabled",
-            }
-        )
-        return result
-
-    @app.post("/evolution/on")
-    async def evolution_on(
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        result = set_evolution_kill_switch(active.settings, disabled=False)
-        active.approvals.audit.write(
-            {
-                "event_type": "evolution_kill_switch_set",
-                "request_id": x_request_id or str(uuid.uuid4()),
-                "actor": "local-user",
-                "outcome": "cleared",
-            }
-        )
-        return result
-
-    @app.post("/evolution/dataset/export")
-    async def evolution_dataset_export(
-        request: DatasetExportRequest,
-        active: ApiContainer = Depends(authorized),
-        x_request_id: str | None = Header(default=None),
-    ) -> object:
-        result = await export_finetune_dataset(
-            active.memory,
-            active.settings,
-            dataset_name=request.name,
-        )
-        active.approvals.audit.write(
-            {
-                "event_type": "evolution_dataset_exported",
-                "request_id": x_request_id or str(uuid.uuid4()),
-                "actor": "local-user",
-                "outcome": "written",
-            }
-        )
-        return {"export": result.to_payload()}
-
-    @app.get("/evolution/overlays/pending")
-    async def evolution_overlays_pending(
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        service = PromptOverlayApprovalService(
-            active.settings,
-            active.database,
-            audit=active.approvals.audit,
-            runtime_client=active.runtime_client,
-        )
-        return {"pending": [item.to_payload() for item in await service.list_pending()]}
-
-    @app.post("/evolution/overlays/approve")
-    async def evolution_overlays_approve(
-        request: OverlayApprovalRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        service = PromptOverlayApprovalService(
-            active.settings,
-            active.database,
-            audit=active.approvals.audit,
-            runtime_client=active.runtime_client,
-        )
-        result = await service.approve(agent=request.agent, content_hash=request.content_hash)
-        payload = asdict(result)
-        if payload.get("path") is not None:
-            payload["path"] = str(payload["path"])
-        return {"approval": payload}
-
-    @app.get("/evolution/evals/pending")
-    async def evolution_evals_pending(active: ApiContainer = Depends(authorized)) -> object:
-        return {"pending": list_pending_cases(active.settings)}
-
-    @app.get("/evolution/evals/pending/{case_id}")
-    async def evolution_evals_pending_case(
-        case_id: str,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        try:
-            case = get_pending_case(active.settings, case_id)
-        except EvalReviewError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if case is None:
-            raise HTTPException(status_code=404, detail="pending eval case not found")
-        return {"case": case}
-
-    @app.post("/evolution/evals/promote")
-    async def evolution_evals_promote(
-        request: EvalPromoteRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        try:
-            result = promote_pending_case(
-                active.settings,
-                request.case_id,
-                expected_behavior=request.expected_behavior,
-                audit=active.approvals.audit,
-            )
-        except EvalReviewError as exc:
-            status_code = 404 if "unknown" in str(exc) else 400
-            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        return {"promoted": result}
-
-    @app.post("/evolution/evals/reject")
-    async def evolution_evals_reject(
-        request: EvalRejectRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        try:
-            result = reject_pending_case(
-                active.settings,
-                request.case_id,
-                reason=request.reason,
-                audit=active.approvals.audit,
-            )
-        except EvalReviewError as exc:
-            status_code = 404 if "unknown" in str(exc) else 400
-            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        return {"rejected": result}
-
-    @app.get("/scheduler/briefing/preview")
-    async def scheduler_briefing_preview(
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        now = utc_now()
-        until = now + timedelta(hours=24)
-        repo_activity = None
-        if active.settings.scheduler.repo_monitor_enabled:
-            # Preview must not advance the baseline (persist=False, idempotent).
-            repo_activity = await compute_repo_activity(active.memory, persist=False)
-        notification = await compose_briefing(
-            active.memory,
-            now_iso=now.isoformat().replace("+00:00", "Z"),
-            until_iso=until.isoformat().replace("+00:00", "Z"),
-            repo_activity=repo_activity,
-            evolution_report=latest_report(active.settings),
-        )
-        return notification.model_dump()
-
-    @app.delete("/conversations/{conversation_id}")
-    async def conversation_delete(
-        conversation_id: str, active: ApiContainer = Depends(authorized)
-    ) -> object:
-        return {"deleted": await active.memory.delete_conversation(conversation_id)}
-
-    @app.get("/projects")
-    async def projects(active: ApiContainer = Depends(authorized)) -> object:
-        return {
-            "projects": [project.model_dump() for project in await active.memory.list_projects()]
-        }
-
-    @app.post("/projects")
-    async def project_add(
-        request: ProjectCreateRequest, active: ApiContainer = Depends(authorized)
-    ) -> object:
-        normalized = _normalize_project_path(request.path, active.settings)
-        project = await active.memory.add_project(str(normalized), name=request.name)
-        return project
-
-    @app.post("/projects/{project_id}/index")
-    async def project_index(project_id: str, active: ApiContainer = Depends(authorized)) -> object:
-        project = await active.memory.get_project(project_id)
-        if project is None:
-            raise PermissionDeniedError("Project not found.")
-        request_id = str(uuid.uuid4())
-        context = await active.tool_executor.context(
-            request_id=request_id,
-            actor="local-user",
-            agent_id="coding_agent",
-            project_id=project_id,
-            source="api",
-        )
-        outcome = await active.tool_executor.request_or_execute(
-            tool="repo_indexer",
-            args={"repo_path": project.path, "project_id": project_id},
-            context=context,
-        )
-        return {"result": outcome.result}
-
-    @app.post("/documents")
-    async def document_add(
-        request: DocumentCreateRequest, active: ApiContainer = Depends(authorized)
-    ) -> object:
-        request_id = str(uuid.uuid4())
-        context = await active.tool_executor.context(
-            request_id=request_id,
-            actor="local-user",
-            agent_id="reading_agent",
-            source="api",
-        )
-        outcome = await active.tool_executor.request_or_execute(
-            tool="document_indexer",
-            args={"folder_path": request.path},
-            context=context,
-        )
-        return {"result": outcome.result}
-
-    @app.get("/documents")
-    async def documents(active: ApiContainer = Depends(authorized)) -> object:
-        return {"documents": active.vector_memory.sources(source_type="document")}
-
-    @app.get("/documents/search")
-    async def documents_search(q: str, active: ApiContainer = Depends(authorized)) -> object:
-        chunks = active.memory_retriever.document_chunks(q)
-        return {
-            "chunks": [chunk.model_dump() for chunk in chunks],
-            "citations": [
-                {
-                    "path": chunk.metadata.get("path"),
-                    "start_line": chunk.metadata.get("start_line"),
-                    "end_line": chunk.metadata.get("end_line"),
-                }
-                for chunk in chunks
-                if chunk.metadata.get("path")
-            ],
-        }
-
-    @app.get("/pool/agents")
-    async def pool_agents(active: ApiContainer = Depends(authorized)) -> object:
-        pool = AgentPool(
-            active.memory,
-            known_agents=[agent.name for agent in active.agent_registry.list()],
-        )
-        return {"agents": [card.to_payload() for card in await pool.scorecards()]}
-
-    @app.get("/runtime/models")
-    async def runtime_models(active: ApiContainer = Depends(authorized)) -> object:
-        return await active.runtime_client.models()
-
-    @app.post("/runtime/models/load")
-    async def runtime_model_load(
-        request: LoadModelRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        return await active.runtime_client.load(request.model_id, request_id=request.request_id)
-
-    @app.post("/runtime/models/unload")
-    async def runtime_model_unload(
-        request: LoadModelRequest,
-        active: ApiContainer = Depends(authorized),
-    ) -> object:
-        return await active.runtime_client.unload(request.model_id, request_id=request.request_id)
+    register_evolution_routes(app, authorized)
+    register_scheduler_routes(app, authorized)
+    register_project_routes(app, authorized)
+    register_model_routes(app, authorized)
 
     # Serve the local Desktop SPA from the Core API (same-origin, loopback only).
     # The static assets ship no secrets; all data still flows through the
@@ -1184,6 +624,20 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         scheduler_available=scheduler_available,
         vector_health=vector_health,
     )
+    sandbox = sandbox_capabilities(
+        environment=active.settings.environment,
+        development_override=(active.settings.workers.development_unsandboxed_override),
+    )
+    if (
+        active.settings.environment == "production"
+        and sandbox.backend is SandboxBackend.UNAVAILABLE
+    ):
+        failure_reasons.append(
+            {
+                "code": "process_sandbox_unavailable",
+                "message": "Risky subprocess operations fail closed without an OS sandbox.",
+            }
+        )
     if not bool(adapter_state["consistent"]):
         failure_reasons.append(
             {
@@ -1274,6 +728,13 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         },
         "process_policy": {
             "environment_policy_version": PROCESS_ENVIRONMENT_POLICY_VERSION,
+            "sandbox_policy_version": sandbox.policy_version,
+            "sandbox_backend": sandbox.backend.value,
+            "network_denial_available": sandbox.network_denial_available,
+            "filesystem_policy_available": sandbox.filesystem_policy_available,
+            "production_fail_closed": sandbox.production_fail_closed,
+            "development_unsandboxed_override": sandbox.development_override_enabled,
+            "sandbox_warning": sandbox.warning,
             "unsupported_resource_limits": list(
                 resource_limit_report(ResourceLimitProfile.COMMAND).unsupported
             ),
@@ -2338,31 +1799,6 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
-
-
-async def _execute_approved_tool(
-    active: ApiContainer, request: ToolApprovalAction, *, request_id: str
-) -> object:
-    outcome = await active.tool_executor.execute_approved(
-        approval_id=request.approval_id,
-        actor="local-user",
-        request_id=request_id,
-        tool=request.tool,
-        args=request.args if request.tool is not None else None,
-    )
-    return {"status": outcome.status, "result": outcome.result}
-
-
-def _normalize_project_path(path: str, settings: AprilSettings) -> Path:
-    policy = PathPolicy(
-        allowed_roots=tuple(settings.allowed_roots),
-        max_read_bytes=settings.paths.max_file_read_bytes,
-        max_write_bytes=settings.paths.max_file_write_bytes,
-    )
-    normalized = normalize_existing_path(path, policy)
-    if not normalized.is_dir():
-        raise PermissionDeniedError("Project path must be an existing directory.")
-    return normalized
 
 
 def _sse_event(event: str, request_id: str, payload: dict[str, Any]) -> str:

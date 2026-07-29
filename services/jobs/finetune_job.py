@@ -16,6 +16,7 @@ from april_common.process_runner import (
     ResourceLimitProfile,
     run_restricted_process,
 )
+from april_common.process_sandbox import NetworkPolicy, SandboxOperation, SandboxPolicy
 from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
 from services.april_runtime.model_registry import ModelRegistry
@@ -73,6 +74,9 @@ async def run_finetune_job(
         cancellation_event=cancellation_event,
         resource_limit_profile=ResourceLimitProfile.TRAINING,
         april_home=settings.home,
+        sandbox_policy=_finetune_sandbox_policy(settings),
+        sandbox_environment=settings.environment,
+        development_unsandboxed_override=(settings.workers.development_unsandboxed_override),
     )
     if training.status is ProcessStatus.CANCELLED:
         raise asyncio.CancelledError
@@ -213,6 +217,9 @@ async def _evaluate(
         cancellation_event=cancellation_event,
         resource_limit_profile=ResourceLimitProfile.MODEL_UTILITY,
         april_home=settings.home,
+        sandbox_policy=_finetune_sandbox_policy(settings),
+        sandbox_environment=settings.environment,
+        development_unsandboxed_override=(settings.workers.development_unsandboxed_override),
     )
     if result.status is ProcessStatus.CANCELLED:
         raise asyncio.CancelledError
@@ -227,6 +234,16 @@ async def _evaluate(
     if not math.isfinite(value) or value <= 0:
         raise FinetuneJobError(f"{target}_perplexity_invalid")
     return value
+
+
+def _finetune_sandbox_policy(settings: AprilSettings) -> SandboxPolicy:
+    return SandboxPolicy(
+        operation=SandboxOperation.FINETUNE,
+        network=NetworkPolicy.DENY_ALL,
+        readable_roots=(settings.home, *settings.allowed_roots),
+        writable_roots=(settings.evolution_path,),
+        temporary_roots=(settings.home / ".april_tmp" / "finetune",),
+    )
 
 
 def _validated_executable(value: Path | None, *, expected_sha256: str | None, label: str) -> Path:

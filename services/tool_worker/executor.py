@@ -13,6 +13,7 @@ from april_common.process_runner import (
     ResourceLimitProfile,
     run_restricted_process,
 )
+from april_common.process_sandbox import operation_policy
 from april_common.project_scope import (
     git_apply_bytes,
     git_apply_check_bytes,
@@ -28,9 +29,18 @@ from skills.terminal.command_policy import validate_command
 
 
 class ToolWorkerExecutor:
-    def __init__(self, *, allowed_roots: tuple[Path, ...], capability: str) -> None:
+    def __init__(
+        self,
+        *,
+        allowed_roots: tuple[Path, ...],
+        capability: str,
+        environment: str | None = None,
+        development_unsandboxed_override: bool = False,
+    ) -> None:
         self.allowed_roots = tuple(root.expanduser().resolve(strict=True) for root in allowed_roots)
         self.capability = capability
+        self.environment = environment
+        self.development_unsandboxed_override = development_unsandboxed_override
         self._cancellations: dict[str, asyncio.Event] = {}
 
     async def execute(self, request: ToolWorkerRequest) -> ToolWorkerResponse:
@@ -96,6 +106,15 @@ class ToolWorkerExecutor:
         cancellation = asyncio.Event()
         self._cancellations[request.request_id] = cancellation
         try:
+            policy = (
+                operation_policy(
+                    category,
+                    project_root=root,
+                    allowed_roots=self.allowed_roots,
+                )
+                if self.environment is not None
+                else None
+            )
             result = await run_restricted_process(
                 command,
                 cwd=cwd,
@@ -105,6 +124,9 @@ class ToolWorkerExecutor:
                 max_stderr_bytes=request.max_stderr_bytes,
                 cancellation_event=cancellation,
                 resource_limit_profile=profile,
+                sandbox_policy=policy,
+                sandbox_environment=self.environment or "development",
+                development_unsandboxed_override=self.development_unsandboxed_override,
             )
         finally:
             self._cancellations.pop(request.request_id, None)
@@ -128,20 +150,31 @@ class ToolWorkerExecutor:
         expected_state = request.args.get("repo_state_digest")
         if expected_repo != str(root):
             raise PermissionDeniedError("approved_repository_mismatch")
-        artifact = await inspect_patch_bytes(patch_bytes=patch_bytes, repo_root=root)
+        artifact = await inspect_patch_bytes(
+            patch_bytes=patch_bytes,
+            repo_root=root,
+            sandbox_environment=self.environment,
+            development_unsandboxed_override=self.development_unsandboxed_override,
+        )
         if artifact.patch_sha256 != expected_sha:
             raise PermissionDeniedError("patch_hash_mismatch")
         if artifact.patch_byte_length != expected_length:
             raise PermissionDeniedError("patch_length_mismatch")
         if artifact.affected_paths != expected_paths:
             raise PermissionDeniedError("patch_paths_mismatch")
-        if expected_state is not None and await git_worktree_digest(root) != str(expected_state):
+        if expected_state is not None and await git_worktree_digest(
+            root,
+            sandbox_environment=self.environment,
+            development_unsandboxed_override=self.development_unsandboxed_override,
+        ) != str(expected_state):
             raise PermissionDeniedError("repository_state_changed")
         check_ok, check_stdout, check_stderr = await git_apply_check_bytes(
             root,
             patch_bytes,
             timeout_seconds=request.timeout_seconds,
             cancellation_event=cancellation,
+            sandbox_environment=self.environment,
+            development_unsandboxed_override=self.development_unsandboxed_override,
         )
         if not check_ok:
             return ToolWorkerResponse(
@@ -159,6 +192,8 @@ class ToolWorkerExecutor:
             patch_bytes,
             timeout_seconds=request.timeout_seconds,
             cancellation_event=cancellation,
+            sandbox_environment=self.environment,
+            development_unsandboxed_override=self.development_unsandboxed_override,
         )
         return ToolWorkerResponse(
             request_id=request.request_id,
@@ -184,19 +219,40 @@ class ToolWorkerExecutor:
             raise ValueError("invalid_commit_message")
         expected_digest = str(request.args["staged_diff_sha256"])
         expected_tree = str(request.args["staged_tree_id"])
-        if await git_staged_digest(root) != expected_digest:
+        if (
+            await git_staged_digest(
+                root,
+                sandbox_environment=self.environment,
+                development_unsandboxed_override=self.development_unsandboxed_override,
+            )
+            != expected_digest
+        ):
             raise PermissionDeniedError("staged_diff_changed")
-        if await git_staged_tree_id(root) != expected_tree:
+        if (
+            await git_staged_tree_id(
+                root,
+                sandbox_environment=self.environment,
+                development_unsandboxed_override=self.development_unsandboxed_override,
+            )
+            != expected_tree
+        ):
             raise PermissionDeniedError("staged_tree_changed")
         code, stdout, stderr = await run_git(
             str(root),
             ["commit", "-m", message],
             timeout=request.timeout_seconds,
             cancellation_event=cancellation,
+            sandbox_environment=self.environment,
+            development_unsandboxed_override=self.development_unsandboxed_override,
         )
         data: dict[str, Any] = {}
         if code == 0:
-            head_code, head, head_error = await run_git(str(root), ["rev-parse", "HEAD"])
+            head_code, head, head_error = await run_git(
+                str(root),
+                ["rev-parse", "HEAD"],
+                sandbox_environment=self.environment,
+                development_unsandboxed_override=self.development_unsandboxed_override,
+            )
             if head_code == 0:
                 data["commit_hash"] = head.strip()
             elif head_error:

@@ -216,6 +216,10 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         tool_worker_manager = ToolWorkerProcessManager(
             april_home=active_settings.home,
             allowed_roots=tuple(active_settings.allowed_roots),
+            environment=active_settings.environment,
+            development_unsandboxed_override=(
+                active_settings.workers.development_unsandboxed_override
+            ),
         )
         try:
             tool_worker_client = await tool_worker_manager.start()

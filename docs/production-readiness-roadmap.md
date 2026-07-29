@@ -5,9 +5,27 @@ training, Dream Cycle, speaker gating, and sensitive-memory encryption. Fake
 backends remain useful for software verification, but their reports are not
 evidence of real model, microphone, thermal, signing, or notarization success.
 
+## Verification status matrix
+
+| Area | Status | Evidence still required |
+|---|---|---|
+| Core API, SQLite serialization, approvals, audit, backup/restore, deterministic routing, retrieval, and durable jobs | Implemented and tested | Normal CI and local regression suite |
+| Tool Worker Seatbelt profiles and production fail-closed policy | Implemented and tested | Target-Mac socket-denial integration where `sandbox-exec` is operational |
+| Durable staged model import and inactive registration | Implemented and tested | A separately supplied local GGUF for a real import, verification, and benchmark |
+| Real GGUF load/chat/stream, prompt-eval timing, sustained performance, and setup comparison | Implemented but target-Mac verification required | Local model artifact and genuine real-runtime execution |
+| Voice endpointing and optional voice adapters | Implemented and tested | Live microphone and speaker checks require those devices and local voice artifacts |
+| Production `.app` structure and release exclusions | Implemented and tested | Target-Mac bundle validation |
+| Developer ID signing, notarization, stapling, and Gatekeeper | Implemented but target-Mac verification required | Real Apple signing identity, notary Keychain profile, and genuine Apple service execution |
+
+Skipped hardware, model, voice, thermal, signing, or notarization checks remain
+unverified; they are never counted as passed.
+
 ## Durable model, training, and Dream jobs
 
-`model_import_verification` and `model_benchmark` accept only a model ID already
+`model_import` accepts an exact-approved absolute local source path, stages and
+hashes the bytes, atomically publishes the GGUF, and registers it as an inactive,
+low-priority candidate. It never downloads, loads, selects, or activates the
+model. `model_import_verification` and `model_benchmark` accept only a model ID already
 present in `configs/models.yaml`. APRIL resolves the registered path, verifies
 containment and GGUF identity, and runs the existing real-model verifier in a
 bounded process group. Neither job downloads, selects, or activates a model.

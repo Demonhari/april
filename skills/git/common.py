@@ -10,6 +10,7 @@ from april_common.process_runner import (
     ResourceLimitProfile,
     run_restricted_process,
 )
+from april_common.process_sandbox import NetworkPolicy, SandboxOperation, SandboxPolicy
 from skills.filesystem.common import current_path_policy
 
 MAX_GIT_OUTPUT = 200_000
@@ -21,6 +22,8 @@ async def run_git(
     *,
     timeout: float = 15.0,
     cancellation_event: asyncio.Event | None = None,
+    sandbox_environment: str | None = None,
+    development_unsandboxed_override: bool = False,
 ) -> tuple[int, str, str]:
     policy = current_path_policy()
     repo = normalize_existing_path(repo_path, policy)
@@ -35,6 +38,18 @@ async def run_git(
         max_stderr_bytes=MAX_GIT_OUTPUT,
         resource_limit_profile=ResourceLimitProfile.COMMAND,
         cancellation_event=cancellation_event,
+        sandbox_policy=(
+            SandboxPolicy(
+                operation=SandboxOperation.GIT_MUTATION,
+                network=NetworkPolicy.DENY_ALL,
+                readable_roots=(repo,),
+                writable_roots=(repo,),
+            )
+            if sandbox_environment is not None
+            else None
+        ),
+        sandbox_environment=sandbox_environment or "development",
+        development_unsandboxed_override=development_unsandboxed_override,
     )
     if result.status is ProcessStatus.TIMED_OUT:
         return 124, result.stdout, result.stderr or "Git command timed out."

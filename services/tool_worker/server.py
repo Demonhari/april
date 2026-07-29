@@ -40,12 +40,16 @@ class ToolWorkerServer:
         socket_path: Path,
         capability_path: Path,
         allowed_roots: tuple[Path, ...],
+        environment: str | None = None,
+        development_unsandboxed_override: bool = False,
     ) -> None:
         self.april_home = april_home
         self.runtime_directory = socket_path.parent
         self.socket_path = socket_path
         self.capability_path = capability_path
         self.allowed_roots = allowed_roots
+        self.environment = environment
+        self.development_unsandboxed_override = development_unsandboxed_override
         self._server: asyncio.Server | None = None
         self._outcomes: OrderedDict[str, tuple[str, ToolWorkerResponse | None, bool]] = (
             OrderedDict()
@@ -66,6 +70,8 @@ class ToolWorkerServer:
         self.executor = ToolWorkerExecutor(
             allowed_roots=self.allowed_roots,
             capability=capability,
+            environment=self.environment,
+            development_unsandboxed_override=self.development_unsandboxed_override,
         )
         self._server = await asyncio.start_unix_server(self._handle, path=socket_path)
         os.chmod(socket_path, 0o600)
@@ -219,6 +225,8 @@ async def _run(args: argparse.Namespace) -> None:
         socket_path=Path(args.socket),
         capability_path=Path(args.capability_file),
         allowed_roots=roots,
+        environment=args.environment,
+        development_unsandboxed_override=args.development_unsandboxed_override,
     )
     try:
         await server.serve_forever()
@@ -232,6 +240,16 @@ def main() -> None:
     parser.add_argument("--socket", required=True)
     parser.add_argument("--capability-file", required=True)
     parser.add_argument("--allowed-root", action="append", required=True)
+    parser.add_argument(
+        "--environment",
+        choices=("development", "test", "production"),
+        default="development",
+    )
+    parser.add_argument(
+        "--development-unsandboxed-override",
+        action="store_true",
+        help="DEVELOPMENT ONLY: permit subprocesses without an OS sandbox.",
+    )
     asyncio.run(_run(parser.parse_args()))
 
 

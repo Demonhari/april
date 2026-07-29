@@ -16,6 +16,7 @@ from april_common.process_runner import (
     ResourceLimitProfile,
     run_restricted_process,
 )
+from april_common.process_sandbox import operation_policy
 from april_common.settings import AprilSettings
 from services.april_runtime.model_registry import ModelRegistry
 
@@ -118,6 +119,18 @@ async def run_model_utility_job(
         cancellation_event=cancellation_event,
         resource_limit_profile=ResourceLimitProfile.MODEL_UTILITY,
         april_home=settings.home,
+        sandbox_policy=operation_policy(
+            (
+                ProcessCategory.MODEL_VERIFICATION
+                if mode == "verify"
+                else ProcessCategory.BENCHMARKING
+            ),
+            project_root=settings.home,
+            allowed_roots=settings.allowed_roots,
+            temporary_roots=(settings.home / ".april_tmp",),
+        ),
+        sandbox_environment=settings.environment,
+        development_unsandboxed_override=(settings.workers.development_unsandboxed_override),
     )
     if result.status is ProcessStatus.CANCELLED:
         raise asyncio.CancelledError

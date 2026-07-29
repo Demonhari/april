@@ -89,6 +89,7 @@ class PermissionSettings(BaseModel):
 class WorkerSettings(BaseModel):
     tool_worker_enabled: bool = True
     job_worker_enabled: bool = True
+    development_unsandboxed_override: bool = False
 
 
 class SecuritySettings(BaseModel):
@@ -571,6 +572,10 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_EXTERNAL_ACTIONS_ENABLED": ("permissions", "external_actions_enabled"),
     "APRIL_TOOL_WORKER_ENABLED": ("workers", "tool_worker_enabled"),
     "APRIL_JOB_WORKER_ENABLED": ("workers", "job_worker_enabled"),
+    "APRIL_DEVELOPMENT_UNSANDBOXED_OVERRIDE": (
+        "workers",
+        "development_unsandboxed_override",
+    ),
     "APRIL_BRAIN_MODEL_ID": ("brain", "model_id"),
     "APRIL_ROUTER_MODEL_ID": ("brain", "router_model_id"),
     "APRIL_ROUTING_RELIABILITY_MIN_SAMPLES": (

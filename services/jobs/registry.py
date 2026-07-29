@@ -41,6 +41,24 @@ class ModelVerificationPayload(BaseModel):
     model_id: str = Field(min_length=1, max_length=128)
 
 
+class ModelImportPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_path: str = Field(min_length=1, max_length=4096)
+    model_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    role: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=160)
+    expected_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-fA-F0-9]{64}$",
+    )
+
+
 class BenchmarkPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -131,6 +149,18 @@ def default_job_registry(
                 default_timeout_seconds=1800.0,
                 maximum_attempts=2,
                 cancellation_behavior="process_group",
+                available=True,
+            ),
+            JobTypeDefinition(
+                "model_import",
+                ModelImportPayload,
+                permission_level=4,
+                approval_required=True,
+                idempotent=True,
+                restart_safe=True,
+                default_timeout_seconds=14_400.0,
+                maximum_attempts=2,
+                cancellation_behavior="cooperative",
                 available=True,
             ),
             JobTypeDefinition(

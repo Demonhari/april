@@ -134,9 +134,13 @@ class ToolWorkerProcessManager:
         april_home: Path,
         allowed_roots: tuple[Path, ...],
         runtime_directory: Path | None = None,
+        environment: str = "development",
+        development_unsandboxed_override: bool = False,
     ) -> None:
         self.april_home = april_home.expanduser().resolve(strict=True)
         self.allowed_roots = allowed_roots
+        self.environment = environment
+        self.development_unsandboxed_override = development_unsandboxed_override
         self.runtime_directory = runtime_directory or default_tool_worker_runtime_directory(
             self.april_home
         )
@@ -175,7 +179,13 @@ class ToolWorkerProcessManager:
             str(self.socket_path),
             "--capability-file",
             str(self.capability_path),
+            "--environment",
+            self.environment,
         ]
+        if self.development_unsandboxed_override:
+            if self.environment != "development":
+                raise ToolWorkerUnavailable("unsandboxed_override_development_only")
+            argv.append("--development-unsandboxed-override")
         for root in self.allowed_roots:
             argv.extend(["--allowed-root", str(root)])
         self.process = await asyncio.create_subprocess_exec(

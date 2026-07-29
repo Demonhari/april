@@ -5,7 +5,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from april_common.process_environment import ProcessCategory, build_process_environment
+from april_common.process_sandbox import (
+    HostProcessSandbox,
+    SandboxCapabilities,
+    SandboxPolicy,
+    SandboxProvider,
+    SandboxUnavailableError,
+)
 
 DEFAULT_MAX_OUTPUT_BYTES = 100_000
 DEFAULT_TERMINATION_GRACE_SECONDS = 1.0
@@ -55,6 +62,10 @@ class RestrictedProcessResult:
     duration_seconds: float
     failure_code: str | None
     resource_limits: ResourceLimitReport
+    sandbox: SandboxCapabilities | None = None
+
+
+AsyncProcessLauncher = Callable[..., Awaitable[asyncio.subprocess.Process]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +107,11 @@ async def run_restricted_process(
     stdin_bytes: bytes | None = None,
     april_home: Path | None = None,
     termination_grace_seconds: float = DEFAULT_TERMINATION_GRACE_SECONDS,
+    sandbox_policy: SandboxPolicy | None = None,
+    sandbox_environment: str = "development",
+    development_unsandboxed_override: bool = False,
+    sandbox_provider: SandboxProvider | None = None,
+    process_launcher: AsyncProcessLauncher | None = None,
 ) -> RestrictedProcessResult:
     """Execute one argv-only child in an isolated process group with hard bounds."""
     normalized_argv = _validate_argv(argv)
@@ -109,13 +125,25 @@ async def run_restricted_process(
     environment = build_process_environment(category, april_home=april_home)
     limit_report, preexec_fn = _resource_limit_setup(resource_limit_profile)
     started = time.monotonic()
+    sandbox_capabilities: SandboxCapabilities | None = None
     process: asyncio.subprocess.Process | None = None
     stdout_task: asyncio.Task[tuple[bytes, bool]] | None = None
     stderr_task: asyncio.Task[tuple[bytes, bool]] | None = None
     stdin_task: asyncio.Task[None] | None = None
     try:
-        process = await asyncio.create_subprocess_exec(
-            *normalized_argv,
+        launch_argv = normalized_argv
+        if sandbox_policy is not None:
+            launch = (sandbox_provider or HostProcessSandbox()).wrap(
+                normalized_argv,
+                policy=sandbox_policy,
+                environment=sandbox_environment,
+                development_override=development_unsandboxed_override,
+            )
+            launch_argv = launch.argv
+            sandbox_capabilities = launch.capabilities
+        launcher = process_launcher or asyncio.create_subprocess_exec
+        process = await launcher(
+            *launch_argv,
             cwd=str(resolved_cwd),
             env=environment,
             stdin=asyncio.subprocess.PIPE
@@ -180,12 +208,13 @@ async def run_restricted_process(
             duration_seconds=max(0.0, time.monotonic() - started),
             failure_code=failure_code,
             resource_limits=limit_report,
+            sandbox=sandbox_capabilities,
         )
     except asyncio.CancelledError:
         if process is not None:
             await asyncio.shield(_terminate_process_group(process, grace))
         raise
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, SandboxUnavailableError) as exc:
         if process is not None and process.returncode is None:
             await _terminate_process_group(process, grace)
         return RestrictedProcessResult(
@@ -198,6 +227,7 @@ async def run_restricted_process(
             duration_seconds=max(0.0, time.monotonic() - started),
             failure_code=_safe_start_failure_code(exc),
             resource_limits=limit_report,
+            sandbox=sandbox_capabilities,
         )
     finally:
         for task in (stdin_task, stdout_task, stderr_task):
@@ -216,6 +246,11 @@ def run_restricted_process_sync(
     max_stderr_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     resource_limit_profile: ResourceLimitProfile = ResourceLimitProfile.NONE,
     april_home: Path | None = None,
+    sandbox_policy: SandboxPolicy | None = None,
+    sandbox_environment: str = "development",
+    development_unsandboxed_override: bool = False,
+    sandbox_provider: SandboxProvider | None = None,
+    process_launcher: AsyncProcessLauncher | None = None,
 ) -> RestrictedProcessResult:
     """Synchronous adapter for startup and diagnostic paths without an event loop."""
     return asyncio.run(
@@ -228,6 +263,11 @@ def run_restricted_process_sync(
             max_stderr_bytes=max_stderr_bytes,
             resource_limit_profile=resource_limit_profile,
             april_home=april_home,
+            sandbox_policy=sandbox_policy,
+            sandbox_environment=sandbox_environment,
+            development_unsandboxed_override=development_unsandboxed_override,
+            sandbox_provider=sandbox_provider,
+            process_launcher=process_launcher,
         )
     )
 
@@ -358,6 +398,8 @@ def _bounded_float(value: float, minimum: float, maximum: float, label: str) -> 
 
 
 def _safe_start_failure_code(exc: Exception) -> str:
+    if isinstance(exc, SandboxUnavailableError):
+        return str(exc)
     if isinstance(exc, FileNotFoundError):
         return "executable_not_found"
     if isinstance(exc, PermissionError):

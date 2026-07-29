@@ -134,30 +134,49 @@ injected global. If pywebview is not installed, `--native` prints a message and
 falls back to the browser path. The default path needs zero extra runtime
 dependencies.
 
-### Unsigned app stub vs. a real signed/notarized app
+### Development SPA, development stub, and production bundle
 
-For a local app bundle wrapper around the same command:
+These are three distinct launch and distribution paths.
+
+The browser SPA is the normal development UI. `run april desktop` serves it
+from the loopback Core API and does not create an app bundle.
+
+The unsigned app stub is a disposable development launcher:
 
 ```bash
 scripts/create_macos_app_stub.sh
 run april setup app-stub
 ```
 
-| | Unsigned app stub (today) | Signed/notarized app (future work) |
-|---|---|---|
-| What it is | `dist/APRIL.app`, a thin launcher that runs `run april desktop` | A distributable, Gatekeeper-trusted `.app` |
-| Code signing | None | Developer ID signature required |
-| Notarization | None | Apple notarization + stapling required |
-| Gatekeeper | First launch needs right-click → Open (or a quarantine prompt) | Launches with no warning |
-| Bundles models/voice/tokens | No — none of these are ever bundled | No — still local-only |
-| Launch-at-login | No | Possible future option |
-| Git | Ignored (`dist/` is not committed) | n/a |
+Both commands above create `dist/APRIL.app` as a development launcher only.
+They perform no signing or notarization, install nothing, and bundle no models,
+voice artifacts, tokens, credentials, or user data. The bundle is Git-ignored.
 
-Both commands create `dist/APRIL.app` as a **development launcher only**. They
-perform no signing/notarization, install nothing, and bundle no models, voice
-binaries, tokens, or secrets. The generated bundle is ignored by Git. Signed
-packaging, notarization, and launch-at-login are future work; until then the
-Desktop is a local SPA reached through `run april desktop` or this unsigned stub.
+The production bundle is built and structurally validated separately:
+
+```bash
+run april package build --output dist/APRIL.app --version 0.1.0
+run april package validate dist/APRIL.app
+```
+
+Production packaging also supports real Developer ID signing, signature
+verification, release ZIP creation, notarization, stapling, and Gatekeeper:
+
+```bash
+run april package sign dist/APRIL.app --identity "Developer ID Application: NAME (TEAMID)"
+run april package verify-signature dist/APRIL.app
+run april package archive dist/APRIL.app --output dist/APRIL.zip
+run april package notarize-submit dist/APRIL.zip --keychain-profile APRIL_NOTARY
+run april package notarize-status SUBMISSION_ID --keychain-profile APRIL_NOTARY
+run april package staple dist/APRIL.app
+run april package gatekeeper dist/APRIL.app
+```
+
+Those commands are implemented, but successful execution still requires a real
+target Mac, Apple command-line tools, a valid Developer ID identity, and an
+operator-created notary Keychain profile containing real Apple credentials.
+APRIL neither creates nor stores those credentials and does not claim signing
+or notarization success until the real commands succeed.
 
 No authenticated request is issued until token acquisition succeeds. If it fails,
 the SPA shows a safe local "locked" screen and starts no polling; the dashboard,

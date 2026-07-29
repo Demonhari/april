@@ -383,7 +383,17 @@ def test_release_zip_rejects_models_credentials_and_generated_data(tmp_path: Pat
         archive.writestr("APRIL/README.md", "safe")
     assert validate_release_zip(safe) == ("APRIL/README.md",)
 
-    for member in ("models/model.gguf", ".venv/bin/python", "credentials.json"):
+    for member in (
+        "models/model.gguf",
+        ".venv/bin/python",
+        "credentials.json",
+        "logs/april.log",
+        "data/verification/report.json",
+        "models/adapters/candidate.bin",
+        "data/april.db",
+        "dist/APRIL.app/Contents/Info.plist",
+        "data/audio_cache/recording.wav",
+    ):
         bad = tmp_path / f"{member.replace('/', '-')}.zip"
         with zipfile.ZipFile(bad, "w") as archive:
             archive.writestr(member, "not safe")

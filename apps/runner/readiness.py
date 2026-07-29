@@ -36,6 +36,7 @@ from apps.runner.mac_report import redact_reason
 from april_common.audit import audit_logger_for_settings
 from april_common.credentials import CredentialStore
 from april_common.errors import ConfigError
+from april_common.process_sandbox import SandboxBackend, sandbox_capabilities
 from april_common.settings import (
     KNOWN_DEFAULT_API_TOKENS,
     KNOWN_DEFAULT_RUNTIME_TOKENS,
@@ -783,6 +784,32 @@ def build_readiness_report(
                 else credential_store_selected
             ),
             action=("run april security credentials migrate" if legacy_plaintext else None),
+        )
+    )
+    sandbox = sandbox_capabilities(
+        environment=settings.environment,
+        development_override=settings.workers.development_unsandboxed_override,
+    )
+    sandbox_status: CheckStatus = "ok"
+    if sandbox.backend is SandboxBackend.UNAVAILABLE:
+        sandbox_status = "blocker" if settings.environment == "production" else "warning"
+    elif sandbox.development_override_enabled:
+        sandbox_status = "warning"
+    checks.append(
+        ReadinessCheck(
+            name="Tool Worker OS sandbox",
+            status=sandbox_status,
+            detail=(
+                sandbox.warning
+                or (
+                    f"{sandbox.backend.value}; network denial and filesystem policy are OS-enforced"
+                )
+            ),
+            action=(
+                "Run APRIL on macOS with /usr/bin/sandbox-exec available."
+                if sandbox.backend is SandboxBackend.UNAVAILABLE
+                else None
+            ),
         )
     )
     try:

@@ -66,6 +66,7 @@ def register_job_routes(
             if approval_id is None:
                 raise HTTPException(status_code=409, detail="approval_required")
             record = await active.approvals.get(approval_id)
+            expected_payload: dict[str, Any]
             if request.job_type == "configured_test" and record.tool == "test_runner":
                 expected_payload = {
                     "argv": list(record.args.get("argv", ["pytest"])),
@@ -73,6 +74,14 @@ def register_job_routes(
                 }
             elif request.job_type == "finetune" and record.tool == "finetune":
                 expected_payload = {"plan_id": str(record.args.get("plan_id", ""))}
+            elif request.job_type == "model_import" and record.tool == "model_import":
+                expected_payload = {
+                    "source_path": str(record.args.get("source_path", "")),
+                    "model_id": str(record.args.get("model_id", "")),
+                    "role": str(record.args.get("role", "")),
+                    "name": str(record.args.get("name", "")),
+                    "expected_sha256": record.args.get("expected_sha256"),
+                }
             else:
                 raise HTTPException(status_code=409, detail="approval_action_mismatch")
             validated_payload = definition.validate_payload(request.payload)

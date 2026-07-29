@@ -26,6 +26,8 @@ _BANNED_PARTS = {
     ".april_tmp",
     "adapters",
     "credentials",
+    "logs",
+    "audio_cache",
     "voice_recordings",
 }
 _BANNED_SUFFIXES = {
@@ -41,6 +43,9 @@ _BANNED_SUFFIXES = {
     ".onnx",
     ".safetensors",
     ".tflite",
+    ".bin",
+    ".pt",
+    ".pth",
 }
 _SECRET_NAME = re.compile(
     r"(?i)(?:^|[._-])(tokens?|secrets?|credentials?|private[-_]?keys?)(?:[._-]|$)"
@@ -71,6 +76,13 @@ def validate_release_zip(path: Path) -> tuple[str, ...]:
             lowered_parts = {part.casefold() for part in member.parts}
             suffix = member.suffix.casefold()
             basename = member.name.casefold()
+            app_part_indexes = [
+                index for index, part in enumerate(member.parts) if part.casefold().endswith(".app")
+            ]
+            if any(index != 0 for index in app_part_indexes):
+                raise ReleaseValidationError(
+                    "Archive contains a nested or generated application bundle."
+                )
             if lowered_parts & _BANNED_PARTS:
                 raise ReleaseValidationError(
                     f"Archive contains forbidden category: {member.name or 'directory'}."

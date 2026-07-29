@@ -14,6 +14,11 @@ from april_common.audit import audit_logger_for_settings
 from april_common.settings import AprilSettings, load_settings
 from april_common.time import utc_now_iso
 from services.jobs.finetune_job import FinetuneJobError, run_finetune_job
+from services.jobs.model_import import (
+    ModelImportError,
+    reconcile_model_imports,
+    run_model_import_job,
+)
 from services.jobs.model_jobs import ModelJobError, run_model_utility_job
 from services.jobs.registry import JobRegistry, default_job_registry
 from services.jobs.schemas import DEFAULT_LEASE_SECONDS, ClaimedJob, JobStatus
@@ -53,6 +58,7 @@ class JobWorker:
         self._stopping = asyncio.Event()
 
     async def run_forever(self, *, poll_seconds: float = 0.25) -> None:
+        await asyncio.to_thread(reconcile_model_imports, self.settings)
         await self.store.recover_expired_leases()
         self._write_status(ready=True, active_job_id=None)
         while not self._stopping.is_set():
@@ -180,6 +186,24 @@ class JobWorker:
                 "stdout_truncated": response.stdout_truncated,
                 "stderr_truncated": response.stderr_truncated,
             }
+        if job.job_type == "model_import":
+
+            async def import_progress(percent: int, code: str) -> None:
+                await self.store.heartbeat(
+                    job.id,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.lease_seconds,
+                    progress_percent=percent,
+                    progress_code=code,
+                )
+
+            return await run_model_import_job(
+                self.settings,
+                operation_id=job.id,
+                payload=job.payload,
+                cancellation_event=asyncio.Event(),
+                progress=import_progress,
+            )
         if job.job_type in {"model_import_verification", "model_benchmark"}:
             await self.store.heartbeat(
                 job.id,
@@ -305,7 +329,7 @@ def main() -> None:
 
 
 def _safe_job_error_code(exc: Exception) -> str:
-    if isinstance(exc, (FinetuneJobError, ModelJobError)):
+    if isinstance(exc, (FinetuneJobError, ModelImportError, ModelJobError)):
         value = str(exc)
         if value and len(value) <= 160 and value.replace("_", "").isalnum():
             return value

@@ -45,6 +45,7 @@ from april_common.credentials import CredentialKey, FileCredentialStore
 from april_common.errors import ConfigError
 from april_common.process_environment import ProcessCategory, build_process_environment
 from april_common.process_runner import run_restricted_process_sync
+from april_common.process_sandbox import SandboxBackend, sandbox_capabilities
 from april_common.service_health import ServiceHealthResult, probe_service_health
 from april_common.settings import load_settings
 from april_common.token_setup import legacy_plaintext_credentials_detected
@@ -86,7 +87,58 @@ def _verification_health_failure(
 
 def run_fake_verification(home: Path) -> list[VerifyCheck]:
     verifier = LauncherVerifier(home=home)
-    return verifier.run()
+    return [*verifier.run(), *run_local_sandbox_verification(home)]
+
+
+def run_local_sandbox_verification(home: Path) -> list[VerifyCheck]:
+    try:
+        settings = load_settings(root=home)
+    except (ConfigError, RuntimeError) as exc:
+        return [
+            VerifyCheck(
+                name="Tool Worker sandbox capability",
+                ok=False,
+                detail=f"unavailable ({type(exc).__name__})",
+            )
+        ]
+    report = sandbox_capabilities(
+        environment=settings.environment,
+        development_override=settings.workers.development_unsandboxed_override,
+    )
+    backend_available = report.backend is not SandboxBackend.UNAVAILABLE
+    production = settings.environment == "production"
+    unavailable_status: VerifyStatus = "fail" if production else "skip"
+    return [
+        VerifyCheck(
+            "sandbox backend",
+            backend_available or not production,
+            report.backend.value,
+            status="pass" if backend_available else unavailable_status,
+        ),
+        VerifyCheck(
+            "sandbox network denial",
+            report.network_denial_available or not production,
+            "available" if report.network_denial_available else "unavailable",
+            status="pass" if report.network_denial_available else unavailable_status,
+        ),
+        VerifyCheck(
+            "sandbox filesystem policy",
+            report.filesystem_policy_available or not production,
+            "available" if report.filesystem_policy_available else "unavailable",
+            status="pass" if report.filesystem_policy_available else unavailable_status,
+        ),
+        VerifyCheck(
+            "sandbox production fail closed",
+            report.production_fail_closed,
+            "enabled" if report.production_fail_closed else "disabled",
+        ),
+        VerifyCheck(
+            "sandbox development override",
+            not report.development_override_enabled or not production,
+            report.warning or "disabled",
+            status="skip" if report.development_override_enabled else "pass",
+        ),
+    ]
 
 
 def run_local_security_integrity_verification(home: Path) -> list[VerifyCheck]:
@@ -114,6 +166,7 @@ def run_local_security_integrity_verification(home: Path) -> list[VerifyCheck]:
     backup = database.last_successful_backup
     backup_detail = str(backup.get("creation_timestamp", "known")) if backup else "none recorded"
     return [
+        *run_local_sandbox_verification(home),
         VerifyCheck("credential store selected", True, store_name),
         VerifyCheck(
             "API credential available",
@@ -458,6 +511,10 @@ class BenchmarkResult(BaseModel):
     output_tokens: int = 0
     tokens_per_second: float = 0.0
     unload_success: bool = False
+    process_rss_bytes: int | None = None
+    peak_process_rss_bytes: int | None = None
+    prompt_token_count: int | None = None
+    prompt_eval_duration_seconds: float | None = None
     context_size: int = 1024
     backend_settings: dict[str, Any] = Field(default_factory=dict)
 
@@ -1334,6 +1391,7 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
         try:
             self._load_model()
             self._benchmark_stream()
+            process_rss = _process_rss_bytes(self.runtime.pid if self.runtime else None)
             unload_success = False
             if not self.keep_loaded:
                 self._unload_model()
@@ -1347,6 +1405,7 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
                 output_tokens=self.output_tokens,
                 tokens_per_second=self.tokens_per_second or 0.0,
                 unload_success=unload_success,
+                process_rss_bytes=process_rss,
                 context_size=1024,
                 backend_settings={
                     "backend": "llama_cpp",
