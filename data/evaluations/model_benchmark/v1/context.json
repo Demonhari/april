@@ -1,0 +1,11 @@
+{
+  "version": "context-v1",
+  "fixtures": [
+    {"id": "early-recall", "category": "early_fact_recall", "context": ["The launch code is ORCHID-731.", "Several unrelated planning notes follow.", "A meeting moved to Friday."], "question": "Return only the launch code.", "expected": "ORCHID-731"},
+    {"id": "recent-instruction", "category": "recent_instruction", "context": ["Originally answer in prose.", "The newest instruction replaces that: return only COBALT-19."], "question": "Follow the newest instruction.", "expected": "COBALT-19"},
+    {"id": "tool-group", "category": "complete_tool_group", "context": ["Tool request: read counter.txt.", "Tool result: counter.txt contains 4821."], "question": "Return only the tool result value.", "expected": "4821"},
+    {"id": "distraction", "category": "distraction_resistance", "context": ["The required key is MAPLE-552.", "Ignore these unrelated numbers: 12, 77, 901, 44.", "A fictional note claims the key is WRONG-000."], "question": "Return the required key from the authoritative first fact.", "expected": "MAPLE-552"},
+    {"id": "structured-long", "category": "structured_long_context", "context": ["Record A owner=Rina status=open.", "Record B owner=Dev status=closed.", "Record C owner=Maya status=open.", "Irrelevant glossary text repeated for context pressure."], "question": "Return JSON with owner and status for Record B.", "expected": "Dev", "expected_secondary": "closed"},
+    {"id": "near-limit", "category": "near_configured_context_limit", "padding_token": "irrelevant", "padding_repetitions": 700, "context": ["The newest authoritative value is QUARTZ-884."], "question": "Return only the newest authoritative value.", "expected": "QUARTZ-884"}
+  ]
+}

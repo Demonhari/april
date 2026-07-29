@@ -571,6 +571,7 @@ class VectorMemory:
     def reindex(self, *, progress: Callable[[int, int], None] | None = None) -> int:
         """Re-embed every record and atomically publish exactly one generation."""
         with self._locked():
+            self._cleanup_staging_unlocked()
             loaded = self._load_effective_unlocked(require_compatible=False)
             records = list(loaded.records)
             loaded.vectors = np.empty((0, 0), dtype=np.float32)
@@ -594,6 +595,7 @@ class VectorMemory:
         progress: Callable[[int, int], None] | None = None,
     ) -> int:
         with self._locked():
+            self._cleanup_staging_unlocked()
             loaded = self._load_effective_unlocked(require_compatible=False)
             preserved = [
                 record

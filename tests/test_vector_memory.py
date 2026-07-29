@@ -544,6 +544,42 @@ def test_embedding_failure_during_reindex_keeps_current(tmp_path: Path) -> None:
     assert _current_generation(tmp_path) == current
 
 
+def test_cancellation_during_reindex_keeps_current_generation(tmp_path: Path) -> None:
+    import asyncio
+
+    memory = VectorMemory(tmp_path)
+    memory.upsert(record_id="old", content="old value", metadata=metadata("old"))
+    current = _current_generation(tmp_path)
+
+    def cancel(_done: int, _total: int) -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        memory.reindex(progress=cancel)
+    assert _current_generation(tmp_path) == current
+    assert memory.health()["active_generation"] == current
+
+
+def test_restart_reindex_discards_abandoned_staging_before_publication(
+    tmp_path: Path,
+) -> None:
+    memory = VectorMemory(tmp_path)
+    memory.upsert(record_id="old", content="old value", metadata=metadata("old"))
+    current = _current_generation(tmp_path)
+    abandoned = memory.staging_path / memory._new_generation_id()
+    abandoned.mkdir()
+    (abandoned / "records.json").write_text("partial", encoding="utf-8")
+
+    restarted = VectorMemory(tmp_path)
+    assert restarted.health()["active_generation"] == current
+    assert restarted.health()["abandoned_staging_count"] == 1
+    restarted.reindex()
+
+    assert not abandoned.exists()
+    assert _current_generation(tmp_path) != current
+    assert restarted.health()["abandoned_staging_count"] == 0
+
+
 def test_version_two_legacy_index_is_readable_and_migrates(tmp_path: Path) -> None:
     provider = HashedTokenEmbedding(16)
     records = [{"id": "1", "content": "legacy", "metadata": metadata("h").model_dump()}]

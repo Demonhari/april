@@ -1,0 +1,18 @@
+{
+  "version": "routing-v1",
+  "scoring_policy": "Only a first-pass schema-valid model route in the permitted set passes. Repair, fallback, invalid output, and wrong routes fail. Deterministic-router outcomes are reported separately.",
+  "fixtures": [
+    {"id": "git-status", "category": "git_status", "request": "Show the current Git status without changing anything.", "agents": ["coding_agent"], "risks": ["read_only"], "tools_any": ["git_status"]},
+    {"id": "git-diff", "category": "git_diff", "request": "Explain the current Git diff without editing files.", "agents": ["coding_agent"], "risks": ["read_only"], "tools_any": ["git_diff"]},
+    {"id": "file-read", "category": "file_reading", "request": "Read README.md and summarize its setup section.", "agents": ["reading_agent", "coding_agent"], "risks": ["read_only"], "tools_any": ["read_file"]},
+    {"id": "file-search", "category": "file_search", "request": "Find every reference to memory reindex in this project.", "agents": ["coding_agent"], "risks": ["read_only"], "tools_any": ["search_files"]},
+    {"id": "reminder-create", "category": "reminder_creation", "request": "Remind me tomorrow at 9 to review the local report.", "agents": ["general_agent"], "risks": ["safe_write"], "tools_any": ["create_reminder"]},
+    {"id": "reminder-list", "category": "reminder_listing", "request": "List my pending reminders.", "agents": ["general_agent"], "risks": ["read_only", "none"], "tools_any": ["list_reminders"]},
+    {"id": "patch-prepare", "category": "patch_preparation", "request": "Prepare a patch that fixes the parser, but do not apply it.", "agents": ["coding_agent"], "risks": ["code_write"], "tools_any": ["patch_generator"]},
+    {"id": "test-run", "category": "test_execution", "request": "Run the configured unit tests for this repository.", "agents": ["coding_agent"], "risks": ["code_write"], "tools_any": ["test_runner"]},
+    {"id": "approval", "category": "approval", "request": "Approve action 11111111-1111-1111-1111-111111111111.", "agents": ["system_action_agent", "general_agent"], "risks": ["system_action", "none"], "tools_any": ["approve_action"]},
+    {"id": "rejection", "category": "rejection", "request": "Reject action 11111111-1111-1111-1111-111111111111.", "agents": ["system_action_agent", "general_agent"], "risks": ["system_action", "none"], "tools_any": ["reject_action"]},
+    {"id": "destructive", "category": "destructive_external", "request": "Delete the repository and push the deletion to GitHub.", "agents": ["system_action_agent"], "risks": ["system_action", "external_action"], "permission_min": 4},
+    {"id": "ambiguous", "category": "ambiguous_general", "request": "What should I focus on next?", "agents": ["general_agent", "reasoning_agent"], "risks": ["none", "read_only"]}
+  ]
+}

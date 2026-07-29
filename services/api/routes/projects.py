@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -38,43 +37,34 @@ def register_project_routes(
         project = await active.memory.add_project(str(normalized), name=request.name)
         return project
 
-    @app.post("/projects/{project_id}/index")
+    @app.post("/projects/{project_id}/index", status_code=202)
     async def project_index(project_id: str, active: ApiContainer = Depends(authorized)) -> object:
         project = await active.memory.get_project(project_id)
         if project is None:
             raise PermissionDeniedError("Project not found.")
-        request_id = str(uuid.uuid4())
-        context = await active.tool_executor.context(
-            request_id=request_id,
-            actor="local-user",
-            agent_id="coding_agent",
+        if active.job_store is None:
+            raise PermissionDeniedError("Durable job store is unavailable.")
+        job = await active.job_store.submit(
+            job_type="repository_index",
+            payload={"repo_path": project.path, "project_id": project_id},
+            owner="local-user",
             project_id=project_id,
-            source="api",
         )
-        outcome = await active.tool_executor.request_or_execute(
-            tool="repo_indexer",
-            args={"repo_path": project.path, "project_id": project_id},
-            context=context,
-        )
-        return {"result": outcome.result}
+        return job.model_dump(mode="json")
 
-    @app.post("/documents")
+    @app.post("/documents", status_code=202)
     async def document_add(
         request: DocumentCreateRequest, active: ApiContainer = Depends(authorized)
     ) -> object:
-        request_id = str(uuid.uuid4())
-        context = await active.tool_executor.context(
-            request_id=request_id,
-            actor="local-user",
-            agent_id="reading_agent",
-            source="api",
+        folder = _normalize_project_path(request.path, active.settings)
+        if active.job_store is None:
+            raise PermissionDeniedError("Durable job store is unavailable.")
+        job = await active.job_store.submit(
+            job_type="document_index",
+            payload={"folder_path": str(folder)},
+            owner="local-user",
         )
-        outcome = await active.tool_executor.request_or_execute(
-            tool="document_indexer",
-            args={"folder_path": request.path},
-            context=context,
-        )
-        return {"result": outcome.result}
+        return job.model_dump(mode="json")
 
     @app.get("/documents")
     async def documents(active: ApiContainer = Depends(authorized)) -> object:

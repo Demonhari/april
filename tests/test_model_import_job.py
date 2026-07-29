@@ -30,6 +30,27 @@ def _gguf(path: Path, *, size: int = 2_500_000) -> Path:
     return path
 
 
+def test_prepare_payload_uses_operator_hash_without_hashing_in_cli_phase(
+    settings_tmp: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _configure(settings_tmp)
+    source = _gguf(settings_tmp.home / "incoming" / "preflight.gguf", size=16)
+    monkeypatch.setattr(
+        model_import_module,
+        "_sha256_file",
+        lambda _path: (_ for _ in ()).throw(AssertionError("must not hash synchronously")),
+    )
+    payload = service.prepare_payload(
+        source_path=str(source),
+        model_id="candidate-preflight",
+        role="brain",
+        name="Candidate",
+        expected_sha256="b" * 64,
+    )
+    assert payload["expected_sha256"] == "b" * 64
+
+
 async def _run(
     service: ModelImportService,
     source: Path,

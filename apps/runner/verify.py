@@ -506,11 +506,13 @@ class BenchmarkResult(BaseModel):
     ok: bool = True
     detail: str = ""
     load_time_seconds: float = 0.0
+    warm_load_time_seconds: float | None = None
     first_token_latency_seconds: float | None = None
     generation_time_seconds: float = 0.0
     output_tokens: int = 0
     tokens_per_second: float = 0.0
     unload_success: bool = False
+    unload_time_seconds: float | None = None
     process_rss_bytes: int | None = None
     peak_process_rss_bytes: int | None = None
     prompt_token_count: int | None = None
@@ -988,6 +990,7 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         self.first_token_latency_seconds: float | None = None
         self.generation_time_seconds: float | None = None
         self.output_tokens: int = 0
+        self.prompt_token_count: int | None = None
         self.tokens_per_second: float | None = None
         self.prompt_path: str = "unknown"
         self.runtime_rss_bytes: int | None = None
@@ -1257,6 +1260,8 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
             return
         if "output_tokens" in payload:
             self.output_tokens = int(payload["output_tokens"])
+        if "input_tokens" in payload:
+            self.prompt_token_count = int(payload["input_tokens"])
         if payload.get("prompt_path"):
             self.prompt_path = str(payload["prompt_path"])
 
@@ -1367,7 +1372,14 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
         self.keep_loaded = keep_loaded
 
     def run(self) -> list[BenchmarkResult]:  # type: ignore[override]
+        return self.run_with_evaluation()[0]
+
+    def run_with_evaluation(
+        self,
+        evaluator: Callable[[ModelBenchmark], dict[str, Any]] | None = None,
+    ) -> tuple[list[BenchmarkResult], dict[str, Any] | None]:
         results: list[BenchmarkResult] = []
+        evaluation: dict[str, Any] | None = None
         try:
             self._prepare()
             env = self._env()
@@ -1377,10 +1389,12 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
             self._wait_json(self.api_url + "/health")
             for index in range(1, self.runs + 1):
                 results.append(self._run_one(index))
+            if evaluator is not None:
+                evaluation = evaluator(self)
         finally:
             self._stop()
             shutil.rmtree(self.temp, ignore_errors=True)
-        return results
+        return results, evaluation
 
     def _run_one(self, index: int) -> BenchmarkResult:
         self.load_time_seconds = None
@@ -1388,24 +1402,47 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
         self.generation_time_seconds = None
         self.output_tokens = 0
         self.tokens_per_second = None
+        self.prompt_token_count = None
         try:
             self._load_model()
+            cold_load_time = self.load_time_seconds or 0.0
+            self._load_model()
+            warm_load_time = self.load_time_seconds
             self._benchmark_stream()
             process_rss = _process_rss_bytes(self.runtime.pid if self.runtime else None)
+            peak_process_rss: int | None = None
+            try:
+                health = self._wait_json(
+                    self.runtime_url + "/runtime/health",
+                    auth_runtime=True,
+                )
+                peak_value = health.get("process_peak_rss_bytes")
+                if isinstance(peak_value, int):
+                    peak_process_rss = peak_value
+            except Exception:
+                peak_process_rss = None
             unload_success = False
+            unload_time: float | None = None
             if not self.keep_loaded:
+                unload_started = time.monotonic()
                 self._unload_model()
+                unload_time = time.monotonic() - unload_started
                 unload_success = True
             return BenchmarkResult(
                 run_index=index,
                 ok=True,
-                load_time_seconds=self.load_time_seconds or 0.0,
+                load_time_seconds=cold_load_time,
+                warm_load_time_seconds=warm_load_time,
                 first_token_latency_seconds=self.first_token_latency_seconds,
                 generation_time_seconds=self.generation_time_seconds or 0.0,
                 output_tokens=self.output_tokens,
                 tokens_per_second=self.tokens_per_second or 0.0,
                 unload_success=unload_success,
+                unload_time_seconds=unload_time,
                 process_rss_bytes=process_rss,
+                peak_process_rss_bytes=peak_process_rss,
+                prompt_token_count=self.prompt_token_count,
+                prompt_eval_duration_seconds=self.first_token_latency_seconds,
                 context_size=1024,
                 backend_settings={
                     "backend": "llama_cpp",
@@ -3336,15 +3373,10 @@ def _process_rss_bytes(pid: int | None) -> int | None:
         max_stdout_bytes=4096,
         max_stderr_bytes=4096,
     )
-    if completed.returncode is None:
-        return None
-    if completed.returncode != 0:
-        return None
-    raw = completed.stdout.strip()
-    if not raw:
+    if completed.returncode is None or completed.returncode != 0:
         return None
     try:
-        return int(raw.split()[0]) * 1024
+        return int(completed.stdout.strip().split()[0]) * 1024
     except (ValueError, IndexError):
         return None
 

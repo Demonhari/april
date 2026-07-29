@@ -25,6 +25,7 @@ from services.jobs.schemas import (
     JobStatus,
 )
 from services.memory.database import Database
+from services.permissions.approvals import canonical_hash, legacy_canonical_hash
 
 _FORBIDDEN_STRUCTURED_KEYS = frozenset(
     {
@@ -115,6 +116,173 @@ class JobStore:
                 created_at=now,
             )
         return await self.require(identifier)
+
+    async def submit_with_exact_approval(
+        self,
+        *,
+        job_type: str,
+        payload: dict[str, Any],
+        owner: str,
+        approval_id: str,
+        approval_tool: str,
+        approval_args: dict[str, Any],
+        conversation_id: str | None = None,
+        project_id: str | None = None,
+    ) -> tuple[JobRecord, bool]:
+        """Atomically consume one exact approval and accept its durable job.
+
+        The approval identifier is also the idempotency key. Replaying the same
+        exact accepted action returns the original job; changed arguments fail
+        closed.
+        """
+        definition = self.registry.require(job_type)
+        if not definition.approval_required:
+            raise JobTransitionError("approval_not_required")
+        _reject_forbidden_keys(payload)
+        validated = definition.validate_payload(payload)
+        payload_json = _safe_json(validated, MAX_JOB_PAYLOAD_BYTES, "payload")
+        payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        identifier = f"approved-{_bounded_identifier(approval_id)}"
+        now = utc_now_iso()
+        created = False
+        async with self.database.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM approvals WHERE id = ?",
+                (_bounded_identifier(approval_id),),
+            )
+            approval = await cursor.fetchone()
+            if approval is None:
+                raise JobTransitionError("approval_not_found")
+            try:
+                stored_args = json.loads(str(approval["args_json"]))
+                metadata = json.loads(str(approval["metadata_json"] or "{}"))
+            except json.JSONDecodeError as exc:
+                raise JobTransitionError("approval_record_invalid") from exc
+            if not isinstance(stored_args, dict) or not isinstance(metadata, dict):
+                raise JobTransitionError("approval_record_invalid")
+            expected = canonical_hash(approval_tool, approval_args, metadata)
+            legacy = legacy_canonical_hash(approval_tool, approval_args)
+            hash_matches = str(approval["canonical_hash"]) == expected or (
+                not metadata and str(approval["canonical_hash"]) == legacy
+            )
+            if (
+                str(approval["tool"]) != approval_tool
+                or stored_args != approval_args
+                or not hash_matches
+            ):
+                raise JobTransitionError("approval_action_mismatch")
+            status = str(approval["status"])
+            if status == "consumed":
+                cursor = await connection.execute(
+                    "SELECT * FROM background_jobs WHERE id = ?",
+                    (identifier,),
+                )
+                row = await cursor.fetchone()
+                if (
+                    row is None
+                    or str(row["job_type"]) != job_type
+                    or str(row["payload_hash"]) != payload_hash
+                ):
+                    raise JobTransitionError("approval_replay_mismatch")
+                return _record_from_row(row), False
+            if status != "approved":
+                raise JobTransitionError("approval_not_approved")
+            if str(approval["expires_at"]) < now:
+                raise JobTransitionError("approval_expired")
+            try:
+                await connection.execute(
+                    """
+                    INSERT INTO background_jobs(
+                        id, job_type, status, payload_json, payload_hash, owner,
+                        conversation_id, project_id, progress_percent, attempt_count,
+                        maximum_attempts, cancellation_requested, created_at, updated_at
+                    ) VALUES(?, ?, 'queued', ?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?)
+                    """,
+                    (
+                        identifier,
+                        job_type,
+                        payload_json,
+                        payload_hash,
+                        _bounded_code(owner, "owner"),
+                        conversation_id,
+                        project_id,
+                        definition.maximum_attempts,
+                        now,
+                        now,
+                    ),
+                )
+            except aiosqlite.IntegrityError as exc:
+                raise JobTransitionError("duplicate_job_id") from exc
+            await self._append_event_tx(
+                connection,
+                identifier,
+                event_type="submitted",
+                message_code="queued",
+                progress_percent=0,
+                created_at=now,
+            )
+            result = json.dumps(
+                {"ok": True, "job_id": identifier, "status": JobStatus.QUEUED.value},
+                sort_keys=True,
+            )
+            updated = await connection.execute(
+                """
+                UPDATE approvals
+                SET status = 'consumed', consumed_at = ?, result_json = ?
+                WHERE id = ? AND status = 'approved'
+                """,
+                (now, result, approval_id),
+            )
+            if updated.rowcount != 1:
+                raise JobTransitionError("approval_consumption_race")
+            created = True
+            cursor = await connection.execute(
+                "SELECT * FROM background_jobs WHERE id = ?",
+                (identifier,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+        return _record_from_row(row), created
+
+    async def checkpoint(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        result: dict[str, Any],
+        progress_percent: int,
+        progress_code: str,
+    ) -> JobRecord:
+        """Persist a bounded safe partial result while retaining the worker lease."""
+        result_json = _safe_json(result, MAX_JOB_RESULT_BYTES, "result")
+        now = utc_now_iso()
+        async with self.database.transaction() as connection:
+            updated = await connection.execute(
+                """
+                UPDATE background_jobs
+                SET result_json = ?, progress_percent = ?, progress_code = ?, updated_at = ?
+                WHERE id = ? AND worker_id = ? AND status IN ('running', 'cancelling')
+                """,
+                (
+                    result_json,
+                    _progress(progress_percent),
+                    _bounded_code(progress_code, "progress_code"),
+                    now,
+                    _bounded_identifier(job_id),
+                    _bounded_code(worker_id, "worker_id"),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise JobTransitionError("lease_not_owned")
+            await self._append_event_tx(
+                connection,
+                job_id,
+                event_type="checkpoint",
+                message_code=progress_code,
+                progress_percent=progress_percent,
+                created_at=now,
+            )
+        return await self.require(job_id)
 
     async def require(self, job_id: str, *, include_payload: bool = False) -> JobRecord:
         row = await self.database.fetchone(
@@ -408,7 +576,12 @@ class JobStore:
                 UPDATE background_jobs
                 SET status = 'queued', cancellation_requested = 0, worker_id = NULL,
                     lease_acquired_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-                    completed_at = NULL, result_json = NULL, error_code = NULL,
+                    completed_at = NULL,
+                    result_json = CASE
+                        WHEN job_type = 'model_setup_comparison' THEN result_json
+                        ELSE NULL
+                    END,
+                    error_code = NULL,
                     progress_percent = 0, progress_code = 'retry_queued', updated_at = ?
                 WHERE id = ? AND status IN ('failed', 'interrupted', 'cancelled')
                 """,

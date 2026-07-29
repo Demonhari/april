@@ -13,17 +13,30 @@ attempt available. Mutation jobs are never automatically retried.
 
 The separate Job Worker claims one job at a time by default. Fully integrated
 job types are `repository_index`, `memory_reindex`, `document_index`,
-`configured_test`, and `self_check`. Configured tests require an exact existing
-`test_runner` approval. Model verification, benchmarking, and Dream Cycle
-definitions are visible but deliberately unavailable until their phase-specific
-permission and hardware workflows are implemented. Fine-tuning is not
-registered.
+`configured_test`, `model_import`, `model_import_verification`,
+`model_benchmark`, `model_setup_comparison`, and `self_check`. Configured tests
+and model import require exact existing approvals. Fine-tuning is registered
+only when explicitly enabled; Dream Cycle is registered only when evolution is
+explicitly enabled.
+
+`run april model import`, `run april model verify`, `run april memory reindex`,
+`run april model benchmark`, and `run april model compare-setups` submit these
+durable jobs.
+Import acceptance and one-time approval consumption are one SQLite transaction.
+Comparison checkpoints completed model measurements so lease recovery or an
+explicit retry does not discard safe partial work.
 
 Authenticated API routes are `POST /jobs`, `GET /jobs`,
 `GET /jobs/{job_id}`, `POST /jobs/{job_id}/cancel`, and
 `POST /jobs/{job_id}/retry`. Matching commands are
 `run april jobs submit|list|show|cancel|retry`. `--wait` polls with a bounded
 timeout; Ctrl-C stops only the wait and does not cancel the durable job.
+
+Model imports take a manually calculated expected SHA-256, never download a
+model, publish from staging atomically, and register only an inactive
+priority-`-100` candidate. Memory reindex builds a staging generation and
+switches `CURRENT` only after validation. Comparison and model utility
+cancellation terminate their isolated process groups.
 
 Risky command, test, patch, and Git-commit execution is outside Core in the
 Tool Worker. It listens only on an owner-controlled Unix socket, uses a 0600

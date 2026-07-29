@@ -117,16 +117,16 @@ manifest-backed downloader on the target Mac.
 Register existing local GGUF files with:
 
 ```bash
-run april model import --role brain --id april-brain --name granite3.3-2b --path /absolute/path/model.gguf
-run april model import --role coding --id april-coding --name qwen3-1.7b --path /absolute/path/model.gguf
-run april model import --role reading --id april-reading --name qwen3-0.6b --path /absolute/path/model.gguf
+run april model import --role brain --id april-brain --name granite3.3-2b --path /absolute/path/model.gguf --sha256 EXPECTED_SHA256
+run april model import --role coding --id april-coding --name qwen3-1.7b --path /absolute/path/model.gguf --sha256 EXPECTED_SHA256
+run april model import --role reading --id april-reading --name qwen3-0.6b --path /absolute/path/model.gguf --sha256 EXPECTED_SHA256
 ```
 
-If the source file is outside configured allowed roots, copy it into APRIL with:
-
-```bash
-run april model import --role brain --id april-brain --name granite3.3-2b --path /absolute/path/model.gguf --copy-into-models
-```
+The first invocation creates an exact one-time approval and prints the command
+that accepts the durable `model_import` job. The CLI never copies, hashes,
+registers, loads, activates, or selects the model synchronously. The expected
+hash must be calculated independently. Imported models remain inactive at
+non-selected priority.
 
 CPU-only profiles are local config edits only:
 
@@ -135,25 +135,24 @@ run april model profile list
 run april model profile apply intel_macbook_cpu_low
 run april model doctor
 run april verify --real-model /absolute/path/model.gguf
-run april model benchmark /absolute/path/model.gguf --runs 1 --max-output-tokens 32
+run april model benchmark REGISTERED_MODEL_ID --wait
+run april model verify REGISTERED_MODEL_ID --wait
 ```
 
 ### Target Mac model install
 
-The default full Mac activation core is `brain`, `coding`, and `reading`.
-Reasoning remains optional. To explicitly download APRIL's manifest-approved
-default core GGUFs from Hugging Face, run:
+The default full Mac activation core is `brain`, `coding`, and `reading`;
+reasoning remains optional. Obtain the GGUF files manually, calculate each
+SHA-256 independently, and submit one durable import per file:
 
 ```bash
-run april model download --all-core --apply --yes
+run april model import --role brain --id april-brain-candidate --name LOCAL_BRAIN \
+  --path /absolute/path/brain.gguf --sha256 EXPECTED_SHA256
+run april model import --role coding --id april-coding-candidate --name LOCAL_CODING \
+  --path /absolute/path/coding.gguf --sha256 EXPECTED_SHA256
+run april model import --role reading --id april-reading-candidate --name LOCAL_READING \
+  --path /absolute/path/reading.gguf --sha256 EXPECTED_SHA256
 run april model doctor
-run april setup mac-activation \
-  --brain models/granite3.3-2b-q4_k_m.gguf \
-  --coding models/qwen3-1.7b-q8_0.gguf \
-  --reading models/qwen3-0.6b-q8_0.gguf \
-  --apply \
-  --run-acceptance \
-  --start-services
 run april verify --all-configured-models \
   --require-real-model \
   --report data/verification/real-model-verification.json
@@ -166,15 +165,11 @@ run april acceptance \
 Voice is opt-in, so model-only Mac activation needs no `--skip-voice`. Supply
 voice flags (and `--enable-voice`) only when you actually want to set voice up.
 
-`run april model download` is dry-run by default and only downloads entries from
-`configs/model_downloads.yaml`. Network access requires `--apply`;
-non-interactive use also requires `--yes`. Downloads go through a `.part` file,
-validate GGUF magic/size, atomically rename on success, compute SHA-256, and
-then update `configs/models.yaml` through the same validated model setup path.
-Existing targets are refused unless you pass `--skip-existing` or `--force`.
-Downloading is **not** verification: `real_model_ready` and
-`real_model_verified` remain false until a real GGUF load/chat/stream/unload
-verification passes.
+`run april model download` is inspection-only; `--apply` is retired. APRIL does
+not download a model automatically. Imports validate and atomically publish
+operator-supplied local bytes but remain inactive and non-selected. Importing is
+**not** verification: `real_model_ready` and `real_model_verified` remain false
+until a real GGUF load/chat/stream/unload verification passes.
 
 Missing files do not crash startup. With the real `llama_cpp` backend, runtime
 health reports `degraded` and lists the missing model ids. With the fake backend
@@ -262,7 +257,7 @@ run april memory doctor
 # Optionally prove the local embedding actually serves vectors via /runtime/embed:
 run april memory doctor --verify-runtime-embedding
 # Register a local embedding GGUF and switch to runtime-local (dry-run unless --apply):
-run april setup embeddings --model /absolute/path/to/embedding.gguf --id april-embedding --apply
+run april model import --role embedding --id april-embedding --name LOCAL_EMBEDDING --path /absolute/path/to/embedding.gguf --sha256 EXPECTED_SHA256
 ```
 
 Every reader and writer of the local vector index — the API container and the
@@ -323,7 +318,7 @@ The intended order from a fresh checkout to a hardened daily local assistant is:
 - **B. Real model core verification** — `run april verify --all-configured-models --require-real-model`. Real GGUF load/chat/stream/unload, strict-JSON brain routing with no fallback, specialist switching.
 - **C. Go-live core proof** — `run april go-live --write-report --start-services`. Reports **`real_model_core_status`** separately from the hardened rung.
 - **D. Full real workflow/security verification** — `run april verify --workflow --real-model`. Real routing smoke **plus** the full deterministic security checklist (patch approve/apply/replay/tamper/path-escape/repo-override/cwd-forcing/allowlist + audit/tool_call/agent_run records).
-- **E. Runtime-local embeddings + memory reindex** — `run april memory doctor`, `run april setup embeddings … --apply`, then `run april memory reindex`.
+- **E. Runtime-local embeddings + memory reindex** — durable local embedding import, explicit provider selection, then `run april memory reindex --wait`.
 - **F. Voice push-to-talk live verification** — `run april voice doctor` then `run april voice verify-live`.
 - **G. Wake-word live verification** — `run april voice verify-wake-live` (requires a configured wake-word ONNX model).
 - **H. Desktop / native app** — comes later; the Desktop Readiness screen only reads sanitized `/readiness` and redacted reports.
@@ -351,7 +346,7 @@ go-live report and the Desktop Readiness screen state both explicitly:
 | 4 | Real model chat/stream verification | `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json` |
 | 5 | Real specialist switching verification | same `--all-configured-models` run (verifies brain-resident specialist switching) |
 | 6 | Real workflow + full security checklist | `run april verify --workflow --real-model --report data/verification/workflow-real.json` (real routing smoke **plus** the deterministic patch/security checklist) |
-| 6b | Runtime-local embeddings + reindex | `run april memory doctor` · `run april setup embeddings … --apply` · `run april memory reindex` |
+| 6b | Runtime-local embeddings + reindex | `run april memory doctor` · `run april model import --role embedding … --sha256 …` · explicit provider selection · `run april memory reindex --wait` |
 | 7 | Voice push-to-talk verification | `run april voice doctor` then `run april voice verify-live --report data/verification/voice-live.json` |
 | 8 | Wake-word verification | `run april voice verify-wake-live --report data/verification/wake-live.json` (requires a configured wake-word ONNX model) |
 | 9 | Desktop verification | `run april desktop` → Readiness screen (reads only sanitized `/readiness` + redacted report endpoints) |
@@ -405,7 +400,7 @@ Reason: development tokens, hashed-token embeddings
 
 Next commands:
   run april setup tokens
-  run april setup embeddings --model /absolute/path/to/embedding.gguf --id april-embedding --apply
+  run april model import --role embedding --id april-embedding --name LOCAL_EMBEDDING --path /absolute/path/to/embedding.gguf --sha256 EXPECTED_SHA256
   run april memory reindex
   run april verify --workflow --real-model --report data/verification/workflow-real.json
 ```
@@ -463,12 +458,12 @@ On a target Mac, run setup and verification in this order (or run
 2. `run april setup bootstrap`
 3. `run april setup tokens` if bootstrap reports token warnings
 4. `run april model profile apply intel_macbook_cpu_low`
-5. Either place existing GGUFs and run `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`, then repeat with `--apply`, or explicitly run `run april model download --all-core --apply --yes`
+5. Validate local GGUFs with `run april setup models ... --dry-run`, then import each model through exact-approved `run april model import ... --sha256 EXPECTED_SHA256`.
 6. `pip install -e '.[runtime]'`
 7. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json` — real model **core** verification.
 8. `run april verify --workflow --real-model --report data/verification/workflow-real.json` — real routing smoke **plus** the full deterministic security checklist.
 9. `run april go-live --write-report --start-services` — the real-model-only go-live proof (real models + strict-JSON routing without fallback + specialist switching + clean service lifecycle). It reports **`real_model_core_status`** separately from **`hardened_go_live_ready`**, so a working real-model core is never hidden behind a hardening warning (dev tokens, non-runtime-local embeddings).
-10. Hardened memory (recommended): `run april memory doctor`, then `run april setup embeddings --model /absolute/path/to/embedding.gguf --id april-embedding --apply`, then `run april memory reindex`. Switching providers changes the vector space, so the reindex is required.
+10. Hardened memory (recommended): import Nomic manually with `run april model import --role embedding ... --sha256 EXPECTED_SHA256`, select `runtime-local` explicitly, then run `run april memory reindex --wait`. Switching providers changes the vector space, so the reindex is required.
 11. Optional voice (not part of the first real-model go-live milestone) setup/doctor/live verification: `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`, `run april voice doctor`, then `run april voice verify-live --report data/verification/voice-live.json`. The Core API `/readiness` reports a single redacted `voice_milestone` (`disabled` → `not_configured` → `push_to_talk_ready` → `wake_word_ready` → `full_voice_loop_ready` → `live_verified` → `wake_live_verified`).
 
 Thereafter, `run april doctor --daily-driver` is the one command to run before
@@ -496,18 +491,16 @@ run april setup models \
   --reading /absolute/path/qwen-reading.gguf \
   --dry-run
 run april verify --real-model /absolute/path/to/model.gguf
-run april model benchmark /absolute/path/to/model.gguf --runs 1 --max-output-tokens 32
+run april model benchmark REGISTERED_MODEL_ID --wait
 run april verify --target-mac --require-real-model /absolute/path/to/model.gguf
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
 run april verify --workflow --real-model --report data/verification/workflow-real.json
 ```
 
-`run april setup models` is dry-run by default. It validates local `.gguf` paths,
-can copy explicitly supplied files into `models/` with `--copy-into-models`, and
-only writes `configs/models.yaml` with `--apply` after creating a backup. It
-never downloads or installs anything. If a copied multi-model import fails after
-one role has already copied into `models/`, APRIL restores the previous model
-config and removes only files created by that failed command.
+`run april setup models` is validation-only. Synchronous `--apply` is retired;
+each model is accepted through the persistent import job with exact approval,
+staging, atomic publication, and rollback. It never downloads or installs
+anything.
 
 #### Machine-readable acceptance report
 
@@ -682,17 +675,9 @@ Fake verification is **not** Mac readiness; the go-live proof is real-model-only
 .venv/bin/python -m pytest -q -x
 APRIL_RUNTIME_BACKEND=fake .venv/bin/python -m apps.runner.main april verify --fake
 
-# B. Real model activation:
+# B. Real model evidence (after manual local import and manual selection):
 pip install -e '.[runtime]'
-run april model download --all-core --apply --yes
-run april setup mac-activation \
-  --brain models/granite3.3-2b-q4_k_m.gguf \
-  --coding models/qwen3-1.7b-q8_0.gguf \
-  --reading models/qwen3-0.6b-q8_0.gguf \
-  --apply \
-  --run-acceptance \
-  --start-services \
-  --write-report
+run april model doctor
 
 # C. Go-live proof (real-model-only):
 run april go-live --write-report --start-services
@@ -703,72 +688,14 @@ run april voice verify-live ...
 run april voice verify-wake-live ...
 ```
 
-`run april setup mac-activation` is the guided local activation wizard: it
-validates the GGUF model set (and, when voice is requested, the voice tools), then
-applies config **transactionally** with `--apply` (validate-first; a failed apply
-step is rolled back automatically so model and voice config can never be left
-half-written), can enable voice with `--enable-voice`, and can chain into
-real-model and live voice/wake acceptance with `--run-acceptance`. It is dry-run
-by default and never downloads, installs, uses `sudo`/Homebrew, or records audio.
-Full Mac activation requires the core local GGUF roles `brain`, `coding`, and
-`reading`, either supplied in the command or already configured to existing local
-GGUF files. `--reasoning` / `--reasoning-id` are optional; omit them to keep the
-reasoning agent on the brain model.
+`run april setup mac-activation` remains useful as a dry-run validator and for
+voice-only setup. Its synchronous model-registration path is retired: supplying
+model paths together with `--apply` fails closed and points to `run april model
+import`. Import all GGUFs through durable exact-approved jobs first. Imports
+never activate or select a model; selection is a separate manual follow-up.
 
-**Voice is opt-in.** Model-only Mac activation needs no `--skip-voice`: with no
-voice flags, voice is skipped and only `configs/models.yaml` is touched. Voice is
-requested only when you pass a voice path (`--whisper-binary`, `--whisper-model`,
-`--piper-binary`, `--piper-model`, `--wake-word-model`), `--enable-voice`, or a
-live voice acceptance flag. Voice **setup** requires the four voice paths
-(whisper binary/model, Piper binary/model); `--enable-voice` turns voice on after
-they validate. `--skip-voice` is optional and mostly for explicit clarity — it is
-an error to combine it with any voice flag. Push-to-talk does not require a
-wake-word model; wake-word listening requires a configured local openWakeWord
-ONNX model (`--wake-word-model`). Live voice acceptance
-(`--acceptance-voice-live` / `--acceptance-wake-word-live`) requires
-`--run-acceptance`, `--enable-voice`, the complete voice paths, and live
-verification on this Mac.
-
-Partial model registration is different from full Mac activation. Supplying only
-some core roles is refused before writes by default. Add
-`--allow-partial-model-set` only when you intentionally want to register a
-partial set; the report stays `incomplete`, records `core_model_set_complete: false`,
-lists `missing_required_roles`, and blocks `--run-acceptance` until
-`brain`, `coding`, and `reading` are complete. Real GGUF verification still means
-load/chat/stream/unload actually passed, and live voice verification still means
-the live voice path actually ran. Fake verification remains fake/simulated.
-
-```bash
-# Models only — validate, apply, then run real-model acceptance:
-# Voice is opt-in, so no --skip-voice is needed (add it only for explicit clarity).
-# Optional: add --reasoning /absolute/path/reasoning.gguf when configured.
-run april setup mac-activation \
-  --brain /absolute/path/brain.gguf \
-  --coding /absolute/path/coding.gguf \
-  --reading /absolute/path/reading.gguf \
-  --apply \
-  --run-acceptance \
-  --write-report
-
-# Full activation — models + voice enabled + full acceptance with live checks:
-# Optional: add --reasoning /absolute/path/reasoning.gguf when configured.
-run april setup mac-activation \
-  --brain /absolute/path/brain.gguf \
-  --coding /absolute/path/coding.gguf \
-  --reading /absolute/path/reading.gguf \
-  --whisper-binary /absolute/path/whisper \
-  --whisper-model /absolute/path/whisper-model.bin \
-  --piper-binary /absolute/path/piper \
-  --piper-model /absolute/path/piper-voice.onnx \
-  --wake-word-model /absolute/path/april.onnx \
-  --enable-voice \
-  --apply \
-  --run-acceptance \
-  --acceptance-voice-live \
-  --acceptance-wake-word-live \
-  --start-services \
-  --write-report
-```
+Voice remains opt-in. Configure and verify it through `run april setup voice`,
+`run april voice verify-live`, and `run april voice verify-wake-live`.
 
 `run april reports` browses the redacted reports under `data/verification`
 read-only (`list`, `latest`, `show PATH`, `show-latest --type <type>`, and a
@@ -1188,7 +1115,9 @@ back to the brain model on any error. Register one with:
 
 ```bash
 run april model import --role reasoning --id april-reasoning \
-  --path models/your-reasoning-model-q4_k_m.gguf
+  --name local-reasoning \
+  --path /absolute/path/your-reasoning-model-q4_k_m.gguf \
+  --sha256 EXPECTED_SHA256
 ```
 
 See the commented `reasoning:` example in `configs/models.yaml`. The Reasoning
@@ -1225,7 +1154,9 @@ GGUF model through April Runtime:
 ```bash
 # 1. Register a local embedding-role GGUF model
 run april model import --role embedding --id april-embedding \
-  --path models/your-embedding-model-q4_k_m.gguf
+  --name local-embedding \
+  --path /absolute/path/your-embedding-model-q4_k_m.gguf \
+  --sha256 EXPECTED_SHA256
 
 # 2. Select the runtime-local provider
 export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
@@ -1233,7 +1164,7 @@ export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding   # optional; auto-detect
 
 # 3. Rebuild the index under the new provider
 run april memory doctor --json
-run april memory reindex
+run april memory reindex --wait
 ```
 
 The embedding model is loaded as its own dedicated instance (a chat model
@@ -1251,12 +1182,12 @@ fallback/reindex risk, whether an embedding-role model is registered, and
 whether that model path exists. It does not start Runtime or load a model unless
 you explicitly pass `--verify-runtime-embedding`, which probes `/runtime/embed`.
 Real semantic memory requires a runtime-local embedding model plus
-`run april memory reindex` after switching providers.
+`run april memory reindex --wait` after switching providers.
 
 Switching embedding providers changes the vector space, so APRIL refuses to
 silently mix spaces: searches/writes against an index built with a different
 provider/dimension raise an actionable error pointing you to
-`run april memory reindex`. Reindexing re-embeds existing memories and known
+`run april memory reindex --wait`. Reindexing re-embeds existing memories and known
 sources under the current provider — it never wipes your index without this
 explicit command.
 

@@ -65,9 +65,9 @@ APRIL does not download these artifacts. After obtaining and reviewing local
 files, import them explicitly:
 
 ```console
-run april model import --role reasoning --id qwen3-4b-reasoning --name "Qwen3-4B Q4_K_M" --path /LOCAL/Qwen3-4B-Q4_K_M.gguf
-run april model import --role embedding --id nomic-embed-text-v1.5 --name "nomic-embed-text-v1.5 Q8" --path /LOCAL/nomic-embed-text-v1.5.Q8_0.gguf
-run april memory reindex
+run april model import --role reasoning --id qwen3-4b-reasoning --name "Qwen3-4B Q4_K_M" --path /LOCAL/Qwen3-4B-Q4_K_M.gguf --sha256 EXPECTED_SHA256
+run april model import --role embedding --id nomic-embed-text-v1.5 --name "nomic-embed-text-v1.5 Q8" --path /LOCAL/nomic-embed-text-v1.5.Q8_0.gguf --sha256 EXPECTED_SHA256
+run april memory reindex --wait
 ```
 
 Readiness distinguishes an unregistered reasoning artifact, an unverified
@@ -83,12 +83,31 @@ explicit override. Readiness and status never modify configuration.
 Compare a locally registered shared model with the current specialists:
 
 ```console
-run april model compare-setups --shared-model-id LOCAL_SHARED_MODEL_ID --output data/verification/model-setup-comparison.json
+run april model compare-setups --shared-model-id LOCAL_SHARED_MODEL_ID --wait
 ```
 
-The report excludes prompts, outputs, tokens, credentials, and absolute paths.
-Measurements unavailable without platform/runtime support are reported as
-unavailable. APRIL makes no automatic model/profile selection.
+The job result excludes prompts, generations, source files, patches,
+credentials, and absolute paths. Versioned offline routing, strict-JSON,
+coding, context, lifecycle, and sustained-performance fixtures are identical
+for both setups. Coding fixtures execute only through Tool Worker. Fake Runtime
+results are labelled simulated and cannot produce a production
+recommendation. Direct thermal state remains unavailable unless the platform
+provides real evidence; sustained degradation is only a proxy. APRIL makes no
+automatic model/profile selection. Live Intel Mac evidence must be generated
+on the target machine.
+
+The production recommendation gates require the complete installed fixture set
+with the same hash for every setup and real (non-simulated) measurements for
+routing accuracy, strict-JSON first-pass and final reliability, coding pass
+rate, context reliability, first-token latency, generation and prompt
+throughput, peak memory, load/unload reliability, load/switch overhead, and
+sustained degradation. Defaults require routing ≥ 0.80, both JSON reliability
+scores ≥ 0.90, coding ≥ 0.80, sustained degradation ≤ 0.15, and no required
+metric regression beyond 15% versus the specialist setup. Missing fixtures or
+metrics produce `insufficient_evidence`; a failed shared benchmark or absolute
+gate produces `comparison_failed`; relative regressions produce
+`manual_review_required`; only a complete passing real comparison is
+`recommended`. The result is advisory and is never applied automatically.
 
 ## Live speaker verification
 

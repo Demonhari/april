@@ -25,7 +25,7 @@ from services.api.server import create_app
 from services.april_runtime.model_registry import ModelRegistry
 from services.permissions.engine import PermissionEngine
 from skills.registry import default_registry
-from tests.test_core_api import auth, make_container
+from tests.test_core_api import auth, make_container, run_one_job
 
 
 def _configured_engine() -> PermissionEngine:
@@ -91,13 +91,15 @@ def test_documents_endpoint_indexes_local_folder_as_reading_agent(settings_tmp) 
         json={"path": str(folder)},
         headers=auth(settings_tmp),
     )
-    assert response.status_code == 200
-    result = response.json()["result"]
-    assert result["ok"] is True
-    # document_indexer is Level 2 safe_write — no approval, real chunks indexed.
-    assert result["permission_level"] == 2
-    assert result["risk_level"] == "safe_write"
-    assert result["data"]["chunks"] > 0
+    assert response.status_code == 202
+    job_id = response.json()["id"]
+    anyio.run(run_one_job, container)
+    assert container.job_store is not None
+    job = anyio.run(container.job_store.require, job_id)
+    assert job.status.value == "succeeded"
+    assert job.result is not None
+    assert job.result["chunks"] > 0
+    assert container.job_store.registry.require("document_index").permission_level == 2
     indexed = client.get("/documents", headers=auth(settings_tmp)).json()["documents"]
     indexed_paths = {path for source in indexed for path in source["paths"]}
     assert any(path.endswith("guide.md") for path in indexed_paths)

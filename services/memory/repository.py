@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -93,11 +95,19 @@ class MemoryRepository:
         count = int(row["count"]) if row is not None else 0
         return MemoryIndexHealth(repair_required=count > 0, pending_repairs=count)
 
-    async def rebuild(self) -> int:
+    async def rebuild(
+        self,
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> int:
         records = await self.memory.list_memories()
         items = [(record.id, record.content, self._metadata(record)) for record in records]
         try:
-            count = self.vector_memory.rebuild_memory_namespace(items)
+            count = await asyncio.to_thread(
+                self.vector_memory.rebuild_memory_namespace,
+                items,
+                progress=progress,
+            )
         except Exception as exc:
             await self._mark_repair("*", "reindex", exc)
             self._audit("memory_index_rebuild_failed", None, exc)

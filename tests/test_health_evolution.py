@@ -11,7 +11,7 @@ from services.api.server import create_app
 from services.evolution.evaluator import write_pending_eval_case
 from services.evolution.write_guard import EvolutionWriteGuard
 from services.memory.schemas import VectorMetadata
-from tests.test_core_api import auth, make_container
+from tests.test_core_api import auth, make_container, run_one_job
 
 
 def test_readiness_exposes_redacted_evolution_block(settings_tmp) -> None:
@@ -93,13 +93,18 @@ def test_chat_response_carries_intelligence_metadata(settings_tmp) -> None:
 def test_memory_reindex_reports_provider_and_degradation(settings_tmp) -> None:
     container = anyio.run(make_container, settings_tmp)
     client = TestClient(create_app(container))
-    payload = client.post("/memory/reindex", json={}, headers=auth(settings_tmp)).json()
-    assert payload["provider"] == "hashed-token"
-    assert payload["configured_provider"] == "hashed-token"
-    assert payload["dimensions"] == 256
-    assert payload["index_compatible"] is True
-    assert payload["fallback_active"] is False
-    assert payload["degraded"] is False
+    response = client.post("/memory/reindex", json={}, headers=auth(settings_tmp))
+    assert response.status_code == 202
+    job_id = response.json()["id"]
+    anyio.run(run_one_job, container)
+    assert container.job_store is not None
+    job = anyio.run(container.job_store.require, job_id)
+    assert job.status.value == "succeeded"
+    assert job.result is not None
+    assert job.result["provider"] == "hashed-token"
+    assert job.result["dimensions"] == 256
+    assert job.result["validation_result"]["ok"] is True
+    assert job.result["final_generation"]
 
 
 def test_memory_repair_index_is_dry_run_unless_apply_is_requested(settings_tmp) -> None:

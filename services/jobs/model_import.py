@@ -58,16 +58,33 @@ class ModelImportService:
         model_id: str,
         role: str,
         name: str,
+        expected_sha256: str | None = None,
+        requested_verification: bool = False,
     ) -> dict[str, Any]:
-        """Validate and bind an approval payload to the current local bytes."""
+        """Validate and bind an approval payload without mutating model state."""
         source = self._validate_source(source_path)
         self._validate_identifiers(model_id=model_id, role=role, name=name)
+        info = source.stat()
+        destination = self.models_dir / source.name
         return {
             "source_path": str(source),
             "model_id": model_id,
             "role": role,
             "name": name,
-            "expected_sha256": _sha256_file(source),
+            "expected_sha256": (
+                _validate_expected_sha(expected_sha256)
+                if expected_sha256 is not None
+                else _sha256_file(source)
+            ),
+            "source_identity": {
+                "device": int(info.st_dev),
+                "inode": int(info.st_ino),
+                "size": int(info.st_size),
+                "modified_ns": int(info.st_mtime_ns),
+            },
+            "format": "gguf",
+            "destination": str(destination.relative_to(self.home)),
+            "requested_verification": requested_verification,
         }
 
     async def run(
@@ -81,6 +98,10 @@ class ModelImportService:
         expected_sha256: str,
         cancellation_event: asyncio.Event,
         progress: Progress,
+        source_identity: dict[str, Any] | None = None,
+        destination: str | None = None,
+        model_format: str = "gguf",
+        requested_verification: bool = False,
     ) -> dict[str, Any]:
         existing = self._completed_result(operation_id)
         if existing is not None:
@@ -88,13 +109,20 @@ class ModelImportService:
         source = self._validate_source(source_path)
         self._validate_identifiers(model_id=model_id, role=role, name=name)
         expected = _validate_expected_sha(expected_sha256)
+        if model_format != "gguf":
+            raise ModelImportError("model_import_invalid_format")
+        if source_identity is not None:
+            self._validate_source_identity(source, source_identity)
         basename = source.name
-        destination = self.models_dir / basename
+        target = self.models_dir / basename
+        expected_destination = str(target.relative_to(self.home))
+        if destination is not None and destination != expected_destination:
+            raise ModelImportError("model_import_destination_mismatch")
         staging = self.staging_dir / f"{operation_id}-{basename}.part"
         snapshot = self.journal_dir / f"{operation_id}.models.yaml.before"
         journal_path = self._journal_path(operation_id)
         self._prepare_directories()
-        if destination.exists() or destination.is_symlink():
+        if target.exists() or target.is_symlink():
             raise ModelImportError("model_import_overwrite_rejected")
         if self._model_id_exists(model_id):
             raise ModelImportError("model_import_identifier_exists")
@@ -104,7 +132,7 @@ class ModelImportService:
             "status": "planned",
             "source_path": str(source),
             "staging_path": str(staging),
-            "destination_path": str(destination),
+            "destination_path": str(target),
             "snapshot_path": str(snapshot),
             "model_id": model_id,
             "role": role,
@@ -162,12 +190,14 @@ class ModelImportService:
             )
             await progress(80, "model_import_staged")
             with self._config_write_lock():
-                if destination.exists() or destination.is_symlink():
+                if target.exists() or target.is_symlink():
                     raise ModelImportError("model_import_overwrite_rejected")
                 if self._model_id_exists(model_id):
                     raise ModelImportError("model_import_identifier_exists")
+                if self._artifact_sha_exists(actual_sha, operation_id=operation_id):
+                    raise ModelImportError("model_import_artifact_exists")
                 _raise_if_cancelled(cancellation_event)
-                os.replace(staging, destination)
+                os.replace(staging, target)
                 published = True
                 _fsync_directory(self.models_dir)
                 journal = self._update_journal(
@@ -179,7 +209,7 @@ class ModelImportService:
                     model_id=model_id,
                     role=role,
                     name=name,
-                    destination=destination,
+                    destination=target,
                 )
                 try:
                     self._atomic_writer(self.config_path, config_bytes)
@@ -196,6 +226,8 @@ class ModelImportService:
                 "sha256": actual_sha,
                 "registration_status": "registered_inactive",
             }
+            if requested_verification:
+                result["requested_verification"] = True
             self._update_journal(
                 journal_path,
                 journal,
@@ -207,7 +239,7 @@ class ModelImportService:
             return result
         except asyncio.CancelledError:
             self._rollback(
-                destination=destination,
+                destination=target,
                 staging=staging,
                 snapshot=snapshot,
                 restore_config=published,
@@ -216,7 +248,7 @@ class ModelImportService:
             raise
         except Exception:
             self._rollback(
-                destination=destination,
+                destination=target,
                 staging=staging,
                 snapshot=snapshot,
                 restore_config=published,
@@ -266,7 +298,7 @@ class ModelImportService:
         result = journal.get("result")
         if journal.get("status") != "completed" or not isinstance(result, dict):
             return None
-        return {
+        completed = {
             "model_id": str(result["model_id"]),
             "logical_role": str(result["logical_role"]),
             "basename": str(result["basename"]),
@@ -274,6 +306,9 @@ class ModelImportService:
             "sha256": str(result["sha256"]),
             "registration_status": str(result["registration_status"]),
         }
+        if result.get("requested_verification") is True:
+            completed["requested_verification"] = True
+        return completed
 
     def _validate_source(self, value: str) -> Path:
         requested = Path(value).expanduser()
@@ -307,6 +342,42 @@ class ModelImportService:
             raise ModelImportError("model_import_invalid_role")
         if not name.strip() or len(name) > 160 or "\x00" in name:
             raise ModelImportError("model_import_invalid_name")
+
+    @staticmethod
+    def _validate_source_identity(source: Path, expected: dict[str, Any]) -> None:
+        info = source.stat()
+        actual = {
+            "device": int(info.st_dev),
+            "inode": int(info.st_ino),
+            "size": int(info.st_size),
+            "modified_ns": int(info.st_mtime_ns),
+        }
+        normalized = {
+            key: int(expected.get(key, -1)) for key in ("device", "inode", "size", "modified_ns")
+        }
+        if actual != normalized:
+            raise ModelImportError("model_import_source_identity_changed")
+
+    def _artifact_sha_exists(self, sha256: str, *, operation_id: str) -> bool:
+        for path in self.journal_dir.glob("*.json"):
+            if path.stem == operation_id:
+                continue
+            try:
+                journal = _read_json_object(path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            result = journal.get("result")
+            completed_match = (
+                journal.get("status") == "completed"
+                and isinstance(result, dict)
+                and result.get("sha256") == sha256
+            )
+            publishing_match = (
+                journal.get("status") == "configuring" and journal.get("sha256") == sha256
+            )
+            if completed_match or publishing_match:
+                return True
+        return False
 
     def _registered_config(
         self,
@@ -437,6 +508,10 @@ async def run_model_import_job(
         expected_sha256=(str(payload["expected_sha256"])),
         cancellation_event=cancellation_event,
         progress=progress,
+        source_identity=dict(payload["source_identity"]),
+        destination=str(payload["destination"]),
+        model_format=str(payload["format"]),
+        requested_verification=bool(payload["requested_verification"]),
     )
 
 

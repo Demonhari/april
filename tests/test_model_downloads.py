@@ -282,7 +282,9 @@ def test_download_report_does_not_mark_real_model_verification_passed(tmp_path: 
     assert report.real_model_verified is False
 
 
-def test_cli_model_download_wiring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_model_download_apply_is_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     manager = types.SimpleNamespace(home=tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     captured: dict[str, Any] = {}
@@ -315,12 +317,9 @@ def test_cli_model_download_wiring(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    assert captured["home"] == tmp_path
-    assert captured["role"] == "brain"
-    assert captured["apply"] is True
-    assert captured["yes"] is True
-    assert captured["skip_existing"] is True
+    assert result.exit_code == 1
+    assert "Model download/apply is retired" in result.output
+    assert captured == {}
 
 
 def test_cli_model_download_writes_explicit_report_path(
@@ -333,8 +332,8 @@ def test_cli_model_download_writes_explicit_report_path(
     def _fake_run(home: Path, **kwargs: Any) -> ModelDownloadReport:
         return ModelDownloadReport(
             generated_at="2026-06-28T00:00:00Z",
-            mode="apply",
-            applied=True,
+            mode="dry_run",
+            applied=False,
             selected_roles=["brain"],
             entries=[],
             next_commands=[],
@@ -350,8 +349,6 @@ def test_cli_model_download_writes_explicit_report_path(
             "download",
             "--role",
             "brain",
-            "--apply",
-            "--yes",
             "--write-report",
             str(report_path),
         ],
@@ -363,7 +360,7 @@ def test_cli_model_download_writes_explicit_report_path(
     assert parsed.report_type == "model_download"
 
 
-def test_cli_model_download_apply_requires_yes(
+def test_cli_model_download_apply_points_to_durable_import(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager = types.SimpleNamespace(home=tmp_path)
@@ -375,4 +372,4 @@ def test_cli_model_download_apply_requires_yes(
     )
 
     assert result.exit_code == 1
-    assert "--yes" in result.output
+    assert "run april model import" in result.output

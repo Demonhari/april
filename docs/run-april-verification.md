@@ -66,7 +66,7 @@ Run target-Mac setup and real verification in this order:
 2. `run april setup bootstrap`
 3. `run april setup tokens` if bootstrap reports token warnings
 4. `run april model profile apply intel_macbook_cpu_low`
-5. `run april setup models --brain /absolute/path/brain.gguf --coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --dry-run`, then repeat with `--apply`
+5. Validate with `run april setup models ... --dry-run`, then import each role with exact-approved `run april model import ... --sha256 EXPECTED_SHA256`
 6. `pip install -e '.[runtime]'`
 7. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
 8. `run april verify --workflow --real-model --report data/verification/workflow-real.json`
@@ -107,7 +107,7 @@ APRIL_TEST_GGUF_PATH=/absolute/path/to/small-local-model.gguf run april verify -
 APRIL_TEST_GGUF_PATH=/absolute/path/to/small-local-model.gguf run april verify --workflow --real-model
 APRIL_TEST_GGUF_PATH=/absolute/path/to/small-local-model.gguf run april verify --workflow --real-model --report data/verification/workflow-real.json
 run april eval brain --real-model /absolute/path/to/small-local-model.gguf
-run april model benchmark /absolute/path/to/small-local-model.gguf --runs 1 --max-output-tokens 32
+run april model benchmark REGISTERED_MODEL_ID --wait
 run april verify --target-mac /absolute/path/to/small-local-model.gguf --require-real-model
 ```
 
@@ -246,14 +246,16 @@ automatically):
 ```bash
 run april model import --role embedding --id april-embedding \
   --name nomic-embed-text-v1.5 \
-  --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf
+  --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf \
+  --sha256 EXPECTED_SHA256
 export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
 export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding
 run april memory doctor --verify-runtime-embedding
-run april memory reindex
+run april memory reindex --wait
 
 run april model import --role reasoning --id april-reasoning \
-  --name qwen3-4b --path /absolute/path/qwen3-4b-Q4_K_M.gguf
+  --name qwen3-4b --path /absolute/path/qwen3-4b-Q4_K_M.gguf \
+  --sha256 EXPECTED_SHA256
 ```
 
 Deep and Council reasoning use the reasoning-role model when available and

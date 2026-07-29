@@ -10,6 +10,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from apps.runner.commands.model_compare import _compare as run_model_setup_comparison
 from april_common.audit import audit_logger_for_settings
 from april_common.settings import AprilSettings, load_settings
 from april_common.time import utc_now_iso
@@ -56,6 +57,7 @@ class JobWorker:
         self.lease_seconds = lease_seconds
         self.status_path = status_path
         self._stopping = asyncio.Event()
+        self._cancellation_events: dict[str, asyncio.Event] = {}
 
     async def run_forever(self, *, poll_seconds: float = 0.25) -> None:
         await asyncio.to_thread(reconcile_model_imports, self.settings)
@@ -80,6 +82,7 @@ class JobWorker:
             self._write_status(ready=True, active_job_id=None)
             return False
         self._write_status(ready=True, active_job_id=job.id)
+        self._cancellation_events[job.id] = asyncio.Event()
         execution = asyncio.create_task(self._execute(job))
         try:
             while not execution.done():
@@ -122,6 +125,7 @@ class JobWorker:
                 error_code=_safe_job_error_code(exc),
             )
         finally:
+            self._cancellation_events.pop(job.id, None)
             self._write_status(ready=True, active_job_id=None)
         return True
 
@@ -154,6 +158,7 @@ class JobWorker:
                 "unsupported_count": len(result.data.get("unsupported", [])),
             }
         if job.job_type == "memory_reindex":
+            cancellation = self._cancellation_events[job.id]
             memory = SqliteMemory(self.database)
             vector = vector_memory_from_settings(
                 self.settings,
@@ -162,11 +167,45 @@ class JobWorker:
             repository = MemoryRepository(
                 memory, vector, audit=audit_logger_for_settings(self.settings)
             )
-            count = await repository.rebuild()
+            before = vector.health()
+            await self.store.heartbeat(
+                job.id,
+                worker_id=self.worker_id,
+                lease_seconds=self.lease_seconds,
+                progress_percent=5,
+                progress_code="memory_reindex_staging",
+            )
+            loop = asyncio.get_running_loop()
+
+            def reindex_progress(completed: int, total: int) -> None:
+                if cancellation.is_set():
+                    raise asyncio.CancelledError
+                percent = 10 + int(80 * completed / max(1, total))
+                loop.call_soon_threadsafe(
+                    asyncio.create_task,
+                    self.store.heartbeat(
+                        job.id,
+                        worker_id=self.worker_id,
+                        lease_seconds=self.lease_seconds,
+                        progress_percent=min(percent, 90),
+                        progress_code="memory_reindex_embedding",
+                    ),
+                )
+
+            count = await repository.rebuild(progress=reindex_progress)
+            after = vector.health()
             return {
-                "reindexed": count,
+                "record_count": count,
+                "vector_count": int(after.get("vector_count") or 0),
                 "provider": vector.embedding.name,
                 "dimensions": vector.embedding.dimensions,
+                "model_id": getattr(vector.embedding, "model_id", None),
+                "active_generation": before.get("active_generation"),
+                "final_generation": after.get("active_generation"),
+                "validation_result": {
+                    "ok": bool(after.get("compatible")),
+                    "failure_reasons": list(after.get("failure_reasons") or []),
+                },
             }
         if job.job_type == "configured_test":
             if self.tool_worker is None:
@@ -187,6 +226,7 @@ class JobWorker:
                 "stderr_truncated": response.stderr_truncated,
             }
         if job.job_type == "model_import":
+            cancellation = self._cancellation_events[job.id]
 
             async def import_progress(percent: int, code: str) -> None:
                 await self.store.heartbeat(
@@ -201,10 +241,11 @@ class JobWorker:
                 self.settings,
                 operation_id=job.id,
                 payload=job.payload,
-                cancellation_event=asyncio.Event(),
+                cancellation_event=cancellation,
                 progress=import_progress,
             )
         if job.job_type in {"model_import_verification", "model_benchmark"}:
+            cancellation = self._cancellation_events[job.id]
             await self.store.heartbeat(
                 job.id,
                 worker_id=self.worker_id,
@@ -216,10 +257,35 @@ class JobWorker:
                 self.settings,
                 model_id=str(job.payload["model_id"]),
                 mode="verify" if job.job_type == "model_import_verification" else "benchmark",
-                cancellation_event=asyncio.Event(),
+                cancellation_event=cancellation,
                 timeout_seconds=(900.0 if job.job_type == "model_import_verification" else 3600.0),
             )
+        if job.job_type == "model_setup_comparison":
+            cancellation = self._cancellation_events[job.id]
+
+            async def comparison_progress(
+                percent: int,
+                code: str,
+                checkpoint: dict[str, Any],
+            ) -> None:
+                await self.store.checkpoint(
+                    job.id,
+                    worker_id=self.worker_id,
+                    result=checkpoint,
+                    progress_percent=percent,
+                    progress_code=code,
+                )
+
+            return await run_model_setup_comparison(
+                str(job.payload["shared_model_id"]),
+                cooldown_seconds=float(job.payload.get("cooldown_seconds", 0.0)),
+                settings=self.settings,
+                cancellation_event=cancellation,
+                progress=comparison_progress,
+                resume=job.result,
+            )
         if job.job_type == "finetune":
+            cancellation = self._cancellation_events[job.id]
 
             async def report_progress(percent: int, code: str) -> None:
                 await self.store.heartbeat(
@@ -233,7 +299,7 @@ class JobWorker:
             return await run_finetune_job(
                 self.settings,
                 plan_id=str(job.payload["plan_id"]),
-                cancellation_event=asyncio.Event(),
+                cancellation_event=cancellation,
                 progress=report_progress,
             )
         if job.job_type == "dream_cycle":
@@ -262,15 +328,19 @@ class JobWorker:
         job: ClaimedJob,
         execution: asyncio.Task[dict[str, Any]],
     ) -> None:
+        cancellation = self._cancellation_events.get(job.id)
+        if cancellation is not None:
+            cancellation.set()
         if job.job_type == "configured_test" and self.tool_worker is not None:
             with suppress(ToolWorkerUnavailable):
                 await self.tool_worker.cancel(
                     target_request_id=f"job:{job.id}",
                     project_root=Path(str(job.payload["cwd"])).expanduser().resolve(strict=True),
                 )
-        execution.cancel()
+        if job.job_type == "configured_test":
+            execution.cancel()
         with suppress(asyncio.CancelledError, Exception):
-            await execution
+            await asyncio.wait_for(execution, timeout=10.0)
 
     def _write_status(self, *, ready: bool, active_job_id: str | None) -> None:
         if self.status_path is None:
@@ -290,7 +360,7 @@ class JobWorker:
         os.replace(temporary, self.status_path)
 
 
-async def _run(args: argparse.Namespace) -> None:
+async def _run(args: argparse.Namespace) -> None:  # pragma: no cover
     settings = load_settings(root=Path(args.april_home))
     registry: JobRegistry = default_job_registry(
         finetune_enabled=settings.finetune.enabled,
@@ -321,7 +391,7 @@ async def _run(args: argparse.Namespace) -> None:
         await database.close()
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     parser = argparse.ArgumentParser(description="APRIL durable Job Worker")
     parser.add_argument("--april-home", required=True)
     parser.add_argument("--status-file", required=True)

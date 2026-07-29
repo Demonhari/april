@@ -677,13 +677,27 @@ def test_model_benchmark_run_one_unloads(tmp_path: Path, monkeypatch) -> None:
     benchmark.first_token_latency_seconds = 0.5
     benchmark.output_tokens = 6
     benchmark.tokens_per_second = 3.0
-    monkeypatch.setattr(benchmark, "_load_model", lambda: calls.append("load") or "loaded")
+
+    def load() -> str:
+        calls.append("load")
+        benchmark.load_time_seconds = 1.0
+        return "loaded"
+
+    monkeypatch.setattr(benchmark, "_load_model", load)
     monkeypatch.setattr(benchmark, "_benchmark_stream", lambda: calls.append("stream"))
     monkeypatch.setattr(benchmark, "_unload_model", lambda: calls.append("unload") or "unloaded")
+    monkeypatch.setattr(
+        benchmark,
+        "_wait_json",
+        lambda *_args, **_kwargs: {"process_peak_rss_bytes": 123},
+    )
     result = benchmark._run_one(1)
     assert result.ok is True
     assert result.unload_success is True
-    assert calls == ["load", "stream", "unload"]
+    assert calls == ["load", "load", "stream", "unload"]
+    assert result.warm_load_time_seconds == 1.0
+    assert result.unload_time_seconds is not None
+    assert result.peak_process_rss_bytes == 123
 
 
 def test_workflow_verifier_run_uses_release_checklist(monkeypatch) -> None:

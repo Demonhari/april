@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -13,11 +14,10 @@ from apps.runner.main import app
 from apps.runner.model_tools import setup_model_set, setup_voice_stack
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
 from apps.runner.soak import SoakReport
-from apps.runner.verify import BenchmarkResult, VerifyCheck
+from apps.runner.verify import VerifyCheck
 from apps.runner.voice_conversation_live import VoiceConversationLiveReport
 from apps.runner.voice_live import VoiceLiveReport
 from apps.runner.wake_live import WakeWordLiveReport
-from april_common.config_validation import validate_configuration
 from april_common.errors import ConfigError
 from april_common.settings import load_settings
 from services.memory.schemas import VectorMetadata
@@ -885,7 +885,7 @@ def test_setup_models_dry_run_writes_nothing_and_prints_basenames(
     assert "run april model doctor" in result.output
 
 
-def test_setup_models_apply_writes_config_and_backup(tmp_path: Path, monkeypatch) -> None:
+def test_setup_models_apply_is_retired_without_mutation(tmp_path: Path, monkeypatch) -> None:
     _copy_configs(tmp_path)
     brain = tmp_path / "brain.gguf"
     brain.write_bytes(b"gguf")
@@ -895,12 +895,9 @@ def test_setup_models_apply_writes_config_and_backup(tmp_path: Path, monkeypatch
         app,
         ["april", "setup", "models", "--brain", str(brain), "--apply"],
     )
-    assert result.exit_code == 0, result.output
-    data = yaml.safe_load((tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8"))
-    assert data["models"]["brain"]["id"] == "april-brain"
-    assert data["models"]["brain"]["path"] == str(brain.resolve())
-    assert list((tmp_path / "configs").glob("models.yaml.bak-*"))
-    assert validate_configuration(tmp_path) == []
+    assert result.exit_code == 1
+    assert "Synchronous setup mutation is retired" in result.output
+    assert not list((tmp_path / "configs").glob("models.yaml.bak-*"))
 
 
 def test_setup_embeddings_dry_run_writes_nothing(tmp_path: Path, monkeypatch) -> None:
@@ -920,7 +917,7 @@ def test_setup_embeddings_dry_run_writes_nothing(tmp_path: Path, monkeypatch) ->
     assert "run april memory reindex" in result.output
 
 
-def test_setup_embeddings_apply_switches_provider_and_reindex_hint(
+def test_setup_embeddings_apply_is_retired_without_provider_change(
     tmp_path: Path, monkeypatch
 ) -> None:
     _copy_configs(tmp_path)
@@ -931,15 +928,10 @@ def test_setup_embeddings_apply_switches_provider_and_reindex_hint(
     result = CliRunner().invoke(
         app, ["april", "setup", "embeddings", "--model", str(embed), "--apply"]
     )
-    assert result.exit_code == 0, result.output
-    models = yaml.safe_load((tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8"))
-    embedding_models = [m for m in models["models"].values() if m.get("role") == "embedding"]
-    assert embedding_models
-    assert embedding_models[0]["id"] == "april-embedding"
+    assert result.exit_code == 1
+    assert "Synchronous embedding import/provider mutation is retired" in result.output
     april = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
-    assert april["memory"]["embedding_provider"] == "runtime-local"
-    assert april["memory"]["embedding_model_id"] == "april-embedding"
-    assert validate_configuration(tmp_path) == []
+    assert april["memory"]["embedding_provider"] == "hashed-token"
     assert "run april memory reindex" in result.output
 
 
@@ -985,7 +977,7 @@ def test_setup_models_rejects_symlink_escape(tmp_path: Path, monkeypatch) -> Non
     assert "symlink target is outside" in result.output
 
 
-def test_setup_models_copy_into_models_uses_local_home(tmp_path: Path, monkeypatch) -> None:
+def test_setup_models_copy_apply_cannot_bypass_durable_import(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "home"
     home.mkdir()
     _copy_configs(home)
@@ -1005,10 +997,9 @@ def test_setup_models_copy_into_models_uses_local_home(tmp_path: Path, monkeypat
             "--apply",
         ],
     )
-    assert result.exit_code == 0, result.output
-    assert (home / "models" / "source.gguf").exists()
-    data = yaml.safe_load((home / "configs" / "models.yaml").read_text(encoding="utf-8"))
-    assert data["models"]["brain"]["path"] == "models/source.gguf"
+    assert result.exit_code == 1
+    assert "Synchronous setup mutation is retired" in result.output
+    assert not (home / "models" / "source.gguf").exists()
 
 
 def test_setup_model_set_copy_rollback_removes_new_copy_and_restores_config(
@@ -1479,8 +1470,7 @@ def test_setup_app_stub_command_refuses_overwrite_and_force_replaces(
 
 def test_model_import_rejects_missing_path(tmp_path: Path, monkeypatch) -> None:
     _copy_configs(tmp_path)
-    manager = FakeManager(tmp_path)
-    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
     result = CliRunner().invoke(
         app,
         [
@@ -1495,18 +1485,19 @@ def test_model_import_rejects_missing_path(tmp_path: Path, monkeypatch) -> None:
             "missing",
             "--path",
             str(tmp_path / "missing.gguf"),
+            "--sha256",
+            "0" * 64,
         ],
     )
     assert result.exit_code == 1
-    assert "does not exist" in result.output
+    assert "model_import_source_unavailable" in result.output
 
 
 def test_model_import_rejects_non_gguf(tmp_path: Path, monkeypatch) -> None:
     _copy_configs(tmp_path)
     model = tmp_path / "model.txt"
     model.write_text("not gguf", encoding="utf-8")
-    manager = FakeManager(tmp_path)
-    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
     result = CliRunner().invoke(
         app,
         [
@@ -1521,18 +1512,23 @@ def test_model_import_rejects_non_gguf(tmp_path: Path, monkeypatch) -> None:
             "bad",
             "--path",
             str(model),
+            "--sha256",
+            "0" * 64,
         ],
     )
     assert result.exit_code == 1
-    assert ".gguf" in result.output
+    assert "model_import_source_not_gguf" in result.output
 
 
-def test_model_import_absolute_path_updates_config(tmp_path: Path, monkeypatch) -> None:
+def test_model_import_requires_approval_without_mutating_config(
+    tmp_path: Path, monkeypatch
+) -> None:
     _copy_configs(tmp_path)
     model = tmp_path / "local.gguf"
-    model.write_bytes(b"gguf")
-    manager = FakeManager(tmp_path)
-    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    model.write_bytes(b"GGUF")
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    before = (tmp_path / "configs" / "models.yaml").read_bytes()
+    expected = hashlib.sha256(b"GGUF").hexdigest()
     result = CliRunner().invoke(
         app,
         [
@@ -1547,62 +1543,60 @@ def test_model_import_absolute_path_updates_config(tmp_path: Path, monkeypatch) 
             "local",
             "--path",
             str(model),
+            "--sha256",
+            expected,
+            "--json",
         ],
     )
     assert result.exit_code == 0
-    text = (tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8")
-    assert str(model) in text
-    assert "run april verify --real-model" in result.output
-    assert "local.gguf" in result.output
-    assert validate_configuration(tmp_path) == []
+    payload = json.loads(result.output)
+    assert payload["status"] == "approval_required"
+    assert payload["automatic_selection_performed"] is False
+    assert (tmp_path / "configs" / "models.yaml").read_bytes() == before
+    assert not (tmp_path / "models" / "local.gguf").exists()
 
 
-def test_model_import_copy_into_models_and_no_overwrite(tmp_path: Path, monkeypatch) -> None:
+def test_model_import_approval_submits_one_durable_job_and_alias_is_idempotent(
+    tmp_path: Path, monkeypatch
+) -> None:
     _copy_configs(tmp_path)
-    source = tmp_path / "outside" / "model.gguf"
-    source.parent.mkdir()
-    source.write_bytes(b"gguf")
-    manager = FakeManager(tmp_path)
-    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    source = tmp_path / "model.gguf"
+    source.write_bytes(b"GGUF")
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    expected = hashlib.sha256(b"GGUF").hexdigest()
     runner = CliRunner()
-    result = runner.invoke(
+    common = [
+        "--role",
+        "brain",
+        "--id",
+        "candidate-brain",
+        "--name",
+        "local",
+        "--path",
+        str(source),
+        "--sha256",
+        expected,
+        "--json",
+    ]
+    approval = runner.invoke(
         app,
-        [
-            "april",
-            "model",
-            "import",
-            "--role",
-            "brain",
-            "--id",
-            "april-brain",
-            "--name",
-            "local",
-            "--path",
-            str(source),
-            "--copy-into-models",
-        ],
+        ["april", "model", "import", *common],
     )
-    assert result.exit_code == 0
-    assert (tmp_path / "models" / "model.gguf").exists()
-    again = runner.invoke(
+    approval_id = json.loads(approval.output)["approval_id"]
+    accepted = runner.invoke(
         app,
-        [
-            "april",
-            "model",
-            "import",
-            "--role",
-            "brain",
-            "--id",
-            "april-brain",
-            "--name",
-            "local",
-            "--path",
-            str(source),
-            "--copy-into-models",
-        ],
+        ["april", "model", "import", *common, "--approval-id", approval_id],
     )
-    assert again.exit_code == 1
-    assert "--force" in again.output
+    assert accepted.exit_code == 0, accepted.output
+    first = json.loads(accepted.output)
+    alias = runner.invoke(
+        app,
+        ["april", "model", "import-enqueue", *common, "--approval-id", approval_id],
+    )
+    assert alias.exit_code == 0, alias.output
+    second = json.loads(alias.output[alias.output.index("{") :])
+    assert second["job_id"] == first["job_id"]
+    assert not (tmp_path / "models" / "model.gguf").exists()
 
 
 def test_model_profile_list_and_apply(tmp_path: Path, monkeypatch) -> None:
@@ -1633,43 +1627,62 @@ def test_model_doctor_json(tmp_path: Path, monkeypatch) -> None:
     assert "Configured Models" in table.output
 
 
-def test_model_benchmark_json_and_failure(tmp_path: Path, monkeypatch) -> None:
-    _copy_configs(tmp_path)
-    gguf = tmp_path / "model.gguf"
-    gguf.write_bytes(b"fake")
+def test_model_benchmark_submits_durable_job(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
+    delegated: list[list[str]] = []
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
-    monkeypatch.setattr(
-        "apps.runner.main.run_model_benchmark",
-        lambda *args, **kwargs: [
-            BenchmarkResult(
-                run_index=1,
-                ok=True,
-                load_time_seconds=1.0,
-                output_tokens=2,
-                tokens_per_second=3.0,
-                unload_success=True,
-            )
-        ],
+    monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
+    result = CliRunner().invoke(
+        app,
+        ["april", "model", "benchmark", "candidate-brain", "--wait", "--json"],
     )
-    result = CliRunner().invoke(app, ["april", "model", "benchmark", str(gguf), "--json"])
     assert result.exit_code == 0
-    assert '"tokens_per_second"' in result.output
-    monkeypatch.setattr(
-        "apps.runner.main.run_model_benchmark",
-        lambda *args, **kwargs: [BenchmarkResult(run_index=1, ok=False, detail="missing")],
-    )
-    failed = CliRunner().invoke(app, ["april", "model", "benchmark", str(gguf)])
-    assert failed.exit_code == 1
-    assert "missing" in failed.output
+    assert delegated
+    assert delegated[0][:3] == ["jobs", "submit", "model_benchmark"]
+    assert json.loads(delegated[0][4]) == {"model_id": "candidate-brain"}
+    assert "--wait" in delegated[0]
+    assert "--json" in delegated[0]
 
 
-def test_model_benchmark_rejects_missing_path(tmp_path: Path, monkeypatch) -> None:
+def test_model_benchmark_treats_argument_as_registered_model_id(
+    tmp_path: Path, monkeypatch
+) -> None:
     manager = FakeManager(tmp_path)
+    delegated: list[list[str]] = []
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
-    result = CliRunner().invoke(app, ["april", "model", "benchmark", str(tmp_path / "no.gguf")])
-    assert result.exit_code == 1
-    assert "does not exist" in result.output
+    monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
+    result = CliRunner().invoke(app, ["april", "model", "benchmark", "missing-model-id"])
+    assert result.exit_code == 0
+    assert "missing-model-id" in delegated[0][4]
+
+
+def test_model_verify_submits_durable_job(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    delegated: list[list[str]] = []
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
+    result = CliRunner().invoke(
+        app,
+        ["april", "model", "verify", "candidate-brain", "--wait", "--json"],
+    )
+    assert result.exit_code == 0
+    assert delegated[0][:3] == ["jobs", "submit", "model_import_verification"]
+    assert json.loads(delegated[0][4]) == {"model_id": "candidate-brain"}
+    assert "--wait" in delegated[0]
+    assert "--json" in delegated[0]
+
+
+def test_memory_reindex_delegates_to_durable_job_api(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    delegated: list[list[str]] = []
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
+    result = CliRunner().invoke(
+        app,
+        ["april", "memory", "reindex", "--wait", "--json"],
+    )
+    assert result.exit_code == 0
+    assert delegated == [["memory", "reindex", "--wait", "--json"]]
 
 
 def test_memory_doctor(tmp_path: Path, monkeypatch) -> None:

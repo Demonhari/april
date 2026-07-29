@@ -740,7 +740,9 @@ def test_activation_cli_writes_explicit_report_path(tmp_path: Path, monkeypatch)
     assert parsed.report_type == "mac_activation"
 
 
-def test_activation_cli_apply_runs_mocked_acceptance(tmp_path: Path, monkeypatch) -> None:
+def test_activation_cli_model_apply_is_retired_before_acceptance(
+    tmp_path: Path, monkeypatch
+) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     monkeypatch.setattr(
@@ -766,9 +768,8 @@ def test_activation_cli_apply_runs_mocked_acceptance(tmp_path: Path, monkeypatch
             "--run-acceptance",
         ],
     )
-    assert result.exit_code == 0, result.output
-    assert "APPLIED" in result.output
-    assert "Acceptance: pass" in result.output
+    assert result.exit_code == 1
+    assert "Synchronous model registration through mac-activation is retired" in result.output
 
 
 def test_activation_cli_apply_and_dry_run_conflict(tmp_path: Path, monkeypatch) -> None:
@@ -1157,20 +1158,21 @@ def test_activation_cli_live_acceptance_requires_run_acceptance(
     assert result.exit_code == 1
 
 
-def test_docs_contain_new_activation_and_reports_examples() -> None:
+def test_docs_contain_durable_import_and_reports_examples() -> None:
     root = Path(__file__).resolve().parents[1]
     for relative in ("docs/macbookpro-acceptance.md", "README.md"):
         text = (root / relative).read_text(encoding="utf-8")
         assert "--enable-voice" in text
-        assert "--acceptance-voice-live" in text
-        assert "--acceptance-wake-word-live" in text
-        assert "--allow-partial-model-set" in text
+        assert "run april voice verify-live" in text
+        assert "run april voice verify-wake-live" in text
+        assert "run april model import" in text
+        assert "registration" in text
         assert "run april reports" in text
         # The fake/real contradictory command must never reappear.
         assert "--fake acceptance" not in text
 
 
-def test_activation_cli_runs_live_acceptance_with_orchestration(
+def test_activation_cli_cannot_combine_model_registration_with_live_orchestration(
     tmp_path: Path, monkeypatch
 ) -> None:
     manager = FakeManager(tmp_path)
@@ -1219,8 +1221,6 @@ def test_activation_cli_runs_live_acceptance_with_orchestration(
             "--start-services",
         ],
     )
-    assert result.exit_code == 0, result.output
-    assert captured["require_real_models"] is True
-    assert captured["start_services"] is True
-    assert captured["voice_live_runner"] is not None
-    assert captured["wake_word_live_runner"] is not None
+    assert result.exit_code == 1
+    assert "Synchronous model registration through mac-activation is retired" in result.output
+    assert captured == {}

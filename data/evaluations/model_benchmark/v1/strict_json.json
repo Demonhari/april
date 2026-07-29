@@ -1,0 +1,46 @@
+{
+  "version": "strict-json-v1",
+  "fixtures": [
+    {
+      "id": "route-decision",
+      "prompt": "Return a routing decision for a harmless general question.",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["intent", "agent", "risk_level"],
+        "properties": {
+          "intent": {"type": "string"},
+          "agent": {"type": "string", "enum": ["general_agent", "coding_agent", "reading_agent", "reasoning_agent", "creative_agent", "system_action_agent"]},
+          "risk_level": {"type": "string", "enum": ["none", "read_only", "safe_write", "code_write", "system_action", "external_action"]}
+        }
+      }
+    },
+    {
+      "id": "tool-request",
+      "prompt": "Return a read_file tool request for README.md.",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "tool", "args"],
+        "properties": {
+          "type": {"type": "string", "enum": ["tool_request"]},
+          "tool": {"type": "string", "enum": ["read_file"]},
+          "args": {"type": "object"}
+        }
+      }
+    },
+    {
+      "id": "final-answer",
+      "prompt": "Return a minimal final answer object.",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "message"],
+        "properties": {
+          "type": {"type": "string", "enum": ["final_answer"]},
+          "message": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

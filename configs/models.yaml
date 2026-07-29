@@ -56,7 +56,8 @@ models:
   # upgrades to a registered role: reasoning model whenever one is available.
   # Import a real GGUF with:
   #   run april model import --role reasoning --id april-reasoning \
-  #     --name qwen3-4b --path /absolute/path/qwen3-4b-Q4_K_M.gguf
+  #     --name qwen3-4b --path /absolute/path/qwen3-4b-Q4_K_M.gguf \
+  #     --sha256 EXPECTED_SHA256
   # then uncomment and adjust the entry below (commented out so it does not
   # point at a missing file and degrade runtime health).
   # reasoning:
@@ -98,7 +99,8 @@ models:
   # embeddings (the default). Import a real GGUF embedding model with:
   #   run april model import --role embedding --id april-embedding \
   #     --name nomic-embed-text-v1.5 \
-  #     --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf
+  #     --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf \
+  #     --sha256 EXPECTED_SHA256
   # then set memory.embedding_provider=runtime-local (APRIL_MEMORY_EMBEDDING_PROVIDER)
   # and run `run april memory reindex`. Keep this commented out until a real file
   # exists so runtime health is not degraded by a missing path.

@@ -62,7 +62,6 @@ from apps.runner.model_downloads import (
 from apps.runner.model_tools import (
     apply_model_profile,
     create_macos_app_stub,
-    import_model,
     load_model_profiles,
     model_doctor,
     recommend_model_profile,
@@ -99,7 +98,6 @@ from apps.runner.verify import (
     run_all_configured_models_verification,
     run_fake_verification,
     run_local_security_integrity_verification,
-    run_model_benchmark,
     run_real_model_verification,
     run_workflow_verification,
     write_workflow_report,
@@ -481,7 +479,7 @@ def _print_model_doctor(payload: dict[str, Any]) -> None:
     table.add_column("Check")
     table.add_column("Result")
     table.add_row("Python", str(payload["python_version"]))
-    table.add_row("APRIL_HOME", str(payload["april_home"]))
+    table.add_row("APRIL home", str(payload["april_home_basename"]))
     table.add_row("Runtime backend", str(payload["runtime_backend"]))
     table.add_row(
         "llama-cpp-python installed",
@@ -1001,40 +999,6 @@ def model_recommend_command(json_output: bool = typer.Option(False, "--json")) -
     _print_model_recommendation(payload)
 
 
-@model_app.command("import")
-def model_import_command(
-    role: str = typer.Option(
-        ...,
-        "--role",
-        help=(
-            "Logical model role: brain/router/coding/reading/creative/"
-            "reasoning/system_action/embedding."
-        ),
-    ),
-    model_id: str = typer.Option(..., "--id"),
-    name: str = typer.Option(..., "--name"),
-    path: Path = typer.Option(..., "--path"),
-    copy_into_models: bool = typer.Option(False, "--copy-into-models"),
-    force: bool = typer.Option(False, "--force"),
-) -> None:
-    try:
-        result = import_model(
-            home=_manager().home,
-            role=role,
-            model_id=model_id,
-            name=name,
-            source_path=path,
-            copy_into_models=copy_into_models,
-            force=force,
-        )
-    except ConfigError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-    console.print(f"[green]Registered {result.model_id} for role {result.role}.[/green]")
-    console.print(f"Model path: {result.path}")
-    console.print(result.next_command)
-
-
 def _print_model_download(report: ModelDownloadReport) -> None:
     heading = "APPLIED" if report.applied else "DRY RUN"
     console.print(f"APRIL model download — {heading}")
@@ -1083,19 +1047,15 @@ def model_download_command(
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Explicit user-run GGUF downloader for manifest-approved local models."""
-    confirmed = yes
-    if apply_changes and not confirmed:
-        if not sys.stdin.isatty():
-            console.print("[red]Model downloads require --yes when --apply is used.[/red]")
-            raise typer.Exit(1)
-        confirmed = typer.confirm(
-            "Download GGUF model files from the manifest-approved source?",
-            default=False,
+    """Inspect the legacy model manifest without downloading or registering models."""
+    if apply_changes:
+        console.print(
+            "[red]Model download/apply is retired. Obtain the GGUF manually, calculate "
+            "its SHA-256 independently, then use exact-approved "
+            "`run april model import ... --sha256 EXPECTED_SHA256`.[/red]"
         )
-        if not confirmed:
-            console.print("[yellow]Cancelled; no downloads were started.[/yellow]")
-            raise typer.Exit(1)
+        raise typer.Exit(1)
+    confirmed = yes
     try:
         report = run_model_downloads(
             _manager().home,
@@ -1129,30 +1089,49 @@ def model_download_command(
 
 @model_app.command("benchmark")
 def model_benchmark_command(
-    model_path: Path,
-    prompt: str = typer.Option("Reply with one short sentence.", "--prompt"),
-    runs: int = typer.Option(1, "--runs", min=1, max=20),
-    max_output_tokens: int = typer.Option(32, "--max-output-tokens", min=1, max=4096),
-    keep_loaded: bool = typer.Option(False, "--keep-loaded"),
+    ctx: typer.Context,
+    model_id: str,
+    wait: bool = typer.Option(False, "--wait"),
     json_output: bool = typer.Option(False, "--json"),
+    wait_timeout: float = typer.Option(3600.0, "--wait-timeout", min=1.0, max=86400.0),
 ) -> None:
-    if not model_path.expanduser().exists():
-        console.print(f"[red]GGUF path does not exist: {model_path}[/red]")
-        raise typer.Exit(1)
-    results = run_model_benchmark(
-        _manager().home,
-        model_path,
-        prompt=prompt,
-        runs=runs,
-        max_output_tokens=max_output_tokens,
-        keep_loaded=keep_loaded,
-    )
+    payload = json.dumps({"model_id": model_id}, separators=(",", ":"))
+    args = ["jobs", "submit", "model_benchmark", "--payload", payload]
+    if wait:
+        args.append("--wait")
     if json_output:
-        console.print_json(data={"runs": [result.model_dump() for result in results]})
-    else:
-        _print_benchmark(results)
-    if not all(result.ok for result in results):
-        raise typer.Exit(1)
+        args.append("--json")
+    if wait_timeout != 3600.0:
+        args.extend(["--wait-timeout", str(wait_timeout)])
+    _delegate(
+        args,
+        fake=_effective_fake(ctx, False),
+        oneshot=_effective_oneshot(ctx),
+    )
+
+
+@model_app.command("verify")
+def model_verify_command(
+    ctx: typer.Context,
+    model_id: str,
+    wait: bool = typer.Option(False, "--wait"),
+    json_output: bool = typer.Option(False, "--json"),
+    wait_timeout: float = typer.Option(900.0, "--wait-timeout", min=1.0, max=86400.0),
+) -> None:
+    """Submit explicit verification of an already registered local model."""
+    payload = json.dumps({"model_id": model_id}, separators=(",", ":"))
+    args = ["jobs", "submit", "model_import_verification", "--payload", payload]
+    if wait:
+        args.append("--wait")
+    if json_output:
+        args.append("--json")
+    if wait_timeout != 900.0:
+        args.extend(["--wait-timeout", str(wait_timeout)])
+    _delegate(
+        args,
+        fake=_effective_fake(ctx, False),
+        oneshot=_effective_oneshot(ctx),
+    )
 
 
 profile_app = typer.Typer(help="Model profile operations.")
@@ -1258,9 +1237,19 @@ def memory_export(
 def memory_reindex(
     ctx: typer.Context,
     fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
+    wait: bool = typer.Option(False, "--wait"),
+    json_output: bool = typer.Option(False, "--json"),
+    wait_timeout: float = typer.Option(3600.0, "--wait-timeout", min=1.0, max=86400.0),
 ) -> None:
+    args = ["memory", "reindex"]
+    if wait:
+        args.append("--wait")
+    if json_output:
+        args.append("--json")
+    if wait_timeout != 3600.0:
+        args.extend(["--wait-timeout", str(wait_timeout)])
     _delegate(
-        ["memory", "reindex"],
+        args,
         fake=_effective_fake(ctx, fake),
         oneshot=_effective_oneshot(ctx),
     )
@@ -1399,8 +1388,9 @@ def _memory_doctor_report(
     ):
         # Highly visible setup hint when runtime-local is requested but unusable.
         report["setup_command"] = (
-            "run april setup embeddings --model /absolute/path/to/embedding.gguf "
-            "--id april-embedding --apply"
+            "run april model import --role embedding --id april-embedding "
+            "--name LOCAL_EMBEDDING --path /absolute/path/to/embedding.gguf "
+            "--sha256 EXPECTED_SHA256"
         )
     if verification is not None:
         report["runtime_embedding_verification"] = verification
@@ -2078,6 +2068,12 @@ def setup_models(
     if apply_changes and dry_run:
         console.print("[red]Use either --apply or --dry-run, not both.[/red]")
         raise typer.Exit(1)
+    if apply_changes:
+        console.print(
+            "[red]Synchronous setup mutation is retired. Use one exact-approved "
+            "`run april model import ... --sha256 EXPECTED_SHA256` job per model.[/red]"
+        )
+        raise typer.Exit(1)
     try:
         result = setup_model_set(
             home=_manager().home,
@@ -2136,6 +2132,14 @@ def setup_embeddings(
     """
     if apply_changes and dry_run:
         console.print("[red]Use either --apply or --dry-run, not both.[/red]")
+        raise typer.Exit(1)
+    if apply_changes:
+        console.print(
+            "[red]Synchronous embedding import/provider mutation is retired. "
+            "Import with `run april model import --role embedding ... "
+            "--sha256 EXPECTED_SHA256`, then select the provider explicitly and "
+            "run `run april memory reindex --wait`.[/red]"
+        )
         raise typer.Exit(1)
     try:
         result = setup_embedding_model(
@@ -2386,6 +2390,13 @@ def setup_mac_activation(
     Homebrew, or records audio. Config is written only with --apply, all paths are
     validated first, and a failed apply step is rolled back automatically.
     """
+    if apply_changes and any(path is not None for path in (brain, coding, reading, reasoning)):
+        console.print(
+            "[red]Synchronous model registration through mac-activation is retired. "
+            "Import each local GGUF through exact-approved `run april model import "
+            "... --sha256 EXPECTED_SHA256`; activation remains a separate manual phase.[/red]"
+        )
+        raise typer.Exit(1)
     activation_voice_paths: dict[str, Path | None] = {
         "whisper_binary": whisper_binary,
         "whisper_model": whisper_model,

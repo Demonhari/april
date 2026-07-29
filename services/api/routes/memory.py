@@ -134,25 +134,16 @@ def register_memory_routes(app: FastAPI, authorized: Callable[..., Any]) -> None
             )
         return {"export": await active.memory.export_memories(project_id=project_id)}
 
-    @app.post("/memory/reindex")
+    @app.post("/memory/reindex", status_code=202)
     async def memory_reindex(active: ApiContainer = Depends(authorized)) -> object:
-        reindexed = await active.memory_repository.rebuild()
-        configured_provider = active.settings.memory.embedding_provider
-        active_provider = active.vector_memory.embedding.name
-        vector_health = active.vector_memory.health()
-        fallback_active = configured_provider == "runtime-local" and (
-            active_provider == "hashed-token"
+        if active.job_store is None:
+            raise HTTPException(status_code=503, detail="job_store_unavailable")
+        job = await active.job_store.submit(
+            job_type="memory_reindex",
+            payload={},
+            owner="local-user",
         )
-        compatible = bool(vector_health.get("compatible", True))
-        return {
-            "reindexed": reindexed,
-            "provider": active_provider,
-            "configured_provider": configured_provider,
-            "dimensions": active.vector_memory.embedding.dimensions,
-            "index_compatible": compatible,
-            "fallback_active": fallback_active,
-            "degraded": fallback_active or not compatible,
-        }
+        return job.model_dump(mode="json")
 
     @app.post("/memory/repair-index")
     async def memory_repair_index(

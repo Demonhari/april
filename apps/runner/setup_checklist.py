@@ -41,8 +41,8 @@ _STEPS: tuple[tuple[int, str, str | None, str], ...] = (
         3,
         "setup models",
         "configured GGUF presence",
-        "run april setup models --brain /absolute/path/brain.gguf "
-        "--coding /absolute/path/coding.gguf --reading /absolute/path/reading.gguf --apply",
+        "run april model import --role brain --id april-brain --name LOCAL_BRAIN "
+        "--path /absolute/path/brain.gguf --sha256 EXPECTED_SHA256",
     ),
     (4, "config validate", "config validation", "run april config validate"),
     (
@@ -65,9 +65,10 @@ _STEPS: tuple[tuple[int, str, str | None, str], ...] = (
         "embedding provider",
         "run april model import --role embedding --id april-embedding "
         "--name nomic-embed-text-v1.5 "
-        "--path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf",
+        "--path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf "
+        "--sha256 EXPECTED_SHA256",
     ),
-    (9, "memory reindex", "vector index compatibility", "run april memory reindex"),
+    (9, "memory reindex", "vector index compatibility", "run april memory reindex --wait"),
     (
         10,
         "optional voice setup",

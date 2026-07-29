@@ -27,6 +27,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import platform
+import sqlite3
 from pathlib import Path
 from typing import Literal
 
@@ -36,6 +37,7 @@ from apps.runner.mac_report import redact_reason
 from april_common.audit import audit_logger_for_settings
 from april_common.credentials import CredentialStore
 from april_common.errors import ConfigError
+from april_common.hardware_profile import safe_hardware_profile
 from april_common.process_sandbox import SandboxBackend, sandbox_capabilities
 from april_common.settings import (
     KNOWN_DEFAULT_API_TOKENS,
@@ -48,6 +50,7 @@ from april_common.settings import (
 from april_common.time import utc_now_iso
 from april_common.token_setup import legacy_plaintext_credentials_detected
 from services.april_runtime.model_registry import ModelRegistry
+from services.evaluation.model_quality import fixture_set_metadata
 from services.evolution.adapters import inspect_adapter_state
 from services.memory.maintenance import check_database
 
@@ -58,15 +61,21 @@ _INSTALL_RUNTIME = "pip install -e '.[runtime]'"
 _SETUP_MODELS = "run april setup models"
 _SETUP_VOICE = "run april setup voice"
 _SETUP_TOKENS = "run april setup tokens"
-_SETUP_EMBEDDINGS = "run april setup embeddings --model /absolute/path/to/embedding.gguf --apply"
+_SETUP_EMBEDDINGS = (
+    "run april model import --role embedding --id april-embedding "
+    "--name LOCAL_EMBEDDING --path /absolute/path/to/embedding.gguf "
+    "--sha256 EXPECTED_SHA256"
+)
 _IMPORT_REASONING = (
     "run april model import --role reasoning --id april-reasoning "
-    "--name qwen3-4b --path /absolute/path/Qwen3-4B-Q4_K_M.gguf"
+    "--name qwen3-4b --path /absolute/path/Qwen3-4B-Q4_K_M.gguf "
+    "--sha256 EXPECTED_SHA256"
 )
 _IMPORT_EMBEDDING = (
     "run april model import --role embedding --id april-embedding "
     "--name nomic-embed-text-v1.5 "
-    "--path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf"
+    "--path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf "
+    "--sha256 EXPECTED_SHA256"
 )
 _VERIFY_REAL = (
     "run april verify --all-configured-models --require-real-model "
@@ -172,6 +181,21 @@ class ReadinessReport(BaseModel):
     dreamer_last_report_available: bool = False
     pending_eval_case_count: int = 0
     pending_write_capable_overlay_count: int = 0
+    model_import_uses_durable_jobs: bool = True
+    memory_reindex_uses_durable_jobs: bool = True
+    last_successful_semantic_reindex: str | None = None
+    active_vector_generation: str | None = None
+    active_embedding_provider: str | None = None
+    active_embedding_model_id: str | None = None
+    comparison_fixtures_installed: bool = False
+    comparison_fixture_set_version: str | None = None
+    comparison_fixture_set_sha256: str | None = None
+    real_benchmark_evidence_exists: bool = False
+    benchmark_evidence_current_hardware: bool = False
+    benchmark_evidence_simulated: bool = False
+    benchmark_evidence_stale: bool = False
+    benchmark_evidence_incomplete: bool = False
+    benchmark_evidence_production_eligible: bool = False
     checks: list[ReadinessCheck] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
@@ -241,17 +265,82 @@ def _verified_model_ids(home: Path) -> set[str]:
 
 
 def _active_vector_provider(path: Path) -> str | None:
+    metadata = _active_vector_metadata(path)
+    provider = metadata.get("provider")
+    return str(provider) if isinstance(provider, str) else None
+
+
+def _active_vector_metadata(path: Path) -> dict[str, object]:
     try:
         generation_id = (path / "CURRENT").read_text(encoding="utf-8").strip()
         if not generation_id or "/" in generation_id or "\\" in generation_id:
-            return None
+            return {}
         metadata = json.loads(
             (path / "generations" / generation_id / "metadata.json").read_text(encoding="utf-8")
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    provider = metadata.get("provider") if isinstance(metadata, dict) else None
-    return str(provider) if isinstance(provider, str) else None
+        return {}
+    if not isinstance(metadata, dict):
+        return {}
+    return {**metadata, "active_generation": generation_id}
+
+
+def _benchmark_evidence(settings: AprilSettings) -> dict[str, object]:
+    empty: dict[str, object] = {
+        "exists": False,
+        "current_hardware": False,
+        "simulated": False,
+        "stale": False,
+        "incomplete": False,
+        "production_eligible": False,
+    }
+    if not settings.database_path.is_file():
+        return empty
+    try:
+        connection = sqlite3.connect(f"file:{settings.database_path}?mode=ro", uri=True)
+        row = connection.execute(
+            """
+            SELECT result_json FROM background_jobs
+            WHERE job_type = 'model_setup_comparison' AND status = 'succeeded'
+            ORDER BY completed_at DESC LIMIT 1
+            """
+        ).fetchone()
+    except (sqlite3.Error, OSError):
+        return empty
+    finally:
+        if "connection" in locals():
+            connection.close()
+    if row is None or not isinstance(row[0], str):
+        return empty
+    try:
+        report = json.loads(row[0])
+    except json.JSONDecodeError:
+        return {**empty, "incomplete": True}
+    if not isinstance(report, dict):
+        return {**empty, "incomplete": True}
+    profile = report.get("hardware_profile")
+    current = safe_hardware_profile()["id"]
+    profile_id = profile.get("id") if isinstance(profile, dict) else None
+    simulated = bool(report.get("simulated"))
+    unavailable = report.get("unavailable_measurements")
+    required_unavailable = (
+        [item for item in unavailable if item != "thermal_throttling"]
+        if isinstance(unavailable, list)
+        else []
+    )
+    incomplete = bool(required_unavailable) or not bool(report.get("fixture_set"))
+    current_hardware = profile_id == current
+    return {
+        "exists": not simulated,
+        "current_hardware": current_hardware,
+        "simulated": simulated,
+        "stale": bool(profile_id) and not current_hardware,
+        "incomplete": incomplete,
+        "production_eligible": bool(report.get("production_eligible"))
+        and current_hardware
+        and not simulated
+        and not incomplete,
+    }
 
 
 def build_readiness_report(
@@ -657,6 +746,59 @@ def build_readiness_report(
                 ),
             )
         )
+
+    vector_metadata = _active_vector_metadata(settings.vector_index_path)
+    fixture_metadata = fixture_set_metadata(settings.home)
+    benchmark_evidence = _benchmark_evidence(settings)
+    checks.extend(
+        [
+            ReadinessCheck(
+                name="durable model import",
+                status="ok",
+                detail="`run april model import` requires exact approval and submits model_import.",
+            ),
+            ReadinessCheck(
+                name="durable memory reindex",
+                status="ok",
+                detail="`run april memory reindex` submits memory_reindex.",
+            ),
+            ReadinessCheck(
+                name="model comparison fixtures",
+                status="ok" if fixture_metadata["installed"] else "warning",
+                detail=(
+                    f"Installed fixture set {fixture_metadata['version']}."
+                    if fixture_metadata["installed"]
+                    else "Versioned offline comparison fixtures are missing."
+                ),
+                action=(
+                    None
+                    if fixture_metadata["installed"]
+                    else "Restore data/evaluations/model_benchmark/v1 from the APRIL source tree."
+                ),
+            ),
+            ReadinessCheck(
+                name="real model comparison evidence",
+                status=("ok" if benchmark_evidence["production_eligible"] else "warning"),
+                detail=(
+                    "Production-eligible real evidence exists for this hardware profile."
+                    if benchmark_evidence["production_eligible"]
+                    else (
+                        "Only fake/simulated comparison evidence exists."
+                        if benchmark_evidence["simulated"]
+                        else "Optional real comparison evidence is absent, stale, or incomplete."
+                    )
+                ),
+                action=(
+                    None
+                    if benchmark_evidence["production_eligible"]
+                    else (
+                        "run april model compare-setups "
+                        "--shared-model-id LOCAL_SHARED_MODEL_ID --wait"
+                    )
+                ),
+            ),
+        ]
+    )
 
     # --- loopback-only binding ------------------------------------------------
     non_loopback = [
@@ -1212,6 +1354,40 @@ def build_readiness_report(
         dreamer_last_report_available=any((settings.evolution_path / "reports").glob("*.json")),
         pending_eval_case_count=pending_evals,
         pending_write_capable_overlay_count=pending_overlays,
+        model_import_uses_durable_jobs=True,
+        memory_reindex_uses_durable_jobs=True,
+        last_successful_semantic_reindex=(
+            str(vector_metadata.get("last_successful_reindex_at"))
+            if vector_metadata.get("provider") == "runtime-local"
+            and isinstance(vector_metadata.get("last_successful_reindex_at"), str)
+            else None
+        ),
+        active_vector_generation=(
+            str(vector_metadata["active_generation"])
+            if isinstance(vector_metadata.get("active_generation"), str)
+            else None
+        ),
+        active_embedding_provider=(
+            str(vector_metadata["provider"])
+            if isinstance(vector_metadata.get("provider"), str)
+            else settings.memory.embedding_provider
+        ),
+        active_embedding_model_id=(
+            str(vector_metadata["embedding_model_id"])
+            if isinstance(vector_metadata.get("embedding_model_id"), str)
+            else settings.memory.embedding_model_id
+        ),
+        comparison_fixtures_installed=bool(fixture_metadata["installed"]),
+        comparison_fixture_set_version=str(fixture_metadata["version"]),
+        comparison_fixture_set_sha256=(
+            str(fixture_metadata["sha256"]) if fixture_metadata["sha256"] else None
+        ),
+        real_benchmark_evidence_exists=bool(benchmark_evidence["exists"]),
+        benchmark_evidence_current_hardware=bool(benchmark_evidence["current_hardware"]),
+        benchmark_evidence_simulated=bool(benchmark_evidence["simulated"]),
+        benchmark_evidence_stale=bool(benchmark_evidence["stale"]),
+        benchmark_evidence_incomplete=bool(benchmark_evidence["incomplete"]),
+        benchmark_evidence_production_eligible=bool(benchmark_evidence["production_eligible"]),
         checks=checks,
         blockers=blockers,
         warnings=warnings,

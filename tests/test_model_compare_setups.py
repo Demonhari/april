@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 from apps.runner.commands import model_compare
 from april_common.settings import BenchmarkSettings
 
@@ -10,10 +12,16 @@ def _summary(**overrides: float | bool | None) -> dict[str, object]:
     metrics: dict[str, float | None] = {
         "output_tokens_per_second": 10.0,
         "routing_accuracy": 0.95,
+        "strict_json_first_pass_reliability": 0.96,
         "structured_json_reliability": 0.96,
         "coding_fixture_pass_rate": 0.94,
         "context_handling_reliability": 0.95,
         "load_unload_reliability": 1.0,
+        "first_token_latency_seconds": 1.0,
+        "prompt_processing_tokens_per_second": 10.0,
+        "peak_process_rss_bytes": 1_000.0,
+        "model_load_time_seconds": 1.0,
+        "specialist_switching_overhead_seconds": 1.0,
     }
     passed = bool(overrides.pop("passed", True))
     sustained = overrides.pop("sustained", 0.05)
@@ -123,3 +131,42 @@ def test_recommendation_is_pure_and_does_not_mutate_inputs() -> None:
     assert failures == []
     assert specialist == before_specialist
     assert shared == before_shared
+
+
+@pytest.mark.parametrize(
+    ("metric", "regressed"),
+    [
+        ("strict_json_first_pass_reliability", 0.2),
+        ("context_handling_reliability", 0.5),
+        ("load_unload_reliability", 0.5),
+        ("first_token_latency_seconds", 2.0),
+        ("output_tokens_per_second", 5.0),
+        ("prompt_processing_tokens_per_second", 5.0),
+        ("peak_process_rss_bytes", 2_000.0),
+        ("model_load_time_seconds", 2.0),
+        ("specialist_switching_overhead_seconds", 2.0),
+    ],
+)
+def test_each_required_measurement_can_fail_a_recommendation_gate(
+    metric: str,
+    regressed: float,
+) -> None:
+    recommendation, failures = model_compare.recommend_setup(
+        _summary(),
+        _summary(**{metric: regressed}),
+        BenchmarkSettings(maximum_decline_fraction=0.1),
+        simulated=False,
+    )
+    assert recommendation != "shared_model_recommended_for_manual_review"
+    assert any(metric in failure for failure in failures)
+
+
+def test_sustained_performance_can_fail_recommendation_gate() -> None:
+    recommendation, failures = model_compare.recommend_setup(
+        _summary(),
+        _summary(sustained=0.5),
+        BenchmarkSettings(maximum_decline_fraction=0.1),
+        simulated=False,
+    )
+    assert recommendation == "candidate_failed_no_regression_gates"
+    assert "sustained_degradation_above_configured_maximum" in failures

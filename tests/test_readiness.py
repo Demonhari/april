@@ -383,6 +383,21 @@ def test_report_is_json_serialisable_and_redacted(tmp_path: Path) -> None:
     assert report.api_token_status == "default-development"
 
 
+def test_readiness_reports_durable_workflows_and_optional_fixture_evidence(
+    tmp_path: Path,
+) -> None:
+    report = build_readiness_report(_write_home(tmp_path))
+    assert report.model_import_uses_durable_jobs is True
+    assert report.memory_reindex_uses_durable_jobs is True
+    assert isinstance(report.comparison_fixtures_installed, bool)
+    assert report.real_benchmark_evidence_exists is False
+    assert report.benchmark_evidence_production_eligible is False
+    assert not any(
+        "benchmark" in blocker.lower() or "fixture" in blocker.lower()
+        for blocker in report.blockers
+    )
+
+
 def test_broken_config_reports_a_single_blocker(tmp_path: Path) -> None:
     configs = tmp_path / "configs"
     configs.mkdir()

@@ -645,21 +645,23 @@ def memory_inspect(
 
 
 @memory_app.command("reindex")
-def memory_reindex() -> None:
-    console.print("Reindexing vector memory under the current embedding provider...")
-    data = run(client().post("/memory/reindex", {}))
-    console.print(
-        f"Reindexed {data['reindexed']} records using "
-        f"{data['provider']} ({data['dimensions']} dimensions)."
-    )
-    if data.get("degraded"):
-        configured = data.get("configured_provider", "unknown")
-        console.print(
-            f"[yellow]Index is degraded: configured provider is {configured} but "
-            f"the active provider is {data['provider']} "
-            f"(fallback_active={data.get('fallback_active', False)}, "
-            f"index_compatible={data.get('index_compatible', True)}).[/yellow]"
-        )
+def memory_reindex(
+    wait: bool = typer.Option(False, "--wait"),
+    json_output: bool = typer.Option(False, "--json"),
+    wait_timeout: float = typer.Option(3600.0, "--wait-timeout", min=1.0, max=86400.0),
+) -> None:
+    job = run(client().post("/memory/reindex", {}))
+    if wait:
+        job = _wait_for_job(str(job["id"]), timeout_seconds=wait_timeout)
+    if json_output:
+        console.print_json(data=job)
+        return
+    console.print(f"Durable memory reindex job {job['id']} is {job['status']}.")
+    if job.get("result"):
+        print_jsonish(job["result"])
+    else:
+        console.print(f"  run april jobs show {job['id']}")
+        console.print(f"  run april jobs cancel {job['id']}")
 
 
 @memory_app.command("repair-index")

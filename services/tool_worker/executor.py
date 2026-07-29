@@ -70,6 +70,8 @@ class ToolWorkerExecutor:
                 )
             if request.operation in {"run_command", "test_runner"}:
                 return await self._command(request, root)
+            if request.operation == "benchmark_fixture":
+                return await self._benchmark_fixture(request, root)
             if request.operation == "patch_applier":
                 return await self._cancellable_mutation(request, root, self._patch)
             if request.operation == "git_commit":
@@ -156,6 +158,7 @@ class ToolWorkerExecutor:
             sandbox_environment=self.environment,
             development_unsandboxed_override=self.development_unsandboxed_override,
         )
+
         if artifact.patch_sha256 != expected_sha:
             raise PermissionDeniedError("patch_hash_mismatch")
         if artifact.patch_byte_length != expected_length:
@@ -206,6 +209,75 @@ class ToolWorkerExecutor:
             status="completed" if code == 0 else "failed",
             failure_code=None if code == 0 else "git_apply_failed",
             data=_artifact_data(artifact),
+        )
+
+    async def _benchmark_fixture(
+        self,
+        request: ToolWorkerRequest,
+        root: Path,
+    ) -> ToolWorkerResponse:
+        """Materialize and test one bounded benchmark only inside Tool Worker."""
+        fixture_files = request.args.get("fixture_files")
+        candidate_file = request.args.get("candidate_file")
+        candidate_content = request.args.get("candidate_content")
+        expected_content = request.args.get("expected_content")
+        test_argv = request.args.get("test_argv")
+        if (
+            not isinstance(fixture_files, dict)
+            or not isinstance(candidate_file, str)
+            or not isinstance(candidate_content, str)
+            or not isinstance(test_argv, list)
+            or not all(isinstance(item, str) for item in test_argv)
+        ):
+            raise ValueError("invalid_benchmark_fixture")
+        if len(fixture_files) > 16 or len(candidate_content.encode("utf-8")) > 65_536:
+            raise ValueError("benchmark_fixture_too_large")
+        allowed_paths: set[str] = set()
+        total_bytes = len(candidate_content.encode("utf-8"))
+        for name, content in fixture_files.items():
+            if not isinstance(name, str) or not isinstance(content, str):
+                raise ValueError("invalid_benchmark_fixture")
+            path = _bounded_fixture_path(root, name)
+            total_bytes += len(content.encode("utf-8"))
+            if total_bytes > 262_144:
+                raise ValueError("benchmark_fixture_too_large")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            allowed_paths.add(path.relative_to(root).as_posix())
+        candidate_path = _bounded_fixture_path(root, candidate_file)
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        candidate_path.write_text(candidate_content, encoding="utf-8")
+        allowed_paths.add(candidate_path.relative_to(root).as_posix())
+        command_request = request.model_copy(
+            update={"operation": "test_runner", "args": {"argv": test_argv}}
+        )
+        response = await self._command(command_request, root)
+        generated = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and ".pytest_cache" not in path.parts
+        }
+        forbidden = bool(generated - allowed_paths)
+        stderr = response.stderr
+        syntax_failure = "SyntaxError" in stderr or "IndentationError" in stderr
+        unnecessary = isinstance(expected_content, str) and (
+            candidate_content.strip() != expected_content.strip()
+        )
+        return response.model_copy(
+            update={
+                "ok": response.ok and not forbidden,
+                "failure_code": (
+                    "forbidden_file_modification" if forbidden else response.failure_code
+                ),
+                "data": {
+                    **response.data,
+                    "forbidden_file_modification": forbidden,
+                    "syntax_or_compilation_failure": syntax_failure,
+                    "unnecessary_change": unnecessary,
+                },
+            }
         )
 
     async def _git_commit(
@@ -318,6 +390,18 @@ def _artifact_data(artifact: Any) -> dict[str, Any]:
         "affected_paths": artifact.affected_paths,
         "repo_root": artifact.repo_root,
     }
+
+
+def _bounded_fixture_path(root: Path, value: str) -> Path:
+    if not value or "\x00" in value:
+        raise ValueError("invalid_benchmark_fixture_path")
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("invalid_benchmark_fixture_path")
+    candidate = (root / relative).resolve(strict=False)
+    if not _relative_to(candidate, root):
+        raise ValueError("invalid_benchmark_fixture_path")
+    return candidate
 
 
 def _relative_to(path: Path, root: Path) -> bool:

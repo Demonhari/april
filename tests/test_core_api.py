@@ -14,6 +14,7 @@ from services.api.dependencies import ApiContainer
 from services.api.server import create_app
 from services.jobs.registry import default_job_registry
 from services.jobs.store import JobStore
+from services.jobs.worker import JobWorker
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.repository import MemoryRepository
@@ -88,7 +89,19 @@ async def make_container(
         tool_executor=tool_executor,
         agent_registry=default_agent_registry(),
         orchestrator=orchestrator,
+        job_store=JobStore(database, default_job_registry()),
     )
+
+
+async def run_one_job(container: ApiContainer) -> None:
+    assert container.job_store is not None
+    worker = JobWorker(
+        settings=container.settings,
+        database=container.database,
+        store=container.job_store,
+        tool_worker=None,
+    )
+    assert await worker.run_once() is True
 
 
 def auth(settings_tmp) -> dict[str, str]:
@@ -1033,7 +1046,8 @@ def test_vector_repo_chunks_return_citations(settings_tmp) -> None:
         json={},
         headers=auth(settings_tmp),
     )
-    assert index_response.status_code == 200
+    assert index_response.status_code == 202
+    anyio.run(run_one_job, container)
     response = client.post(
         "/chat",
         json={
@@ -2287,7 +2301,7 @@ def test_run_command_cwd_is_forced_to_selected_project(settings_tmp, tmp_path) -
     assert response.json()["approval"]["args"]["cwd"] == str(settings_tmp.home)
 
 
-def test_project_index_records_audit_and_tool_call(settings_tmp) -> None:
+def test_project_index_submits_durable_job(settings_tmp) -> None:
     import anyio
 
     container = anyio.run(make_container, settings_tmp)
@@ -2300,12 +2314,15 @@ def test_project_index_records_audit_and_tool_call(settings_tmp) -> None:
         json={},
         headers=auth(settings_tmp),
     )
-    assert response.status_code == 200
+    assert response.status_code == 202
+    assert response.json()["job_type"] == "repository_index"
     rows = anyio.run(
-        container.database.fetchall, "SELECT * FROM tool_calls WHERE tool = ?", ("repo_indexer",)
+        container.database.fetchall,
+        "SELECT * FROM background_jobs WHERE job_type = ?",
+        ("repository_index",),
     )
     assert len(rows) == 1
-    assert "tool_executed" in settings_tmp.audit_path.read_text(encoding="utf-8")
+    assert rows[0]["status"] == "queued"
 
 
 def test_project_scoped_read_cannot_access_another_project(settings_tmp, tmp_path) -> None:
@@ -2337,7 +2354,7 @@ def test_project_scoped_read_cannot_access_another_project(settings_tmp, tmp_pat
     assert response.status_code == 403
 
 
-def test_recorded_permission_uses_policy_not_executor_output(settings_tmp) -> None:
+def test_repository_index_job_permission_comes_from_registry(settings_tmp) -> None:
     import anyio
 
     container = anyio.run(make_container, settings_tmp)
@@ -2350,11 +2367,12 @@ def test_recorded_permission_uses_policy_not_executor_output(settings_tmp) -> No
         json={},
         headers=auth(settings_tmp),
     )
-    assert index.status_code == 200
-    rows = anyio.run(
-        container.database.fetchall, "SELECT * FROM tool_calls WHERE tool = ?", ("repo_indexer",)
-    )
-    assert rows[0]["permission_level"] == 2
+    assert index.status_code == 202
+    assert container.job_store is not None
+    definition = container.job_store.registry.require("repository_index")
+    assert definition.permission_level == 2
+    rows = anyio.run(container.database.fetchall, "SELECT * FROM tool_calls")
+    assert rows == []
 
 
 def test_disabled_external_action_is_denied(settings_tmp) -> None:

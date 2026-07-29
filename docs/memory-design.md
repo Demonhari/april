@@ -134,14 +134,18 @@ Manual recommended semantic setup:
 ```bash
 run april model import --role embedding --id april-embedding \
   --name nomic-embed-text-v1.5 \
-  --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf
+  --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf \
+  --sha256 EXPECTED_SHA256
 export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
 export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding
 run april memory doctor --verify-runtime-embedding
-run april memory reindex
+run april memory reindex --wait
 ```
 
-APRIL never downloads this model. Hashed-token remains a clearly identified
+APRIL never downloads this model. Import requires exact one-time approval,
+keeps it inactive, and never changes the selected embedding provider. Nomic
+becomes usable only after the manual local import, explicit provider
+configuration, and durable reindex. Hashed-token remains a clearly identified
 degraded semantic path for first-run development.
 
 Document ingestion uses typed local extractors. Text/source files are supported

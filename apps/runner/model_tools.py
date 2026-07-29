@@ -861,7 +861,7 @@ def model_doctor(home: Path) -> dict[str, Any]:
                 "role": model.role,
                 "name": model.name,
                 "backend": model.backend,
-                "path": str(path),
+                "path": path.name,
                 "path_exists": exists,
                 "file_size_bytes": size,
                 "file_size": format_bytes(size),
@@ -875,9 +875,12 @@ def model_doctor(home: Path) -> dict[str, Any]:
                 "realism": _model_realism(size, ram),
             }
         )
+    from apps.runner.readiness import build_readiness_report
+
+    readiness = build_readiness_report(root)
     return {
         "python_version": sys.version.split()[0],
-        "april_home": str(root),
+        "april_home_basename": root.name,
         "runtime_backend": settings.runtime.backend,
         "llama_cpp_python_installed": importlib.util.find_spec("llama_cpp") is not None,
         "api_token": redact_token(settings.api.token),
@@ -888,4 +891,25 @@ def model_doctor(home: Path) -> dict[str, Any]:
         "estimated_ram_bytes": ram,
         "estimated_ram": format_bytes(ram),
         "models": models,
+        "durable_workflows": {
+            "model_import": readiness.model_import_uses_durable_jobs,
+            "memory_reindex": readiness.memory_reindex_uses_durable_jobs,
+        },
+        "memory_index": {
+            "last_successful_semantic_reindex": readiness.last_successful_semantic_reindex,
+            "active_generation": readiness.active_vector_generation,
+            "provider": readiness.active_embedding_provider,
+            "model_id": readiness.active_embedding_model_id,
+        },
+        "benchmark_evidence": {
+            "fixtures_installed": readiness.comparison_fixtures_installed,
+            "fixture_set_version": readiness.comparison_fixture_set_version,
+            "fixture_set_sha256": readiness.comparison_fixture_set_sha256,
+            "real_evidence_exists": readiness.real_benchmark_evidence_exists,
+            "current_hardware": readiness.benchmark_evidence_current_hardware,
+            "simulated": readiness.benchmark_evidence_simulated,
+            "stale": readiness.benchmark_evidence_stale,
+            "incomplete": readiness.benchmark_evidence_incomplete,
+            "production_eligible": readiness.benchmark_evidence_production_eligible,
+        },
     }

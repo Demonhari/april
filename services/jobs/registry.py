@@ -22,6 +22,15 @@ class MemoryReindexPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SourceIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device: int = Field(ge=0)
+    inode: int = Field(ge=0)
+    size: int = Field(ge=4)
+    modified_ns: int = Field(ge=0)
+
+
 class DocumentIndexPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -57,12 +66,23 @@ class ModelImportPayload(BaseModel):
         max_length=64,
         pattern=r"^[a-fA-F0-9]{64}$",
     )
+    source_identity: SourceIdentity
+    format: str = Field(pattern=r"^gguf$")
+    destination: str = Field(min_length=1, max_length=4096)
+    requested_verification: bool = False
 
 
 class BenchmarkPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_id: str = Field(min_length=1, max_length=128)
+
+
+class ModelSetupComparisonPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shared_model_id: str = Field(min_length=1, max_length=128)
+    cooldown_seconds: float = Field(default=0.0, ge=0.0, le=600.0)
 
 
 class FinetunePayload(BaseModel):
@@ -184,6 +204,18 @@ def default_job_registry(
                 restart_safe=True,
                 default_timeout_seconds=3600.0,
                 maximum_attempts=2,
+                cancellation_behavior="process_group",
+                available=True,
+            ),
+            JobTypeDefinition(
+                "model_setup_comparison",
+                ModelSetupComparisonPayload,
+                permission_level=2,
+                approval_required=False,
+                idempotent=True,
+                restart_safe=True,
+                default_timeout_seconds=14_400.0,
+                maximum_attempts=3,
                 cancellation_behavior="process_group",
                 available=True,
             ),

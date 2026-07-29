@@ -335,7 +335,8 @@ def _next_commands(profile: str, env_file: Path) -> list[str]:
         "run april verify --fake",
         f"run april model profile apply {profile}",
         "pip install -e '.[runtime]'  # optional: real llama.cpp runtime",
-        "run april model import --role brain --id april-brain --path /absolute/path/model.gguf",
+        "run april model import --role brain --id april-brain --name LOCAL_BRAIN "
+        "--path /absolute/path/model.gguf --sha256 EXPECTED_SHA256",
         "run april model doctor",
         "run april verify --real-model /absolute/path/model.gguf",
         "run april verify --target-mac --require-real-model /absolute/path/model.gguf "

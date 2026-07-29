@@ -17,6 +17,7 @@ ToolWorkerOperation = Literal[
     "cancel",
     "run_command",
     "test_runner",
+    "benchmark_fixture",
     "patch_applier",
     "git_commit",
 ]

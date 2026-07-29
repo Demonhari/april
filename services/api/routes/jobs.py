@@ -60,6 +60,7 @@ def register_job_routes(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         approved = False
+        atomically_accepted = False
         approval_id = request.approval_id
         request_id = http_request.headers.get("x-request-id") or str(uuid.uuid4())
         if definition.approval_required:
@@ -75,38 +76,69 @@ def register_job_routes(
             elif request.job_type == "finetune" and record.tool == "finetune":
                 expected_payload = {"plan_id": str(record.args.get("plan_id", ""))}
             elif request.job_type == "model_import" and record.tool == "model_import":
-                expected_payload = {
-                    "source_path": str(record.args.get("source_path", "")),
-                    "model_id": str(record.args.get("model_id", "")),
-                    "role": str(record.args.get("role", "")),
-                    "name": str(record.args.get("name", "")),
-                    "expected_sha256": record.args.get("expected_sha256"),
-                }
+                expected_payload = dict(record.args)
             else:
                 raise HTTPException(status_code=409, detail="approval_action_mismatch")
             validated_payload = definition.validate_payload(request.payload)
             if validated_payload != expected_payload:
                 raise HTTPException(status_code=409, detail="approval_action_mismatch")
-            await active.approvals.approve_exact(
-                approval_id=approval_id,
-                tool=record.tool,
-                args=record.args,
-                actor="local-user",
-                request_id=request_id,
-            )
+            if request.job_type == "model_import":
+                if record.status == "pending":
+                    await active.approvals.approve_exact(
+                        approval_id=approval_id,
+                        tool=record.tool,
+                        args=record.args,
+                        actor="local-user",
+                        request_id=request_id,
+                    )
+                try:
+                    job, created = await active.job_store.submit_with_exact_approval(
+                        job_type=request.job_type,
+                        payload=request.payload,
+                        owner="local-user",
+                        approval_id=approval_id,
+                        approval_tool=record.tool,
+                        approval_args=record.args,
+                        conversation_id=request.conversation_id,
+                        project_id=request.project_id,
+                    )
+                    if created:
+                        active.approvals.audit.write(
+                            {
+                                "actor": "local-user",
+                                "request_id": request_id,
+                                "event_type": "approval_consumed",
+                                "tool": record.tool,
+                                "approval_id": approval_id,
+                                "outcome": "consumed",
+                                "job_id": job.id,
+                            }
+                        )
+                except (ValueError, JobTransitionError) as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                atomically_accepted = True
+            else:
+                await active.approvals.approve_exact(
+                    approval_id=approval_id,
+                    tool=record.tool,
+                    args=record.args,
+                    actor="local-user",
+                    request_id=request_id,
+                )
             approved = True
-        try:
-            job = await active.job_store.submit(
-                job_type=request.job_type,
-                payload=request.payload,
-                owner="local-user",
-                conversation_id=request.conversation_id,
-                project_id=request.project_id,
-                approved=approved,
-            )
-        except (ValueError, JobTransitionError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if approval_id is not None and approved:
+        if not atomically_accepted:
+            try:
+                job = await active.job_store.submit(
+                    job_type=request.job_type,
+                    payload=request.payload,
+                    owner="local-user",
+                    conversation_id=request.conversation_id,
+                    project_id=request.project_id,
+                    approved=approved,
+                )
+            except (ValueError, JobTransitionError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if approval_id is not None and approved and not atomically_accepted:
             await active.approvals.consume(
                 approval_id=approval_id,
                 result={"ok": True, "job_id": job.id, "status": job.status.value},
