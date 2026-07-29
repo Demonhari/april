@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -13,10 +14,17 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from april_common.audit import AuditLogger
+from april_common.process_environment import ProcessCategory, build_process_environment
 from april_common.service_health import probe_service_health
 from april_common.settings import AprilSettings, get_settings
 from april_common.time import utc_now_iso
 from services.pool.governor import GovernorDecision, ResourceGovernor
+from services.tool_worker.limits import (
+    default_tool_worker_runtime_directory,
+    prepare_runtime_directory,
+    validate_live_socket,
+    write_capability_file,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +33,8 @@ class ChildSpec:
     argv: tuple[str, ...]
     health_url: str | None = None
     health_token: str | None = field(default=None, repr=False)
+    process_category: ProcessCategory = ProcessCategory.DAEMON
+    environment_overrides: tuple[tuple[str, str], ...] = ()
     restart_backoff_seconds: float = 2.0
     max_restart_backoff_seconds: float = 60.0
 
@@ -137,6 +147,7 @@ class AprialdSupervisor:
     ) -> None:
         self.settings = settings
         self.process_factory = process_factory or self._spawn_process
+        self._uses_default_process_factory = process_factory is None
         self.health_checker = health_checker or _loopback_health_check
         self.governor = governor or ResourceGovernor(settings)
         self.sleep = sleep
@@ -208,11 +219,11 @@ class AprialdSupervisor:
             process = runtime.process
             if process is None or process.returncode is not None:
                 continue
-            process.terminate()
+            self._signal_process(process, signal.SIGTERM)
             try:
                 await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
-                process.kill()
+                self._signal_process(process, signal.SIGKILL)
                 await process.wait()
             self._audit("daemon_child_exit", child=runtime.spec.name)
         daemon_pid_path(self.settings).unlink(missing_ok=True)
@@ -319,7 +330,7 @@ class AprialdSupervisor:
             runtime.crash_loop_suppressed = True
             self._audit("daemon_child_crash_loop_suppressed", child=runtime.spec.name)
             return
-        runtime.process.terminate()
+        self._signal_process(runtime.process, signal.SIGTERM)
 
     async def _child_health(self, runtime: ChildRuntime) -> ChildHealth:
         process = runtime.process
@@ -397,8 +408,11 @@ class AprialdSupervisor:
         )
 
     async def _spawn_process(self, spec: ChildSpec) -> ProcessHandle:
-        env = os.environ.copy()
-        env["APRIL_HOME"] = str(self.settings.home)
+        env = build_process_environment(
+            spec.process_category,
+            april_home=self.settings.home,
+            overrides=dict(spec.environment_overrides),
+        )
         # Passing asyncio.subprocess.DEVNULL asks asyncio to create parent-side
         # file objects whose cleanup otherwise depends on transport GC on some
         # supported Python/macOS combinations. Own the handle explicitly so
@@ -410,7 +424,20 @@ class AprialdSupervisor:
                 env=env,
                 stdout=devnull,
                 stderr=devnull,
+                start_new_session=True,
             )
+
+    def _signal_process(self, process: ProcessHandle, signum: int) -> None:
+        if self._uses_default_process_factory:
+            try:
+                os.killpg(process.pid, signum)
+                return
+            except ProcessLookupError:
+                return
+        if signum == signal.SIGKILL:
+            process.kill()
+        else:
+            process.terminate()
 
     def _audit(
         self, event_type: str, *, child: str | None = None, detail: str | None = None
@@ -433,13 +460,76 @@ def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
             argv=(python, "-m", "services.april_runtime.server"),
             health_url=settings.runtime.url.rstrip("/") + "/runtime/health",
             health_token=settings.runtime.token,
+            process_category=ProcessCategory.RUNTIME,
         ),
+    ]
+    external_overrides: list[tuple[str, str]] = []
+    if settings.workers.tool_worker_enabled:
+        tool_runtime = prepare_runtime_directory(
+            default_tool_worker_runtime_directory(settings.home),
+            april_home=settings.home,
+        )
+        tool_socket = tool_runtime / "worker.sock"
+        capability_file = tool_runtime / "capability"
+        write_capability_file(
+            capability_file,
+            secrets.token_urlsafe(32),
+            runtime_directory=tool_runtime,
+        )
+        specs.append(
+            ChildSpec(
+                name="tool_worker",
+                argv=(
+                    python,
+                    "-m",
+                    "services.tool_worker.server",
+                    "--april-home",
+                    str(settings.home),
+                    "--socket",
+                    str(tool_socket),
+                    "--capability-file",
+                    str(capability_file),
+                    *tuple(
+                        part
+                        for root in settings.allowed_roots
+                        for part in ("--allowed-root", str(root))
+                    ),
+                ),
+                health_url=f"tool-worker://{tool_socket}",
+                process_category=ProcessCategory.TOOL_WORKER,
+            )
+        )
+        external_overrides.append(("APRIL_TOOL_WORKER_EXTERNAL", "1"))
+    if settings.workers.job_worker_enabled:
+        job_runtime = settings.home / "data" / "runtime" / "job-worker"
+        job_runtime.mkdir(parents=True, mode=0o700, exist_ok=True)
+        os.chmod(job_runtime, 0o700)
+        specs.append(
+            ChildSpec(
+                name="job_worker",
+                argv=(
+                    python,
+                    "-m",
+                    "services.jobs.worker",
+                    "--april-home",
+                    str(settings.home),
+                    "--status-file",
+                    str(job_runtime / "status.json"),
+                ),
+                health_url=f"job-worker://{job_runtime / 'status.json'}",
+                process_category=ProcessCategory.JOB_WORKER,
+            )
+        )
+        external_overrides.append(("APRIL_JOB_WORKER_EXTERNAL", "1"))
+    specs.append(
         ChildSpec(
             name="api",
             argv=(python, "-m", "services.api.server"),
             health_url=f"http://{settings.api.host}:{settings.api.port}/health",
-        ),
-    ]
+            process_category=ProcessCategory.CORE_API,
+            environment_overrides=tuple(external_overrides),
+        )
+    )
     # The Sentinel needs a microphone, wake models, and STT. Supervising it with
     # voice or wake disabled would only crash-loop (run_sentinel raises), so the
     # default safe config supervises runtime and API only.
@@ -451,6 +541,7 @@ def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
                 name="sentinel",
                 argv=(python, "-m", "services.wake.sentinel"),
                 health_url=f"sentinel-control://{sentinel_control_path(settings)}",
+                process_category=ProcessCategory.SENTINEL_VOICE,
             )
         )
     return tuple(specs)
@@ -469,6 +560,20 @@ async def _loopback_health_check(spec: ChildSpec) -> bool:
             status = await asyncio.to_thread(sentinel_status_at_path, path)
             return status.get("state") in {"listening", "muted"}
         except (OSError, RuntimeError, ValueError):
+            return False
+    if spec.health_url.startswith("tool-worker://"):
+        try:
+            path = Path(spec.health_url.removeprefix("tool-worker://"))
+            validate_live_socket(path, runtime_directory=path.parent)
+            return True
+        except (OSError, RuntimeError):
+            return False
+    if spec.health_url.startswith("job-worker://"):
+        try:
+            path = Path(spec.health_url.removeprefix("job-worker://"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return payload.get("version") == 1 and payload.get("ready") is True
+        except (OSError, ValueError, TypeError):
             return False
     result = await asyncio.to_thread(
         probe_service_health,
@@ -553,8 +658,7 @@ def start_daemon_background(
         return current
     settings.logs_path.mkdir(parents=True, exist_ok=True)
     log_path = settings.logs_path / "apriald.log"
-    env = os.environ.copy()
-    env["APRIL_HOME"] = str(settings.home)
+    env = build_process_environment(ProcessCategory.DAEMON, april_home=settings.home)
     with log_path.open("ab") as log_file, Path(os.devnull).open("rb") as devnull:
         process = subprocess.Popen(
             [sys.executable, "-m", "apps.daemon.apriald"],

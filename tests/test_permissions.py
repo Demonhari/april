@@ -90,13 +90,13 @@ async def test_open_app_uses_macos_open_with_argv(settings_tmp, tmp_path, monkey
     open_binary.write_text("", encoding="utf-8")
     calls: list[list[str]] = []
 
-    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+    async def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr("skills.apps.open_app.sys.platform", "darwin")
     monkeypatch.setattr("skills.apps.open_app.OPEN_BINARY", open_binary)
-    monkeypatch.setattr("skills.apps.open_app.subprocess.run", fake_run)
+    monkeypatch.setattr("skills.apps.open_app.run_restricted_process", fake_run)
     result = await open_app({"name": "TextEdit"})
     assert result.ok is True
     assert calls == [[str(open_binary), "-a", "TextEdit"]]
@@ -124,13 +124,13 @@ async def test_open_url_normalizes_and_uses_argv(settings_tmp, tmp_path, monkeyp
     open_binary.write_text("", encoding="utf-8")
     calls: list[list[str]] = []
 
-    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+    async def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr("skills.apps.open_url.sys.platform", "darwin")
     monkeypatch.setattr("skills.apps.open_url.OPEN_BINARY", open_binary)
-    monkeypatch.setattr("skills.apps.open_url.subprocess.run", fake_run)
+    monkeypatch.setattr("skills.apps.open_url.run_restricted_process", fake_run)
     result = await open_url({"url": "HTTPS://Example.COM?q=1"})
     assert result.ok is True
     assert result.data == {"url": "https://example.com/?q=1"}

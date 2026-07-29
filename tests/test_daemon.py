@@ -14,6 +14,7 @@ from apps.daemon.apriald import (
     DaemonLock,
     daemon_pid_path,
     daemon_status_path,
+    default_child_specs,
     read_daemon_status,
     stop_daemon,
     wait_for_core_health,
@@ -155,8 +156,8 @@ async def test_supervisor_default_safe_config_excludes_sentinel(settings_tmp) ->
     supervisor = _supervisor(settings_tmp, factory, ManualClock())
     await supervisor.start()
     try:
-        assert factory.started == ["runtime", "api"]
-        assert set(supervisor.children) == {"runtime", "api"}
+        assert factory.started == ["runtime", "tool_worker", "job_worker", "api"]
+        assert set(supervisor.children) == {"runtime", "tool_worker", "job_worker", "api"}
         health = await supervisor.health()
         assert health.status == "ok"
     finally:
@@ -175,7 +176,7 @@ async def test_daemon_status_reports_running_child_details(settings_tmp) -> None
         assert status["details_available"] is True
         assert status["governor"] == {"allowed": True, "reasons": []}
         children = {child["name"]: child for child in status["children"]}  # type: ignore[index]
-        assert set(children) == {"runtime", "api"}
+        assert set(children) == {"runtime", "tool_worker", "job_worker", "api"}
         assert children["runtime"]["status"] == "running"
         assert children["runtime"]["pid"] == 10_000
         assert children["runtime"]["restarts"] == 0
@@ -278,7 +279,13 @@ async def test_supervisor_includes_sentinel_when_voice_and_wake_enabled(settings
     supervisor = _supervisor(_voice_wake_enabled(settings_tmp), factory, ManualClock())
     await supervisor.start()
     try:
-        assert factory.started == ["runtime", "api", "sentinel"]
+        assert factory.started == [
+            "runtime",
+            "tool_worker",
+            "job_worker",
+            "api",
+            "sentinel",
+        ]
     finally:
         await supervisor.stop()
 
@@ -292,7 +299,7 @@ async def test_supervisor_excludes_sentinel_when_only_wake_enabled(settings_tmp)
     supervisor = _supervisor(wake_only, factory, ManualClock())
     await supervisor.start()
     try:
-        assert factory.started == ["runtime", "api"]
+        assert factory.started == ["runtime", "tool_worker", "job_worker", "api"]
     finally:
         await supervisor.stop()
 
@@ -304,7 +311,13 @@ async def test_supervisor_starts_children_degrades_and_restarts_with_backoff(set
     supervisor = _supervisor(_voice_wake_enabled(settings_tmp), factory, clock)
     await supervisor.start()
     try:
-        assert factory.started == ["runtime", "api", "sentinel"]
+        assert factory.started == [
+            "runtime",
+            "tool_worker",
+            "job_worker",
+            "api",
+            "sentinel",
+        ]
         health = await supervisor.health()
         assert health.status == "ok"
 
@@ -319,7 +332,13 @@ async def test_supervisor_starts_children_degrades_and_restarts_with_backoff(set
         )
 
         await supervisor.supervise_once()
-        assert factory.started == ["runtime", "api", "sentinel"]
+        assert factory.started == [
+            "runtime",
+            "tool_worker",
+            "job_worker",
+            "api",
+            "sentinel",
+        ]
         # A scheduled restart is reported with its remaining delay.
         scheduled = await supervisor.health()
         runtime_child = next(c for c in scheduled.children if c.name == "runtime")
@@ -328,7 +347,14 @@ async def test_supervisor_starts_children_degrades_and_restarts_with_backoff(set
         assert "restart_scheduled_in" in (runtime_child.detail or "")
         clock.advance(3.0)
         await supervisor.supervise_once()
-        assert factory.started == ["runtime", "api", "sentinel", "runtime"]
+        assert factory.started == [
+            "runtime",
+            "tool_worker",
+            "job_worker",
+            "api",
+            "sentinel",
+            "runtime",
+        ]
         assert supervisor.children["runtime"].restarts == 1
     finally:
         await supervisor.stop()
@@ -512,6 +538,19 @@ def test_launchd_install_writes_only_user_launch_agents(settings_tmp, tmp_path: 
 
     assert manager.uninstall() is True
     assert manager.status()["installed"] is False
+
+
+def test_development_can_explicitly_disable_workers(settings_tmp) -> None:
+    disabled = settings_tmp.model_copy(
+        update={
+            "workers": settings_tmp.workers.model_copy(
+                update={"tool_worker_enabled": False, "job_worker_enabled": False}
+            )
+        }
+    )
+    specs = default_child_specs(disabled)
+    assert [spec.name for spec in specs] == ["runtime", "api"]
+    assert specs[-1].environment_overrides == ()
 
 
 def test_launchd_argv_lifecycle_is_idempotent_and_truthful(settings_tmp, tmp_path: Path) -> None:

@@ -27,6 +27,8 @@ from april_common.errors import (
     error_payload,
 )
 from april_common.path_security import PathPolicy, normalize_existing_path
+from april_common.process_environment import PROCESS_ENVIRONMENT_POLICY_VERSION
+from april_common.process_runner import ResourceLimitProfile, resource_limit_report
 from april_common.report_freshness import freshness_from_payload
 from april_common.service_health import ServiceHealthResult, probe_service_health
 from april_common.settings import (
@@ -87,9 +89,17 @@ from services.evolution.inspect import (
 from services.evolution.playbook_miner import mine_playbook_candidates
 from services.evolution.versions import PromptOverlayManager
 from services.evolution.write_guard import EvolutionWriteGuard
+from services.jobs.schemas import (
+    DEFAULT_JOB_LIST_LIMIT,
+    MAX_JOB_LIST_LIMIT,
+    JobSubmission,
+)
+from services.jobs.store import JobNotFoundError, JobTransitionError
+from services.memory.migrations import SCHEMA_VERSION
 from services.memory.writer import MemoryWriter
 from services.pool.agent_pool import AgentPool
 from services.scheduler import compose_briefing, compute_repo_activity
+from services.tool_worker.limits import UnsafeToolWorkerSocket, validate_live_socket
 from services.voice.health import (
     microphone_access,
     query_audio_devices,
@@ -147,6 +157,21 @@ _ACTIVITY_ALLOWED_KEYS = frozenset(
         "case_id",
     }
 )
+
+
+async def _scoped_job(active: ApiContainer, job_id: str) -> Any:
+    if active.job_store is None:
+        raise HTTPException(status_code=503, detail="job_store_unavailable")
+    try:
+        job = await active.job_store.require(job_id)
+    except (JobNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="job_not_found") from exc
+    if job.owner != "local-user":
+        raise HTTPException(status_code=404, detail="job_not_found")
+    if job.project_id is not None and await active.memory.get_project(job.project_id) is None:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    return job
+
 
 _PATH_TEXT_RE = re.compile(r"~?(?:/[\w.\-]+){2,}/?")
 _VERIFICATION_REPORT_TYPES = {
@@ -269,6 +294,136 @@ def create_app(container: ApiContainer | None = None) -> FastAPI:
     @app.get("/health")
     async def health() -> object:
         return {"status": "ok", "service": "april-core-api"}
+
+    @app.post("/jobs")
+    async def submit_job(
+        request: JobSubmission,
+        http_request: Request,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        if active.job_store is None:
+            raise HTTPException(status_code=503, detail="job_store_unavailable")
+        if request.project_id is not None:
+            project = await active.memory.get_project(request.project_id)
+            if project is None:
+                raise HTTPException(status_code=404, detail="project_not_found")
+        if request.conversation_id is not None:
+            conversation = await active.memory.get_conversation(request.conversation_id)
+            if conversation is None:
+                raise HTTPException(status_code=404, detail="conversation_not_found")
+            if (
+                request.project_id is not None
+                and conversation.project_id is not None
+                and conversation.project_id != request.project_id
+            ):
+                raise HTTPException(status_code=409, detail="conversation_project_mismatch")
+        try:
+            definition = active.job_store.registry.require(request.job_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        approved = False
+        approval_id = request.approval_id
+        request_id = http_request.headers.get("x-request-id") or str(uuid.uuid4())
+        if definition.approval_required:
+            if approval_id is None:
+                raise HTTPException(status_code=409, detail="approval_required")
+            record = await active.approvals.get(approval_id)
+            if request.job_type != "configured_test" or record.tool != "test_runner":
+                raise HTTPException(status_code=409, detail="approval_action_mismatch")
+            expected_payload = {
+                "argv": list(record.args.get("argv", ["pytest"])),
+                "cwd": str(record.args.get("repo_path", "")),
+            }
+            validated_payload = definition.validate_payload(request.payload)
+            if validated_payload != expected_payload:
+                raise HTTPException(status_code=409, detail="approval_action_mismatch")
+            await active.approvals.approve_exact(
+                approval_id=approval_id,
+                tool=record.tool,
+                args=record.args,
+                actor="local-user",
+                request_id=request_id,
+            )
+            approved = True
+        try:
+            job = await active.job_store.submit(
+                job_type=request.job_type,
+                payload=request.payload,
+                owner="local-user",
+                conversation_id=request.conversation_id,
+                project_id=request.project_id,
+                approved=approved,
+            )
+        except (ValueError, JobTransitionError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if approval_id is not None and approved:
+            await active.approvals.consume(
+                approval_id=approval_id,
+                result={"ok": True, "job_id": job.id, "status": job.status.value},
+                actor="local-user",
+                request_id=request_id,
+            )
+        return job.model_dump(mode="json")
+
+    @app.get("/jobs")
+    async def list_jobs(
+        project_id: str | None = None,
+        limit: int = DEFAULT_JOB_LIST_LIMIT,
+        offset: int = 0,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        if active.job_store is None:
+            raise HTTPException(status_code=503, detail="job_store_unavailable")
+        if not 1 <= limit <= MAX_JOB_LIST_LIMIT or not 0 <= offset <= 10_000:
+            raise HTTPException(status_code=400, detail="pagination_out_of_bounds")
+        jobs = await active.job_store.list(
+            owner="local-user",
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "jobs": [job.model_dump(mode="json") for job in jobs],
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @app.get("/jobs/{job_id}")
+    async def show_job(
+        job_id: str,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        job = await _scoped_job(active, job_id)
+        return job.model_dump(mode="json")
+
+    @app.post("/jobs/{job_id}/cancel")
+    async def cancel_job(
+        job_id: str,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        await _scoped_job(active, job_id)
+        assert active.job_store is not None
+        job, already_terminal = await active.job_store.request_cancel(job_id)
+        return {
+            "job": job.model_dump(mode="json"),
+            "already_terminal": already_terminal,
+        }
+
+    @app.post("/jobs/{job_id}/retry")
+    async def retry_job(
+        job_id: str,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        await _scoped_job(active, job_id)
+        assert active.job_store is not None
+        try:
+            job, already_queued = await active.job_store.retry(job_id)
+        except JobTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "job": job.model_dump(mode="json"),
+            "already_queued": already_queued,
+        }
 
     @app.get("/diagnostics")
     async def diagnostics(active: ApiContainer = Depends(authorized)) -> object:
@@ -1588,6 +1743,42 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         active.database,
         audit=active.approvals.audit,
     ).state_health()
+    job_counts = (
+        await active.job_store.counts()
+        if active.job_store is not None
+        else {"queued": 0, "running": 0, "interrupted": 0, "expired_leases": 0}
+    )
+    tool_worker_live = bool(
+        active.tool_worker_manager is not None
+        and active.tool_worker_manager.process is not None
+        and active.tool_worker_manager.process.returncode is None
+    )
+    tool_worker_socket_mode: str | None = None
+    tool_worker_protocol_ready = False
+    tool_worker_self_check = False
+    if active.tool_worker_manager is not None:
+        try:
+            tool_worker_socket_mode = validate_live_socket(
+                active.tool_worker_manager.socket_path,
+                runtime_directory=active.tool_worker_manager.runtime_directory,
+            )
+            tool_worker_protocol_ready = active.tool_worker_client is not None
+            if active.tool_worker_client is not None and active.settings.allowed_roots:
+                response = await active.tool_worker_client.self_check(
+                    project_root=active.settings.allowed_roots[0]
+                )
+                tool_worker_self_check = response.ok
+        except (OSError, UnsafeToolWorkerSocket, Exception):
+            tool_worker_protocol_ready = False
+            tool_worker_self_check = False
+    job_worker_live = bool(
+        active.job_worker_manager is not None
+        and active.job_worker_manager.process is not None
+        and active.job_worker_manager.process.returncode is None
+    )
+    job_worker_ready = bool(
+        active.job_worker_manager is not None and active.job_worker_manager.status_path.exists()
+    )
     scheduler_required = active.settings.scheduler.enabled
     scheduler_available = active.scheduler is not None and active.scheduler.running
     failure_reasons = _readiness_failure_reasons(
@@ -1604,6 +1795,22 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
             {
                 "code": "adapter_state_inconsistent",
                 "message": "Adapter lifecycle state requires reconciliation.",
+            }
+        )
+    if active.settings.workers.tool_worker_enabled and (
+        not tool_worker_protocol_ready or not tool_worker_self_check
+    ):
+        failure_reasons.append(
+            {
+                "code": "tool_worker_unavailable",
+                "message": "Tool Worker is not ready; risky tools fail closed.",
+            }
+        )
+    if active.settings.workers.job_worker_enabled and not job_worker_ready:
+        failure_reasons.append(
+            {
+                "code": "job_worker_unavailable",
+                "message": "Job Worker is not ready; durable jobs remain queued.",
             }
         )
     ready = not failure_reasons
@@ -1653,6 +1860,30 @@ async def _readiness_payload(active: ApiContainer) -> dict[str, Any]:
         },
         "embeddings": embeddings,
         "conversation_summarization": summary_readiness,
+        "jobs": {
+            "schema_version": SCHEMA_VERSION,
+            "worker_enabled": active.settings.workers.job_worker_enabled,
+            "queued": job_counts.get("queued", 0),
+            "running": job_counts.get("running", 0),
+            "interrupted": job_counts.get("interrupted", 0),
+            "expired_leases": job_counts.get("expired_leases", 0),
+            "worker_liveness": job_worker_live,
+            "worker_readiness": job_worker_ready,
+        },
+        "tool_worker": {
+            "enabled": active.settings.workers.tool_worker_enabled,
+            "process_liveness": tool_worker_live,
+            "socket_available": tool_worker_socket_mode is not None,
+            "socket_mode": tool_worker_socket_mode,
+            "protocol_readiness": tool_worker_protocol_ready,
+            "self_check": tool_worker_self_check,
+        },
+        "process_policy": {
+            "environment_policy_version": PROCESS_ENVIRONMENT_POLICY_VERSION,
+            "unsupported_resource_limits": list(
+                resource_limit_report(ResourceLimitProfile.COMMAND).unsupported
+            ),
+        },
         "evolution": {
             "enabled": active.settings.evolution.enabled,
             "kill_switch_active": evolution_kill_switch_active(active.settings),

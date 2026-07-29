@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from april_common.errors import RuntimeUnavailableError
+from april_common.process_environment import ProcessCategory
+from april_common.process_runner import (
+    ProcessStatus,
+    ResourceLimitProfile,
+    run_restricted_process,
+)
 
 
 class SpeechToText:
@@ -24,28 +29,30 @@ class WhisperCppSpeechToText(SpeechToText):
             raise RuntimeUnavailableError("whisper.cpp binary/model paths are not configured.")
         if not self.binary_path.exists() or not self.model_path.exists():
             raise RuntimeUnavailableError("whisper.cpp binary or model path is missing.")
-        process = await asyncio.create_subprocess_exec(
-            str(self.binary_path),
-            "-m",
-            str(self.model_path),
-            "-f",
-            str(audio_path),
-            "-nt",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        result = await run_restricted_process(
+            [
+                str(self.binary_path),
+                "-m",
+                str(self.model_path),
+                "-f",
+                str(audio_path),
+                "-nt",
+            ],
+            cwd=self.binary_path.parent,
+            category=ProcessCategory.SENTINEL_VOICE,
+            timeout_seconds=self.timeout,
+            max_stdout_bytes=100_000,
+            max_stderr_bytes=100_000,
+            resource_limit_profile=ResourceLimitProfile.MODEL_UTILITY,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout)
-        except TimeoutError as exc:
-            process.kill()
-            await process.wait()
-            raise RuntimeUnavailableError("whisper.cpp timed out.") from exc
-        if process.returncode:
+        if result.status is ProcessStatus.TIMED_OUT:
+            raise RuntimeUnavailableError("whisper.cpp timed out.")
+        if result.status is not ProcessStatus.COMPLETED or result.returncode:
             raise RuntimeUnavailableError(
                 "whisper.cpp failed.",
-                {"stderr": stderr.decode("utf-8", errors="replace")[:1000]},
+                {"stderr": result.stderr[:1000], "failure_code": result.failure_code},
             )
-        return stdout.decode("utf-8", errors="replace").strip()
+        return result.stdout.strip()
 
 
 class FakeSpeechToText(SpeechToText):

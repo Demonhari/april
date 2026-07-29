@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -12,9 +13,9 @@ from services.memory.schemas import Project
 from services.memory.sqlite_memory import SqliteMemory
 from services.permissions.approvals import ApprovalStore, canonical_args_hash
 from services.permissions.artifacts import (
-    apply_approved_patch,
     build_git_commit_metadata,
     build_patch_approval_metadata,
+    load_patch_artifact_bytes,
     verify_approval_artifact,
 )
 from services.permissions.cleanup import (
@@ -24,6 +25,11 @@ from services.permissions.cleanup import (
 from services.permissions.engine import PermissionEngine
 from services.permissions.schemas import ApprovalRequest, ApprovalResponse, PermissionDecision
 from services.permissions.tool_status import ToolCallStatus
+from services.tool_worker.client import (
+    ToolWorkerClient,
+    ToolWorkerProcessManager,
+    ToolWorkerUnavailable,
+)
 from skills.registry import ToolRegistry
 from skills.schemas import ToolResult
 
@@ -43,6 +49,9 @@ PROJECT_REQUIRED_TOOLS = {
 }
 PROJECT_OPTIONAL_PATH_TOOLS = {"read_file", "write_file", "list_files", "search_files"}
 MAX_STORED_OUTPUT_CHARS = 4000
+TOOL_WORKER_REQUIRED_TOOLS = frozenset(
+    {"run_command", "test_runner", "patch_applier", "git_commit"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,12 +87,20 @@ class ToolExecutionService:
         tool_registry: ToolRegistry,
         permission_engine: PermissionEngine,
         approvals: ApprovalStore,
+        tool_worker: ToolWorkerClient | None = None,
     ) -> None:
         self.settings = settings
         self.memory = memory
         self.tool_registry = tool_registry
         self.permission_engine = permission_engine
         self.approvals = approvals
+        self.tool_worker = tool_worker
+        self._owned_tool_worker_manager: ToolWorkerProcessManager | None = None
+
+    async def aclose(self) -> None:
+        if self._owned_tool_worker_manager is not None:
+            await self._owned_tool_worker_manager.stop()
+            self._owned_tool_worker_manager = None
 
     async def context(
         self,
@@ -269,8 +286,13 @@ class ToolExecutionService:
                 result=precondition_failure,
             )
         try:
-            if approved.tool == "patch_applier":
-                result = await apply_approved_patch(approved)
+            if approved.tool in TOOL_WORKER_REQUIRED_TOOLS:
+                result = await self._execute_via_tool_worker(
+                    tool=approved.tool,
+                    args=approved.args,
+                    context=active_context,
+                    metadata=approved.metadata,
+                )
             elif approved.tool == "apply_log_cleanup":
                 result = await apply_approved_log_cleanup(approved)
             else:
@@ -462,7 +484,15 @@ class ToolExecutionService:
         permission: PermissionDecision,
     ) -> ToolResult:
         try:
-            result = await self.tool_registry.execute(tool, args)
+            if tool in TOOL_WORKER_REQUIRED_TOOLS:
+                result = await self._execute_via_tool_worker(
+                    tool=tool,
+                    args=args,
+                    context=context,
+                    metadata={},
+                )
+            else:
+                result = await self.tool_registry.execute(tool, args)
         except Exception as exc:
             result = ToolResult(
                 ok=False,
@@ -492,6 +522,129 @@ class ToolExecutionService:
                 "ok" if result.ok else "failed",
             )
         return result
+
+    async def _execute_via_tool_worker(
+        self,
+        *,
+        tool: str,
+        args: dict[str, Any],
+        context: ToolExecutionContext,
+        metadata: dict[str, Any],
+    ) -> ToolResult:
+        permission = context.permission_decision
+        risk = permission.risk_level if permission is not None else "code_write"
+        level = permission.permission_level if permission is not None else 3
+        if tool == "patch_applier" and (
+            metadata.get("artifact_type") != "patch"
+            or not metadata.get("artifact_id")
+            or not metadata.get("patch_sha256")
+        ):
+            return ToolResult(
+                ok=False,
+                stderr="Patch approval is missing immutable artifact metadata.",
+                data={"failure_code": "patch_artifact_metadata_missing"},
+                risk_level=risk,
+                permission_level=level,
+            )
+        if self.tool_worker is None:
+            manager = ToolWorkerProcessManager(
+                april_home=self.settings.home,
+                allowed_roots=tuple(self.settings.allowed_roots),
+            )
+            try:
+                self.tool_worker = await manager.start()
+                self._owned_tool_worker_manager = manager
+            except (OSError, ToolWorkerUnavailable):
+                return ToolResult(
+                    ok=False,
+                    stderr="Tool Worker is unavailable.",
+                    data={"failure_code": "tool_worker_unavailable"},
+                    risk_level=risk,
+                    permission_level=level,
+                )
+        root_value = args.get("repo_path") or args.get("cwd")
+        if root_value is None:
+            return ToolResult(
+                ok=False,
+                stderr="Tool Worker request has no trusted project root.",
+                data={"failure_code": "worker_project_root_missing"},
+                risk_level=risk,
+                permission_level=level,
+            )
+        worker_args: dict[str, object]
+        if tool in {"run_command", "test_runner"}:
+            worker_args = {"argv": list(args.get("argv", []))}
+        elif tool == "patch_applier":
+            artifact_id = str(metadata.get("artifact_id", ""))
+            try:
+                patch_bytes = load_patch_artifact_bytes(artifact_id)
+            except PermissionDeniedError:
+                return ToolResult(
+                    ok=False,
+                    stderr="Approved patch artifact is unavailable.",
+                    data={"failure_code": "patch_artifact_unavailable"},
+                    risk_level=risk,
+                    permission_level=level,
+                )
+            worker_args = {
+                "patch_base64": base64.b64encode(patch_bytes).decode("ascii"),
+                "patch_sha256": str(metadata.get("patch_sha256", "")),
+                "patch_byte_length": metadata.get("patch_byte_length"),
+                "affected_paths": list(metadata.get("affected_paths", [])),
+                "repo_root": str(metadata.get("repo_root", "")),
+                "repo_state_digest": metadata.get("repo_state_digest"),
+            }
+        elif tool == "git_commit":
+            worker_args = {
+                "message": str(args.get("message", "")),
+                "staged_diff_sha256": str(metadata.get("staged_diff_sha256", "")),
+                "staged_tree_id": str(metadata.get("staged_tree_id", "")),
+            }
+        else:
+            return ToolResult(
+                ok=False,
+                stderr="Tool Worker operation is unsupported.",
+                data={"failure_code": "worker_operation_unsupported"},
+                risk_level=risk,
+                permission_level=level,
+            )
+        definition = self.tool_registry.get(tool)
+        timeout = (
+            definition.timeout_seconds
+            if definition is not None
+            else self.settings.permissions.tool_timeout_seconds
+        )
+        try:
+            response = await self.tool_worker.execute(
+                request_id=f"{context.request_id}:{tool}",
+                operation=tool,
+                project_root=normalize_project_root(str(root_value)),
+                args=worker_args,
+                timeout_seconds=timeout,
+            )
+        except ToolWorkerUnavailable:
+            return ToolResult(
+                ok=False,
+                stderr="Tool Worker is unavailable.",
+                data={"failure_code": "tool_worker_unavailable"},
+                risk_level=risk,
+                permission_level=level,
+            )
+        data = dict(response.data)
+        if response.failure_code:
+            data["failure_code"] = response.failure_code
+        if response.stdout_truncated:
+            data["stdout_truncated"] = True
+        if response.stderr_truncated:
+            data["stderr_truncated"] = True
+        return ToolResult(
+            ok=response.ok,
+            stdout=response.stdout,
+            stderr=response.stderr,
+            data=data,
+            risk_level=risk,
+            permission_level=level,
+        )
 
     async def _record_tool_call(
         self,

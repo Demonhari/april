@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
-import subprocess
 import sys
 import webbrowser
 from collections.abc import Awaitable, Callable
@@ -102,6 +102,8 @@ from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.config_validation import validate_configuration
 from april_common.effective_config import load_agents_file, load_permissions_file, load_tools_file
 from april_common.errors import ConfigError
+from april_common.process_environment import ProcessCategory
+from april_common.process_runner import run_restricted_process_sync
 from april_common.settings import load_settings
 from april_common.text_normalization import (
     HASHED_TOKEN_IMPLEMENTATION_VERSION,
@@ -135,6 +137,7 @@ eval_app = typer.Typer(help="Local evaluation operations.")
 setup_app = typer.Typer(help="Local setup utilities.")
 user_profile_app = typer.Typer(help="Local user-profile operations.")
 reports_app = typer.Typer(help="Browse local verification reports.")
+jobs_app = typer.Typer(help="Durable background-job operations.")
 app.add_typer(april_app, name="april")
 april_app.add_typer(model_app, name="model")
 april_app.add_typer(project_app, name="project")
@@ -149,6 +152,47 @@ april_app.add_typer(eval_app, name="eval")
 april_app.add_typer(setup_app, name="setup")
 april_app.add_typer(user_profile_app, name="profile")
 april_app.add_typer(reports_app, name="reports")
+april_app.add_typer(jobs_app, name="jobs")
+
+
+@jobs_app.command(
+    "submit",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def jobs_submit(ctx: typer.Context, job_type: str) -> None:
+    _delegate(["jobs", "submit", job_type, *ctx.args], fake=False)
+
+
+@jobs_app.command(
+    "list",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def jobs_list(ctx: typer.Context) -> None:
+    _delegate(["jobs", "list", *ctx.args], fake=False)
+
+
+@jobs_app.command(
+    "show",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def jobs_show(ctx: typer.Context, job_id: str) -> None:
+    _delegate(["jobs", "show", job_id, *ctx.args], fake=False)
+
+
+@jobs_app.command(
+    "cancel",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def jobs_cancel(ctx: typer.Context, job_id: str) -> None:
+    _delegate(["jobs", "cancel", job_id, *ctx.args], fake=False)
+
+
+@jobs_app.command(
+    "retry",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def jobs_retry(ctx: typer.Context, job_id: str) -> None:
+    _delegate(["jobs", "retry", job_id, *ctx.args], fake=False)
 
 
 def _manager() -> AprilServiceManager:
@@ -205,15 +249,17 @@ def _effective_oneshot(ctx: typer.Context) -> bool:
 
 
 def _run_april_cli(args: list[str]) -> int:
-    env = dict(os.environ)
-    env.setdefault("APRIL_HOME", str(_manager().home))
-    completed = subprocess.run(
+    home = _manager().home
+    completed = run_restricted_process_sync(
         [sys.executable, "-m", "apps.cli.main", *args],
-        cwd=env["APRIL_HOME"],
-        env=env,
-        check=False,
+        cwd=home,
+        category=ProcessCategory.CORE_API,
+        timeout_seconds=24 * 60 * 60,
+        max_stdout_bytes=10_000_000,
+        max_stderr_bytes=10_000_000,
+        april_home=home,
     )
-    return completed.returncode
+    return completed.returncode if completed.returncode is not None else 1
 
 
 def _ensure_services(fake: bool) -> ServiceStatus:
@@ -294,14 +340,23 @@ def _same_file(left: Path, right: Path) -> bool:
 def _doctor() -> None:
     manager = _manager()
     home = manager.home
+    from april_common.process_environment import PROCESS_ENVIRONMENT_POLICY_VERSION
     from services.evolution.adapters import inspect_adapter_state
+    from services.jobs.worker import JOB_WORKER_STATUS_VERSION
+    from services.tool_worker.limits import (
+        UnsafeToolWorkerSocket,
+        default_tool_worker_runtime_directory,
+        validate_live_socket,
+    )
 
     try:
-        adapter_state = inspect_adapter_state(load_settings(root=home))
+        active_settings = load_settings(root=home)
+        adapter_state = inspect_adapter_state(active_settings)
         adapter_state_label = (
             "consistent" if adapter_state["consistent"] else "reconciliation required"
         )
     except ConfigError:
+        active_settings = None
         adapter_state_label = "unavailable (configuration invalid)"
     local_bin = Path.home() / ".local" / "bin"
     run_path = local_bin / "run"
@@ -343,6 +398,36 @@ def _doctor() -> None:
         "adapter pointer/database state",
         adapter_state_label,
     )
+    table.add_row("child environment policy", PROCESS_ENVIRONMENT_POLICY_VERSION)
+    if active_settings is not None and not active_settings.workers.tool_worker_enabled:
+        table.add_row("Tool Worker", "disabled explicitly; risky tools fail closed")
+    elif active_settings is not None:
+        runtime_directory = default_tool_worker_runtime_directory(active_settings.home)
+        try:
+            mode = validate_live_socket(
+                runtime_directory / "worker.sock",
+                runtime_directory=runtime_directory,
+            )
+            table.add_row("Tool Worker", f"socket ready ({mode}); check /readiness for protocol")
+        except FileNotFoundError:
+            table.add_row("Tool Worker", "not running; start APRIL services")
+        except UnsafeToolWorkerSocket as exc:
+            table.add_row("Tool Worker", f"unsafe socket path ({exc})")
+    if active_settings is not None and not active_settings.workers.job_worker_enabled:
+        table.add_row("Job Worker", "disabled explicitly; durable jobs remain queued")
+    elif active_settings is not None:
+        status_path = active_settings.home / "data" / "runtime" / "job-worker" / "status.json"
+        try:
+            payload = json.loads(status_path.read_text(encoding="utf-8"))
+            valid = (
+                payload.get("version") == JOB_WORKER_STATUS_VERSION and payload.get("ready") is True
+            )
+            table.add_row(
+                "Job Worker",
+                "ready" if valid else "status invalid or not ready; restart APRIL services",
+            )
+        except (OSError, json.JSONDecodeError):
+            table.add_row("Job Worker", "not running; start APRIL services")
     console.print(table)
     _print_status(manager.status())
 

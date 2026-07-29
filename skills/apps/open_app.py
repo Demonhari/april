@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 from april_common.effective_config import load_tools_file
+from april_common.process_environment import ProcessCategory
+from april_common.process_runner import ResourceLimitProfile, run_restricted_process
 from april_common.settings import get_settings
 from skills.base import timed_tool
 from skills.schemas import ToolDefinition, ToolResult
@@ -39,11 +40,15 @@ async def open_app(args: dict[str, Any]) -> ToolResult:
                 risk_level="system_action",
                 permission_level=4,
             )
-        completed = subprocess.run(
+        completed = await run_restricted_process(
             [str(OPEN_BINARY), "-a", app_name],
-            capture_output=True,
-            text=True,
-            check=False,
+            cwd=settings.home,
+            category=ProcessCategory.RESTRICTED_COMMAND,
+            timeout_seconds=15,
+            max_stdout_bytes=10_000,
+            max_stderr_bytes=10_000,
+            resource_limit_profile=ResourceLimitProfile.COMMAND,
+            april_home=settings.home,
         )
         return ToolResult(
             ok=completed.returncode == 0,

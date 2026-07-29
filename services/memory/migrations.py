@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 
 async def run_migrations(database: Database) -> None:
@@ -150,6 +150,60 @@ async def _run_migrations_locked(database: Database) -> None:
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS background_jobs (
+            id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'queued', 'running', 'cancelling', 'cancelled',
+                    'succeeded', 'failed', 'interrupted'
+                )
+            ),
+            payload_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+            project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            progress_percent INTEGER NOT NULL DEFAULT 0
+                CHECK (progress_percent BETWEEN 0 AND 100),
+            progress_code TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            maximum_attempts INTEGER NOT NULL DEFAULT 1 CHECK (maximum_attempts >= 1),
+            cancellation_requested INTEGER NOT NULL DEFAULT 0
+                CHECK (cancellation_requested IN (0, 1)),
+            worker_id TEXT,
+            lease_acquired_at TEXT,
+            lease_expires_at TEXT,
+            heartbeat_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            result_json TEXT,
+            error_code TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_claim
+            ON background_jobs(status, lease_expires_at, created_at);
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_project
+            ON background_jobs(project_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_owner
+            ON background_jobs(owner, created_at);
+
+        CREATE TABLE IF NOT EXISTS background_job_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL REFERENCES background_jobs(id) ON DELETE CASCADE,
+            event_type TEXT NOT NULL,
+            message_code TEXT,
+            progress_percent INTEGER CHECK (
+                progress_percent IS NULL OR progress_percent BETWEEN 0 AND 100
+            ),
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_background_job_events_job
+            ON background_job_events(job_id, id);
 
         CREATE TABLE IF NOT EXISTS repo_snapshots (
             project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,

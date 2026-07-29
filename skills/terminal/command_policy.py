@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import asyncio
-import os
 import shutil
-import signal
-from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from april_common.effective_config import load_tools_file
 from april_common.errors import PermissionDeniedError, ValidationError
 from april_common.path_security import normalize_existing_path
+from april_common.process_environment import ProcessCategory, build_process_environment
+from april_common.process_runner import (
+    ProcessStatus,
+    ResourceLimitProfile,
+    run_restricted_process,
+)
 from april_common.settings import get_settings
 from skills.filesystem.common import current_path_policy
 
@@ -107,12 +109,8 @@ def _configured_rules(home: Path) -> dict[str, CommandRule]:
 
 
 def clean_environment() -> dict[str, str]:
-    blocked = ("TOKEN", "SECRET", "PASSWORD", "AUTH", "KEY", "CREDENTIAL")
-    return {
-        key: value
-        for key, value in os.environ.items()
-        if not any(part in key.upper() for part in blocked)
-    }
+    """Return the explicit restricted-command environment allowlist."""
+    return build_process_environment(ProcessCategory.RESTRICTED_COMMAND)
 
 
 async def run_restricted_command(
@@ -120,24 +118,20 @@ async def run_restricted_command(
 ) -> tuple[int, str, str]:
     command, resolved_cwd, _rule = validate_command(argv, cwd)
     settings = get_settings()
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=str(resolved_cwd),
-        env=clean_environment(),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
+    result = await run_restricted_process(
+        command,
+        cwd=resolved_cwd,
+        category=ProcessCategory.RESTRICTED_COMMAND,
+        timeout_seconds=timeout or settings.permissions.tool_timeout_seconds,
+        max_stdout_bytes=MAX_COMMAND_OUTPUT,
+        max_stderr_bytes=MAX_COMMAND_OUTPUT,
+        resource_limit_profile=ResourceLimitProfile.COMMAND,
+        april_home=settings.home,
     )
-    try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            process.communicate(),
-            timeout=timeout or settings.permissions.tool_timeout_seconds,
-        )
-    except TimeoutError:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGTERM)
-        await process.wait()
-        return 124, "", "Command timed out."
-    stdout = stdout_bytes.decode("utf-8", errors="replace")[:MAX_COMMAND_OUTPUT]
-    stderr = stderr_bytes.decode("utf-8", errors="replace")[:MAX_COMMAND_OUTPUT]
-    return process.returncode or 0, stdout, stderr
+    if result.status is ProcessStatus.TIMED_OUT:
+        return 124, result.stdout, result.stderr or "Command timed out."
+    if result.status is ProcessStatus.CANCELLED:
+        return 130, result.stdout, result.stderr or "Command cancelled."
+    if result.status is ProcessStatus.START_FAILED:
+        return 126, "", f"Command could not start ({result.failure_code})."
+    return result.returncode or 0, result.stdout, result.stderr

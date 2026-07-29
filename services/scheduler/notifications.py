@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import platform
 import shutil
@@ -10,6 +9,8 @@ from typing import Any
 
 from april_common.audit import AuditLogger
 from april_common.errors import RuntimeUnavailableError
+from april_common.process_environment import ProcessCategory
+from april_common.process_runner import ProcessStatus, run_restricted_process
 from april_common.settings import AprilSettings
 
 
@@ -83,23 +84,20 @@ class MacOsNotificationSink(NotificationSink):
             f"display notification {_applescript_string(notification.body)} "
             f"with title {_applescript_string(notification.title)}"
         )
-        process = await asyncio.create_subprocess_exec(
-            "osascript",
-            "-e",
-            script,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        result = await run_restricted_process(
+            ["osascript", "-e", script],
+            cwd=Path("/"),
+            category=ProcessCategory.DAEMON,
+            timeout_seconds=self.timeout,
+            max_stdout_bytes=10_000,
+            max_stderr_bytes=10_000,
         )
-        try:
-            _, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout)
-        except TimeoutError as exc:
-            process.kill()
-            await process.wait()
-            raise RuntimeUnavailableError("osascript notification timed out.") from exc
-        if process.returncode:
+        if result.status is ProcessStatus.TIMED_OUT:
+            raise RuntimeUnavailableError("osascript notification timed out.")
+        if result.status is not ProcessStatus.COMPLETED or result.returncode:
             raise RuntimeUnavailableError(
                 "osascript notification failed.",
-                {"stderr": stderr.decode("utf-8", errors="replace")[:500]},
+                {"stderr": result.stderr[:500], "failure_code": result.failure_code},
             )
 
 

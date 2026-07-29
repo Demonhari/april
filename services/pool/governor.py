@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
+from april_common.process_environment import ProcessCategory
+from april_common.process_runner import ProcessStatus, run_restricted_process_sync
 from april_common.settings import AprilSettings
 
 # Signal source labels. "unknown" means the live probe was unavailable or
@@ -84,14 +86,16 @@ class ResourceSignalProvider(Protocol):
 
 def _run_command(argv: Sequence[str]) -> str:
     """argv-only local probe; shell=False, bounded, never raises past caller."""
-    completed = subprocess.run(
+    completed = run_restricted_process_sync(
         list(argv),
-        shell=False,
-        capture_output=True,
-        text=True,
-        timeout=5.0,
-        check=True,
+        cwd=Path("/"),
+        category=ProcessCategory.DAEMON,
+        timeout_seconds=5.0,
+        max_stdout_bytes=10_000,
+        max_stderr_bytes=10_000,
     )
+    if completed.status is not ProcessStatus.COMPLETED or completed.returncode != 0:
+        raise RuntimeError("Local resource probe failed.")
     return completed.stdout
 
 

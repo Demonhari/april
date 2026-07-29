@@ -4,6 +4,25 @@ APRIL is a private, local-first AI assistant MVP for macOS. It is CLI-first, use
 
 No model files are downloaded automatically. No cloud AI APIs, Ollama integration, telemetry, or unrestricted shell execution are included.
 
+## Durable jobs and Tool Worker
+
+Schema 19 adds durable background jobs plus separate Job Worker and Tool Worker
+processes. Repository indexing, memory reindexing, document indexing, approved
+configured tests, and self-checks can survive Core API restarts.
+
+```bash
+run april jobs submit self_check --payload '{}' --wait
+run april jobs list
+run april jobs show JOB_ID
+run april jobs cancel JOB_ID
+run april jobs retry JOB_ID
+```
+
+Ctrl-C during `--wait` stops polling but does not cancel or delete the job.
+Command, test, patch, and Git-commit mutations execute only in the owner-only
+Unix-socket Tool Worker and fail closed when it is unavailable. See
+[Durable jobs and isolated tool execution](docs/background-jobs.md).
+
 ## Architecture
 
 ```mermaid

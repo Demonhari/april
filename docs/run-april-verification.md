@@ -2,6 +2,11 @@
 
 APRIL release checks should include these local launcher gates:
 
+Phase 4A also verifies schema-19 transitions and lease recovery, Job Worker
+completion, the Tool Worker self-check and socket permissions, restricted
+process timeout/output behavior, and service-token isolation. Unix-socket tests
+may need an offline rerun outside a sandbox that denies local socket binding.
+
 ```bash
 run april config validate
 run april config inspect

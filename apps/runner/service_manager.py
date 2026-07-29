@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import IO, Protocol
 from urllib.parse import urlparse
 
+from april_common.process_environment import ProcessCategory, build_process_environment
 from april_common.service_health import probe_service_health
 from april_common.settings import AprilSettings, load_settings, project_root
 
@@ -152,7 +153,12 @@ class AprilServiceManager:
         module: str,
         fake_backend: bool,
     ) -> None:
-        env = self._child_env(fake_backend=fake_backend)
+        category = (
+            ProcessCategory.RUNTIME
+            if module == "services.april_runtime.server"
+            else ProcessCategory.CORE_API
+        )
+        env = self._child_env(fake_backend=fake_backend, category=category)
         args = [self.python_executable, "-m", module]
         with log_path.open("ab") as log_file:
             process = self.popen_factory(
@@ -230,10 +236,14 @@ class AprilServiceManager:
             pid_path.unlink(missing_ok=True)
             return None
 
-    def _child_env(self, *, fake_backend: bool) -> dict[str, str]:
-        env = dict(os.environ)
-        env["APRIL_HOME"] = str(self.home)
-        if fake_backend:
+    def _child_env(
+        self,
+        *,
+        fake_backend: bool,
+        category: ProcessCategory = ProcessCategory.CORE_API,
+    ) -> dict[str, str]:
+        env = build_process_environment(category, april_home=self.home)
+        if fake_backend and category is ProcessCategory.RUNTIME:
             env["APRIL_RUNTIME_BACKEND"] = "fake"
         return env
 
@@ -278,9 +288,7 @@ class AprilServiceManager:
         return probe_service_health(url, timeout=timeout).ok
 
     def _authenticated_health_getter(self, url: str, timeout: float) -> bool:
-        token = (
-            self.settings.runtime.token if url.startswith(self.settings.runtime.url) else None
-        )
+        token = self.settings.runtime.token if url.startswith(self.settings.runtime.url) else None
         return probe_service_health(url, bearer_token=token, timeout=timeout).ok
 
     def _port_in_use(self, host: str, port: int) -> bool:

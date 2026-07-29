@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -39,6 +41,8 @@ from apps.runner.multi_model_report import (
     build_multi_model_report,
 )
 from april_common.errors import ConfigError
+from april_common.process_environment import ProcessCategory, build_process_environment
+from april_common.process_runner import run_restricted_process_sync
 from april_common.service_health import ServiceHealthResult, probe_service_health
 from april_common.settings import load_settings
 from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
@@ -943,9 +947,10 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         )
 
     def _env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        env.update(
-            {
+        return build_process_environment(
+            ProcessCategory.VERIFICATION_SUBPROCESS,
+            april_home=self.verify_home,
+            overrides={
                 "APRIL_HOME": str(self.verify_home),
                 "PYTHONPATH": str(self.repo_home),
                 "APRIL_RUNTIME_BACKEND": "llama_cpp",
@@ -960,17 +965,26 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
                 "APRIL_AUDIT_PATH": str(self.temp / "logs" / "audit.jsonl"),
                 "APRIL_LOGS_PATH": str(self.temp / "logs"),
                 "APRIL_ALLOWED_FILESYSTEM_ROOTS": str(self.temp),
-            }
+            },
         )
-        return env
 
     def _start(self, module: str, env: dict[str, str], log_path: Path) -> subprocess.Popen[bytes]:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        category = (
+            ProcessCategory.RUNTIME
+            if module == "services.april_runtime.server"
+            else ProcessCategory.CORE_API
+        )
+        child_env = build_process_environment(
+            category,
+            source=env,
+            april_home=Path(env["APRIL_HOME"]),
+        )
         with log_path.open("ab") as log_file:
             return subprocess.Popen(
                 [sys.executable, "-m", module],
                 cwd=str(self.repo_home),
-                env=env,
+                env=child_env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -1183,14 +1197,16 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
     def _stop(self) -> None:
         for proc in (self.api, self.runtime):
             if proc is not None and proc.poll() is None:
-                proc.terminate()
+                with suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGTERM)
         for proc in (self.api, self.runtime):
             if proc is None:
                 continue
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                with suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=5)
 
 
@@ -1327,6 +1343,7 @@ class LauncherVerifier:
             )
             self._check("core health", lambda: self._wait_json(self.api_url + "/health"))
             self._check("core readiness", self._core_readiness)
+            self._check("durable job self-check", self._job_self_check)
             self._check("model listing", self._check_models)
             project_id = self._check("project registration", self._register_project)
             # Unscored readiness warm-up: import contention can make the first
@@ -1417,9 +1434,10 @@ class LauncherVerifier:
         _git(self.project, "commit", "-m", "initial")
 
     def _env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        env.update(
-            {
+        return build_process_environment(
+            ProcessCategory.VERIFICATION_SUBPROCESS,
+            april_home=self.verify_home,
+            overrides={
                 "APRIL_HOME": str(self.verify_home),
                 "PYTHONPATH": str(self.repo_home),
                 "APRIL_RUNTIME_BACKEND": "fake",
@@ -1433,17 +1451,26 @@ class LauncherVerifier:
                 "APRIL_AUDIT_PATH": str(self.temp / "logs" / "audit.jsonl"),
                 "APRIL_LOGS_PATH": str(self.temp / "logs"),
                 "APRIL_ALLOWED_FILESYSTEM_ROOTS": f"{self.project},{self.second_project}",
-            }
+            },
         )
-        return env
 
     def _start(self, module: str, env: dict[str, str], log_path: Path) -> subprocess.Popen[bytes]:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        category = (
+            ProcessCategory.RUNTIME
+            if module == "services.april_runtime.server"
+            else ProcessCategory.CORE_API
+        )
+        child_env = build_process_environment(
+            category,
+            source=env,
+            april_home=Path(env["APRIL_HOME"]),
+        )
         with log_path.open("ab") as log_file:
             return subprocess.Popen(
                 [sys.executable, "-m", module],
                 cwd=str(self.repo_home),
-                env=env,
+                env=child_env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -1486,7 +1513,39 @@ class LauncherVerifier:
             raise RuntimeError(
                 "Core API is alive but not ready" + (f": {details}" if details else ".")
             )
-        return "ready"
+        tool_worker = payload.get("tool_worker", {})
+        jobs = payload.get("jobs", {})
+        if not isinstance(tool_worker, dict) or tool_worker.get("self_check") is not True:
+            raise RuntimeError("Tool Worker readiness self-check failed.")
+        if not isinstance(jobs, dict) or jobs.get("worker_readiness") is not True:
+            raise RuntimeError("Job Worker is not ready.")
+        return "ready with Tool Worker and Job Worker"
+
+    def _job_self_check(self) -> str:
+        with self._client(timeout=5.0) as client:
+            response = client.post(
+                "/jobs",
+                json={"job_type": "self_check", "payload": {}},
+            )
+            if response.status_code != 200:
+                raise RuntimeError(f"Job submission returned HTTP {response.status_code}.")
+            job_id = str(response.json().get("id", ""))
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                shown = client.get(f"/jobs/{job_id}")
+                if shown.status_code != 200:
+                    raise RuntimeError(f"Job inspection returned HTTP {shown.status_code}.")
+                payload = shown.json()
+                status = str(payload.get("status", ""))
+                if status == "succeeded":
+                    result = payload.get("result")
+                    if not isinstance(result, dict) or result.get("self_check") is not True:
+                        raise RuntimeError("Job self-check result was malformed.")
+                    return "submitted, claimed, and durably completed"
+                if status in {"cancelled", "failed", "interrupted"}:
+                    raise RuntimeError(f"Job self-check ended as {status}.")
+                time.sleep(0.1)
+        raise RuntimeError("Job self-check did not complete before timeout.")
 
     def _client(self, *, timeout: float = 10.0) -> httpx.Client:
         return httpx.Client(base_url=self.api_url, headers=self.headers, timeout=timeout)
@@ -1890,14 +1949,16 @@ class LauncherVerifier:
     def _stop(self) -> None:
         for proc in (self.api, self.runtime):
             if proc is not None and proc.poll() is None:
-                proc.terminate()
+                with suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGTERM)
         for proc in (self.api, self.runtime):
             if proc is None:
                 continue
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                with suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=5)
 
 
@@ -3105,14 +3166,15 @@ def _llama_cpp_installed() -> bool:
 def _process_rss_bytes(pid: int | None) -> int | None:
     if pid is None:
         return None
-    try:
-        completed = subprocess.run(
-            ["ps", "-o", "rss=", "-p", str(pid)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
+    completed = run_restricted_process_sync(
+        ["ps", "-o", "rss=", "-p", str(pid)],
+        cwd=Path.cwd(),
+        category=ProcessCategory.VERIFICATION_SUBPROCESS,
+        timeout_seconds=5,
+        max_stdout_bytes=4096,
+        max_stderr_bytes=4096,
+    )
+    if completed.returncode is None:
         return None
     if completed.returncode != 0:
         return None
@@ -3132,4 +3194,13 @@ def _free_port() -> int:
 
 
 def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+    result = run_restricted_process_sync(
+        ["git", *args],
+        cwd=cwd,
+        category=ProcessCategory.GIT,
+        timeout_seconds=15,
+        max_stdout_bytes=100_000,
+        max_stderr_bytes=100_000,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Verification Git command failed.")

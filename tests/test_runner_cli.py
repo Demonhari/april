@@ -122,6 +122,26 @@ def test_run_april_fake_reaches_service_start(tmp_path: Path, monkeypatch) -> No
     assert delegated == [["ask", "hello"]]
 
 
+def test_run_april_jobs_commands_delegate_without_cancelling_on_wait(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = FakeManager(tmp_path)
+    delegated: list[list[str]] = []
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr("apps.runner.main._run_april_cli", lambda args: delegated.append(args) or 0)
+    submitted = CliRunner().invoke(
+        app,
+        ["april", "jobs", "submit", "self_check", "--payload", "{}", "--json"],
+    )
+    shown = CliRunner().invoke(app, ["april", "jobs", "show", "job-1", "--json"])
+    assert submitted.exit_code == 0
+    assert shown.exit_code == 0
+    assert delegated == [
+        ["jobs", "submit", "self_check", "--payload", "{}", "--json"],
+        ["jobs", "show", "job-1", "--json"],
+    ]
+
+
 def test_run_april_logs_prints_recent_logs(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
@@ -1894,6 +1914,25 @@ def test_doctor_reports_ok_when_path_contains_april_wrapper(tmp_path: Path, monk
     result = CliRunner().invoke(app, ["april", "doctor"])
     assert result.exit_code == 0
     assert "OK: run resolves to an APRIL wrapper visible in PATH" in result.output
+
+
+def test_doctor_reports_actionable_worker_states(settings_tmp, tmp_path: Path, monkeypatch) -> None:
+    local_bin = tmp_path / "local-bin"
+    local_bin.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(local_bin))
+    monkeypatch.setattr("apps.runner.main._manager", lambda: FakeManager(settings_tmp.home))
+
+    missing = CliRunner().invoke(app, ["doctor"])
+    assert missing.exit_code == 0
+    assert "phase4a-env-v1" in missing.output
+    assert missing.output.count("not running; start APRIL services") == 2
+
+    monkeypatch.setenv("APRIL_TOOL_WORKER_ENABLED", "false")
+    monkeypatch.setenv("APRIL_JOB_WORKER_ENABLED", "false")
+    disabled = CliRunner().invoke(app, ["doctor"])
+    assert disabled.exit_code == 0
+    assert disabled.output.count("disabled explicitly") == 2
 
 
 def test_doctor_reports_non_april_run_command(tmp_path: Path, monkeypatch) -> None:

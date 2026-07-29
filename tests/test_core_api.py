@@ -12,6 +12,8 @@ from april_common.service_health import ServiceHealthResult
 from april_common.token_setup import generate_tokens
 from services.api.dependencies import ApiContainer
 from services.api.server import create_app
+from services.jobs.registry import default_job_registry
+from services.jobs.store import JobStore
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.repository import MemoryRepository
@@ -110,6 +112,31 @@ def test_authentication(settings_tmp) -> None:
     assert response.status_code == 200
 
 
+def test_authenticated_job_routes_and_pagination(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    container.job_store = JobStore(container.database, default_job_registry())
+    client = TestClient(create_app(container))
+    assert client.post("/jobs", json={"job_type": "self_check", "payload": {}}).status_code == 403
+    submitted = client.post(
+        "/jobs",
+        headers=auth(settings_tmp),
+        json={"job_type": "self_check", "payload": {}},
+    )
+    assert submitted.status_code == 200
+    job_id = submitted.json()["id"]
+    listed = client.get("/jobs?limit=1&offset=0", headers=auth(settings_tmp))
+    assert listed.status_code == 200
+    assert listed.json()["jobs"][0]["id"] == job_id
+    assert client.get("/jobs?limit=101", headers=auth(settings_tmp)).status_code == 400
+    cancelled = client.post(f"/jobs/{job_id}/cancel", headers=auth(settings_tmp))
+    assert cancelled.status_code == 200
+    assert cancelled.json()["job"]["status"] == "cancelled"
+    repeated = client.post(f"/jobs/{job_id}/cancel", headers=auth(settings_tmp))
+    assert repeated.json()["already_terminal"] is True
+
+
 def test_blank_configured_api_token_rejects_blank_bearer(settings_tmp) -> None:
     import anyio
 
@@ -140,6 +167,26 @@ def test_local_dev_token_authenticates_in_test(settings_tmp) -> None:
     client = TestClient(create_app(container))
     response = client.get("/readiness", headers=auth(local_settings))
     assert response.status_code == 200
+
+
+def test_readiness_allows_explicitly_disabled_development_workers(settings_tmp) -> None:
+    import anyio
+
+    disabled = settings_tmp.model_copy(
+        update={
+            "workers": settings_tmp.workers.model_copy(
+                update={"tool_worker_enabled": False, "job_worker_enabled": False}
+            )
+        }
+    )
+    container = anyio.run(make_container, disabled)
+    client = TestClient(create_app(container))
+    body = client.get("/readiness", headers=auth(disabled)).json()
+    codes = {reason["code"] for reason in body["failure_reasons"]}
+    assert "tool_worker_unavailable" not in codes
+    assert "job_worker_unavailable" not in codes
+    assert body["tool_worker"]["enabled"] is False
+    assert body["jobs"]["worker_enabled"] is False
 
 
 def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
@@ -385,8 +432,7 @@ def test_standard_chat_advances_and_uses_conversation_summary(settings_tmp) -> N
         if call and "Route the user request" in call[0].content
     ]
     assert any(
-        "[MACHINE-GENERATED CONVERSATION CONTEXT" in message.content
-        for message in router_calls[-1]
+        "[MACHINE-GENERATED CONVERSATION CONTEXT" in message.content for message in router_calls[-1]
     )
     direct = client.post(
         "/agents/run",

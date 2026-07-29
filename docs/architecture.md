@@ -1,6 +1,10 @@
 # Architecture
 
-APRIL runs as two local processes:
+APRIL's resident service set has four local roles: April Runtime, Core API, an
+owner-only Tool Worker, and a durable Job Worker. The Tool Worker exposes no
+TCP port. Core retains routing, permission classification, exact-action
+approval validation, and auditing; the worker independently revalidates and
+executes only its bounded local protocol.
 
 ```mermaid
 sequenceDiagram

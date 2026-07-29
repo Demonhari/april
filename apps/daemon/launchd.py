@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import plistlib
-import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Protocol
 
+from april_common.process_environment import ProcessCategory
+from april_common.process_runner import RestrictedProcessResult, run_restricted_process_sync
 from april_common.settings import AprilSettings
 
 # Final APRIL product LaunchAgent label. The vendor prefix is the project name
@@ -17,13 +19,17 @@ from april_common.settings import AprilSettings
 LABEL = "com.april.apriald"
 
 
+class _LaunchResult(Protocol):
+    returncode: int | None
+
+
 class LaunchdManager:
     def __init__(
         self,
         settings: AprilSettings,
         *,
         user_home: Path | None = None,
-        runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None,
+        runner: Callable[[Sequence[str]], _LaunchResult] | None = None,
         platform: str | None = None,
         uid: int | None = None,
     ) -> None:
@@ -153,14 +159,15 @@ class LaunchdManager:
             "detail": "launchd is supported only on macOS",
         }
 
-    @staticmethod
-    def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+    def _run(self, argv: Sequence[str]) -> RestrictedProcessResult:
+        return run_restricted_process_sync(
             list(argv),
-            check=False,
-            capture_output=True,
-            text=True,
-            shell=False,
+            cwd=self.user_home,
+            category=ProcessCategory.DAEMON,
+            timeout_seconds=30.0,
+            max_stdout_bytes=20_000,
+            max_stderr_bytes=20_000,
+            april_home=self.settings.home,
         )
 
     def _validate_path(self, path: Path) -> None:

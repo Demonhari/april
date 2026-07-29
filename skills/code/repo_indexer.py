@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,8 @@ from april_common.path_security import (
     is_path_within_roots,
     normalize_existing_path,
 )
+from april_common.process_environment import ProcessCategory
+from april_common.process_runner import ProcessStatus, ResourceLimitProfile, run_restricted_process
 from april_common.settings import get_settings
 from april_common.time import utc_now_iso
 from services.memory.database import Database
@@ -31,20 +33,26 @@ def chunk_text(lines: list[str], *, size: int = 80) -> list[tuple[str, int, int]
     return chunks
 
 
-def _git_head(root: Path) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+async def _git_head_async(root: Path) -> str | None:
+    result = await run_restricted_process(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        cwd=root,
+        category=ProcessCategory.REPOSITORY_INDEXING,
+        timeout_seconds=5,
+        max_stdout_bytes=4096,
+        max_stderr_bytes=4096,
+        resource_limit_profile=ResourceLimitProfile.INDEXING,
+    )
+    if result.status is not ProcessStatus.COMPLETED:
         return None
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def _git_head(root: Path) -> str | None:
+    """Synchronous compatibility helper used by existing index diagnostics."""
+    return asyncio.run(_git_head_async(root))
 
 
 def _file_chunks(path_str: str, content: str) -> list[tuple[str, str, int | None, int | None]]:
@@ -101,7 +109,7 @@ async def repo_indexer(args: dict[str, Any]) -> ToolResult:
         project_id = args.get("project_id")
         patterns = read_gitignore_patterns(root)
         source_id = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
-        git_commit = _git_head(root)
+        git_commit = await _git_head_async(root)
         vector = vector_memory_from_settings(settings, audit=AuditLogger(settings.audit_path))
         max_bytes = min(policy.max_read_bytes, 500_000)
 

@@ -18,6 +18,17 @@ Core API:
 - `GET /reminders`
 - `POST /reminders`
 - `DELETE /reminders/{reminder_id}`
+- `POST /jobs`
+- `GET /jobs`
+- `GET /jobs/{job_id}`
+- `POST /jobs/{job_id}/cancel`
+- `POST /jobs/{job_id}/retry`
+
+Job routes use existing Core authentication, typed allowlisted payloads, and
+bounded pagination (`limit` 1–100, `offset` 0–10000). Responses omit payloads,
+credentials, child environments, unrestricted command output, and model
+reasoning. A Level 3 configured-test job consumes an exact existing
+`test_runner` approval before it can be queued.
 - `GET /tasks`
 - `GET /projects`
 - `POST /projects`

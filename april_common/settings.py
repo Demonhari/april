@@ -82,6 +82,11 @@ class PermissionSettings(BaseModel):
     tool_timeout_seconds: float = 15.0
 
 
+class WorkerSettings(BaseModel):
+    tool_worker_enabled: bool = True
+    job_worker_enabled: bool = True
+
+
 class BrainSettings(BaseModel):
     model_id: str = "april-brain"
     router_model_id: str | None = None
@@ -388,6 +393,7 @@ class AprilSettings(BaseModel):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     paths: PathSettings = Field(default_factory=PathSettings)
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
+    workers: WorkerSettings = Field(default_factory=WorkerSettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
     conversation_context: ConversationContextSettings = Field(
         default_factory=ConversationContextSettings
@@ -489,6 +495,8 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_APPROVAL_EXPIRY": ("permissions", "approval_expiry_seconds"),
     "APRIL_MAXIMUM_AGENT_TOOL_ITERATIONS": ("permissions", "maximum_agent_tool_iterations"),
     "APRIL_EXTERNAL_ACTIONS_ENABLED": ("permissions", "external_actions_enabled"),
+    "APRIL_TOOL_WORKER_ENABLED": ("workers", "tool_worker_enabled"),
+    "APRIL_JOB_WORKER_ENABLED": ("workers", "job_worker_enabled"),
     "APRIL_BRAIN_MODEL_ID": ("brain", "model_id"),
     "APRIL_ROUTER_MODEL_ID": ("brain", "router_model_id"),
     "APRIL_ROUTING_RELIABILITY_MIN_SAMPLES": (

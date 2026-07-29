@@ -14,6 +14,12 @@ from apps.daemon.apriald import daemon_lock_path, daemon_pid_path, daemon_status
 from apps.runner import install as runner_install
 from april_common.errors import PermissionDeniedError, RuntimeUnavailableError
 from april_common.logging import JsonFormatter, configure_logging
+from april_common.process_runner import (
+    ProcessStatus,
+    ResourceLimitProfile,
+    ResourceLimitReport,
+    RestrictedProcessResult,
+)
 from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.health import ProcessMemoryMetrics, runtime_health
@@ -467,37 +473,51 @@ async def test_voice_subprocess_adapters_success_and_failure(tmp_path: Path, mon
     model.write_text("", encoding="utf-8")
     audio.write_text("", encoding="utf-8")
 
-    async def fake_exec(*argv: str, **kwargs: object) -> FakeProcess:
-        return FakeProcess(stdout=b"transcript")
+    def process_result(
+        *,
+        returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> RestrictedProcessResult:
+        return RestrictedProcessResult(
+            status=ProcessStatus.COMPLETED,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=False,
+            stderr_truncated=False,
+            duration_seconds=0.01,
+            failure_code=None,
+            resource_limits=ResourceLimitReport(ResourceLimitProfile.MODEL_UTILITY, (), ()),
+        )
 
-    monkeypatch.setattr("services.voice.speech_to_text.asyncio.create_subprocess_exec", fake_exec)
+    async def fake_exec(argv: list[str], **kwargs: object) -> RestrictedProcessResult:
+        return process_result(stdout="transcript")
+
+    monkeypatch.setattr("services.voice.speech_to_text.run_restricted_process", fake_exec)
     stt = WhisperCppSpeechToText(binary, model)
     assert await stt.transcribe(audio) == "transcript"
 
-    async def fake_piper(*argv: str, **kwargs: object) -> FakeProcess:
+    async def fake_piper(argv: list[str], **kwargs: object) -> RestrictedProcessResult:
         output_path = Path(argv[argv.index("--output_file") + 1])
         output_path.write_bytes(b"RIFFfake")
-        return FakeProcess(stdout=b"", stderr=b"")
+        return process_result()
 
-    monkeypatch.setattr("services.voice.text_to_speech.asyncio.create_subprocess_exec", fake_piper)
+    monkeypatch.setattr("services.voice.text_to_speech.run_restricted_process", fake_piper)
     tts = PiperTextToSpeech(binary, model)
     assert await tts.synthesize("hello", tmp_path / "out.wav") == tmp_path / "out.wav"
 
-    async def silent_piper(*argv: str, **kwargs: object) -> FakeProcess:
-        return FakeProcess(stdout=b"", stderr=b"")
+    async def silent_piper(argv: list[str], **kwargs: object) -> RestrictedProcessResult:
+        return process_result()
 
-    monkeypatch.setattr(
-        "services.voice.text_to_speech.asyncio.create_subprocess_exec", silent_piper
-    )
+    monkeypatch.setattr("services.voice.text_to_speech.run_restricted_process", silent_piper)
     with pytest.raises(RuntimeUnavailableError, match="non-empty WAV"):
         await tts.synthesize("hello", tmp_path / "missing.wav")
 
-    async def failing_exec(*argv: str, **kwargs: object) -> FakeProcess:
-        return FakeProcess(returncode=1, stderr=b"bad")
+    async def failing_exec(argv: list[str], **kwargs: object) -> RestrictedProcessResult:
+        return process_result(returncode=1, stderr="bad")
 
-    monkeypatch.setattr(
-        "services.voice.speech_to_text.asyncio.create_subprocess_exec", failing_exec
-    )
+    monkeypatch.setattr("services.voice.speech_to_text.run_restricted_process", failing_exec)
     with pytest.raises(RuntimeUnavailableError, match="failed"):
         await stt.transcribe(audio)
 

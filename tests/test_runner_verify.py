@@ -388,6 +388,7 @@ def test_verifier_run_records_failures_and_stops(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(verifier, "_start", lambda *args: subprocess.Popen(["true"]))
     monkeypatch.setattr(verifier, "_wait_json", lambda url: {"status": "ok"})
     monkeypatch.setattr(verifier, "_core_readiness", lambda: "ready")
+    monkeypatch.setattr(verifier, "_job_self_check", lambda: "completed")
     monkeypatch.setattr(verifier, "_check_models", lambda: "models")
     monkeypatch.setattr(verifier, "_register_project", lambda: "project")
     warmups: list[str] = []

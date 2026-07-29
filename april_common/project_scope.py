@@ -7,6 +7,12 @@ from pathlib import Path
 
 from april_common.errors import PermissionDeniedError
 from april_common.path_security import MODEL_SUFFIXES, deny_sensitive_path
+from april_common.process_environment import ProcessCategory
+from april_common.process_runner import (
+    ProcessStatus,
+    ResourceLimitProfile,
+    run_restricted_process,
+)
 
 GIT_TIMEOUT_SECONDS = 15.0
 MAX_GIT_CAPTURE_BYTES = 2_000_000
@@ -181,12 +187,20 @@ async def git_apply_check(repo_root: str | Path, patch_path: str | Path) -> tupl
     return code == 0, stdout, stderr
 
 
-async def git_apply_check_bytes(repo_root: str | Path, patch_bytes: bytes) -> tuple[bool, str, str]:
+async def git_apply_check_bytes(
+    repo_root: str | Path,
+    patch_bytes: bytes,
+    *,
+    timeout_seconds: float = GIT_TIMEOUT_SECONDS,
+    cancellation_event: asyncio.Event | None = None,
+) -> tuple[bool, str, str]:
     root = normalize_project_root(repo_root)
     code, stdout, stderr = await _run_git_bytes_with_input(
         root,
         ["apply", "--check", "-"],
         patch_bytes,
+        timeout_seconds=timeout_seconds,
+        cancellation_event=cancellation_event,
     )
     return (
         code == 0,
@@ -195,9 +209,21 @@ async def git_apply_check_bytes(repo_root: str | Path, patch_bytes: bytes) -> tu
     )
 
 
-async def git_apply_bytes(repo_root: str | Path, patch_bytes: bytes) -> tuple[int, str, str]:
+async def git_apply_bytes(
+    repo_root: str | Path,
+    patch_bytes: bytes,
+    *,
+    timeout_seconds: float = GIT_TIMEOUT_SECONDS,
+    cancellation_event: asyncio.Event | None = None,
+) -> tuple[int, str, str]:
     root = normalize_project_root(repo_root)
-    code, stdout, stderr = await _run_git_bytes_with_input(root, ["apply", "-"], patch_bytes)
+    code, stdout, stderr = await _run_git_bytes_with_input(
+        root,
+        ["apply", "-"],
+        patch_bytes,
+        timeout_seconds=timeout_seconds,
+        cancellation_event=cancellation_event,
+    )
     return (
         code,
         stdout.decode("utf-8", errors="replace"),
@@ -215,27 +241,25 @@ async def _run_git(repo_root: Path, args: list[str]) -> tuple[int, str, str]:
 
 
 async def _run_git_bytes(repo_root: Path, args: list[str]) -> tuple[int, bytes, bytes]:
-    process = await asyncio.create_subprocess_exec(
-        "git",
-        "-C",
-        str(repo_root),
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    result = await run_restricted_process(
+        ["git", "-C", str(repo_root), *args],
+        cwd=repo_root,
+        category=ProcessCategory.GIT,
+        timeout_seconds=GIT_TIMEOUT_SECONDS,
+        max_stdout_bytes=MAX_GIT_CAPTURE_BYTES,
+        max_stderr_bytes=MAX_GIT_CAPTURE_BYTES,
+        resource_limit_profile=ResourceLimitProfile.COMMAND,
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=GIT_TIMEOUT_SECONDS,
-        )
-    except TimeoutError:
-        process.kill()
-        await process.wait()
+    if result.status is ProcessStatus.TIMED_OUT:
         return 124, b"", b"Git command timed out."
+    if result.status is ProcessStatus.START_FAILED:
+        return 126, b"", f"Git command failed to start ({result.failure_code}).".encode()
+    if result.status is ProcessStatus.CANCELLED:
+        return 130, result.stdout.encode(), result.stderr.encode()
     return (
-        process.returncode or 0,
-        stdout[:MAX_GIT_CAPTURE_BYTES],
-        stderr[:MAX_GIT_CAPTURE_BYTES],
+        result.returncode or 0,
+        result.stdout.encode(),
+        result.stderr.encode(),
     )
 
 
@@ -243,29 +267,31 @@ async def _run_git_bytes_with_input(
     repo_root: Path,
     args: list[str],
     stdin: bytes,
+    *,
+    timeout_seconds: float = GIT_TIMEOUT_SECONDS,
+    cancellation_event: asyncio.Event | None = None,
 ) -> tuple[int, bytes, bytes]:
-    process = await asyncio.create_subprocess_exec(
-        "git",
-        "-C",
-        str(repo_root),
-        *args,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    result = await run_restricted_process(
+        ["git", "-C", str(repo_root), *args],
+        cwd=repo_root,
+        category=ProcessCategory.GIT,
+        timeout_seconds=timeout_seconds,
+        max_stdout_bytes=MAX_GIT_CAPTURE_BYTES,
+        max_stderr_bytes=MAX_GIT_CAPTURE_BYTES,
+        resource_limit_profile=ResourceLimitProfile.PATCH,
+        stdin_bytes=stdin,
+        cancellation_event=cancellation_event,
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(stdin),
-            timeout=GIT_TIMEOUT_SECONDS,
-        )
-    except TimeoutError:
-        process.kill()
-        await process.wait()
+    if result.status is ProcessStatus.TIMED_OUT:
         return 124, b"", b"Git command timed out."
+    if result.status is ProcessStatus.START_FAILED:
+        return 126, b"", f"Git command failed to start ({result.failure_code}).".encode()
+    if result.status is ProcessStatus.CANCELLED:
+        return 130, result.stdout.encode(), result.stderr.encode()
     return (
-        process.returncode or 0,
-        stdout[:MAX_GIT_CAPTURE_BYTES],
-        stderr[:MAX_GIT_CAPTURE_BYTES],
+        result.returncode or 0,
+        result.stdout.encode(),
+        result.stderr.encode(),
     )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 
 from agents.registry import AgentRegistry
@@ -19,6 +20,9 @@ from services.evolution.adapters import AdapterLifecycleManager
 from services.evolution.dreamer import DreamerService
 from services.evolution.scheduler import EvolutionSchedulerGate
 from services.evolution.versions import PromptOverlayManager
+from services.jobs.client import JobWorkerProcessManager
+from services.jobs.registry import default_job_registry
+from services.jobs.store import JobStore
 from services.memory.archive import ArchiveReflectionService
 from services.memory.database import Database
 from services.memory.embeddings import embedding_provider_from_config
@@ -33,6 +37,11 @@ from services.permissions.tool_execution import ToolExecutionService
 from services.pool.agent_pool import AgentPool
 from services.pool.governor import ResourceGovernor
 from services.scheduler import SchedulerService, notification_sink_from_settings
+from services.tool_worker.client import (
+    ToolWorkerClient,
+    ToolWorkerProcessManager,
+    ToolWorkerUnavailable,
+)
 from services.wake.session_manager import SessionManager
 from skills.playbooks import PlaybookLoader, PlaybookRunner
 from skills.registry import ToolRegistry, default_registry
@@ -56,6 +65,10 @@ class ApiContainer:
     scheduler: SchedulerService | None = None
     session_manager: SessionManager | None = None
     archive_reflection: ArchiveReflectionService | None = None
+    job_store: JobStore | None = None
+    tool_worker_client: ToolWorkerClient | None = None
+    tool_worker_manager: ToolWorkerProcessManager | None = None
+    job_worker_manager: JobWorkerProcessManager | None = None
 
     def require_session_manager(self) -> SessionManager:
         if self.session_manager is None:
@@ -75,6 +88,11 @@ class ApiContainer:
         """Release every owned resource. Safe to call more than once."""
         if self.scheduler is not None:
             await self.scheduler.stop()
+        if self.job_worker_manager is not None:
+            await self.job_worker_manager.stop()
+        if self.tool_worker_manager is not None:
+            await self.tool_worker_manager.stop()
+        await self.tool_executor.aclose()
         await self.database.close()
 
 
@@ -173,12 +191,34 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         audit,
         expiry_seconds=active_settings.permissions.approval_expiry_seconds,
     )
+    job_store = JobStore(database, default_job_registry())
+    tool_worker_manager: ToolWorkerProcessManager | None = None
+    tool_worker_client: ToolWorkerClient | None
+    if active_settings.workers.tool_worker_enabled:
+        tool_worker_manager = ToolWorkerProcessManager(
+            april_home=active_settings.home,
+            allowed_roots=tuple(active_settings.allowed_roots),
+        )
+        try:
+            tool_worker_client = await tool_worker_manager.start()
+        except (OSError, ToolWorkerUnavailable):
+            # Core remains available for read-only chat; worker-required tools fail
+            # closed through ToolExecutionService and readiness reports degradation.
+            tool_worker_client = None
+    else:
+        tool_worker_client = None
+    job_worker_manager: JobWorkerProcessManager | None = None
+    if active_settings.workers.job_worker_enabled:
+        job_worker_manager = JobWorkerProcessManager(april_home=active_settings.home)
+        with suppress(OSError):
+            await job_worker_manager.start()
     tool_executor = ToolExecutionService(
         settings=active_settings,
         memory=memory,
         tool_registry=tool_registry,
         permission_engine=permission_engine,
         approvals=approvals,
+        tool_worker=tool_worker_client,
     )
     overlay_manager = PromptOverlayManager(active_settings, database, audit=audit)
     playbook_loader = PlaybookLoader(active_settings.playbooks_path)
@@ -257,4 +297,8 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         scheduler=scheduler,
         session_manager=session_manager,
         archive_reflection=archive_reflection,
+        job_store=job_store,
+        tool_worker_client=tool_worker_client,
+        tool_worker_manager=tool_worker_manager,
+        job_worker_manager=job_worker_manager,
     )

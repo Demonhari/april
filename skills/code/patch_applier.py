@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from april_common.project_scope import (
+    git_apply_bytes,
     git_apply_check,
     inspect_patch_file,
     normalize_project_child,
@@ -37,23 +37,14 @@ async def patch_applier(args: dict[str, Any]) -> ToolResult:
                 risk_level="code_write",
                 permission_level=3,
             )
-        process = await asyncio.create_subprocess_exec(
-            "git",
-            "-C",
-            str(repo),
-            "apply",
-            "--",
-            str(patch_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_bytes, stderr_bytes = await process.communicate()
+        patch_bytes = patch_path.read_bytes()
+        returncode, stdout, stderr = await git_apply_bytes(repo, patch_bytes)
         return ToolResult(
-            ok=(process.returncode or 0) == 0,
-            stdout=stdout_bytes.decode("utf-8", errors="replace"),
-            stderr=stderr_bytes.decode("utf-8", errors="replace"),
+            ok=returncode == 0,
+            stdout=stdout,
+            stderr=stderr,
             data={
-                "returncode": process.returncode or 0,
+                "returncode": returncode,
                 "patch_sha256": artifact.patch_sha256,
                 "affected_paths": artifact.affected_paths,
             },
