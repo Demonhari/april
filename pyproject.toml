@@ -7,7 +7,7 @@ name = "april-local"
 version = "0.1.0"
 description = "APRIL: a private local-first AI assistant for macOS"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 license = { text = "Private" }
 authors = [{ name = "APRIL" }]
 dependencies = [

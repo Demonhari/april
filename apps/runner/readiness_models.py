@@ -5,6 +5,14 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 CheckStatus = Literal["ok", "warning", "blocker", "skipped"]
+EvidenceState = Literal[
+    "implemented_in_code",
+    "configured",
+    "preflight_ready",
+    "verified_with_real_evidence",
+    "optional_unavailable",
+    "blocked_for_safety",
+]
 
 # Exact, copy-pasteable next commands. None of these are executed here.
 _INSTALL_RUNTIME = "pip install -e '.[runtime]'"
@@ -98,8 +106,10 @@ class ReadinessReport(BaseModel):
     speaker_gate_supported: bool = False
     daemon_status: str = "unknown"
     daemon_details_available: bool = False
+    voice_live_status: str = "not_verified"
     sentinel_live_status: str = "not_verified"
     voice_conversation_live_status: str = "not_verified"
+    speaker_live_status: str = "not_verified"
     embedding_provider: str = "hashed-token"
     lexical_tokenizer_version: str = "unicode-nfkc-casefold-v1"
     hashed_token_implementation_version: str = "hashed-token-unicode-v2"
@@ -163,6 +173,7 @@ class ReadinessReport(BaseModel):
     benchmark_evidence_stale: bool = False
     benchmark_evidence_incomplete: bool = False
     benchmark_evidence_production_eligible: bool = False
+    evidence_boundaries: dict[str, EvidenceState] = Field(default_factory=dict)
     checks: list[ReadinessCheck] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

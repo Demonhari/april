@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from apps.runner.mac_report import redact_reason
+from apps.runner.readiness_evidence import build_evidence_boundaries
 from apps.runner.readiness_evolution import (
     _pending_eval_case_count,
     _pending_real_runtime_overlay_blockers,
@@ -44,8 +45,10 @@ from apps.runner.readiness_security import _token_status
 from apps.runner.readiness_voice import (
     _daemon_status,
     _sentinel_live_status,
+    _speaker_gate_check,
     _voice_artifact,
     _voice_conversation_live_status,
+    _voice_live_status,
 )
 from april_common.audit import audit_logger_for_settings
 from april_common.credentials import CredentialStore
@@ -62,6 +65,7 @@ from april_common.settings import (
 )
 from april_common.time import utc_now_iso
 from april_common.token_setup import legacy_plaintext_credentials_detected
+from services.api.production_activation import finetuning_readiness
 from services.april_runtime.model_registry import ModelRegistry
 from services.evaluation.model_quality import fixture_set_metadata
 from services.evolution.adapters import inspect_adapter_state
@@ -344,63 +348,12 @@ def build_readiness_report(
 
     wake_enabled = settings.wake.enabled
     speaker_soft = settings.wake.speaker_gate == "soft"
-    speaker_model_path = settings.wake.speaker_verifier_model_path
-    speaker_model_configured = speaker_model_path is not None
-    speaker_model_exists = bool(
-        speaker_model_path is not None and settings.resolve_path(speaker_model_path).is_file()
+    speaker_gate_supported, speaker_live_status, speaker_check = _speaker_gate_check(
+        settings,
+        wake_enabled=wake_enabled,
     )
-    if speaker_soft and speaker_model_exists:
-        from services.wake.speaker import onnxruntime_importable
-
-        speaker_runtime_available = onnxruntime_importable()
-    else:
-        speaker_runtime_available = False
-    speaker_gate_supported = bool(
-        speaker_soft
-        and speaker_model_configured
-        and speaker_model_exists
-        and speaker_runtime_available
-    )
-    if speaker_gate_supported:
-        speaker_detail = (
-            "speaker_gate=soft has a configured local ONNX model and ONNX Runtime is "
-            "importable. Live scoring still requires target-Mac validation."
-        )
-    elif speaker_soft and not speaker_model_configured:
-        speaker_detail = (
-            "speaker_gate=soft is configured without "
-            "wake.speaker_verifier_model_path; Sentinel degrades to off with one audited "
-            "warning. Follow scripts/speaker_verifier/README.md."
-        )
-    elif speaker_soft and not speaker_model_exists:
-        speaker_detail = (
-            "wake.speaker_verifier_model_path does not name an existing local file; "
-            "Sentinel degrades to off with one audited warning. Follow "
-            "scripts/speaker_verifier/README.md."
-        )
-    elif speaker_soft:
-        speaker_detail = (
-            "The optional onnxruntime dependency is not importable; Sentinel degrades "
-            "to off with one audited warning. Install APRIL's voice extra and follow "
-            "scripts/speaker_verifier/README.md."
-        )
-    else:
-        speaker_detail = (
-            "speaker_gate is off. `april voice enroll` records local samples but does "
-            "not enable soft mode by itself. Configure wake.speaker_verifier_model_path "
-            "as described in scripts/speaker_verifier/README.md before enabling it."
-        )
-    checks.append(
-        ReadinessCheck(
-            name="speaker gate",
-            status=("ok" if speaker_gate_supported else "warning") if wake_enabled else "skipped",
-            detail=(
-                speaker_detail
-                + " The speaker gate is a convenience filter, never a security boundary."
-                + (" Anyone near the microphone can wake APRIL." if wake_enabled else "")
-            ),
-        )
-    )
+    checks.append(speaker_check)
+    voice_live_status = _voice_live_status(root)
     voice_conversation_live_status = _voice_conversation_live_status(root)
     checks.append(
         ReadinessCheck(
@@ -551,20 +504,24 @@ def build_readiness_report(
             action=_VERIFY_REAL if production_real_runtime_eval_required else None,
         )
     )
-    trainer = settings.finetune.trainer_executable
-    evaluator = settings.finetune.evaluator_executable
-    trainer_ready = bool(trainer and settings.resolve_path(trainer).is_file())
-    evaluator_ready = bool(evaluator and settings.resolve_path(evaluator).is_file())
-    if not settings.finetune.enabled:
-        fine_tuning_status = "disabled"
+    fine_tuning = finetuning_readiness(settings)
+    fine_tuning_status = str(fine_tuning["status"])
+    if fine_tuning_status == "disabled":
         fine_tuning_check_status: CheckStatus = "skipped"
         fine_tuning_detail = "Fine-tuning is intentionally disabled."
-    elif trainer_ready and evaluator_ready:
-        fine_tuning_status = "ready"
+    elif fine_tuning_status == "ready":
         fine_tuning_check_status = "ok"
-        fine_tuning_detail = "Reviewed trainer and evaluator executables are configured."
+        fine_tuning_detail = (
+            "Trainer/evaluator commands and explicitly reviewed held-out evaluation "
+            "evidence are present."
+        )
+    elif fine_tuning_status == "awaiting_reviewed_evaluation_data":
+        fine_tuning_check_status = "warning"
+        fine_tuning_detail = (
+            "Trainer and evaluator commands are configured, but no explicitly reviewed "
+            "held-out evaluation evidence is present."
+        )
     else:
-        fine_tuning_status = "unconfigured"
         fine_tuning_check_status = "warning"
         fine_tuning_detail = (
             "Fine-tuning is enabled but trainer/evaluator configuration is incomplete."
@@ -574,7 +531,7 @@ def build_readiness_report(
             name="fine-tuning readiness",
             status=fine_tuning_check_status,
             detail=fine_tuning_detail,
-            action=None if fine_tuning_status == "ready" else "run april finetune doctor",
+            action=(None if fine_tuning_status == "ready" else str(fine_tuning["action"])),
         )
     )
     checks.append(
@@ -584,7 +541,14 @@ def build_readiness_report(
             detail=(
                 "build=not_evaluated; signing=not_evaluated; "
                 "notarization=not_evaluated; stapling=not_evaluated; "
-                "gatekeeper=not_evaluated. Offline readiness did not run Apple tools."
+                "gatekeeper=not_evaluated. Offline readiness did not run Apple tools. "
+                "Next: run april package build --output dist/APRIL.app --version VERSION; "
+                "run april package sign dist/APRIL.app --identity "
+                '"Developer ID Application: NAME"; '
+                "run april package notarize-submit dist/APRIL.zip "
+                "--keychain-profile APRIL_NOTARY; "
+                "run april package staple dist/APRIL.app; "
+                "run april package gatekeeper dist/APRIL.app."
             ),
             action="run april package build --output dist/APRIL.app --version VERSION",
         )
@@ -605,35 +569,56 @@ def build_readiness_report(
         )
     )
 
-    # --- aggregate -----------------------------------------------------------
-    blockers = [check.name for check in checks if check.status == "blocker"]
-    warnings = [check.name for check in checks if check.status == "warning"]
-    # Voice readiness is its own axis; model blockers are the voice "voice:" rows.
-    model_blockers = [name for name in blockers if not name.startswith("voice:")]
-    voice_blockers = [name for name in blockers if name.startswith("voice:")]
-    real_model_preflight_ready = not model_blockers
-    voice_preflight_ready = voice_enabled and not voice_blockers
-
+    verified_model_ids = _verified_model_ids(root)
+    core_model_ids = {model.id for model in models if model.role in {"brain", "coding", "reading"}}
+    core_models_verified = bool(core_model_ids) and core_model_ids.issubset(verified_model_ids)
     checks.append(
         ReadinessCheck(
             name="real-model verification",
-            status="skipped",
-            detail="Offline readiness did not load/chat/stream/unload a GGUF model.",
-            action=_VERIFY_REAL,
+            status="ok" if core_models_verified else "warning",
+            detail=(
+                "Brain, coding, and reading roles have fresh genuine load/chat/stream/"
+                "unload evidence."
+                if core_models_verified
+                else "Brain, coding, and reading roles lack complete fresh real-model evidence."
+            ),
+            action=None if core_models_verified else _VERIFY_REAL,
         )
     )
     checks.append(
         ReadinessCheck(
             name="live voice verification",
-            status="skipped",
-            detail=(
-                "Offline readiness did not run microphone/STT/TTS playback verification."
-                if voice_enabled
-                else "Voice disabled; live verification not requested."
+            status=(
+                "ok"
+                if voice_live_status == "verified"
+                else ("warning" if voice_enabled else "skipped")
             ),
-            action=_VERIFY_VOICE if voice_enabled else None,
+            detail=(
+                "A fresh real-hardware microphone/STT/TTS/playback report is present."
+                if voice_live_status == "verified"
+                else (
+                    "Microphone/STT/TTS/playback verification has not passed on real hardware."
+                    if voice_enabled
+                    else "Voice disabled; live verification not requested."
+                )
+            ),
+            action=(_VERIFY_VOICE if voice_enabled and voice_live_status != "verified" else None),
         )
     )
+
+    # --- aggregate -----------------------------------------------------------
+    blockers = [check.name for check in checks if check.status == "blocker"]
+    warnings = [check.name for check in checks if check.status == "warning"]
+    # Voice readiness is its own axis. An explicitly enabled soft speaker gate
+    # is a voice safety blocker, but never blocks ordinary text chat/model preflight.
+    model_blockers = [
+        name for name in blockers if not name.startswith("voice:") and name != "speaker gate"
+    ]
+    voice_blockers = [
+        name for name in blockers if name.startswith("voice:") or name == "speaker gate"
+    ]
+    real_model_preflight_ready = not model_blockers
+    voice_preflight_ready = voice_enabled and not voice_blockers
 
     next_actions: list[str] = []
     for check in checks:
@@ -677,8 +662,10 @@ def build_readiness_report(
         speaker_gate_supported=speaker_gate_supported,
         daemon_status=daemon_status,
         daemon_details_available=daemon_details_available,
+        voice_live_status=voice_live_status,
         sentinel_live_status=sentinel_live_status,
         voice_conversation_live_status=voice_conversation_live_status,
+        speaker_live_status=speaker_live_status,
         embedding_provider=settings.memory.embedding_provider,
         lexical_tokenizer_version="unicode-nfkc-casefold-v1",
         hashed_token_implementation_version="hashed-token-unicode-v2",
@@ -770,6 +757,24 @@ def build_readiness_report(
         benchmark_evidence_stale=bool(benchmark_evidence["stale"]),
         benchmark_evidence_incomplete=bool(benchmark_evidence["incomplete"]),
         benchmark_evidence_production_eligible=bool(benchmark_evidence["production_eligible"]),
+        evidence_boundaries=build_evidence_boundaries(
+            settings=settings,
+            models=models,
+            core_model_ids=core_model_ids,
+            core_models_verified=core_models_verified,
+            reasoning_model_ids={model.id for model in reasoning_role_models},
+            verified_model_ids=verified_model_ids,
+            vector_metadata=vector_metadata,
+            voice_enabled=voice_enabled,
+            wake_enabled=wake_enabled,
+            voice_live_status=voice_live_status,
+            sentinel_live_status=sentinel_live_status,
+            voice_conversation_live_status=voice_conversation_live_status,
+            speaker_live_status=speaker_live_status,
+            speaker_soft=speaker_soft,
+            benchmark_production_eligible=bool(benchmark_evidence["production_eligible"]),
+            fine_tuning_ready=fine_tuning_status == "ready",
+        ),
         checks=checks,
         blockers=blockers,
         warnings=warnings,

@@ -6,6 +6,7 @@ from pathlib import Path
 from typer.main import get_command
 
 from apps.cli.main import app as legacy_cli_app
+from apps.runner import verify as verify_facade
 from apps.runner.readiness import (
     ReadinessCheck,
     ReadinessModel,
@@ -13,6 +14,7 @@ from apps.runner.readiness import (
     VoiceArtifact,
     build_readiness_report,
 )
+from apps.runner.verification import local_checks, planning, reports
 from services.evolution.rollouts import (
     CanaryContext,
     CanarySelection,
@@ -32,9 +34,9 @@ from services.memory.vector_memory import (
     VectorMemory,
 )
 
-EXPECTED_READINESS_FIELD_COUNT = 98
+EXPECTED_READINESS_FIELD_COUNT = 101
 EXPECTED_READINESS_SCHEMA_SHA256 = (
-    "ea2bf2c3425d3ac5e0ddabe572ba3c551a3837d99fdd686c5a16c560bc888335"
+    "51d481986fac9a66fb61a3e6efcc530eea7a695cd21f9cfe0fc2abf9b314afc0"
 )
 
 EXPECTED_LEGACY_CLI_COMMANDS = {
@@ -153,6 +155,16 @@ def test_readiness_public_imports_and_schema_are_stable() -> None:
     fields = "\n".join(sorted(ReadinessReport.model_fields))
     assert len(ReadinessReport.model_fields) == EXPECTED_READINESS_FIELD_COUNT
     assert hashlib.sha256(fields.encode()).hexdigest() == EXPECTED_READINESS_SCHEMA_SHA256
+
+
+def test_verifier_facade_preserves_moved_public_imports() -> None:
+    assert (
+        verify_facade.run_local_security_integrity_verification
+        is local_checks.run_local_security_integrity_verification
+    )
+    assert verify_facade.skipped_result_for is planning.skipped_result_for
+    assert verify_facade.build_workflow_report is reports.build_workflow_report
+    assert verify_facade.chat_result_from_response is reports.chat_result_from_response
 
 
 def test_memory_and_rollout_facade_imports_are_stable() -> None:

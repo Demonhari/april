@@ -22,6 +22,8 @@ from apps.runner.verification.types import (
 )
 from april_common.process_environment import ProcessCategory, build_process_environment
 from april_common.service_health import ServiceHealthResult, probe_service_health
+from april_common.thermal_state import ThermalStateResult, collect_thermal_state
+from april_common.time import utc_now_iso
 
 
 class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runtime
@@ -427,6 +429,7 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
         max_output_tokens: int,
         keep_loaded: bool,
         inherit_process_group: bool = False,
+        thermal_collector: Callable[[], ThermalStateResult] = collect_thermal_state,
     ) -> None:
         super().__init__(
             home=home,
@@ -438,6 +441,8 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
         self.prompt = prompt
         self.runs = runs
         self.keep_loaded = keep_loaded
+        self.thermal_collector = thermal_collector
+        self.thermal_samples: list[ThermalStateResult] = []
 
     def run(self) -> list[BenchmarkResult]:  # type: ignore[override]
         return self.run_with_evaluation()[0]
@@ -448,6 +453,7 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
     ) -> tuple[list[BenchmarkResult], dict[str, Any] | None]:
         results: list[BenchmarkResult] = []
         evaluation: dict[str, Any] | None = None
+        self._sample_thermal()
         try:
             self._prepare()
             env = self._env()
@@ -455,14 +461,31 @@ class ModelBenchmark(RealModelVerifier):  # pragma: no cover - requires optional
             self.api = self._start("services.api.server", env, self.api_log)
             self._wait_json(self.runtime_url + "/runtime/health", auth_runtime=True)
             self._wait_json(self.api_url + "/health")
+            self._sample_thermal()
             for index in range(1, self.runs + 1):
                 results.append(self._run_one(index))
+                if index < self.runs:
+                    self._sample_thermal()
             if evaluator is not None:
                 evaluation = evaluator(self)
         finally:
+            self._sample_thermal()
             self._stop()
             shutil.rmtree(self.temp, ignore_errors=True)
         return results, evaluation
+
+    def _sample_thermal(self) -> None:
+        try:
+            self.thermal_samples.append(self.thermal_collector())
+        except Exception:
+            # A diagnostic probe must never abort or relabel the benchmark.
+            self.thermal_samples.append(
+                ThermalStateResult(
+                    available=False,
+                    sampled_at=utc_now_iso(),
+                    failure_reason="collector_failed",
+                )
+            )
 
     def _run_one(self, index: int) -> BenchmarkResult:
         self.load_time_seconds = None

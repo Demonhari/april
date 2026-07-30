@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
 from typing import Any
 
 from april_common.service_health import ServiceHealthResult
@@ -10,25 +12,64 @@ from april_common.settings import AprilSettings
 
 
 def finetuning_readiness(settings: AprilSettings) -> dict[str, Any]:
+    reviewed_evaluation_data = _reviewed_finetuning_evidence_present(settings)
     if not settings.finetune.enabled:
         return {
             "status": "disabled",
             "enabled": False,
             "trainer_configured": False,
             "evaluator_configured": False,
+            "reviewed_evaluation_data_present": reviewed_evaluation_data,
             "action": "run april finetune doctor",
         }
     trainer = settings.finetune.trainer_executable
     evaluator = settings.finetune.evaluator_executable
     trainer_ready = bool(trainer and settings.resolve_path(trainer).is_file())
     evaluator_ready = bool(evaluator and settings.resolve_path(evaluator).is_file())
+    commands_ready = trainer_ready and evaluator_ready
+    status = (
+        "unconfigured"
+        if not commands_ready
+        else ("ready" if reviewed_evaluation_data else "awaiting_reviewed_evaluation_data")
+    )
     return {
-        "status": "ready" if trainer_ready and evaluator_ready else "unconfigured",
+        "status": status,
         "enabled": True,
         "trainer_configured": trainer_ready,
         "evaluator_configured": evaluator_ready,
-        "action": None if trainer_ready and evaluator_ready else "run april finetune doctor",
+        "reviewed_evaluation_data_present": reviewed_evaluation_data,
+        "action": (
+            None
+            if status == "ready"
+            else (
+                "run april finetune doctor"
+                if not commands_ready
+                else "Review held-out evaluation evidence before any adapter rollout."
+            )
+        ),
     }
+
+
+def _reviewed_finetuning_evidence_present(settings: AprilSettings) -> bool:
+    evidence_root = settings.evolution_path / "adapters" / "evidence"
+    if not evidence_root.is_dir():
+        return False
+    for path in sorted(evidence_root.glob("*.json"))[:1000]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        heldout_hash = payload.get("heldout_dataset_sha256")
+        if (
+            payload.get("evidence_type") == "lora_perplexity"
+            and payload.get("human_reviewed") is True
+            and isinstance(heldout_hash, str)
+            and re.fullmatch(r"[a-f0-9]{64}", heldout_hash)
+        ):
+            return True
+    return False
 
 
 def production_activation_failure_reasons(
@@ -50,6 +91,7 @@ def production_activation_failure_reasons(
     finetuning: dict[str, Any],
     credential_store_selected: str,
     legacy_plaintext_credential_detected: bool,
+    benchmark_evidence: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Return stable production blockers without changing operational readiness."""
     reasons: list[dict[str, str]] = []
@@ -136,12 +178,57 @@ def production_activation_failure_reasons(
             "A compatible active semantic vector generation is required.",
             "run april memory reindex --wait",
         )
-    if settings.voice.enabled and not live_flags["voice_conversation_live_verified"]:
+    if settings.voice.enabled and not live_flags.get("voice_live_verified", False):
         add(
-            "live_voice_not_verified",
-            "Voice is configured but complete real-hardware verification is absent.",
+            "live_microphone_not_verified",
+            "Voice is configured but push-to-talk has no fresh real-hardware verification.",
+            "run april voice verify-live --report data/verification/voice-live.json",
+        )
+    if (
+        settings.voice.enabled
+        and settings.wake.enabled
+        and not live_flags.get("wake_word_live_verified", False)
+    ):
+        add(
+            "wake_word_live_not_verified",
+            "Wake mode has no fresh real-hardware wake-word verification.",
+            "run april voice verify-wake-live --report data/verification/wake-live.json",
+        )
+    if settings.voice.enabled and not live_flags.get("voice_conversation_live_verified", False):
+        add(
+            "voice_conversation_live_not_verified",
+            "Voice lacks a fresh real-hardware two-turn conversation verification.",
             "run april voice verify-conversation-live "
             "--report data/verification/voice-conversation-live.json",
+        )
+    if settings.wake.speaker_gate == "soft" and not live_flags.get("speaker_live_verified", False):
+        add(
+            "speaker_live_not_verified",
+            "speaker_gate=soft requires fresh real-hardware speaker verification.",
+            "run april voice verify-speaker-live --report data/verification/speaker-live.json",
+        )
+    benchmark = benchmark_evidence or {}
+    if not benchmark.get("production_eligible"):
+        if benchmark.get("simulated"):
+            benchmark_code = "model_comparison_simulated"
+            benchmark_message = "Simulated model comparison is not production evidence."
+        elif benchmark.get("stale") or (
+            benchmark.get("exists") and not benchmark.get("current_hardware")
+        ):
+            benchmark_code = "model_comparison_stale"
+            benchmark_message = (
+                "Model comparison evidence is from different hardware or configuration."
+            )
+        elif benchmark.get("incomplete"):
+            benchmark_code = "model_comparison_incomplete"
+            benchmark_message = "Model comparison evidence is incomplete."
+        else:
+            benchmark_code = "model_comparison_missing"
+            benchmark_message = "Current-hardware model comparison evidence is absent."
+        add(
+            benchmark_code,
+            benchmark_message,
+            "run april model compare-setups --shared-model-id LOCAL_SHARED_MODEL_ID --wait",
         )
     if settings.workers.job_worker_enabled and not job_worker_ready:
         add("job_worker_unavailable", "The durable Job Worker is not ready.", "run april status")
@@ -156,8 +243,8 @@ def production_activation_failure_reasons(
     if finetuning["status"] != "ready":
         add(
             f"fine_tuning_{finetuning['status']}",
-            "Fine-tuning is disabled or its trainer/evaluator is unconfigured.",
-            "run april finetune doctor",
+            "Fine-tuning is disabled, unconfigured, or lacks reviewed evaluation evidence.",
+            str(finetuning.get("action") or "run april finetune doctor"),
         )
     if not settings.evolution.enabled:
         add(

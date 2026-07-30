@@ -57,6 +57,9 @@ load a candidate as a separately addressable immutable model identity alongside
 baseline, or run it in a separate candidate process. Global adapter switching
 is not a safe substitute and remains prohibited.
 
+The complete prerequisite and acceptance design is documented in
+[`lora-canary-safety-design.md`](lora-canary-safety-design.md).
+
 ## Recovery
 
 Run:

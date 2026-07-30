@@ -264,6 +264,8 @@ def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
         assert field in vector_index
     assert voice["speaker_gate"]["mode"] == "off"
     assert voice["speaker_gate"]["supported"] is False
+    assert voice["speaker_gate"]["status"] == "optional_unavailable"
+    assert voice["speaker_gate"]["live_verified"] is False
     assert isinstance(voice["sentinel_live_verified"], bool)
     # Readiness exposes a redacted local config fingerprint + per-type report
     # freshness so the operator console / daily-driver doctor can flag staleness.
@@ -274,18 +276,27 @@ def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
     assert "runtime_simulated" in production_codes
     assert "real_model_evidence_missing" in production_codes
     assert "hashed_token_embeddings_active" in production_codes
+    assert "model_comparison_missing" in production_codes
     assert "fine_tuning_disabled" in production_codes
     assert "evolution_disabled" in production_codes
     assert "apple_release_evidence_unavailable" in production_codes
     assert body["fine_tuning"]["status"] == "disabled"
-    assert body["release_evidence"] == {
+    assert body["model_comparison_evidence"]["production_eligible"] is False
+    assert body["evidence_boundaries"]["readiness_implementation"] == "implemented_in_code"
+    assert body["evidence_boundaries"]["core_models"] == "blocked_for_safety"
+    assert body["evidence_boundaries"]["speaker_verification"] == "optional_unavailable"
+    assert body["evidence_boundaries"]["lora_canary"] == "blocked_for_safety"
+    assert body["release_evidence"] | {"next_actions": {}} == {
         "production_app_build": "not_evaluated",
         "signing": "not_evaluated",
         "notarization": "not_evaluated",
         "stapling": "not_evaluated",
         "gatekeeper": "not_evaluated",
         "production_ready": False,
+        "next_actions": {},
     }
+    release_actions = body["release_evidence"]["next_actions"]
+    assert set(release_actions) == {"build", "sign", "notarize", "staple", "gatekeeper"}
     assert isinstance(body["security"]["database_integrity"]["failures"], list)
     assert "migration_consistent" in body["security"]["database_integrity"]
     assert body["models"]["registry"]["production_model_artifacts_ready"] is False

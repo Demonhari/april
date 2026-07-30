@@ -7,6 +7,8 @@
 > [docs/production-readiness-roadmap.md](docs/production-readiness-roadmap.md).
 > Phase 4B rollout operation and its real-evidence boundary are documented in
 > [docs/evolution-rollouts.md](docs/evolution-rollouts.md).
+> LoRA canary remains safety-blocked; its prerequisite design is documented in
+> [docs/lora-canary-safety-design.md](docs/lora-canary-safety-design.md).
 
 APRIL is a private, local-first AI assistant MVP for macOS. It is CLI-first, uses a separate local model service called April Runtime, supports specialist agents, stores inspectable local memory, and enforces deterministic tool permissions with exact-action approvals.
 
@@ -31,7 +33,9 @@ Only `services/april_runtime/llama_cpp_backend.py` imports `llama_cpp`. Agents a
 ## Install
 
 APRIL supports Python 3.11 through 3.13 for the Core MVP. Optional local
-runtime and voice dependencies remain adapter-isolated.
+runtime and voice dependencies remain adapter-isolated. Project and lock
+metadata enforce the same `>=3.11,<3.14` range, and CI exercises 3.11, 3.12,
+and 3.13.
 
 ```bash
 python3.11 -m venv .venv
@@ -207,6 +211,15 @@ real models, live audio, or native Mac packaging.
 | Live microphone, whisper.cpp, Piper, wake-word | **Not verified here** — requires your local binaries/models |
 | Real-model target-Mac acceptance report | Implemented; runs real checks only when you supply a GGUF |
 | Production app packaging/sign/notary/LaunchAgent commands | Implemented; real Apple execution not verified here |
+| Intel macOS `pmset` thermal sampling and degradation proxy | Implemented and unit-tested; genuine Intel Mac evidence not recorded here |
+| Prompt canary rollout | Implemented and fake/unit-tested; disabled by default and requires reviewed evidence plus exact approvals |
+| LoRA canary rollout | **Safety-blocked** as `lora_canary_unsupported`; not production-ready |
+
+Readiness uses explicit evidence boundaries: `implemented_in_code`,
+`configured`, `preflight_ready`, `verified_with_real_evidence`,
+`optional_unavailable`, and `blocked_for_safety`. Configuration, fake checks,
+mocked hardware, and skipped checks never produce
+`verified_with_real_evidence`.
 
 CI and fake verification are not proof of real GGUF readiness. Real-model
 readiness is proven only by a target-Mac report that loads, chats, streams, and
@@ -261,8 +274,15 @@ up with explicit, dry-run-by-default commands:
 run april memory doctor
 # Optionally prove the local embedding actually serves vectors via /runtime/embed:
 run april memory doctor --verify-runtime-embedding
-# Register a local embedding GGUF and switch to runtime-local (dry-run unless --apply):
-run april model import --role embedding --id april-embedding --name LOCAL_EMBEDDING --path /absolute/path/to/embedding.gguf --sha256 EXPECTED_SHA256
+# Register the reviewed local embedding GGUF; import stays inactive:
+run april model import --role embedding --id nomic-embed-text-v1.5 \
+  --name "nomic-embed-text-v1.5 Q8" --path /ABSOLUTE/LOCAL/PATH \
+  --sha256 EXPECTED_SHA256
+# Then explicitly select runtime-local in config/environment and reindex:
+export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
+export APRIL_MEMORY_EMBEDDING_MODEL_ID=nomic-embed-text-v1.5
+run april memory reindex --wait
+run april memory doctor
 ```
 
 Every reader and writer of the local vector index — the API container and the
@@ -281,6 +301,33 @@ The repository supports both reasoning and embedding roles, but the
 Qwen3-4B reasoning and Nomic embedding GGUF files are operator-supplied and must
 be imported manually. Hashed-token embeddings remain active until Runtime-local
 embedding is explicitly selected and memory reindexing succeeds.
+
+### Operator-owned production activation
+
+APRIL does not supply or select these artifacts. Review each local file and
+replace every placeholder with an operator-owned absolute path and SHA-256:
+
+```bash
+run april model import --role brain --id LOCAL_BRAIN_ID \
+  --name "REVIEWED_BRAIN_NAME" --path /ABSOLUTE/LOCAL/BRAIN.gguf \
+  --sha256 EXPECTED_SHA256
+run april model import --role coding --id LOCAL_CODING_ID \
+  --name "REVIEWED_CODING_NAME" --path /ABSOLUTE/LOCAL/CODING.gguf \
+  --sha256 EXPECTED_SHA256
+run april model import --role reading --id LOCAL_READING_ID \
+  --name "REVIEWED_READING_NAME" --path /ABSOLUTE/LOCAL/READING.gguf \
+  --sha256 EXPECTED_SHA256
+run april model import --role reasoning --id qwen3-4b-reasoning \
+  --name "Qwen3-4B Q4_K_M" --path /ABSOLUTE/LOCAL/PATH \
+  --sha256 EXPECTED_SHA256
+run april model import --role embedding --id nomic-embed-text-v1.5 \
+  --name "nomic-embed-text-v1.5 Q8" --path /ABSOLUTE/LOCAL/PATH \
+  --sha256 EXPECTED_SHA256
+```
+
+Imports are durable and inactive. They do not select an active model or
+embedding provider. After explicitly selecting Runtime-local embeddings, run
+`run april memory reindex --wait` and `run april memory doctor`.
 
 ## Backends, Verification, and Honest Status
 
@@ -1317,6 +1364,19 @@ keeps `voice.enabled: false`, even if it was previously true. A missing
 wake-word model does not block push-to-talk, but wake-word listening remains
 unavailable/unverified until a local wake-word model is configured and live
 verification passes.
+
+Record each real voice evidence rung separately:
+
+```bash
+run april voice verify-live --report data/verification/voice-live.json
+run april voice verify-wake-live --report data/verification/wake-live.json
+run april voice verify-conversation-live \
+  --report data/verification/voice-conversation-live.json
+```
+
+The last command proves two consecutive turns, endpoint timing, short-pause
+tolerance, and interruption/barge-in behavior. No fake microphone or injected
+verifier result is accepted as real hardware evidence.
 
 ## Proactive Scheduler
 

@@ -14,6 +14,10 @@ from apps.cli.render import console
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.hardware_profile import safe_hardware_profile
 from april_common.settings import BenchmarkSettings, load_settings
+from april_common.thermal_state import (
+    ThermalEvidenceSummary,
+    merge_thermal_evidence,
+)
 from april_common.time import utc_now_iso
 from services.april_runtime.model_registry import ModelRegistry
 from services.evaluation.model_quality import fixture_set_metadata
@@ -177,6 +181,18 @@ async def _compare(
         "candidate_failed_no_regression_gates": "comparison_failed",
         "insufficient_evidence": "insufficient_evidence",
     }[recommendation]
+    performance_throttling_suspected = _thermal_suspected(
+        shared_summary,
+        settings.benchmark.maximum_decline_fraction,
+    )
+    thermal_evidence = merge_thermal_evidence(
+        [
+            result["thermal_evidence"]
+            for result in [*specialist_results, shared_result]
+            if isinstance(result.get("thermal_evidence"), Mapping)
+        ],
+        performance_degradation_suggested=performance_throttling_suspected,
+    )
     return {
         "schema_version": 2,
         "report_type": "model_setup_comparison",
@@ -214,15 +230,21 @@ async def _compare(
         "automatic_selection_performed": False,
         "automatic_activation_performed": False,
         "thermal_measurement": {
-            "available": False,
+            **thermal_evidence.model_dump(mode="json"),
+            "available": not thermal_evidence.direct_measurement_unavailable,
             "temperature_celsius": None,
-            "hardware_throttle_state": None,
-            "reason": "safe unprivileged thermal measurement was not exposed",
-            "thermal_throttling_suspected": _thermal_suspected(
-                shared_summary,
-                settings.benchmark.maximum_decline_fraction,
+            "hardware_throttle_state": thermal_evidence.direct_throttling_observed,
+            "reason": (
+                None
+                if not thermal_evidence.direct_measurement_unavailable
+                else (
+                    thermal_evidence.failure_reasons[0]
+                    if thermal_evidence.failure_reasons
+                    else "direct_measurement_unavailable"
+                )
             ),
-            "inference_only": True,
+            "thermal_throttling_suspected": performance_throttling_suspected,
+            "inference_only": thermal_evidence.direct_measurement_unavailable,
         },
         "simulated": simulated,
         "hardware_profile": safe_hardware_profile(),
@@ -483,6 +505,7 @@ def _redacted_benchmark(result: Mapping[str, Any]) -> dict[str, Any]:
         "coding_fixture_pass_rate": result.get("coding_fixture_pass_rate"),
         "context_handling_reliability": result.get("context_handling_reliability"),
         "lifecycle": result.get("lifecycle"),
+        "thermal_evidence": _redacted_thermal_evidence(result.get("thermal_evidence")),
         "runs": [
             {
                 "run_index": run.get("run_index"),
@@ -504,6 +527,17 @@ def _redacted_benchmark(result: Mapping[str, Any]) -> dict[str, Any]:
             if isinstance(run, Mapping)
         ],
     }
+
+
+def _redacted_thermal_evidence(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return ThermalEvidenceSummary().model_dump(mode="json")
+    try:
+        return ThermalEvidenceSummary.model_validate(value).model_dump(mode="json")
+    except ValueError:
+        return ThermalEvidenceSummary(failure_reasons=["thermal_evidence_invalid"]).model_dump(
+            mode="json"
+        )
 
 
 def _measured_prompt_rate(runs: Sequence[Mapping[str, Any]]) -> float | None:

@@ -31,6 +31,7 @@ class SpeakerLiveReport(BaseModel):
     schema_version: int = 1
     report_type: str = "speaker_live"
     generated_at: str
+    evidence_mode: str = "unverified"
     expires_after_days: int = SPEAKER_REPORT_TTL_DAYS
     config_fingerprint: str
     model_basename: str | None
@@ -61,6 +62,7 @@ async def run_speaker_live_verification(
     retain_debug_audio: bool = False,
     report_path: Path | None = None,
 ) -> SpeakerLiveReport:
+    evidence_mode = "real_hardware" if microphone is None and verifier is None else "injected_test"
     model = (
         settings.resolve_path(settings.wake.speaker_verifier_model_path)
         if settings.wake.speaker_verifier_model_path is not None
@@ -72,6 +74,7 @@ async def run_speaker_live_verification(
     rejected = _reviewed_wavs(settings.home / "data" / "voice_profiles" / "rejected")
     report = SpeakerLiveReport(
         generated_at=utc_now_iso(),
+        evidence_mode=evidence_mode,
         config_fingerprint=config_fingerprint_digest(settings.home),
         model_basename=model.name if model is not None else None,
         model_available=model_available,
@@ -132,7 +135,8 @@ async def run_speaker_live_verification(
                 score < SPEAKER_MATCH_THRESHOLD for score in rejected_scores
             )
         report.speaker_live_verified = bool(
-            report.fresh_sample_passed
+            report.evidence_mode == "real_hardware"
+            and report.fresh_sample_passed
             and report.false_reject_fixture_passed
             and report.false_accept_fixture_passed is not False
         )
@@ -158,7 +162,11 @@ def enable_soft_speaker_gate(settings: AprilSettings, report_path: Path) -> None
         current_fingerprint=config_fingerprint_digest(settings.home),
         basename=report_path.name,
     )
-    if not report.speaker_live_verified or freshness.stale:
+    if (
+        report.evidence_mode != "real_hardware"
+        or not report.speaker_live_verified
+        or freshness.stale
+    ):
         raise ValueError("A fresh successful speaker-live report is required.")
     _set_speaker_gate(settings.home / "configs" / "april.yaml", "soft")
 

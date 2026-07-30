@@ -6,7 +6,6 @@ import importlib.util
 import platform
 from collections.abc import Callable
 from dataclasses import asdict
-from pathlib import Path
 from typing import Any
 
 from april_common.config_fingerprint import config_fingerprint_digest
@@ -15,11 +14,7 @@ from april_common.process_environment import PROCESS_ENVIRONMENT_POLICY_VERSION
 from april_common.process_runner import ResourceLimitProfile, resource_limit_report
 from april_common.process_sandbox import SandboxBackend, sandbox_capabilities
 from april_common.service_health import ServiceHealthResult, probe_service_health
-from april_common.settings import (
-    INSECURE_API_TOKENS,
-    INSECURE_RUNTIME_TOKENS,
-    AprilSettings,
-)
+from april_common.settings import AprilSettings
 from april_common.token_setup import legacy_plaintext_credentials_detected
 from april_common.verification_evidence import verified_model_ids
 from services.api.dependencies import ApiContainer
@@ -28,8 +23,26 @@ from services.api.production_activation import (
     finetuning_readiness,
     production_activation_failure_reasons,
 )
+from services.api.readiness_evidence import (
+    api_evidence_boundaries,
+    latest_benchmark_evidence,
+)
+from services.api.readiness_safety import (
+    development_token_warning as _development_token_warning,
+)
+from services.api.readiness_safety import (
+    redact_health_payload as _redact_health_payload,
+)
+from services.api.readiness_safety import (
+    safe_model_entry as _safe_model_entry,
+)
+from services.api.readiness_safety import (
+    safe_runtime_health as _safe_runtime_health,
+)
+from services.api.readiness_safety import (
+    voice_artifact as _voice_artifact,
+)
 from services.api.reporting import (
-    _basename,
     _is_relative_to,
     _latest_live_voice_flags,
     _redact_path_text,
@@ -49,20 +62,7 @@ from services.memory.maintenance import check_database
 from services.memory.migrations import SCHEMA_VERSION
 from services.tool_worker.limits import UnsafeToolWorkerSocket, validate_live_socket
 from services.voice.health import microphone_access, query_audio_devices, voice_readiness_summary
-
-
-def _redact_health_payload(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            if key in {"path", "model_path", "binary_path"}:
-                redacted[key] = "[REDACTED]"
-            else:
-                redacted[key] = _redact_health_payload(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_health_payload(item) for item in value]
-    return value
+from services.wake.speaker import onnxruntime_importable
 
 
 async def readiness_payload(
@@ -171,6 +171,10 @@ async def readiness_payload(
     # Lift the offline milestone to a live rung only when a redacted live report
     # proves it. wake_live_verified outranks live_verified.
     live_flags = _latest_live_voice_flags(active.settings)
+    benchmark_evidence = await latest_benchmark_evidence(
+        active.database,
+        active.settings,
+    )
     voice_milestone = str(voice_readiness.get("voice_milestone", "not_configured"))
     if active.settings.voice.enabled:
         if live_flags["voice_conversation_live_verified"]:
@@ -358,13 +362,14 @@ async def readiness_payload(
     pending_real_runtime_blockers = _pending_real_runtime_overlay_blockers(active.settings)
     real_runtime_required = active.settings.environment == "production"
     finetuning = finetuning_readiness(active.settings)
+    verified_models = verified_model_ids(active.settings.home)
     production_failure_reasons = production_activation_failure_reasons(
         settings=active.settings,
         runtime_probe=runtime_probe,
         runtime_backend=runtime_backend,
         runtime_simulated=runtime_simulated,
         model_registry=model_registry,
-        verified_models=verified_model_ids(active.settings.home),
+        verified_models=verified_models,
         embeddings=embeddings,
         live_flags=live_flags,
         job_worker_ready=job_worker_ready,
@@ -376,6 +381,25 @@ async def readiness_payload(
         finetuning=finetuning,
         credential_store_selected=credential_store_selected,
         legacy_plaintext_credential_detected=legacy_plaintext,
+        benchmark_evidence=benchmark_evidence,
+    )
+    speaker_model = (
+        active.settings.resolve_path(active.settings.wake.speaker_verifier_model_path)
+        if active.settings.wake.speaker_verifier_model_path is not None
+        else None
+    )
+    speaker_supported = bool(
+        speaker_model is not None and speaker_model.is_file() and onnxruntime_importable()
+    )
+    evidence_boundaries = api_evidence_boundaries(
+        settings=active.settings,
+        model_registry=model_registry,
+        verified_models=verified_models,
+        embeddings=embeddings,
+        live_flags=live_flags,
+        benchmark_evidence=benchmark_evidence,
+        finetuning_status=str(finetuning["status"]),
+        rollout_state=rollout_state,
     )
     return {
         "ready": ready,
@@ -383,6 +407,7 @@ async def readiness_payload(
         "readiness_scope": "operational",
         "production_ready": not production_failure_reasons,
         "production_failure_reasons": production_failure_reasons,
+        "evidence_boundaries": evidence_boundaries,
         "failure_reasons": failure_reasons,
         "core": {
             "api_health": "ok",
@@ -470,6 +495,7 @@ async def readiness_payload(
             "rollouts": rollout_state,
         },
         "fine_tuning": finetuning,
+        "model_comparison_evidence": benchmark_evidence,
         "release_evidence": {
             "production_app_build": "not_evaluated",
             "signing": "not_evaluated",
@@ -477,6 +503,19 @@ async def readiness_payload(
             "stapling": "not_evaluated",
             "gatekeeper": "not_evaluated",
             "production_ready": False,
+            "next_actions": {
+                "build": "run april package build --output dist/APRIL.app --version VERSION",
+                "sign": (
+                    "run april package sign dist/APRIL.app "
+                    '--identity "Developer ID Application: NAME"'
+                ),
+                "notarize": (
+                    "run april package notarize-submit dist/APRIL.zip "
+                    "--keychain-profile APRIL_NOTARY"
+                ),
+                "staple": "run april package staple dist/APRIL.app",
+                "gatekeeper": "run april package gatekeeper dist/APRIL.app",
+            },
         },
         # Redacted local config digest + per-type report freshness, so the Desktop
         # operator console and `doctor --daily-driver` can flag stale reports.
@@ -534,12 +573,29 @@ async def readiness_payload(
             ),
             "speaker_gate": {
                 "mode": active.settings.wake.speaker_gate,
-                "supported": False,
+                "supported": speaker_supported,
+                "live_verified": live_flags["speaker_live_verified"],
+                "status": (
+                    "live_verified"
+                    if live_flags["speaker_live_verified"]
+                    else (
+                        "preflight_ready"
+                        if speaker_supported
+                        else (
+                            "blocked_for_safety"
+                            if active.settings.wake.speaker_gate == "soft"
+                            else "optional_unavailable"
+                        )
+                    )
+                ),
+                "verification_command": (
+                    "run april voice verify-speaker-live "
+                    "--report data/verification/speaker-live.json"
+                ),
                 "detail": (
                     (
-                        "speaker_gate=soft is configured, but no production local "
-                        "speaker verifier model ships with APRIL; Sentinel audits one "
-                        "warning and behaves as off."
+                        "speaker_gate=soft requires a configured local model, "
+                        "onnxruntime, and fresh real-hardware speaker-live evidence."
                         if active.settings.wake.speaker_gate == "soft"
                         else "speaker_gate is off; enrollment does not enable it by itself."
                     )
@@ -830,53 +886,3 @@ def _daemon_readiness(settings: AprilSettings) -> dict[str, Any]:
         "children": payload.get("children", []),
         "governor": payload.get("governor", {}),
     }
-
-
-def _safe_runtime_health(payload: dict[str, Any]) -> dict[str, Any]:
-    safe = _redact_health_payload(payload)
-    if isinstance(safe, dict) and isinstance(safe.get("models"), list):
-        backend = str(safe.get("backend", "unknown"))
-        safe["models"] = [
-            _safe_model_entry(model, backend) for model in safe["models"] if isinstance(model, dict)
-        ]
-    return safe if isinstance(safe, dict) else {"status": "unknown"}
-
-
-def _safe_model_entry(model: dict[str, Any], runtime_backend: str) -> dict[str, Any]:
-    path = model.get("path")
-    backend = str(model.get("backend") or runtime_backend or "unknown")
-    return {
-        "id": str(model.get("id", "unknown")),
-        "name": str(model.get("name", "unknown")),
-        "role": str(model.get("role", "unknown")),
-        "backend": backend,
-        "state": str(model.get("state", "unknown")),
-        "keep_loaded": bool(model.get("keep_loaded", False)),
-        "missing_path": bool(model.get("missing_path", False)),
-        "simulated": backend == "fake" or runtime_backend == "fake",
-        "path_basename": _basename(path),
-        "context_size": model.get("context_size"),
-        "load_error": (
-            _redact_path_text(str(model.get("load_error"))) if model.get("load_error") else None
-        ),
-    }
-
-
-def _voice_artifact(settings: AprilSettings, name: str, path: Path | None) -> dict[str, Any]:
-    if path is None:
-        return {"name": name, "configured": False, "missing": True, "basename": None}
-    resolved = settings.resolve_path(path)
-    return {
-        "name": name,
-        "configured": True,
-        "missing": not resolved.exists(),
-        "basename": resolved.name,
-    }
-
-
-def _development_token_warning(settings: AprilSettings) -> str | None:
-    if not settings.api.token or settings.api.token in INSECURE_API_TOKENS:
-        return "API token uses an insecure development/placeholder default or is empty."
-    if not settings.runtime.token or settings.runtime.token in INSECURE_RUNTIME_TOKENS:
-        return "Runtime token uses an insecure development/placeholder default or is missing."
-    return None

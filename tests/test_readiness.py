@@ -12,6 +12,7 @@ import yaml
 
 from apps.runner.readiness import ReadinessReport, build_readiness_report
 from apps.runner.readiness_inspection import _benchmark_evidence
+from april_common.benchmark_evidence import evaluate_benchmark_evidence
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.credentials import CredentialKey, InMemoryCredentialStore
 from april_common.hardware_profile import safe_hardware_profile
@@ -102,6 +103,12 @@ def test_fake_backend_without_models_is_not_ready(tmp_path: Path) -> None:
         '--name "nomic-embed-text-v1.5 Q8" --path /ABSOLUTE/LOCAL/PATH '
         "--sha256 EXPECTED_SHA256"
     )
+    assert report.evidence_boundaries["readiness_implementation"] == "implemented_in_code"
+    assert report.evidence_boundaries["core_models"] == "blocked_for_safety"
+    assert report.evidence_boundaries["reasoning_role"] == "blocked_for_safety"
+    assert report.evidence_boundaries["semantic_embeddings"] == "blocked_for_safety"
+    assert report.evidence_boundaries["speaker_verification"] == "optional_unavailable"
+    assert report.evidence_boundaries["lora_canary"] == "blocked_for_safety"
 
 
 def test_invalid_gguf_header_is_a_model_blocker(tmp_path: Path) -> None:
@@ -215,6 +222,25 @@ def test_benchmark_evidence_requires_current_configuration_fingerprint(
     assert report["config_fingerprint"] != config_fingerprint_digest(home)
     assert evidence["stale"] is True
     assert evidence["incomplete"] is True
+    assert evidence["production_eligible"] is False
+
+
+def test_simulated_benchmark_is_distinct_from_current_real_evidence() -> None:
+    evidence = evaluate_benchmark_evidence(
+        {
+            "hardware_profile": {"id": "current"},
+            "config_fingerprint": "config",
+            "fixture_set": {"id": "fixtures"},
+            "simulated": True,
+            "production_eligible": True,
+            "unavailable_measurements": ["thermal_throttling"],
+        },
+        current_hardware_id="current",
+        current_config_fingerprint="config",
+    )
+
+    assert evidence["simulated"] is True
+    assert evidence["current_hardware"] is True
     assert evidence["production_eligible"] is False
 
 
@@ -600,10 +626,10 @@ def test_wake_enabled_without_onnx_model_is_a_blocker(tmp_path: Path) -> None:
     sentinel = _check(report, "Sentinel live verification")
     assert sentinel is not None
     assert sentinel.status == "warning"
-    # The unsupported speaker gate is called out, not silently skipped.
+    # The optional speaker gate stays explicitly disabled and does not block chat.
     gate = _check(report, "speaker gate")
     assert gate is not None
-    assert gate.status == "warning"
+    assert gate.status == "skipped"
 
 
 def test_wake_disabled_keeps_sentinel_and_speaker_gate_informational(tmp_path: Path) -> None:
@@ -684,8 +710,8 @@ def test_speaker_gate_detail_is_honest_about_enroll(tmp_path: Path) -> None:
     report = build_readiness_report(home)
     gate = _check(report, "speaker gate")
     assert gate is not None
-    assert gate.status == "warning"
-    assert "does not enable soft mode" in gate.detail
+    assert gate.status == "skipped"
+    assert "off" in gate.detail
     assert "never a security boundary" in gate.detail
     assert "Anyone near the microphone can wake APRIL." in gate.detail
 
@@ -698,7 +724,7 @@ def test_soft_speaker_gate_reports_operator_model_blocker(tmp_path: Path) -> Non
     report = build_readiness_report(home)
     gate = _check(report, "speaker gate")
     assert gate is not None
-    assert gate.status == "warning"
+    assert gate.status == "blocker"
     assert "wake.speaker_verifier_model_path" in gate.detail
     assert "scripts/speaker_verifier/README.md" in gate.detail
     assert "degrades to off" in gate.detail
@@ -725,12 +751,69 @@ def test_soft_speaker_gate_supported_only_with_model_and_runtime(
     supported = build_readiness_report(home)
 
     assert supported.speaker_gate_supported is True
-    assert _check(supported, "speaker gate").status == "ok"
+    assert _check(supported, "speaker gate").status == "blocker"
+    assert "fresh real-hardware" in _check(supported, "speaker gate").detail
 
     monkeypatch.setattr("services.wake.speaker.onnxruntime_importable", lambda: False)
     unsupported = build_readiness_report(home)
     assert unsupported.speaker_gate_supported is False
     assert "onnxruntime" in _check(unsupported, "speaker gate").detail
+
+
+def test_injected_speaker_report_cannot_satisfy_soft_gate(tmp_path: Path) -> None:
+    home = _write_home(
+        tmp_path,
+        extra={"wake": {"enabled": True, "speaker_gate": "soft"}},
+    )
+    report_dir = home / "data" / "verification"
+    report_dir.mkdir(parents=True)
+    settings = load_settings(root=home)
+    (report_dir / "speaker-live.json").write_text(
+        json.dumps(
+            {
+                "report_type": "speaker_live",
+                "generated_at": "2026-07-30T00:00:00Z",
+                "expires_after_days": 365,
+                "config_fingerprint": config_fingerprint_digest(settings.home),
+                "evidence_mode": "injected_test",
+                "speaker_live_verified": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_readiness_report(home)
+
+    assert report.speaker_live_status == "failed"
+    assert _check(report, "speaker gate").status == "blocker"
+    assert report.evidence_boundaries["speaker_verification"] == "blocked_for_safety"
+
+
+def test_configured_finetuning_without_reviewed_evidence_is_not_ready(
+    tmp_path: Path,
+) -> None:
+    trainer = tmp_path / "trainer"
+    evaluator = tmp_path / "evaluator"
+    trainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    evaluator.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    home = _write_home(
+        tmp_path,
+        extra={
+            "finetune": {
+                "enabled": True,
+                "trainer_executable": str(trainer),
+                "evaluator_executable": str(evaluator),
+            }
+        },
+    )
+
+    report = build_readiness_report(home)
+
+    assert report.fine_tuning_status == "awaiting_reviewed_evaluation_data"
+    check = _check(report, "fine-tuning readiness")
+    assert check.status == "warning"
+    assert "reviewed" in check.detail
+    assert report.evidence_boundaries["fine_tuning"] == "optional_unavailable"
 
 
 def test_missing_lora_adapter_is_a_blocker_and_present_adapter_warns(tmp_path: Path) -> None:

@@ -179,18 +179,19 @@ def _reports_freshness(settings: AprilSettings) -> dict[str, Any]:
 
 
 def _latest_live_voice_flags(settings: AprilSettings) -> dict[str, bool]:
-    """Read the latest live voice / wake-word verification flags from disk.
+    """Read the latest live voice, wake-word, and speaker flags from disk.
 
-    Returns only two booleans (never a transcript, device, or path). Used to lift
-    the offline voice milestone to its ``live_verified`` / ``wake_live_verified``
-    rungs. Reading a report never opens the microphone.
+    Returns only booleans (never a transcript, device, or path). Reading a
+    report never opens the microphone.
     """
     voice_verified = False
     wake_verified = False
     conversation_verified = False
+    speaker_verified = False
     voice_best: float | None = None
     wake_best: float | None = None
     conversation_best: float | None = None
+    speaker_best: float | None = None
     for path in _verification_report_files(settings):
         payload = _read_safe_report(path)
         if payload is None:
@@ -240,10 +241,25 @@ def _latest_live_voice_flags(settings: AprilSettings) -> dict[str, bool]:
                         basename=path.name,
                     ).stale
                 )
+        elif declared == "speaker_live":
+            key = _report_order_key(path, payload)
+            if speaker_best is None or key > speaker_best:
+                speaker_best = key
+                speaker_verified = bool(
+                    payload.get("evidence_mode") == "real_hardware"
+                    and payload.get("speaker_live_verified", False)
+                    and not freshness_from_payload(
+                        payload,
+                        report_type=declared,
+                        current_fingerprint=config_fingerprint_digest(settings.home),
+                        basename=path.name,
+                    ).stale
+                )
     return {
         "voice_live_verified": voice_verified,
         "wake_word_live_verified": wake_verified,
         "voice_conversation_live_verified": conversation_verified,
+        "speaker_live_verified": speaker_verified,
     }
 
 
@@ -463,6 +479,12 @@ def _safe_report_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
         safe["barge_in_detected"] = bool(payload.get("barge_in_detected", False))
         safe["two_turns_completed"] = bool(payload.get("two_turns_completed", False))
         safe["follow_up_opened"] = bool(payload.get("follow_up_opened", False))
+    if report_type == "speaker_live":
+        safe["evidence_mode"] = str(payload.get("evidence_mode", "unknown"))
+        safe["speaker_live_verified"] = bool(payload.get("speaker_live_verified", False))
+        safe["fresh_sample_passed"] = bool(payload.get("fresh_sample_passed", False))
+        safe["false_accept_fixture_passed"] = payload.get("false_accept_fixture_passed") is True
+        safe["false_reject_fixture_passed"] = payload.get("false_reject_fixture_passed") is True
     if report_type == "workflow":
         safe["real_model_exercised"] = bool(payload.get("real_model_exercised", False))
         safe["checks"] = _safe_workflow_checks(payload.get("checks"))

@@ -485,7 +485,9 @@ def test_production_bundle_and_apple_tool_boundary(
 
 
 @pytest.mark.asyncio
-async def test_speaker_live_fake_backend_is_numeric_and_discards_audio(settings_tmp) -> None:
+async def test_speaker_live_injected_backend_is_not_real_evidence_and_discards_audio(
+    settings_tmp,
+) -> None:
     home = settings_tmp.home
     shutil.copytree(Path.cwd() / "configs", home / "configs")
     model = home / "speaker.onnx"
@@ -504,7 +506,8 @@ async def test_speaker_live_fake_backend_is_numeric_and_discards_audio(settings_
         microphone=FakeMicrophone(),
         verifier=FakeSpeakerVerifier(),
     )
-    assert report.speaker_live_verified is True
+    assert report.evidence_mode == "injected_test"
+    assert report.speaker_live_verified is False
     assert report.false_accept_fixture_passed is True
     assert report.false_reject_fixture_passed is True
     assert not list(settings.audio_cache_path.glob("speaker-live-*.wav"))

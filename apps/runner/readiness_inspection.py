@@ -4,6 +4,10 @@ import json
 import sqlite3
 from pathlib import Path
 
+from april_common.benchmark_evidence import (
+    empty_benchmark_evidence,
+    evaluate_benchmark_evidence,
+)
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.hardware_profile import safe_hardware_profile
 from april_common.settings import AprilSettings
@@ -36,14 +40,7 @@ def _active_vector_metadata(path: Path) -> dict[str, object]:
 
 
 def _benchmark_evidence(settings: AprilSettings) -> dict[str, object]:
-    empty: dict[str, object] = {
-        "exists": False,
-        "current_hardware": False,
-        "simulated": False,
-        "stale": False,
-        "incomplete": False,
-        "production_eligible": False,
-    }
+    empty = empty_benchmark_evidence()
     if not settings.database_path.is_file():
         return empty
     try:
@@ -68,32 +65,8 @@ def _benchmark_evidence(settings: AprilSettings) -> dict[str, object]:
         return {**empty, "incomplete": True}
     if not isinstance(report, dict):
         return {**empty, "incomplete": True}
-    profile = report.get("hardware_profile")
-    current = safe_hardware_profile()["id"]
-    profile_id = profile.get("id") if isinstance(profile, dict) else None
-    simulated = bool(report.get("simulated"))
-    unavailable = report.get("unavailable_measurements")
-    required_unavailable = (
-        [item for item in unavailable if item != "thermal_throttling"]
-        if isinstance(unavailable, list)
-        else []
+    return evaluate_benchmark_evidence(
+        report,
+        current_hardware_id=safe_hardware_profile()["id"],
+        current_config_fingerprint=config_fingerprint_digest(settings.home),
     )
-    report_fingerprint = report.get("config_fingerprint")
-    fingerprint_matches = isinstance(
-        report_fingerprint, str
-    ) and report_fingerprint == config_fingerprint_digest(settings.home)
-    incomplete = (
-        bool(required_unavailable) or not bool(report.get("fixture_set")) or not fingerprint_matches
-    )
-    current_hardware = profile_id == current
-    return {
-        "exists": not simulated,
-        "current_hardware": current_hardware,
-        "simulated": simulated,
-        "stale": (bool(profile_id) and not current_hardware) or not fingerprint_matches,
-        "incomplete": incomplete,
-        "production_eligible": bool(report.get("production_eligible"))
-        and current_hardware
-        and not simulated
-        and not incomplete,
-    }

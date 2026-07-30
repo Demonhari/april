@@ -366,6 +366,17 @@ def _build_model_and_registry_checks(
                 action=_IMPORT_REASONING,
             )
         )
+        checks.append(
+            ReadinessCheck(
+                name="Deep and Council reasoning resolution",
+                status="warning",
+                detail=(
+                    "No reasoning-role model is registered; Deep and Council reasoning "
+                    "resolve to the Brain model."
+                ),
+                action=_IMPORT_REASONING,
+            )
+        )
     else:
         unverified_reasoning = [
             model.id for model in reasoning_role_models if model.id not in verified_model_ids
@@ -386,6 +397,32 @@ def _build_model_and_registry_checks(
                 ),
             )
         )
+        checks.append(
+            ReadinessCheck(
+                name="Deep and Council reasoning resolution",
+                status="ok" if not unverified_reasoning else "warning",
+                detail=(
+                    "Deep and Council resolve to a verified reasoning-role model."
+                    if not unverified_reasoning
+                    else "Deep and Council have a configured reasoning role, but its "
+                    "real-model evidence is missing."
+                ),
+                action=_VERIFY_REAL if unverified_reasoning else None,
+            )
+        )
+
+    checks.append(
+        ReadinessCheck(
+            name="embedding role registration",
+            status="ok" if embedding_role_models else "warning",
+            detail=(
+                "At least one role=embedding model is registered."
+                if embedding_role_models
+                else "No role=embedding model is registered; hashed-token remains available."
+            ),
+            action=None if embedding_role_models else _IMPORT_EMBEDDING,
+        )
+    )
 
     # --- runtime-local embeddings ------------------------------------------
     if settings.memory.embedding_provider == "runtime-local":
@@ -453,7 +490,9 @@ def _build_model_and_registry_checks(
             )
         )
 
-    active_vector_provider = _active_vector_provider(settings.vector_index_path)
+    active_vector_metadata = _active_vector_metadata(settings.vector_index_path)
+    active_vector_provider = active_vector_metadata.get("provider")
+    active_vector_model_id = active_vector_metadata.get("embedding_model_id")
     if settings.memory.embedding_provider == "hashed-token":
         checks.append(
             ReadinessCheck(
@@ -463,16 +502,20 @@ def _build_model_and_registry_checks(
                 action=_IMPORT_EMBEDDING,
             )
         )
-    elif embedding_role_models and active_vector_provider != "runtime-local":
+    elif embedding_role_models and (
+        active_vector_provider != "runtime-local"
+        or active_vector_model_id != settings.memory.embedding_model_id
+        or not isinstance(active_vector_metadata.get("last_successful_reindex_at"), str)
+    ):
         checks.append(
             ReadinessCheck(
                 name="semantic embedding generation",
                 status="warning",
                 detail=(
-                    "A semantic embedding model is registered, but the active vector "
-                    "generation was not rebuilt with runtime-local embeddings."
+                    "The active vector generation lacks a successful runtime-local reindex "
+                    "for the configured embedding identity."
                 ),
-                action="run april memory reindex",
+                action="run april memory reindex --wait",
             )
         )
     elif embedding_role_models:
@@ -494,7 +537,7 @@ def _build_model_and_registry_checks(
             )
         )
 
-    vector_metadata = _active_vector_metadata(settings.vector_index_path)
+    vector_metadata = active_vector_metadata
     fixture_metadata = fixture_set_metadata(settings.home)
     benchmark_evidence = _benchmark_evidence(settings)
     checks.extend(

@@ -18,6 +18,7 @@ evidence of real model, microphone, thermal, signing, or notarization success.
 | Phase 4B LoRA canary | Explicitly blocked as unsupported | Runtime support for a separately loaded immutable candidate model identity; global adapter switching is not accepted |
 | Production `.app` structure and release exclusions | Implemented and tested | Target-Mac bundle validation |
 | Developer ID signing, notarization, stapling, and Gatekeeper | Implemented but target-Mac verification required | Real Apple signing identity, notary Keychain profile, and genuine Apple service execution |
+| Optional Intel macOS thermal-state sampling | Implemented and unit-tested | Genuine unprivileged `pmset -g therm` samples on the target Intel Mac |
 
 Skipped hardware, model, voice, thermal, signing, or notarization checks remain
 unverified; they are never counted as passed.
@@ -30,8 +31,10 @@ The implementation status and operating status are separate:
 |---|---|
 | Implemented in code | The guarded local workflow and its automated fake-backend tests exist. |
 | Configured | The operator has supplied reviewed local paths and explicitly selected the intended provider or feature settings. |
+| Preflight ready | Static prerequisites are present, but no real artifact or hardware success is inferred. |
 | Verified on real hardware | The real artifact and target Intel Mac completed the applicable live command and produced genuine evidence. |
-| Unavailable or disabled | A required local artifact, reviewed command, credential, or explicit feature enablement is absent. No success is inferred. |
+| Optional unavailable | An optional feature is off or unavailable and does not block normal text chat. |
+| Blocked for safety | A requested safety-sensitive mode cannot proceed without required evidence or architecture. |
 
 The remaining operator work must be performed manually on the target Intel Mac:
 
@@ -160,6 +163,9 @@ Intel Mac canary passed.
 Fine-tune workflow:
 
 ```console
+# First configure reviewed absolute trainer/evaluator executables and fixed
+# argument templates under finetune: in configs/april.yaml; keep enabled false
+# until owner review.
 run april finetune doctor
 run april finetune plan --dataset /reviewed/local/dataset.jsonl --base-model-id april-brain
 run april finetune --plan-id PLAN_ID --approval-id APPROVAL_ID
@@ -177,12 +183,19 @@ commands; it never changes an active adapter pointer.
 ## Reasoning, embedding, and Intel Mac setup
 
 APRIL does not download these artifacts. After obtaining and reviewing local
-files, import them explicitly:
+files, import them explicitly. Brain, coding, and reading use the same inactive,
+hash-bound import path:
 
 ```console
+run april model import --role brain --id LOCAL_BRAIN_ID --name "REVIEWED_BRAIN_NAME" --path /ABSOLUTE/LOCAL/BRAIN.gguf --sha256 EXPECTED_SHA256
+run april model import --role coding --id LOCAL_CODING_ID --name "REVIEWED_CODING_NAME" --path /ABSOLUTE/LOCAL/CODING.gguf --sha256 EXPECTED_SHA256
+run april model import --role reading --id LOCAL_READING_ID --name "REVIEWED_READING_NAME" --path /ABSOLUTE/LOCAL/READING.gguf --sha256 EXPECTED_SHA256
 run april model import --role reasoning --id qwen3-4b-reasoning --name "Qwen3-4B Q4_K_M" --path /LOCAL/Qwen3-4B-Q4_K_M.gguf --sha256 EXPECTED_SHA256
 run april model import --role embedding --id nomic-embed-text-v1.5 --name "nomic-embed-text-v1.5 Q8" --path /LOCAL/nomic-embed-text-v1.5.Q8_0.gguf --sha256 EXPECTED_SHA256
+export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
+export APRIL_MEMORY_EMBEDDING_MODEL_ID=nomic-embed-text-v1.5
 run april memory reindex --wait
+run april memory doctor
 ```
 
 Readiness distinguishes an unregistered reasoning artifact, an unverified
@@ -207,10 +220,14 @@ credentials, and absolute paths. Versioned offline routing, strict-JSON,
 coding, context, lifecycle, and sustained-performance fixtures are identical
 for both setups. Coding fixtures execute only through Tool Worker. Fake Runtime
 results are labelled simulated and cannot produce a production
-recommendation. Direct thermal state remains unavailable unless the platform
-provides real evidence; sustained degradation is only a proxy. APRIL makes no
-automatic model/profile selection. Live Intel Mac evidence must be generated
-on the target machine.
+recommendation. On Intel macOS only, APRIL attempts an unprivileged,
+short-timeout `/usr/bin/pmset -g therm` sample before loading, around sustained
+rounds, and after benchmarking. It stores only recognized aggregate limits and
+thermal levels—never raw command output or host identity. An unavailable sample
+remains unavailable, not “no throttling.” Sustained degradation remains a
+separate performance proxy and is never labelled direct thermal telemetry.
+APRIL makes no automatic model/profile selection. Live Intel Mac evidence must
+be generated on the target machine.
 
 The production recommendation gates require the complete installed fixture set
 with the same hash for every setup and real (non-simulated) measurements for
@@ -224,6 +241,25 @@ metrics produce `insufficient_evidence`; a failed shared benchmark or absolute
 gate produces `comparison_failed`; relative regressions produce
 `manual_review_required`; only a complete passing real comparison is
 `recommended`. The result is advisory and is never applied automatically.
+
+## Live voice evidence
+
+Voice artifacts are operator-provided and voice remains disabled until an
+explicit `--apply --enable`. Replace each placeholder with a reviewed local
+Whisper, Piper, and wake-word artifact:
+
+```console
+run april setup voice --whisper-binary /ABSOLUTE/LOCAL/whisper-cli --whisper-model /ABSOLUTE/LOCAL/whisper-model.bin --piper-binary /ABSOLUTE/LOCAL/piper --piper-model /ABSOLUTE/LOCAL/piper-voice.onnx --wake-word-model /ABSOLUTE/LOCAL/april.onnx --apply --enable
+run april voice verify-live --report data/verification/voice-live.json
+run april voice verify-wake-live --report data/verification/wake-live.json
+run april voice verify-conversation-live --report data/verification/voice-conversation-live.json
+```
+
+These are three separate evidence boundaries: push-to-talk microphone/STT/TTS,
+wake-word detection, and a complete two-turn conversation with endpointing and
+barge-in. Fake microphones, injected verifiers, offline artifact checks, and
+skipped steps do not satisfy them. Raw audio is deleted unless debug capture is
+explicitly selected.
 
 ## Live speaker verification
 

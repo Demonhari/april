@@ -2,6 +2,7 @@
 
 from apps.runner.readiness_models import (
     CheckStatus,
+    EvidenceState,
     ReadinessCheck,
     ReadinessModel,
     ReadinessReport,
@@ -11,6 +12,7 @@ from apps.runner.readiness_report import build_readiness_report
 
 __all__ = [
     "CheckStatus",
+    "EvidenceState",
     "ReadinessCheck",
     "ReadinessModel",
     "ReadinessReport",

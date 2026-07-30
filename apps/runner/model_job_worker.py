@@ -9,6 +9,7 @@ from typing import Any
 from apps.runner.verify import ModelBenchmark, RealModelVerifier
 from april_common.hardware_profile import safe_hardware_profile
 from april_common.settings import load_settings
+from april_common.thermal_state import summarize_thermal_samples
 from services.evaluation.model_quality import evaluate_model_quality
 from services.jobs.model_jobs import validate_registered_model
 from services.tool_worker.client import ToolWorkerProcessManager, ToolWorkerUnavailable
@@ -66,6 +67,10 @@ def _benchmark(home: Path, model_id: str) -> dict[str, Any]:  # pragma: no cover
 
     runs, quality_result = benchmark.run_with_evaluation(quality)
     successful = [run for run in runs if run.ok]
+    thermal_evidence = summarize_thermal_samples(
+        benchmark.thermal_samples,
+        performance_degradation_suggested=None,
+    )
     quality_result = quality_result or {}
     load_times = [run.load_time_seconds for run in successful]
     warm_load_times = [
@@ -125,13 +130,14 @@ def _benchmark(home: Path, model_id: str) -> dict[str, Any]:  # pragma: no cover
             "prompt_processing_duration_source": "first_token_latency_proxy",
         },
         "measurements_unavailable": [
-            "thermal_throttling",
+            *(["thermal_throttling"] if thermal_evidence.direct_measurement_unavailable else []),
             *(
                 ["coding_fixture_pass_rate"]
                 if quality_result.get("coding_fixture_pass_rate") is None
                 else []
             ),
         ],
+        "thermal_evidence": thermal_evidence.model_dump(mode="json"),
         "simulated": settings.runtime.backend == "fake",
         "hardware_profile": safe_hardware_profile(),
     }
