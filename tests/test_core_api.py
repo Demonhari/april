@@ -268,6 +268,27 @@ def test_readiness_reports_voice_loop_verdicts(settings_tmp) -> None:
     # Readiness exposes a redacted local config fingerprint + per-type report
     # freshness so the operator console / daily-driver doctor can flag staleness.
     body = response.json()
+    assert body["readiness_scope"] == "operational"
+    assert body["production_ready"] is False
+    production_codes = {reason["code"] for reason in body["production_failure_reasons"]}
+    assert "runtime_simulated" in production_codes
+    assert "real_model_evidence_missing" in production_codes
+    assert "hashed_token_embeddings_active" in production_codes
+    assert "fine_tuning_disabled" in production_codes
+    assert "evolution_disabled" in production_codes
+    assert "apple_release_evidence_unavailable" in production_codes
+    assert body["fine_tuning"]["status"] == "disabled"
+    assert body["release_evidence"] == {
+        "production_app_build": "not_evaluated",
+        "signing": "not_evaluated",
+        "notarization": "not_evaluated",
+        "stapling": "not_evaluated",
+        "gatekeeper": "not_evaluated",
+        "production_ready": False,
+    }
+    assert isinstance(body["security"]["database_integrity"]["failures"], list)
+    assert "migration_consistent" in body["security"]["database_integrity"]
+    assert body["models"]["registry"]["production_model_artifacts_ready"] is False
     assert "config_fingerprint" in body
     assert isinstance(body["reports"], dict)
     assert body["daemon"]["status"] in {

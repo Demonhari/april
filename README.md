@@ -1124,9 +1124,9 @@ it for reasoning runs whenever the runtime reports it as available, and falls
 back to the brain model on any error. Register one with:
 
 ```bash
-run april model import --role reasoning --id april-reasoning \
-  --name local-reasoning \
-  --path /absolute/path/your-reasoning-model-q4_k_m.gguf \
+run april model import --role reasoning --id qwen3-4b-reasoning \
+  --name "Qwen3-4B Q4_K_M" \
+  --path /ABSOLUTE/LOCAL/PATH \
   --sha256 EXPECTED_SHA256
 ```
 
@@ -1163,18 +1163,19 @@ GGUF model through April Runtime:
 
 ```bash
 # 1. Register a local embedding-role GGUF model
-run april model import --role embedding --id april-embedding \
-  --name local-embedding \
-  --path /absolute/path/your-embedding-model-q4_k_m.gguf \
+run april model import --role embedding --id nomic-embed-text-v1.5 \
+  --name "nomic-embed-text-v1.5 Q8" \
+  --path /ABSOLUTE/LOCAL/PATH \
   --sha256 EXPECTED_SHA256
 
 # 2. Select the runtime-local provider
 export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
-export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding   # optional; auto-detected
+export APRIL_MEMORY_EMBEDDING_MODEL_ID=nomic-embed-text-v1.5
 
 # 3. Rebuild the index under the new provider
 run april memory doctor --json
 run april memory reindex --wait
+run april memory doctor
 ```
 
 The embedding model is loaded as its own dedicated instance (a chat model
@@ -1185,6 +1186,10 @@ Graceful degradation is built in: if `embedding_provider=runtime-local` is set
 but no embedding-role model is registered (or the runtime reports it
 unavailable), APRIL logs and audits a clear note and **falls back to
 hashed-token embeddings** instead of crashing.
+
+Hashed-token remains the active provider until the operator explicitly selects
+Runtime-local embeddings and the durable reindex succeeds; importing a Nomic
+GGUF alone does not change configuration or publish a semantic generation.
 
 `run april memory doctor --json` reports the configured embedding provider,
 active vector-index provider, dimensions, whether runtime-local was requested,

@@ -3,13 +3,21 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from apps.runner.readiness import ReadinessReport, build_readiness_report
+from apps.runner.readiness_inspection import _benchmark_evidence
+from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.credentials import CredentialKey, InMemoryCredentialStore
+from april_common.hardware_profile import safe_hardware_profile
+from april_common.service_health import ServiceHealthResult
+from april_common.settings import load_settings
+from services.api.production_activation import production_activation_failure_reasons
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +89,133 @@ def test_fake_backend_without_models_is_not_ready(tmp_path: Path) -> None:
     if not report.llama_cpp_python_available:
         assert "pip install -e '.[runtime]'" in report.next_actions
     assert any(action.startswith("run april verify") for action in report.next_actions)
+    assert not any("verify-wake-live" in action for action in report.next_actions)
+    reasoning = next(item for item in report.checks if item.name == "reasoning role readiness")
+    semantic = next(item for item in report.checks if item.name == "semantic embedding generation")
+    assert reasoning.action == (
+        "run april model import --role reasoning --id qwen3-4b-reasoning "
+        '--name "Qwen3-4B Q4_K_M" --path /ABSOLUTE/LOCAL/PATH '
+        "--sha256 EXPECTED_SHA256"
+    )
+    assert semantic.action == (
+        "run april model import --role embedding --id nomic-embed-text-v1.5 "
+        '--name "nomic-embed-text-v1.5 Q8" --path /ABSOLUTE/LOCAL/PATH '
+        "--sha256 EXPECTED_SHA256"
+    )
+
+
+def test_invalid_gguf_header_is_a_model_blocker(tmp_path: Path) -> None:
+    model_path = tmp_path / "models" / "brain.gguf"
+    model_path.parent.mkdir()
+    model_path.write_bytes(b"not-a-gguf")
+    home = _write_home(tmp_path, backend="llama_cpp")
+
+    report = build_readiness_report(home)
+
+    model = next(item for item in report.models if item.id == "april-brain")
+    assert model.path_exists is True
+    assert model.artifact_status == "invalid_gguf_header"
+    check = next(item for item in report.checks if item.name == "configured GGUF model files")
+    assert check.status == "blocker"
+    assert "invalid_gguf_header" in check.detail
+
+
+def test_readiness_reports_disabled_finetuning_and_unevaluated_apple_evidence(
+    tmp_path: Path,
+) -> None:
+    report = build_readiness_report(_write_home(tmp_path))
+
+    assert report.fine_tuning_status == "disabled"
+    assert report.production_app_status == "not_evaluated"
+    assert report.signing_status == "not_evaluated"
+    assert report.notarization_status == "not_evaluated"
+    assert report.stapling_status == "not_evaluated"
+    assert report.gatekeeper_status == "not_evaluated"
+    assert report.apple_release_evidence_status == "not_evaluated"
+    fine_tuning = next(item for item in report.checks if item.name == "fine-tuning readiness")
+    apple = next(
+        item for item in report.checks if item.name == "production app and Apple verification"
+    )
+    assert fine_tuning.status == "skipped"
+    assert apple.status == "skipped"
+
+
+def test_production_activation_requires_keychain_and_rejects_legacy_plaintext(
+    tmp_path: Path,
+) -> None:
+    home = _write_home(
+        tmp_path,
+        backend="llama_cpp",
+        extra={"environment": "production"},
+    )
+    settings = load_settings(root=home, credential_store=_production_store())
+
+    reasons = production_activation_failure_reasons(
+        settings=settings,
+        runtime_probe=ServiceHealthResult(True, 200, "ok", "ready"),
+        runtime_backend="llama_cpp",
+        runtime_simulated=False,
+        model_registry={
+            "production_model_artifacts_ready": True,
+            "required_model_ids": ["brain", "coding", "reading"],
+            "reasoning_model_ids": ["reasoning"],
+        },
+        verified_models={"brain", "coding", "reading", "reasoning", "embedding"},
+        embeddings={
+            "active_provider": "runtime-local",
+            "embedding_model_id": "embedding",
+            "fell_back_to_hashed_token": False,
+            "reindex_required": False,
+            "active_generation": "generation",
+        },
+        live_flags={"voice_conversation_live_verified": False},
+        job_worker_ready=True,
+        tool_worker_protocol_ready=True,
+        tool_worker_self_check=True,
+        audit_chain_status="valid",
+        database_integrity=SimpleNamespace(ok=True),
+        rollout_state={"status": "disabled"},
+        finetuning={"status": "ready"},
+        credential_store_selected="legacy-development-default",
+        legacy_plaintext_credential_detected=True,
+    )
+
+    codes = {reason["code"] for reason in reasons}
+    assert "production_keychain_unavailable" in codes
+    assert "legacy_plaintext_credentials_detected" in codes
+
+
+def test_benchmark_evidence_requires_current_configuration_fingerprint(
+    tmp_path: Path,
+) -> None:
+    home = _write_home(tmp_path)
+    settings = load_settings(root=home)
+    settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {
+        "report_type": "model_setup_comparison",
+        "config_fingerprint": "different-configuration",
+        "hardware_profile": safe_hardware_profile(),
+        "fixture_set": {"id": "fixture-set"},
+        "simulated": False,
+        "production_eligible": True,
+        "unavailable_measurements": ["thermal_throttling"],
+    }
+    with sqlite3.connect(settings.database_path) as connection:
+        connection.execute(
+            "CREATE TABLE background_jobs ("
+            "job_type TEXT, status TEXT, completed_at TEXT, result_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO background_jobs VALUES (?, ?, ?, ?)",
+            ("model_setup_comparison", "succeeded", "2026-07-30T00:00:00Z", json.dumps(report)),
+        )
+
+    evidence = _benchmark_evidence(settings)
+
+    assert report["config_fingerprint"] != config_fingerprint_digest(home)
+    assert evidence["stale"] is True
+    assert evidence["incomplete"] is True
+    assert evidence["production_eligible"] is False
 
 
 def test_present_model_files_clear_the_gguf_blocker(tmp_path: Path) -> None:
@@ -173,6 +308,7 @@ def test_readiness_detects_verified_sentinel_report(tmp_path: Path) -> None:
             {
                 "report_type": "wake_word_live",
                 "pipeline": "sentinel",
+                "evidence_mode": "real_hardware",
                 "wake_word_live_verified": True,
                 "summary": "pass",
             }

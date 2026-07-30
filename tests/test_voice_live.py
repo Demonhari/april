@@ -93,8 +93,9 @@ async def test_voice_live_success_path_uses_fakes(settings_tmp) -> None:
     assert report.transcript_length == len("hello april")
     assert report.tts_success is True
     assert report.playback_user_confirmed is True
-    # A fully-confirmed pass is the only state that sets voice_live_verified true.
-    assert report.voice_live_verified is True
+    # Injected components exercise the pipeline but are never hardware evidence.
+    assert report.evidence_mode == "injected_test"
+    assert report.voice_live_verified is False
     assert report.generated_at == report.timestamp
     assert report.generated_at
 

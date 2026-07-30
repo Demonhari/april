@@ -12,6 +12,8 @@ from apps.runner.main import app as runner_app
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
 from april_common.service_health import ServiceHealthResult
 from april_common.settings import load_settings
+from april_common.time import utc_now_iso
+from services.api.reporting import _latest_live_voice_flags
 from services.api.server import create_app
 from tests.conftest import FakeRuntimeClient
 from tests.test_core_api import auth, make_container
@@ -170,6 +172,7 @@ def _write_voice_live_report(home: Path, basename: str, *, generated_at: str, pa
     path = report_dir / basename
     report = {
         "report_type": "voice_live",
+        "evidence_mode": "real_hardware",
         "generated_at": generated_at,
         "timestamp": generated_at,
         "platform": "Darwin 25.5.0",
@@ -269,6 +272,28 @@ def test_failed_voice_live_report_serializes_verified_false(settings_tmp) -> Non
     report = response.json()["report"]
     assert report["voice_live_verified"] is False
     assert report["summary"] == "degraded"
+
+
+def test_injected_voice_report_cannot_lift_live_readiness(settings_tmp) -> None:
+    report_dir = settings_tmp.home / "data" / "verification"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "voice-live.json"
+    path.write_text(
+        json.dumps(
+            {
+                "report_type": "voice_live",
+                "generated_at": utc_now_iso(),
+                "evidence_mode": "injected_test",
+                "summary": "pass",
+                "voice_live_verified": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    flags = _latest_live_voice_flags(settings_tmp)
+
+    assert flags["voice_live_verified"] is False
 
 
 def test_latest_report_uses_generated_at_before_mtime(settings_tmp) -> None:

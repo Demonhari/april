@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from apps.runner.daily_driver import build_daily_driver_report
+from apps.runner.readiness import ReadinessReport
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.time import utc_now
 
@@ -89,7 +90,11 @@ def test_core_ready_with_fresh_matching_real_report(
             "generated_at": _iso(1),
             "config_fingerprint": fingerprint,
             "summary": "pass",
+            "runtime_backend": "llama_cpp",
             "real_model_verified": True,
+            "real_models_exercised": 3,
+            "core_model_set_verified": True,
+            "all_configured_models_verified": True,
             "verification_level": "all",
             "models": [],
         },
@@ -145,7 +150,11 @@ def test_stale_report_marks_warning_by_age(tmp_path: Path, llama_cpp_available: 
             "report_type": "multi_model",
             "generated_at": _iso(10),  # older than the 7-day TTL
             "summary": "pass",
+            "runtime_backend": "llama_cpp",
             "real_model_verified": True,
+            "real_models_exercised": 3,
+            "core_model_set_verified": True,
+            "all_configured_models_verified": True,
             "verification_level": "all",
             "models": [],
         },
@@ -166,7 +175,11 @@ def test_fingerprint_mismatch_marks_report_stale(tmp_path: Path, llama_cpp_avail
             "generated_at": _iso(0.1),
             "config_fingerprint": "stale-digest-value",
             "summary": "pass",
+            "runtime_backend": "llama_cpp",
             "real_model_verified": True,
+            "real_models_exercised": 3,
+            "core_model_set_verified": True,
+            "all_configured_models_verified": True,
             "verification_level": "all",
             "models": [],
         },
@@ -175,6 +188,76 @@ def test_fingerprint_mismatch_marks_report_stale(tmp_path: Path, llama_cpp_avail
     assert report.core_real_model == "warning"
     real_check = next(c for c in report.checks if c.name == "latest real-model verification")
     assert "config changed" in (real_check.detail or "")
+
+
+def test_simulated_report_cannot_make_daily_driver_ready(
+    tmp_path: Path, llama_cpp_available: None
+) -> None:
+    home = _ready_home(tmp_path)
+    _write_report(
+        home,
+        "mac-readiness.json",
+        {
+            "report_type": "multi_model",
+            "generated_at": _iso(0.1),
+            "config_fingerprint": config_fingerprint_digest(home),
+            "summary": "pass",
+            "runtime_backend": "fake",
+            "real_model_verified": True,
+            "real_models_exercised": 3,
+            "core_model_set_verified": True,
+            "all_configured_models_verified": True,
+            "verification_level": "all",
+        },
+    )
+
+    report = build_daily_driver_report(home)
+
+    assert report.core_real_model == "warning"
+    check = next(c for c in report.checks if c.name == "latest real-model verification")
+    assert "not production evidence" in check.detail
+
+
+def test_invalid_gguf_header_blocks_daily_driver(tmp_path: Path, llama_cpp_available: None) -> None:
+    home = _ready_home(tmp_path)
+    (home / "models" / "granite3.3-2b-q4_k_m.gguf").write_bytes(b"not a GGUF")
+
+    report = build_daily_driver_report(home)
+
+    assert report.core_real_model == "blocker"
+    check = next(c for c in report.checks if c.name == "configured GGUF presence")
+    assert check.status == "blocker"
+
+
+def test_database_maintenance_failure_blocks_daily_driver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _ready_home(tmp_path)
+    readiness = ReadinessReport(
+        generated_at=_iso(0),
+        os="Darwin",
+        cpu_architecture="x86_64",
+        python_version="3.12",
+        runtime_backend="llama_cpp",
+        runtime_is_fake=False,
+        llama_cpp_python_available=True,
+        environment="development",
+        voice_enabled=False,
+        database_quick_check="ok",
+        database_foreign_key_consistent=True,
+        database_wal_state="wal",
+        database_integrity_failures=["migration_mismatch"],
+    )
+    monkeypatch.setattr(
+        "apps.runner.daily_driver.build_readiness_report",
+        lambda _home: readiness,
+    )
+
+    report = build_daily_driver_report(home)
+
+    check = next(item for item in report.checks if item.name == "database integrity")
+    assert check.status == "blocker"
+    assert "migration_mismatch" in check.detail
 
 
 def test_config_blocker_makes_overall_blocker(tmp_path: Path) -> None:

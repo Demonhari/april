@@ -197,6 +197,11 @@ def build_process_environment(
         allowed.difference_update(_PROXY_KEYS)
 
     environment = {key: parent[key] for key in sorted(allowed) if key in parent}
+    if category is ProcessCategory.GIT:
+        # Host/user Git config must not influence an approved mutation, and
+        # reading those files would require widening the macOS sandbox.
+        environment["GIT_CONFIG_NOSYSTEM"] = "1"
+        environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
     if april_home is not None:
         environment["APRIL_HOME"] = str(april_home.expanduser().resolve())
     for key, value in (overrides or {}).items():

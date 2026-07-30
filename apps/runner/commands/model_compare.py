@@ -11,6 +11,7 @@ from typing import Any
 import typer
 
 from apps.cli.render import console
+from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.hardware_profile import safe_hardware_profile
 from april_common.settings import BenchmarkSettings, load_settings
 from april_common.time import utc_now_iso
@@ -180,6 +181,7 @@ async def _compare(
         "schema_version": 2,
         "report_type": "model_setup_comparison",
         "generated_at": utc_now_iso(),
+        "config_fingerprint": config_fingerprint_digest(settings.home),
         "fixture_set": {
             "id": installed_fixture_set["sha256"],
             "version": installed_fixture_set["version"],

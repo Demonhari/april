@@ -22,6 +22,9 @@ _BANNED_PARTS = {
     ".venv",
     "venv",
     "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
     ".git",
     ".april_tmp",
     "adapters",
@@ -29,6 +32,18 @@ _BANNED_PARTS = {
     "logs",
     "audio_cache",
     "voice_recordings",
+}
+_BANNED_RUNTIME_PREFIXES = {
+    "data/artifacts",
+    "data/evolution",
+    "data/jobs",
+    "data/model-import",
+    "data/patches",
+    "data/playbooks",
+    "data/run",
+    "data/vector_index",
+    "data/verification",
+    "data/voice_artifacts",
 }
 _BANNED_SUFFIXES = {
     ".gguf",
@@ -46,6 +61,8 @@ _BANNED_SUFFIXES = {
     ".bin",
     ".pt",
     ".pth",
+    ".pyc",
+    ".pyo",
 }
 _SECRET_NAME = re.compile(
     r"(?i)(?:^|[._-])(tokens?|secrets?|credentials?|private[-_]?keys?)(?:[._-]|$)"
@@ -76,6 +93,7 @@ def validate_release_zip(path: Path) -> tuple[str, ...]:
             lowered_parts = {part.casefold() for part in member.parts}
             suffix = member.suffix.casefold()
             basename = member.name.casefold()
+            normalized = member.as_posix().casefold().strip("/")
             app_part_indexes = [
                 index for index, part in enumerate(member.parts) if part.casefold().endswith(".app")
             ]
@@ -91,8 +109,23 @@ def validate_release_zip(path: Path) -> tuple[str, ...]:
                 raise ReleaseValidationError(
                     f"Archive contains forbidden file category: {member.name}."
                 )
-            if "data/verification" in member.as_posix().casefold():
-                raise ReleaseValidationError("Archive contains generated verification reports.")
+            if basename == ".env" or basename.startswith(".env."):
+                raise ReleaseValidationError("Archive contains an environment file.")
+            if basename.endswith(("-wal", "-shm", ".write.lock")):
+                raise ReleaseValidationError("Archive contains a database sidecar or write lock.")
+            if "keychain" in basename and (
+                "export" in basename or suffix in {".json", ".plist", ".txt"}
+            ):
+                raise ReleaseValidationError("Archive contains a Keychain export.")
+            relative_parts = normalized.split("/", 1)
+            relative = relative_parts[1] if len(relative_parts) == 2 else normalized
+            candidates = {normalized, relative}
+            if any(
+                candidate == prefix or candidate.startswith(prefix + "/")
+                for prefix in _BANNED_RUNTIME_PREFIXES
+                for candidate in candidates
+            ):
+                raise ReleaseValidationError("Archive contains generated runtime data.")
             accepted.append(member.as_posix())
     return tuple(accepted)
 

@@ -12,19 +12,18 @@ _SETUP_MODELS = "run april setup models"
 _SETUP_VOICE = "run april setup voice"
 _SETUP_TOKENS = "run april setup tokens"
 _SETUP_EMBEDDINGS = (
-    "run april model import --role embedding --id april-embedding "
-    "--name LOCAL_EMBEDDING --path /absolute/path/to/embedding.gguf "
+    "run april model import --role embedding --id nomic-embed-text-v1.5 "
+    '--name "nomic-embed-text-v1.5 Q8" --path /ABSOLUTE/LOCAL/PATH '
     "--sha256 EXPECTED_SHA256"
 )
 _IMPORT_REASONING = (
-    "run april model import --role reasoning --id april-reasoning "
-    "--name qwen3-4b --path /absolute/path/Qwen3-4B-Q4_K_M.gguf "
+    "run april model import --role reasoning --id qwen3-4b-reasoning "
+    '--name "Qwen3-4B Q4_K_M" --path /ABSOLUTE/LOCAL/PATH '
     "--sha256 EXPECTED_SHA256"
 )
 _IMPORT_EMBEDDING = (
-    "run april model import --role embedding --id april-embedding "
-    "--name nomic-embed-text-v1.5 "
-    "--path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf "
+    "run april model import --role embedding --id nomic-embed-text-v1.5 "
+    '--name "nomic-embed-text-v1.5 Q8" --path /ABSOLUTE/LOCAL/PATH '
     "--sha256 EXPECTED_SHA256"
 )
 _VERIFY_REAL = (
@@ -61,6 +60,7 @@ class ReadinessModel(BaseModel):
     backend: str
     path_basename: str | None
     path_exists: bool
+    artifact_status: str = "unknown"
 
 
 class ReadinessReport(BaseModel):
@@ -92,6 +92,7 @@ class ReadinessReport(BaseModel):
     database_quick_check: str = "not_run"
     database_foreign_key_consistent: bool = False
     database_wal_state: str = "unknown"
+    database_integrity_failures: list[str] = Field(default_factory=list)
     last_successful_backup: dict[str, object] | None = None
     speaker_gate: str = "off"
     speaker_gate_supported: bool = False
@@ -133,6 +134,13 @@ class ReadinessReport(BaseModel):
     production_real_runtime_eval_required: bool = False
     pending_real_runtime_overlay_blocker_count: int = 0
     pending_real_runtime_overlay_blockers: list[str] = Field(default_factory=list)
+    fine_tuning_status: str = "disabled"
+    production_app_status: str = "not_evaluated"
+    signing_status: str = "not_evaluated"
+    notarization_status: str = "not_evaluated"
+    stapling_status: str = "not_evaluated"
+    gatekeeper_status: str = "not_evaluated"
+    apple_release_evidence_status: str = "not_evaluated"
     # Dreamer/evolution visibility (file-derived only; readiness stays inert).
     evolution_enabled: bool = False
     evolution_kill_switch_active: bool = False

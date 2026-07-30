@@ -303,7 +303,9 @@ def build_readiness_report(
             detail=(
                 f"quick_check={database_status.quick_check}; "
                 f"foreign_keys={'ok' if database_status.foreign_key_consistent else 'failed'}; "
-                f"journal={database_status.journal_mode}"
+                f"journal={database_status.journal_mode}; "
+                "failures="
+                f"{','.join(database_status.failures) if database_status.failures else 'none'}"
             ),
             action="run april database check" if not database_status.ok else None,
         )
@@ -449,7 +451,7 @@ def build_readiness_report(
             name="Sentinel live verification",
             status=sentinel_check_status,
             detail=sentinel_detail,
-            action=None if sentinel_live_status == "verified" else _VERIFY_WAKE,
+            action=(_VERIFY_WAKE if wake_enabled and sentinel_live_status != "verified" else None),
         )
     )
 
@@ -549,6 +551,44 @@ def build_readiness_report(
             action=_VERIFY_REAL if production_real_runtime_eval_required else None,
         )
     )
+    trainer = settings.finetune.trainer_executable
+    evaluator = settings.finetune.evaluator_executable
+    trainer_ready = bool(trainer and settings.resolve_path(trainer).is_file())
+    evaluator_ready = bool(evaluator and settings.resolve_path(evaluator).is_file())
+    if not settings.finetune.enabled:
+        fine_tuning_status = "disabled"
+        fine_tuning_check_status: CheckStatus = "skipped"
+        fine_tuning_detail = "Fine-tuning is intentionally disabled."
+    elif trainer_ready and evaluator_ready:
+        fine_tuning_status = "ready"
+        fine_tuning_check_status = "ok"
+        fine_tuning_detail = "Reviewed trainer and evaluator executables are configured."
+    else:
+        fine_tuning_status = "unconfigured"
+        fine_tuning_check_status = "warning"
+        fine_tuning_detail = (
+            "Fine-tuning is enabled but trainer/evaluator configuration is incomplete."
+        )
+    checks.append(
+        ReadinessCheck(
+            name="fine-tuning readiness",
+            status=fine_tuning_check_status,
+            detail=fine_tuning_detail,
+            action=None if fine_tuning_status == "ready" else "run april finetune doctor",
+        )
+    )
+    checks.append(
+        ReadinessCheck(
+            name="production app and Apple verification",
+            status="skipped",
+            detail=(
+                "build=not_evaluated; signing=not_evaluated; "
+                "notarization=not_evaluated; stapling=not_evaluated; "
+                "gatekeeper=not_evaluated. Offline readiness did not run Apple tools."
+            ),
+            action="run april package build --output dist/APRIL.app --version VERSION",
+        )
+    )
     daemon_status_payload = _daemon_status(settings)
     daemon_status = str(daemon_status_payload.get("status", "unknown"))
     daemon_details_available = bool(daemon_status_payload.get("details_available", False))
@@ -631,6 +671,7 @@ def build_readiness_report(
         database_quick_check=database_status.quick_check,
         database_foreign_key_consistent=database_status.foreign_key_consistent,
         database_wal_state=database_status.journal_mode,
+        database_integrity_failures=list(database_status.failures),
         last_successful_backup=database_status.last_successful_backup,
         speaker_gate=settings.wake.speaker_gate,
         speaker_gate_supported=speaker_gate_supported,
@@ -682,6 +723,13 @@ def build_readiness_report(
         production_real_runtime_eval_required=production_real_runtime_eval_required,
         pending_real_runtime_overlay_blocker_count=len(pending_real_runtime_blockers),
         pending_real_runtime_overlay_blockers=pending_real_runtime_blockers,
+        fine_tuning_status=fine_tuning_status,
+        production_app_status="not_evaluated",
+        signing_status="not_evaluated",
+        notarization_status="not_evaluated",
+        stapling_status="not_evaluated",
+        gatekeeper_status="not_evaluated",
+        apple_release_evidence_status="not_evaluated",
         evolution_enabled=settings.evolution.enabled,
         evolution_kill_switch_active=(settings.evolution_path / "DISABLED").exists(),
         scheduler_enabled=settings.scheduler.enabled,

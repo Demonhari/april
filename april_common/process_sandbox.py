@@ -232,6 +232,11 @@ def generate_seatbelt_profile(
 ) -> str:
     """Generate an argv-safe Seatbelt profile without mutable profile files."""
     executable_path = _resolve_executable(executable)
+    invoked_executable = Path(executable).expanduser()
+    if not invoked_executable.is_absolute():
+        located = shutil.which(executable)
+        invoked_executable = Path(located) if located is not None else invoked_executable
+    invoked_executable = invoked_executable.absolute()
     readable = _normalize_roots((*policy.readable_roots, *policy.temporary_roots))
     writable = _normalize_roots((*policy.writable_roots, *policy.temporary_roots))
     system_read_paths = (
@@ -240,11 +245,21 @@ def generate_seatbelt_profile(
         Path("/usr/share"),
         Path("/Library/Apple/System/Library"),
         Path("/private/var/db/timezone"),
+        # Package-manager libraries used by locally installed executables. Keep
+        # this to immutable package roots; do not expose /usr/local/etc.
+        Path("/usr/local/Cellar"),
+        Path("/opt/homebrew/Cellar"),
+        Path("/opt/local/lib"),
         Path("/dev/null"),
         Path("/dev/urandom"),
         executable_path,
         executable_path.parent,
         executable_path.parent.parent,
+        # Preserve the invocation path as well as its resolved target. A Python
+        # virtualenv launcher needs its adjacent pyvenv.cfg during startup.
+        invoked_executable,
+        invoked_executable.parent,
+        invoked_executable.parent.parent,
     )
     lines = [
         "(version 1)",
@@ -255,6 +270,10 @@ def generate_seatbelt_profile(
         "(allow sysctl-read)",
         "(allow mach-lookup)",
         "(allow file-read-metadata)",
+        # Current macOS launch validation reads the root directory entry. A
+        # literal rule avoids granting recursive read access outside policy.
+        '(allow file-read-data (literal "/"))',
+        '(allow file-write* (literal "/dev/null"))',
     ]
     for path in _normalize_roots(system_read_paths):
         lines.append(_seatbelt_rule("allow", "file-read*", path))

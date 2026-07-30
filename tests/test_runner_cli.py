@@ -776,7 +776,7 @@ def test_daily_driver_doctor_cli_human_and_json(tmp_path: Path, monkeypatch) -> 
     assert payload["report_type"] == "daily_driver"
     assert "config_fingerprint" in payload
     assert {"core_real_model", "workflow_security", "hardened_go_live", "overall"} <= set(payload)
-    assert len(payload["checks"]) == 14
+    assert len(payload["checks"]) == 15
     # Offline + redacted.
     assert str(tmp_path) not in structured.output
     assert "local-dev-token" not in structured.output

@@ -63,9 +63,8 @@ _STEPS: tuple[tuple[int, str, str | None, str], ...] = (
         8,
         "setup embeddings (optional, recommended)",
         "embedding provider",
-        "run april model import --role embedding --id april-embedding "
-        "--name nomic-embed-text-v1.5 "
-        "--path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf "
+        "run april model import --role embedding --id nomic-embed-text-v1.5 "
+        '--name "nomic-embed-text-v1.5 Q8" --path /ABSOLUTE/LOCAL/PATH '
         "--sha256 EXPECTED_SHA256",
     ),
     (9, "memory reindex", "vector index compatibility", "run april memory reindex --wait"),

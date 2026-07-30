@@ -113,7 +113,8 @@ async def test_wake_live_passes_with_all_fakes(settings_tmp, tmp_path: Path) -> 
     assert report.api_success is True
     assert report.tts_success is True
     assert report.playback_user_confirmed is True
-    assert report.wake_word_live_verified is True
+    assert report.evidence_mode == "injected_test"
+    assert report.wake_word_live_verified is False
     # Temporary audio is cleaned up by default.
     assert list(settings.audio_cache_path.glob("wake-live-*")) == []
 

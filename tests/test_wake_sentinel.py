@@ -1339,7 +1339,8 @@ async def test_sentinel_live_verification_uses_sentinel_pipeline_with_fakes(
     assert events[0].text == "open calendar"
     assert report.pipeline == "sentinel"
     assert report.summary == "pass"
-    assert report.wake_word_live_verified is True
+    assert report.evidence_mode == "injected_test"
+    assert report.wake_word_live_verified is False
     assert report.api_success is True
     persisted = report_path.read_text(encoding="utf-8")
     assert "open calendar" not in persisted

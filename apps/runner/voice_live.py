@@ -5,6 +5,7 @@ import platform
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -26,6 +27,9 @@ class VoiceLiveSkippedCheck(BaseModel):
 class VoiceLiveReport(BaseModel):
     schema_version: int = 1
     report_type: str = "voice_live"
+    # Only the non-injected CLI path may produce real-hardware evidence. Tests
+    # can exercise the complete pipeline, but cannot lift production readiness.
+    evidence_mode: Literal["real_hardware", "injected_test", "unverified"] = "unverified"
     # ``generated_at`` is the canonical timestamp the Desktop/report viewer reads,
     # matching the other verification reports; ``timestamp`` is retained for
     # backward compatibility with any already-written voice-live reports. When only
@@ -83,10 +87,15 @@ def _available(settings: AprilSettings, path: Path | None) -> bool:
     return resolved is not None and resolved.exists()
 
 
-def _initial_report(settings: AprilSettings) -> VoiceLiveReport:
+def _initial_report(
+    settings: AprilSettings,
+    *,
+    evidence_mode: Literal["real_hardware", "injected_test"],
+) -> VoiceLiveReport:
     devices = query_audio_devices()
     now = utc_now_iso()
     return VoiceLiveReport(
+        evidence_mode=evidence_mode,
         generated_at=now,
         timestamp=now,
         platform=f"{platform.system()} {platform.release()}".strip(),
@@ -117,7 +126,9 @@ def _finalize_summary(report: VoiceLiveReport) -> None:
         report.summary = "fail" if not report.skipped else "degraded"
     # Live-verified requires the full pass AND a "pass" summary; never set on a
     # degraded, failed, or skipped run.
-    report.voice_live_verified = full_pass and report.summary == "pass"
+    report.voice_live_verified = (
+        full_pass and report.summary == "pass" and report.evidence_mode == "real_hardware"
+    )
 
 
 def write_voice_live_report(report: VoiceLiveReport, path: Path) -> Path:
@@ -145,7 +156,12 @@ async def run_voice_live_verification(
     # Runs doctor first for operator guidance, but the report stores only safe
     # counts/booleans, never device names, transcripts, or filesystem paths.
     voice_doctor(settings)
-    report = _initial_report(settings)
+    evidence_mode: Literal["real_hardware", "injected_test"] = (
+        "injected_test"
+        if any(component is not None for component in (microphone, stt, tts, player))
+        else "real_hardware"
+    )
+    report = _initial_report(settings, evidence_mode=evidence_mode)
     retain_audio = retain_debug_audio or settings.voice.retain_debug_audio
     report.temp_audio_retained = retain_audio
     if not confirm_recording("Record a short push-to-talk sample now?"):

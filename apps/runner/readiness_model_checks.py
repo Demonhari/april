@@ -50,6 +50,7 @@ from april_common.audit import audit_logger_for_settings
 from april_common.credentials import CredentialStore
 from april_common.errors import ConfigError
 from april_common.hardware_profile import safe_hardware_profile
+from april_common.model_artifacts import gguf_artifact_status
 from april_common.process_sandbox import SandboxBackend, sandbox_capabilities
 from april_common.settings import (
     KNOWN_DEFAULT_API_TOKENS,
@@ -107,7 +108,7 @@ def _build_model_and_registry_checks(
 
     # --- configured GGUF model files ----------------------------------------
     models: list[ReadinessModel] = []
-    missing_models: list[str] = []
+    invalid_models: dict[str, str] = {}
     try:
         registry = ModelRegistry.from_file(root / "configs" / "models.yaml", root=root)
     except ConfigError as exc:
@@ -125,6 +126,9 @@ def _build_model_and_registry_checks(
         for model in registry.list():
             path = model.resolved_path(registry.root)
             exists = path.exists()
+            artifact_status = (
+                gguf_artifact_status(path) if model.backend == "llama_cpp" else "not_applicable"
+            )
             models.append(
                 ReadinessModel(
                     id=model.id,
@@ -132,16 +136,21 @@ def _build_model_and_registry_checks(
                     backend=model.backend,
                     path_basename=path.name,
                     path_exists=exists,
+                    artifact_status=artifact_status,
                 )
             )
-            if model.backend == "llama_cpp" and not exists and model.role != "reading":
-                missing_models.append(model.id)
-        if missing_models:
+            if model.backend == "llama_cpp" and artifact_status != "valid":
+                invalid_models[model.id] = artifact_status
+        if invalid_models:
             checks.append(
                 ReadinessCheck(
                     name="configured GGUF model files",
                     status="blocker",
-                    detail="Missing model files: " + ", ".join(sorted(missing_models)),
+                    detail="Unavailable or invalid model artifacts: "
+                    + ", ".join(
+                        f"{model_id} ({status})"
+                        for model_id, status in sorted(invalid_models.items())
+                    ),
                     action=_SETUP_MODELS,
                 )
             )
@@ -417,16 +426,22 @@ def _build_model_and_registry_checks(
                 )
             else:
                 embedding_path = embedding_model.resolved_path(registry.root)
+                embedding_artifact_status = gguf_artifact_status(embedding_path)
                 checks.append(
                     ReadinessCheck(
                         name="runtime-local embedding model",
-                        status="ok" if embedding_path.exists() else "blocker",
+                        status="ok" if embedding_artifact_status == "valid" else "blocker",
                         detail=(
                             f"Registered embedding model {embedding_model_id} exists."
-                            if embedding_path.exists()
-                            else f"Missing embedding model file: {embedding_path.name}"
+                            if embedding_artifact_status == "valid"
+                            else (
+                                f"Embedding model {embedding_model_id} is "
+                                f"{embedding_artifact_status}."
+                            )
                         ),
-                        action=None if embedding_path.exists() else _SETUP_EMBEDDINGS,
+                        action=(
+                            None if embedding_artifact_status == "valid" else _SETUP_EMBEDDINGS
+                        ),
                     )
                 )
     else:

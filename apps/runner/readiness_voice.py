@@ -10,6 +10,8 @@ from apps.runner.readiness_models import (
     ReadinessCheck,
     VoiceArtifact,
 )
+from april_common.config_fingerprint import config_fingerprint_digest
+from april_common.report_freshness import freshness_from_payload
 from april_common.settings import AprilSettings
 
 
@@ -65,7 +67,17 @@ def _sentinel_live_status(home: Path) -> str:
         if payload.get("pipeline") != "sentinel":
             continue
         order = path.stat().st_mtime
-        verified = bool(payload.get("wake_word_live_verified", False))
+        freshness = freshness_from_payload(
+            payload,
+            report_type="wake_word_live",
+            current_fingerprint=config_fingerprint_digest(home),
+            basename=path.name,
+        )
+        verified = bool(
+            payload.get("evidence_mode") == "real_hardware"
+            and payload.get("wake_word_live_verified", False)
+            and not freshness.stale
+        )
         if latest is None or order > latest[0]:
             latest = (order, verified)
     if latest is None:
@@ -84,5 +96,11 @@ def _voice_conversation_live_status(home: Path) -> str:
     verified = (
         payload.get("evidence_mode") == "real_hardware"
         and payload.get("voice_conversation_live_verified") is True
+        and not freshness_from_payload(
+            payload,
+            report_type="voice_conversation_live",
+            current_fingerprint=config_fingerprint_digest(home),
+            basename=path.name,
+        ).stale
     )
     return "verified" if verified else "failed"

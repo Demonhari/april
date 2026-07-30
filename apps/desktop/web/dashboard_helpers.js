@@ -540,7 +540,7 @@
       }
       if (tokenState !== "ready") return "run april setup tokens";
       if (embState !== "ready") {
-        return "run april model import --role embedding --id april-embedding --name LOCAL_EMBEDDING --path /absolute/path/to/embedding.gguf --sha256 EXPECTED_SHA256";
+        return 'run april model import --role embedding --id nomic-embed-text-v1.5 --name "nomic-embed-text-v1.5 Q8" --path /ABSOLUTE/LOCAL/PATH --sha256 EXPECTED_SHA256';
       }
       if (hardened !== "ready") return "run april go-live --write-report --start-services";
       return "run april doctor --daily-driver";

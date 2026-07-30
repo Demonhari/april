@@ -426,4 +426,14 @@ def _safe_validation_code(exc: Exception) -> str:
         "staged_tree_changed",
         "repository_state_changed",
     }
-    return value if value in known else "worker_validation_failed"
+    if value in known:
+        return value
+    if isinstance(exc, PermissionDeniedError):
+        return "worker_permission_denied"
+    if isinstance(exc, KeyError):
+        return "worker_request_field_missing"
+    if isinstance(exc, TypeError):
+        return "worker_request_type_invalid"
+    if isinstance(exc, ValueError):
+        return "worker_request_value_invalid"
+    return "worker_validation_failed"

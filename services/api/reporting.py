@@ -200,12 +200,32 @@ def _latest_live_voice_flags(settings: AprilSettings) -> dict[str, bool]:
             key = _report_order_key(path, payload)
             if voice_best is None or key > voice_best:
                 voice_best = key
-                voice_verified = bool(payload.get("voice_live_verified", False))
+                fresh = freshness_from_payload(
+                    payload,
+                    report_type=declared,
+                    current_fingerprint=config_fingerprint_digest(settings.home),
+                    basename=path.name,
+                )
+                voice_verified = bool(
+                    payload.get("evidence_mode") == "real_hardware"
+                    and payload.get("voice_live_verified", False)
+                    and not fresh.stale
+                )
         elif declared == "wake_word_live":
             key = _report_order_key(path, payload)
             if wake_best is None or key > wake_best:
                 wake_best = key
-                wake_verified = bool(payload.get("wake_word_live_verified", False))
+                fresh = freshness_from_payload(
+                    payload,
+                    report_type=declared,
+                    current_fingerprint=config_fingerprint_digest(settings.home),
+                    basename=path.name,
+                )
+                wake_verified = bool(
+                    payload.get("evidence_mode") == "real_hardware"
+                    and payload.get("wake_word_live_verified", False)
+                    and not fresh.stale
+                )
         elif declared == "voice_conversation_live":
             key = _report_order_key(path, payload)
             if conversation_best is None or key > conversation_best:
@@ -213,6 +233,12 @@ def _latest_live_voice_flags(settings: AprilSettings) -> dict[str, bool]:
                 conversation_verified = bool(
                     payload.get("evidence_mode") == "real_hardware"
                     and payload.get("voice_conversation_live_verified", False)
+                    and not freshness_from_payload(
+                        payload,
+                        report_type=declared,
+                        current_fingerprint=config_fingerprint_digest(settings.home),
+                        basename=path.name,
+                    ).stale
                 )
     return {
         "voice_live_verified": voice_verified,

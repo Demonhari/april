@@ -64,6 +64,7 @@ class WakeWordLiveSkippedCheck(BaseModel):
 class WakeWordLiveReport(BaseModel):
     schema_version: int = 2
     report_type: Literal["wake_word_live"] = "wake_word_live"
+    evidence_mode: Literal["real_hardware", "injected_test", "unverified"] = "unverified"
     pipeline: Literal["wake_word_loop", "sentinel"] = "wake_word_loop"
     generated_at: str = ""
     timestamp: str = ""
@@ -175,7 +176,7 @@ def _finalize_summary(report: WakeWordLiveReport) -> None:
         and report.playback_user_confirmed
     )
     report.summary = "pass" if full_pass else "fail"
-    report.wake_word_live_verified = full_pass
+    report.wake_word_live_verified = full_pass and report.evidence_mode == "real_hardware"
 
 
 def _finalize_sentinel_summary(report: WakeWordLiveReport) -> None:
@@ -187,7 +188,7 @@ def _finalize_sentinel_summary(report: WakeWordLiveReport) -> None:
         and report.api_success
     )
     report.summary = "pass" if full_pass else "fail"
-    report.wake_word_live_verified = full_pass
+    report.wake_word_live_verified = full_pass and report.evidence_mode == "real_hardware"
 
 
 def write_wake_word_live_report(report: WakeWordLiveReport, path: Path) -> Path:
@@ -273,7 +274,13 @@ async def run_wake_word_live_verification(
     ``retain_debug_audio`` is set). Returns a redacted :class:`WakeWordLiveReport`.
     """
     doctor = voice_doctor(settings)
-    report = WakeWordLiveReport(doctor_status=str(doctor.get("status", "unknown")))
+    injected = any(
+        component is not None for component in (microphone, detector, stt, tts, player, api_caller)
+    )
+    report = WakeWordLiveReport(
+        doctor_status=str(doctor.get("status", "unknown")),
+        evidence_mode="injected_test" if injected else "real_hardware",
+    )
     retain_audio = retain_debug_audio or settings.voice.retain_debug_audio
     report.retained_debug_audio = retain_audio
 
@@ -414,6 +421,7 @@ async def run_sentinel_live_verification(
     report = WakeWordLiveReport(
         pipeline="sentinel",
         doctor_status=str(doctor.get("status", "unknown")),
+        evidence_mode="injected_test" if sentinel is not None else "real_hardware",
     )
     report.retained_debug_audio = bool(settings.voice.retain_debug_audio)
 

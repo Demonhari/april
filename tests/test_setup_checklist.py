@@ -128,7 +128,11 @@ def test_checklist_all_done_when_fresh_reports_present(
             **base,
             "report_type": "multi_model",
             "summary": "pass",
+            "runtime_backend": "llama_cpp",
             "real_model_verified": True,
+            "real_models_exercised": 4,
+            "core_model_set_verified": True,
+            "all_configured_models_verified": True,
             "verification_level": "all",
             "models": [],
         },
@@ -136,12 +140,26 @@ def test_checklist_all_done_when_fresh_reports_present(
     _write_report(
         home,
         "workflow-real.json",
-        {**base, "report_type": "workflow", "summary": "pass", "real_model_verified": True},
+        {
+            **base,
+            "report_type": "workflow",
+            "summary": "pass",
+            "real_model_verified": True,
+            "real_model_exercised": True,
+        },
     )
     _write_report(
         home,
         "go-live.json",
-        {**base, "report_type": "go_live", "final_status": "pass", "hardened_go_live_ready": True},
+        {
+            **base,
+            "report_type": "go_live",
+            "final_status": "pass",
+            "runtime_backend": "llama_cpp",
+            "real_model_verified": True,
+            "core_real_model_ready": True,
+            "hardened_go_live_ready": True,
+        },
     )
     checklist = build_setup_checklist(home)
     by_title = {step.title: step for step in checklist.steps}

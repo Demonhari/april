@@ -49,10 +49,11 @@ _VERIFY_WORKFLOW = (
 )
 _GO_LIVE = "run april go-live --write-report --start-services"
 _SETUP_EMBEDDINGS = (
-    "run april setup embeddings --model /absolute/path/to/embedding.gguf "
-    "--id april-embedding --apply"
+    "run april model import --role embedding --id nomic-embed-text-v1.5 "
+    '--name "nomic-embed-text-v1.5 Q8" --path /ABSOLUTE/LOCAL/PATH '
+    "--sha256 EXPECTED_SHA256"
 )
-_MEMORY_REINDEX = "run april memory reindex"
+_MEMORY_REINDEX = "run april memory reindex --wait"
 _SET_BACKEND = "Set runtime.backend=llama_cpp (or unset APRIL_RUNTIME_BACKEND=fake)."
 
 # severity order for rollups / overall verdict
@@ -174,7 +175,11 @@ def build_daily_driver_report(home: Path) -> DailyDriverReport:
     chat_models = [
         m for m in readiness.models if m.backend == "llama_cpp" and m.role != "embedding"
     ]
-    missing = [m.id for m in chat_models if not m.path_exists]
+    missing = [
+        m.id
+        for m in chat_models
+        if not m.path_exists or m.artifact_status not in {"valid", "unknown"}
+    ]
     if not chat_models:
         checks.append(
             DailyDriverCheck(
@@ -189,7 +194,7 @@ def build_daily_driver_report(home: Path) -> DailyDriverReport:
             DailyDriverCheck(
                 name="configured GGUF presence",
                 status="blocker",
-                detail="missing model files: " + ", ".join(sorted(missing)),
+                detail="missing, unreadable, or invalid GGUF files: " + ", ".join(sorted(missing)),
                 next_command=_SETUP_MODELS,
             )
         )
@@ -226,7 +231,7 @@ def build_daily_driver_report(home: Path) -> DailyDriverReport:
     checks.append(_vector_index_check(home, settings))
 
     # --- voice milestone -----------------------------------------------------
-    checks.append(_voice_check(readiness, latest))
+    checks.append(_voice_check(readiness, latest, fingerprint=fingerprint))
 
     # --- desktop readiness (read-only console) ------------------------------
     checks.append(
@@ -249,21 +254,59 @@ def build_daily_driver_report(home: Path) -> DailyDriverReport:
         )
     )
 
-    # --- audit log -----------------------------------------------------------
+    # --- database integrity / audit chain ------------------------------------
+    database_ok = (
+        readiness.database_quick_check == "ok"
+        and readiness.database_foreign_key_consistent
+        and readiness.database_wal_state.casefold() == "wal"
+        and not readiness.database_integrity_failures
+    )
+    checks.append(
+        DailyDriverCheck(
+            name="database integrity",
+            status="ready" if database_ok else "blocker",
+            detail=(
+                "quick_check=ok; foreign_keys=ok; journal=wal"
+                if database_ok
+                else (
+                    f"quick_check={readiness.database_quick_check}; "
+                    "foreign_keys="
+                    f"{'ok' if readiness.database_foreign_key_consistent else 'failed'}; "
+                    f"journal={readiness.database_wal_state}; "
+                    "failures="
+                    f"{','.join(readiness.database_integrity_failures) or 'none'}"
+                )
+            ),
+            next_command=None if database_ok else "run april database check",
+        )
+    )
+
     audit_writable = settings is not None and _path_writable(settings.audit_path)
     if settings is None:
         audit_status: DailyStatus = "warning"
         audit_detail = "settings unavailable; audit path unknown"
-    elif settings.audit_path.exists():
+    elif (
+        readiness.audit_chain_status in {"valid", "anchor_lagged"} and settings.audit_path.exists()
+    ):
         audit_status = "ready"
-        audit_detail = "audit log present and writable"
+        audit_detail = f"audit chain {readiness.audit_chain_status}; log writable"
+    elif readiness.audit_chain_status in {"corrupt", "unavailable"}:
+        audit_status = "blocker"
+        audit_detail = f"audit chain {readiness.audit_chain_status}"
     elif audit_writable:
-        audit_status = "ready"
-        audit_detail = "audit directory writable (log created when services run)"
+        audit_status = "warning"
+        audit_detail = f"audit chain {readiness.audit_chain_status}; run explicit verification"
     else:
         audit_status = "warning"
         audit_detail = "audit directory is not writable"
-    checks.append(DailyDriverCheck(name="audit log", status=audit_status, detail=audit_detail))
+    checks.append(
+        DailyDriverCheck(
+            name="audit log",
+            status=audit_status,
+            detail=audit_detail,
+            next_command="run april audit verify" if audit_status != "ready" else None,
+        )
+    )
 
     # --- rollups -------------------------------------------------------------
     core_real_model = _core_rollup(
@@ -327,12 +370,16 @@ def _report_check(
     )
     status_value = _report_status(payload) or "unknown"
     failed = status_value in {"fail", "failed"}
+    genuine, evidence_reason = _genuine_report_evidence(report_type, payload)
     if failed:
         status: DailyStatus = "blocker"
         detail = f"{path.name}: {status_value}"
     elif fresh.stale:
         status = "warning"
         detail = f"{path.name}: {status_value}, stale ({fresh.stale_reason})"
+    elif not genuine:
+        status = "warning"
+        detail = f"{path.name}: not production evidence ({evidence_reason})"
     else:
         status = "ready"
         detail = f"{path.name}: {status_value}, age {fresh.age_human or 'unknown'}"
@@ -342,6 +389,44 @@ def _report_check(
         detail=detail,
         next_command=next_command if status != "ready" else None,
     )
+
+
+def _genuine_report_evidence(report_type: str, payload: dict) -> tuple[bool, str]:
+    """Fail-closed evidence rules for the three production report types."""
+    if report_type == "multi_model":
+        if payload.get("runtime_backend") != "llama_cpp":
+            return False, "runtime is fake or unspecified"
+        if payload.get("real_model_verified") is not True:
+            return False, "real model verification did not pass"
+        if (
+            not isinstance(payload.get("real_models_exercised"), int)
+            or int(payload["real_models_exercised"]) <= 0
+        ):
+            return False, "no real model was exercised"
+        if payload.get("core_model_set_verified") is not True:
+            return False, "required core model set was not verified"
+        if payload.get("all_configured_models_verified") is not True:
+            return False, "not all configured models were verified"
+        if payload.get("verification_level") != "all":
+            return False, "verification level is not all"
+        return _report_status(payload) == "pass", "report did not pass"
+    if report_type == "workflow":
+        if payload.get("real_model_exercised") is not True:
+            return False, "real workflow model was not exercised"
+        if payload.get("real_model_verified") is not True:
+            return False, "real workflow verification did not pass"
+        return _report_status(payload) == "pass", "report did not pass"
+    if report_type == "go_live":
+        if payload.get("runtime_backend") != "llama_cpp":
+            return False, "runtime is fake or unspecified"
+        if payload.get("real_model_verified") is not True:
+            return False, "real model verification did not pass"
+        if payload.get("core_real_model_ready") is not True:
+            return False, "core real-model gate did not pass"
+        if payload.get("hardened_go_live_ready") is not True:
+            return False, "hardening gate did not pass"
+        return _report_status(payload) == "pass", "report did not pass"
+    return True, ""
 
 
 def _token_check(readiness: ReadinessReport) -> DailyDriverCheck:
@@ -441,7 +526,10 @@ def _vector_index_check(home: Path, settings: AprilSettings | None) -> DailyDriv
 
 
 def _voice_check(
-    readiness: ReadinessReport, latest: dict[str, tuple[Path, dict]]
+    readiness: ReadinessReport,
+    latest: dict[str, tuple[Path, dict]],
+    *,
+    fingerprint: str | None,
 ) -> DailyDriverCheck:
     # Voice is optional and never a blocker. Live verification status is read from
     # redacted reports; offline artifact presence supplies the rest. No device or
@@ -450,9 +538,19 @@ def _voice_check(
         return DailyDriverCheck(
             name="voice milestone", status="ready", detail="disabled (optional)"
         )
-    if "wake_word_live" in latest:
+    if _live_report_verified(
+        latest.get("wake_word_live"),
+        report_type="wake_word_live",
+        flag="wake_word_live_verified",
+        fingerprint=fingerprint,
+    ):
         return DailyDriverCheck(name="voice milestone", status="ready", detail="wake_live_verified")
-    if "voice_live" in latest:
+    if _live_report_verified(
+        latest.get("voice_live"),
+        report_type="voice_live",
+        flag="voice_live_verified",
+        fingerprint=fingerprint,
+    ):
         return DailyDriverCheck(name="voice milestone", status="ready", detail="live_verified")
     artifacts = {artifact.name: artifact for artifact in readiness.voice_artifacts}
 
@@ -482,6 +580,29 @@ def _voice_check(
     )
 
 
+def _live_report_verified(
+    item: tuple[Path, dict] | None,
+    *,
+    report_type: str,
+    flag: str,
+    fingerprint: str | None,
+) -> bool:
+    if item is None:
+        return False
+    path, payload = item
+    freshness = freshness_from_payload(
+        payload,
+        report_type=report_type,
+        current_fingerprint=fingerprint,
+        basename=path.name,
+    )
+    return bool(
+        payload.get("evidence_mode") == "real_hardware"
+        and payload.get(flag) is True
+        and not freshness.stale
+    )
+
+
 def _core_rollup(
     *,
     config_valid: bool,
@@ -501,7 +622,8 @@ def _core_rollup(
         return "blocker"
     if real_fresh is not None and real_fresh.stale:
         return "warning"
-    if status_value == "pass" or bool(real_payload[1].get("real_model_verified")):
+    genuine, _reason = _genuine_report_evidence("multi_model", real_payload[1])
+    if genuine:
         return "ready"
     return "warning"
 
@@ -516,7 +638,8 @@ def _report_rollup(
         return "blocker"
     if fresh is not None and fresh.stale:
         return "warning"
-    if status_value == "pass":
+    genuine, _reason = _genuine_report_evidence("workflow", payload_item[1])
+    if genuine:
         return "ready"
     return "warning"
 
@@ -541,8 +664,11 @@ def _hardened_rollup(
         return "blocker", reason
     if fresh is not None and fresh.stale:
         return "warning", fresh.stale_reason or reason
-    if bool(payload.get("hardened_go_live_ready")):
+    genuine, evidence_reason = _genuine_report_evidence("go_live", payload)
+    if genuine:
         return "ready", None
+    if not reason:
+        reason = evidence_reason
     # Surface the report's own hardening warnings when the live config has not
     # already supplied a more specific reason.
     hardening = payload.get("hardening_warnings")

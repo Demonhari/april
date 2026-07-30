@@ -132,14 +132,15 @@ timeout, or malformed-vector failures.
 Manual recommended semantic setup:
 
 ```bash
-run april model import --role embedding --id april-embedding \
-  --name nomic-embed-text-v1.5 \
-  --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf \
+run april model import --role embedding --id nomic-embed-text-v1.5 \
+  --name "nomic-embed-text-v1.5 Q8" \
+  --path /ABSOLUTE/LOCAL/PATH \
   --sha256 EXPECTED_SHA256
 export APRIL_MEMORY_EMBEDDING_PROVIDER=runtime-local
-export APRIL_MEMORY_EMBEDDING_MODEL_ID=april-embedding
+export APRIL_MEMORY_EMBEDDING_MODEL_ID=nomic-embed-text-v1.5
 run april memory doctor --verify-runtime-embedding
 run april memory reindex --wait
+run april memory doctor
 ```
 
 APRIL never downloads this model. Import requires exact one-time approval,

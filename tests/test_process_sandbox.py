@@ -36,6 +36,11 @@ def test_seatbelt_profile_denies_network_and_fences_roots(tmp_path: Path) -> Non
     assert "(deny network*)" in profile
     assert f'(allow file-read* (subpath "{tmp_path}"))' in profile
     assert f'(allow file-write* (subpath "{tmp_path}"))' in profile
+    assert '(allow file-read-data (literal "/"))' in profile
+    assert '(allow file-write* (literal "/dev/null"))' in profile
+    assert '(allow file-read* (subpath "/usr/local/Cellar"))' in profile
+    assert '(allow file-read* (subpath "/opt/homebrew/Cellar"))' in profile
+    assert '(allow file-read* (subpath "/usr/local/etc"))' not in profile
     assert f'(deny file-read* (subpath "{tmp_path / ".ssh"}"))' in profile
     assert f'(deny file-read* (subpath "{tmp_path / "Library/Keychains"}"))' in profile
 

@@ -4,30 +4,14 @@ import json
 import sqlite3
 from pathlib import Path
 
+from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.hardware_profile import safe_hardware_profile
 from april_common.settings import AprilSettings
+from april_common.verification_evidence import verified_model_ids
 
 
 def _verified_model_ids(home: Path) -> set[str]:
-    path = home / "data" / "verification" / "mac-readiness.json"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return set()
-    if payload.get("report_type") != "multi_model":
-        return set()
-    models = payload.get("models")
-    if not isinstance(models, list):
-        return set()
-    return {
-        str(model["model_id"])
-        for model in models
-        if isinstance(model, dict)
-        and model.get("available") is True
-        and model.get("load_success") is True
-        and model.get("chat_success") is True
-        and isinstance(model.get("model_id"), str)
-    }
+    return verified_model_ids(home)
 
 
 def _active_vector_provider(path: Path) -> str | None:
@@ -94,13 +78,19 @@ def _benchmark_evidence(settings: AprilSettings) -> dict[str, object]:
         if isinstance(unavailable, list)
         else []
     )
-    incomplete = bool(required_unavailable) or not bool(report.get("fixture_set"))
+    report_fingerprint = report.get("config_fingerprint")
+    fingerprint_matches = isinstance(
+        report_fingerprint, str
+    ) and report_fingerprint == config_fingerprint_digest(settings.home)
+    incomplete = (
+        bool(required_unavailable) or not bool(report.get("fixture_set")) or not fingerprint_matches
+    )
     current_hardware = profile_id == current
     return {
         "exists": not simulated,
         "current_hardware": current_hardware,
         "simulated": simulated,
-        "stale": bool(profile_id) and not current_hardware,
+        "stale": (bool(profile_id) and not current_hardware) or not fingerprint_matches,
         "incomplete": incomplete,
         "production_eligible": bool(report.get("production_eligible"))
         and current_hardware

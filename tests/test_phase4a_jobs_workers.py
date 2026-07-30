@@ -253,6 +253,10 @@ def test_process_environments_are_explicit_and_service_tokens_are_isolated(
     assert "APRIL_API_TOKEN" not in runtime
     core = build_process_environment(ProcessCategory.CORE_API, april_home=tmp_path)
     assert "APRIL_RUNTIME_TOKEN" not in core
+
+    git_environment = build_process_environment(ProcessCategory.GIT, april_home=tmp_path)
+    assert git_environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert git_environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
     assert "APRIL_API_TOKEN" not in core
     assert "OPENAI_API_KEY" not in core
 

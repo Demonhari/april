@@ -34,6 +34,7 @@ STALE_TTL_DAYS: dict[str, int] = {
     "acceptance": 7,
     "voice_live": 30,
     "wake_word_live": 30,
+    "voice_conversation_live": 30,
     "speaker_live": 7,
 }
 

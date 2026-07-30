@@ -21,7 +21,13 @@ from april_common.settings import (
     AprilSettings,
 )
 from april_common.token_setup import legacy_plaintext_credentials_detected
+from april_common.verification_evidence import verified_model_ids
 from services.api.dependencies import ApiContainer
+from services.api.model_readiness import model_registry_readiness as _model_registry_readiness
+from services.api.production_activation import (
+    finetuning_readiness,
+    production_activation_failure_reasons,
+)
 from services.api.reporting import (
     _basename,
     _is_relative_to,
@@ -351,9 +357,32 @@ async def readiness_payload(
     pending_write_capable_overlays = await overlay_approval_service.list_pending()
     pending_real_runtime_blockers = _pending_real_runtime_overlay_blockers(active.settings)
     real_runtime_required = active.settings.environment == "production"
+    finetuning = finetuning_readiness(active.settings)
+    production_failure_reasons = production_activation_failure_reasons(
+        settings=active.settings,
+        runtime_probe=runtime_probe,
+        runtime_backend=runtime_backend,
+        runtime_simulated=runtime_simulated,
+        model_registry=model_registry,
+        verified_models=verified_model_ids(active.settings.home),
+        embeddings=embeddings,
+        live_flags=live_flags,
+        job_worker_ready=job_worker_ready,
+        tool_worker_protocol_ready=tool_worker_protocol_ready,
+        tool_worker_self_check=tool_worker_self_check,
+        audit_chain_status=audit_chain_status,
+        database_integrity=database_integrity,
+        rollout_state=rollout_state,
+        finetuning=finetuning,
+        credential_store_selected=credential_store_selected,
+        legacy_plaintext_credential_detected=legacy_plaintext,
+    )
     return {
         "ready": ready,
         "status": "ok" if ready else "degraded",
+        "readiness_scope": "operational",
+        "production_ready": not production_failure_reasons,
+        "production_failure_reasons": production_failure_reasons,
         "failure_reasons": failure_reasons,
         "core": {
             "api_health": "ok",
@@ -439,6 +468,15 @@ async def readiness_payload(
             ),
             "pending_eval_case_count": count_pending_eval_cases(active.settings),
             "rollouts": rollout_state,
+        },
+        "fine_tuning": finetuning,
+        "release_evidence": {
+            "production_app_build": "not_evaluated",
+            "signing": "not_evaluated",
+            "notarization": "not_evaluated",
+            "stapling": "not_evaluated",
+            "gatekeeper": "not_evaluated",
+            "production_ready": False,
         },
         # Redacted local config digest + per-type report freshness, so the Desktop
         # operator console and `doctor --daily-driver` can flag stale reports.
@@ -530,9 +568,14 @@ async def readiness_payload(
             "legacy_plaintext_credential_detected": legacy_plaintext,
             "audit_chain_status": audit_chain_status,
             "database_integrity": {
+                "ok": database_integrity.ok,
                 "quick_check": database_integrity.quick_check,
                 "foreign_key_consistent": database_integrity.foreign_key_consistent,
                 "wal_state": database_integrity.journal_mode,
+                "schema_version": database_integrity.schema_version,
+                "expected_schema_version": database_integrity.expected_schema_version,
+                "migration_consistent": database_integrity.migration_consistent,
+                "failures": list(database_integrity.failures),
                 "last_successful_backup": database_integrity.last_successful_backup,
                 "checked_at": database_integrity.checked_at,
             },
@@ -547,68 +590,11 @@ async def readiness_payload(
             "--report data/verification/mac-readiness.json",
             "run april voice verify-live --report data/verification/voice-live.json",
             "run april voice verify-wake-live --report data/verification/wake-live.json",
-            "run april setup app-stub",
+            "run april finetune doctor",
+            "run april package build --output dist/APRIL.app --version VERSION",
+            'run april package sign dist/APRIL.app --identity "Developer ID Application: NAME"',
+            "run april package notarize-submit dist/APRIL.zip --keychain-profile APRIL_NOTARY",
         ],
-    }
-
-
-def _model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
-    router_model_id = settings.brain.router_model_id or settings.brain.model_id
-    router_aliased = settings.brain.router_model_id is None
-    try:
-        registry = ModelRegistry.from_file(
-            settings.home / "configs" / "models.yaml",
-            root=settings.home,
-        )
-    except AprilError:
-        return {
-            "valid": False,
-            "required_model_available": False,
-            "required_model_ids": [],
-            "unavailable_required_model_ids": [],
-            "router_model_id": router_model_id,
-            "router_aliased_to_brain": router_aliased,
-            "dedicated_router_available": False,
-            "router_failure_reason": "model_registry_invalid",
-        }
-    required_models = [model for model in registry.list() if model.role == "brain"]
-    unavailable = [
-        model.id
-        for model in required_models
-        if settings.runtime.backend != "fake"
-        and model.backend != "fake"
-        and not model.resolved_path(registry.root).is_file()
-    ]
-    router_failure_reason: str | None = None
-    dedicated_router_available = False
-    if router_aliased:
-        router_valid = registry.exists(settings.brain.model_id)
-        if not router_valid:
-            router_failure_reason = "aliased_brain_model_not_registered"
-    elif not registry.exists(router_model_id):
-        router_valid = False
-        router_failure_reason = "dedicated_router_not_registered"
-    else:
-        router_model = registry.get(router_model_id)
-        router_valid = router_model.role == "router"
-        dedicated_router_available = router_valid and (
-            settings.runtime.backend == "fake"
-            or router_model.backend == "fake"
-            or router_model.resolved_path(registry.root).is_file()
-        )
-        if not router_valid:
-            router_failure_reason = "dedicated_router_role_mismatch"
-        elif not dedicated_router_available:
-            router_failure_reason = "dedicated_router_artifact_unavailable"
-    return {
-        "valid": True,
-        "required_model_available": (bool(required_models) and not unavailable and router_valid),
-        "required_model_ids": [model.id for model in required_models],
-        "unavailable_required_model_ids": unavailable,
-        "router_model_id": router_model_id,
-        "router_aliased_to_brain": router_aliased,
-        "dedicated_router_available": dedicated_router_available,
-        "router_failure_reason": router_failure_reason,
     }
 
 
