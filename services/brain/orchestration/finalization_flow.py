@@ -268,12 +268,8 @@ class FinalizationFlow:
                         "tool_failure": tool_outcome == "failed",
                         "approval_denied": approval_outcome == "denied",
                         "regeneration": regeneration_or_retry,
-                        "runtime_failure": (
-                            final_status == "error" and tool_outcome != "failed"
-                        ),
-                        "hard_failure": (
-                            final_status == "error" and tool_outcome != "failed"
-                        ),
+                        "runtime_failure": (final_status == "error" and tool_outcome != "failed"),
+                        "hard_failure": (final_status == "error" and tool_outcome != "failed"),
                         "success": final_status in {"ok", "pending_approval"},
                     },
                 )

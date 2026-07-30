@@ -322,10 +322,7 @@ async def readiness_payload(
                     "An incomplete rollout, expired canary, artifact integrity "
                     "failure, or active-pointer disagreement requires rollback."
                 ),
-                "action": str(
-                    rollout_state.get("action")
-                    or "run april evolve rollout list"
-                ),
+                "action": str(rollout_state.get("action") or "run april evolve rollout list"),
             }
         )
     if active.settings.workers.tool_worker_enabled and (

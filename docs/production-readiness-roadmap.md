@@ -190,7 +190,8 @@ registered artifact, hashed-token embeddings, a missing runtime-local embedding
 model, a semantic model awaiting reindex, and a verified semantic generation.
 
 On the first bootstrap of an Intel macOS host, APRIL selects
-`intel_macbook_cpu_low` only if there is no prior profile selection and no manual
+`intel_macbook_cpu_low` exactly once only if automatic selection is not
+suppressed, there is no prior profile selection, and there is no manual
 per-model runtime override. Evidence is recorded under local setup data.
 `--no-auto-profile` suppresses this behavior; `--apply-profile` remains the
 explicit override. Readiness and status never modify configuration.

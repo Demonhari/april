@@ -85,8 +85,11 @@ It creates APRIL's data/logs/models/vector-index/audit/audio-cache directories
 with owner-only permissions; generates API/Runtime tokens into the chosen `.env`
 only if absent (never printing full tokens, and refusing to overwrite existing
 secrets without `--force`); inspects architecture, CPU count, and memory;
-**recommends** a model profile without applying it (apply only with
-`--apply-profile`); reports registered models and missing paths, llama-cpp-python
+recommends a model profile and, on a detected Intel macOS first run, applies
+`intel_macbook_cpu_low` exactly once unless `--no-auto-profile` is used, a
+profile was selected previously, or manual model/runtime overrides exist.
+`--apply-profile` remains the explicit override. Bootstrap reports registered
+models and missing paths, llama-cpp-python
 availability, voice dependency/binary/model paths resolved relative to
 `APRIL_HOME`, and configured allowed filesystem roots; warns about known
 development tokens, `.env.example` placeholders, blank API tokens, and
@@ -273,6 +276,11 @@ go-live hardening warnings, and the Desktop Readiness screen. **Switching
 embedding providers changes the vector space and requires a
 `run april memory reindex`** — `memory doctor` and `/readiness` always print the
 exact reindex command.
+
+The repository supports both reasoning and embedding roles, but the
+Qwen3-4B reasoning and Nomic embedding GGUF files are operator-supplied and must
+be imported manually. Hashed-token embeddings remain active until Runtime-local
+embedding is explicitly selected and memory reindexing succeeds.
 
 ## Backends, Verification, and Honest Status
 

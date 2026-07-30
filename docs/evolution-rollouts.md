@@ -53,7 +53,9 @@ evidence. Owner approval is required for canary and again for activation.
 
 No real shadow, prompt canary, LoRA, GGUF, voice, or Intel Mac rollout is
 claimed by the repository tests. LoRA cannot proceed at all until Runtime can
-load a candidate as a separate immutable model identity alongside baseline.
+load a candidate as a separately addressable immutable model identity alongside
+baseline, or run it in a separate candidate process. Global adapter switching
+is not a safe substitute and remains prohibited.
 
 ## Recovery
 

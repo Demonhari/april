@@ -113,9 +113,7 @@ class ContextFlow:
             request_id=active_request_id,
             decision=decision,
             mode=mode,
-            high_risk_reasoning=(
-                predicted_selection.high_stakes or predicted_selection.rung >= 2
-            ),
+            high_risk_reasoning=(predicted_selection.high_stakes or predicted_selection.rung >= 2),
         )
         model_id = agent.model_id or decision.model_id
         run_metadata: dict[str, Any] = {

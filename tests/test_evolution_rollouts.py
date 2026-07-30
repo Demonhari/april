@@ -470,7 +470,8 @@ async def test_automatic_rollback_on_hard_failure_and_threshold_breach(
             update={
                 "memory": settings.memory.model_copy(
                     update={
-                        "database_path": settings.home / "data"
+                        "database_path": settings.home
+                        / "data"
                         / f"rollout-{int(hard_failure)}.sqlite3"
                     }
                 )
@@ -546,6 +547,7 @@ async def test_interruption_reconciliation_before_and_after_pointer_publication(
         )
         database = await _database(settings)
         try:
+
             async def fault(
                 actual: str,
                 _record: RolloutRecord,

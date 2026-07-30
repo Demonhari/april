@@ -3,9 +3,11 @@
 ``run april setup bootstrap`` prepares a local APRIL home: it creates the data /
 logs / models / index / audit / audio-cache directories, provisions local API and
 Runtime credentials in an explicit secure store (writing only identifiers to
-``.env``), inspects the machine, recommends (but does
-not silently apply) a model profile, and reports model / voice / llama.cpp / root
-status plus the exact next verification commands.
+``.env``), inspects the machine, and recommends a model profile. On a detected
+Intel macOS first run it applies ``intel_macbook_cpu_low`` exactly once unless
+automatic selection is suppressed, a profile was selected previously, or
+manual model/runtime overrides exist. It reports model / voice / llama.cpp /
+root status plus the exact next verification commands.
 
 It never installs Homebrew, Python packages, models, or voice binaries, never
 downloads anything, and never edits shell startup files. It is fully

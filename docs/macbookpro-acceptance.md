@@ -57,7 +57,11 @@ run april readiness
 ```
 
 `setup bootstrap` ensures local directories, generates loopback tokens (values
-are never printed), snapshots the machine, and recommends a model profile.
+are never printed), and snapshots the machine. On a detected Intel macOS first
+run it applies `intel_macbook_cpu_low` exactly once unless
+`--no-auto-profile` suppresses selection, a profile was selected previously, or
+manual model/runtime overrides exist. `--apply-profile` remains the explicit
+override.
 `readiness` then explains — offline and redacted — exactly what is still missing
 for real-model and real-voice readiness.
 

@@ -131,8 +131,7 @@ class ExecutionFlow:
                     external_side_effect=risk_level == "external_action",
                     security_sensitive=permission_level >= 3,
                     database_write=any(
-                        tool_name in {"create_reminder", "cancel_reminder"}
-                        for tool_name in tools
+                        tool_name in {"create_reminder", "cancel_reminder"} for tool_name in tools
                     ),
                     repository_write=any(
                         tool_name

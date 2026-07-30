@@ -65,7 +65,11 @@ Run target-Mac setup and real verification in this order:
 1. `run april readiness`
 2. `run april setup bootstrap`
 3. `run april setup tokens` if bootstrap reports token warnings
-4. `run april model profile apply intel_macbook_cpu_low`
+4. Confirm bootstrap's selected profile. On Intel macOS first run it applies
+   `intel_macbook_cpu_low` exactly once unless suppressed, previously selected,
+   or blocked by manual model/runtime overrides. Use
+   `run april model profile apply intel_macbook_cpu_low` only when an explicit
+   override is intended.
 5. Validate with `run april setup models ... --dry-run`, then import each role with exact-approved `run april model import ... --sha256 EXPECTED_SHA256`
 6. `pip install -e '.[runtime]'`
 7. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
