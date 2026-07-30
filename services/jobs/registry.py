@@ -92,6 +92,16 @@ class FinetunePayload(BaseModel):
     plan_id: str = Field(min_length=16, max_length=64, pattern=r"^[a-f0-9]+$")
 
 
+class EvolutionShadowPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rollout_id: str = Field(
+        min_length=1,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+    )
+
+
 ApprovalPayloadBuilder = Callable[[dict[str, Any]], dict[str, Any]]
 
 
@@ -288,6 +298,19 @@ def default_job_registry(
                 cancellation_behavior="cooperative",
                 available=evolution_enabled,
                 unavailable_code="dream_cycle_job_unavailable",
+            ),
+            JobTypeDefinition(
+                "evolution_shadow",
+                EvolutionShadowPayload,
+                permission_level=2,
+                approval_required=False,
+                idempotent=True,
+                restart_safe=True,
+                default_timeout_seconds=14_400.0,
+                maximum_attempts=2,
+                cancellation_behavior="cooperative",
+                available=evolution_enabled,
+                unavailable_code="evolution_shadow_job_unavailable",
             ),
         ]
     )

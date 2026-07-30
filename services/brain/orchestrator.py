@@ -138,6 +138,7 @@ class AprilOrchestrator(
             project_id=project_id,
             repo_path=repo_path,
             structured_specialists=True,
+            mode=mode,
         )
         selection = self._select_intelligence_rung(prepared, message=message, mode=mode)
         self._schedule_agent_prewarm(prepared)

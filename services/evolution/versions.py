@@ -5,13 +5,16 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from april_common.audit import AuditLogger
 from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
 from services.evolution.write_guard import EvolutionDatabaseWriter, EvolutionWriteGuard
 from services.memory.database import Database
+
+if TYPE_CHECKING:
+    from services.evolution.rollouts import CanaryContext
 
 _STRUCTURAL_OVERLAY_RE = re.compile(
     r"(?im)^\s*(tools|permissions|allowed_tools|tool_registry|permission_level)\s*:"
@@ -93,6 +96,20 @@ class PromptOverlayManager:
         source: Literal["dreamer", "forge", "hand"] = "dreamer",
         approved: bool = False,
     ) -> OverlayApplyResult:
+        if self.settings.environment == "production":
+            self._audit(
+                "prompt_overlay_rollout_required",
+                agent=agent,
+                reason="direct production activation is disabled",
+            )
+            return OverlayApplyResult(
+                "pending_real_runtime",
+                agent,
+                reason=(
+                    "production prompt activation requires Phase 4B shadow, "
+                    "bounded canary, and exact activation approval"
+                ),
+            )
         reason = self.rejection_reason(content)
         if reason is not None:
             self._audit("prompt_overlay_discarded", agent=agent, reason=reason)
@@ -147,7 +164,12 @@ class PromptOverlayManager:
             return None
         return path.read_bytes()
 
-    async def active_overlay_text(self, agent: str) -> str | None:
+    async def active_overlay_text(
+        self,
+        agent: str,
+        *,
+        canary_context: CanaryContext | None = None,
+    ) -> str | None:
         """Active overlay as bounded, policy-checked text for prompt assembly.
 
         Returns ``None`` when no overlay is active, its bytes are missing
@@ -156,7 +178,27 @@ class PromptOverlayManager:
         is re-bounded at read time so a hand-edited file cannot exceed the
         configured overlay budget.
         """
-        raw = await self.active_overlay(agent)
+        raw: bytes | None = None
+        if canary_context is not None:
+            # Import lazily to keep the stable prompt-version API independent
+            # from the optional rollout subsystem.
+            from services.evolution.rollouts import RolloutService
+
+            selection = await RolloutService(
+                self.settings,
+                self.database,
+                audit=self.audit,
+            ).select_prompt_canary(target_id=agent, context=canary_context)
+            if selection.selected and selection.overlay_text is not None:
+                raw = selection.overlay_text.encode("utf-8")
+            elif selection.rollout_id is None:
+                await RolloutService(
+                    self.settings,
+                    self.database,
+                    audit=self.audit,
+                ).track_active_request(target_id=agent, context=canary_context)
+        if raw is None:
+            raw = await self.active_overlay(agent)
         if raw is None:
             return None
         text = raw.decode("utf-8", errors="replace").strip()

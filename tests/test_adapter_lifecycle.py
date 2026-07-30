@@ -255,18 +255,20 @@ async def test_production_adapter_activation_requires_report(settings_tmp) -> No
             evidence_path=evidence,
         )
         assert blocked.status == "blocked"
-        assert "verification report" in str(blocked.reason)
+        assert "Phase 4B rollout" in str(blocked.reason)
+        assert "LoRA canary is currently unsupported" in str(blocked.reason)
         assert blocked.next_command is not None
         assert read_adapter_pointer(production.home, "april-brain") is None
 
-        activated = await manager.activate(
+        still_blocked = await manager.activate(
             model_id="april-brain",
             adapter_path=adapter,
             evidence_path=evidence,
             verification_report_path=_report(production, "april-brain", adapter),
         )
-        assert activated.status == "activated"
-        assert read_adapter_pointer(production.home, "april-brain") is not None
+        assert still_blocked.status == "blocked"
+        assert "Phase 4B rollout" in str(still_blocked.reason)
+        assert read_adapter_pointer(production.home, "april-brain") is None
     finally:
         await database.close()
 

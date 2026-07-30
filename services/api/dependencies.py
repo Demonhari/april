@@ -18,6 +18,7 @@ from services.april_runtime.model_registry import ModelRegistry
 from services.brain.orchestrator import AprilOrchestrator
 from services.evolution.adapters import AdapterLifecycleManager
 from services.evolution.dreamer import DreamerService
+from services.evolution.rollouts import RolloutService
 from services.evolution.scheduler import EvolutionSchedulerGate
 from services.evolution.versions import PromptOverlayManager
 from services.jobs.client import JobWorkerProcessManager
@@ -137,6 +138,11 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         database,
         audit=audit,
     ).reconcile_incomplete_operations()
+    await RolloutService(
+        active_settings,
+        database,
+        audit=audit,
+    ).reconcile_startup()
     try:
         sensitive_encryption = sensitive_encryption_for_settings(active_settings)
     except MemoryEncryptionError:

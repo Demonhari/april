@@ -40,6 +40,17 @@ class InteractionFlow:
                 agent_run_id=agent_run_id,
                 implicit_correction=True,
             )
+            if self.overlay_manager is not None:
+                from services.evolution.rollouts import RolloutService
+
+                await RolloutService(
+                    self.settings,
+                    self.memory.database,
+                    audit=self.approvals.audit,
+                ).record_signal_for_agent_run(
+                    agent_run_id=agent_run_id,
+                    signal="user_correction",
+                )
             record = await self.memory.record_feedback_event(
                 rating="bad",
                 reason=f"implicit_correction: {marker}",
@@ -305,6 +316,7 @@ class InteractionFlow:
             project_id=project_id,
             repo_path=repo_path,
             structured_specialists=True,
+            mode=mode,
         )
         selection = self._select_intelligence_rung(prepared, message=message, mode=mode)
         self._schedule_agent_prewarm(prepared)

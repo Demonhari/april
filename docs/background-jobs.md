@@ -14,10 +14,18 @@ attempt available. Mutation jobs are never automatically retried.
 The separate Job Worker claims one job at a time by default. Fully integrated
 job types are `repository_index`, `memory_reindex`, `document_index`,
 `configured_test`, `model_import`, `model_import_verification`,
-`model_benchmark`, `model_setup_comparison`, and `self_check`. Configured tests
+`model_benchmark`, `model_setup_comparison`, `evolution_shadow`, and `self_check`.
+Configured tests
 and model import require exact existing approvals. Fine-tuning is registered
 only when explicitly enabled; Dream Cycle is registered only when evolution is
 explicitly enabled.
+
+`evolution_shadow` is available only when evolution is explicitly enabled.
+`run april evolve rollout shadow-start ROLLOUT_ID` submits it after durably
+moving the rollout to `shadow_pending`. It is idempotent, restart-safe, and
+cooperatively cancellable. Its stored result contains only rollout state,
+sample count, reason code, and evidence hash; no case prompt or generation is
+stored in the job result.
 
 `run april model import`, `run april model verify`, `run april memory reindex`,
 `run april model benchmark`, and `run april model compare-setups` submit these

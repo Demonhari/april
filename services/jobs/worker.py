@@ -12,8 +12,11 @@ from typing import Any
 
 from apps.runner.commands.model_compare import _compare as run_model_setup_comparison
 from april_common.audit import audit_logger_for_settings
+from april_common.effective_config import load_agents_file
 from april_common.settings import AprilSettings, load_settings
 from april_common.time import utc_now_iso
+from services.april_runtime.client import RuntimeClient
+from services.evolution.rollouts import RealPromptShadowEvaluator, RolloutService
 from services.jobs.finetune_job import FinetuneJobError, run_finetune_job
 from services.jobs.model_import import (
     ModelImportError,
@@ -320,6 +323,48 @@ class JobWorker:
                 "status": dream_result.status,
                 "reason_code": _safe_reason_code(dream_result.reason),
                 "activated_candidate": False,
+            }
+        if job.job_type == "evolution_shadow":
+            cancellation = self._cancellation_events[job.id]
+            record = await RolloutService(
+                self.settings,
+                self.database,
+                audit=audit_logger_for_settings(self.settings),
+            ).require(str(job.payload["rollout_id"]))
+            agents = load_agents_file(self.settings.home).agents
+            target = agents.get(record.target_id)
+            judge = agents.get("reading_agent")
+            await self.store.heartbeat(
+                job.id,
+                worker_id=self.worker_id,
+                lease_seconds=self.lease_seconds,
+                progress_percent=5,
+                progress_code="shadow_baseline_candidate_ab",
+            )
+            rollout_result = await RolloutService(
+                self.settings,
+                self.database,
+                audit=audit_logger_for_settings(self.settings),
+            ).start_shadow(
+                record.id,
+                evaluator=RealPromptShadowEvaluator(
+                    self.settings,
+                    RuntimeClient(
+                        self.settings.runtime.url,
+                        timeout=self.settings.runtime.request_timeout_seconds,
+                        token=self.settings.runtime.token,
+                    ),
+                    model_id=target.model_id if target is not None else None,
+                    judge_model_id=judge.model_id if judge is not None else None,
+                ),
+                cancellation_event=cancellation,
+            )
+            return {
+                "rollout_id": rollout_result.id,
+                "state": rollout_result.state,
+                "reason_code": rollout_result.reason_code,
+                "completed_sample_count": rollout_result.completed_sample_count,
+                "shadow_evidence_sha256": rollout_result.shadow_evidence_sha256,
             }
         raise RuntimeError("job_type_unavailable")
 

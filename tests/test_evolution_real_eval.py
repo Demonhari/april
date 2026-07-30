@@ -282,7 +282,7 @@ async def test_production_manual_approval_holds_on_failing_real_eval(settings_tm
 
 
 @pytest.mark.asyncio
-async def test_production_manual_approval_applies_after_passing_real_eval(settings_tmp) -> None:
+async def test_production_manual_approval_still_requires_phase4b_rollout(settings_tmp) -> None:
     production = _production_settings(settings_tmp)
     content_hash = _seed_pending_overlay(production, _OVERLAY)
     database, _memory_unused = await _memory(production)
@@ -293,10 +293,10 @@ async def test_production_manual_approval_applies_after_passing_real_eval(settin
             runtime_client=FakeRealRuntimeClient(),
         )
         result = await service.approve(agent="coding_agent", content_hash=content_hash)
-        assert result.status == "applied"
-        assert result.version == 1
+        assert result.status == "pending_real_runtime"
+        assert "Phase 4B shadow" in (result.reason or "")
         manager = PromptOverlayManager(production, database)
-        assert await manager.active_overlay_text("coding_agent") == _OVERLAY
+        assert await manager.active_overlay_text("coding_agent") is None
     finally:
         await database.close()
 
@@ -370,7 +370,9 @@ async def test_production_dreamer_holds_candidates_without_real_runtime(settings
 
 
 @pytest.mark.asyncio
-async def test_production_dreamer_activates_only_on_real_runtime_pass(settings_tmp) -> None:
+async def test_production_dreamer_never_activates_directly_after_real_runtime_pass(
+    settings_tmp,
+) -> None:
     production = _production_settings(settings_tmp)
     database, memory = await _memory(production)
     try:
@@ -388,7 +390,9 @@ async def test_production_dreamer_activates_only_on_real_runtime_pass(settings_t
 
         report = json.loads(Path(result.report_path).read_text(encoding="utf-8"))
         examine = report["phases"]["examine"]
-        assert examine["activated"] == [{"agent": "general_agent", "version": 1}]
+        assert examine["activated"] == []
+        assert examine["discarded"][0]["agent"] == "general_agent"
+        assert "Phase 4B shadow" in examine["discarded"][0]["reason"]
         assert examine["pending_real_runtime"] == []
         modes = examine["eval_modes"]
         assert modes["real_runtime_eval_passed"] == 1

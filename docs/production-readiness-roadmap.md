@@ -14,6 +14,8 @@ evidence of real model, microphone, thermal, signing, or notarization success.
 | Durable staged model import and inactive registration | Implemented and tested | A separately supplied local GGUF for a real import, verification, and benchmark |
 | Real GGUF load/chat/stream, prompt-eval timing, sustained performance, and setup comparison | Implemented but target-Mac verification required | Local model artifact and genuine real-runtime execution |
 | Voice endpointing and optional voice adapters | Implemented and tested | Live microphone and speaker checks require those devices and local voice artifacts |
+| Phase 4B prompt rollout state machine, shadow jobs, bounded canary, exact approvals, monitoring, reconciliation, and rollback | Implemented and fake/unit tested; disabled by default | Real reviewed-case A/B evidence with local GGUFs, owner approvals, and target-Intel-Mac canary evidence |
+| Phase 4B LoRA canary | Explicitly blocked as unsupported | Runtime support for a separately loaded immutable candidate model identity; global adapter switching is not accepted |
 | Production `.app` structure and release exclusions | Implemented and tested | Target-Mac bundle validation |
 | Developer ID signing, notarization, stapling, and Gatekeeper | Implemented but target-Mac verification required | Real Apple signing identity, notary Keychain profile, and genuine Apple service execution |
 
@@ -74,8 +76,86 @@ consumption are atomic. Results are registered only as inactive adapter
 candidates.
 
 `dream_cycle` remains unavailable unless evolution is explicitly enabled. It is
-not automatically retryable and retains the existing sample, evaluation,
-shadow, no-regression, canary, human-review, approval, and rollback gates.
+not automatically retryable. Candidate creation, rollout execution, canary
+traffic, and automatic promotion are separately disabled by default. Phase 4B
+does not let a production prompt or adapter activation use the legacy direct
+activation path.
+
+## Phase 4B rollout safety
+
+Schema 21 adds durable rollout, assignment, and safe-event records. Prompt
+overlays follow:
+
+`candidate → shadow_pending → shadow_running → shadow_passed →`
+`canary_pending_approval → canary_running → canary_passed →`
+`activation_pending_approval → active`.
+
+Terminal outcomes are `failed`, `cancelled`, `rolled_back`, and `rejected`.
+Every mutation uses the existing serialized SQLite transaction path and an
+optimistic version. Records bind candidate, baseline, configuration, reviewed
+dataset, and shadow evidence hashes. Stored metrics contain only counters,
+rates, bounded latency values, reason codes, and booleans; prompts,
+conversations, generations, tool output, audio, and secrets are excluded.
+
+`evolution_shadow` runs the existing reviewed-case A/B evaluator as a
+restart-safe durable job. It gives the evaluator only the Runtime chat client,
+not a tool executor. Training loss or perplexity is never sufficient evidence.
+The same immutable cases are run for baseline and candidate, minimum sample
+counts and no-regression gates are enforced, and shadow never changes an
+active pointer.
+
+Prompt canary traffic requires an exact Level 4 approval. Selection is a stable
+hash of rollout ID and request ID, bounded by fraction, eligible-turn count, and
+expiry. Voice, deep/council/high-stakes reasoning, write-capable agents,
+approval-requiring interactions, repository/database writes, external or
+destructive operations, and background evolution are excluded. Candidate
+answers are ordinary responses only for selected eligible canary requests;
+shadow answers are never user-visible.
+
+The current Runtime binds a LoRA adapter to the globally loaded model. It does
+not provide a second immutable candidate model identity for safe concurrent
+routing. Phase 4B therefore reports `lora_canary_unsupported`, refuses LoRA
+canary and promotion, and never toggles the global adapter per request.
+
+Canary and newly-active prompt outcomes feed safe aggregate monitoring.
+Integrity failure, Runtime failure, hard failure, regression threshold,
+insufficient expired samples, or pointer/database disagreement triggers
+idempotent rollback to the exact prior artifact. Prompt publication has a
+durable prepared/published/finalized protocol; startup reconciliation
+compensates an interruption on either side of publication. Rollback and
+reconciliation emit hash-chained audit events.
+
+Operator flow:
+
+```console
+# Explicitly review and enable evolution.enabled, evolution.rollout_enabled,
+# and evolution.canary_enabled first. Automatic creation/promotion stay false.
+run april evolve rollout create --type prompt_overlay --target-id general_agent \
+  --candidate-id REVIEWED_ID --candidate-path data/evolution/candidates/FILE.overlay.txt
+run april evolve rollout shadow-start ROLLOUT_ID
+run april jobs status JOB_ID
+run april evolve rollout approval-request ROLLOUT_ID --stage canary
+run april approve APPROVAL_ID
+run april evolve rollout canary-start ROLLOUT_ID --approval-id APPROVAL_ID
+run april evolve rollout status ROLLOUT_ID
+run april evolve rollout approval-request ROLLOUT_ID --stage activation
+run april approve APPROVAL_ID
+run april evolve rollout promote ROLLOUT_ID --approval-id APPROVAL_ID
+run april evolve rollout rollback ROLLOUT_ID --reason operator_rollback
+```
+
+Creating an approval is an explicit owner command. Neither canary passage nor
+good metrics creates, approves, consumes, or performs final promotion
+automatically. `run april readiness`, Core `/readiness`, and `run april verify`
+report disabled rollout state as disabled, while unsafe incomplete transitions
+are readiness failures.
+
+Automated tests use temporary SQLite databases, fake shadow evaluators, and no
+GGUFs. They cover the state machine, approvals, bounds, deterministic selection,
+concurrency, interruption, reconciliation, aggregate evidence, automatic
+rollback, exact restoration, audit-chain validity, defaults, and explicit LoRA
+blocking. They are not evidence that a real prompt, LoRA, GGUF, voice path, or
+Intel Mac canary passed.
 
 Fine-tune workflow:
 

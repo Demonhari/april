@@ -17,6 +17,7 @@ from services.brain.schemas import (
     PlannedToolCall,
     RouteResult,
 )
+from services.evolution.rollouts import CanaryContext
 from services.evolution.versions import LEARNED_GUIDANCE_HEADER
 from services.memory.schemas import Project
 from skills.schemas import ToolResult
@@ -27,7 +28,16 @@ class ExecutionFlow:
         agent = self.agent_registry.get(prepared.agent_name)
         if agent is None:
             raise PermissionDeniedError("Unknown agent selected by brain.")
-        agent = await self.apply_prompt_overlay(agent)
+        agent = await self.apply_prompt_overlay(
+            agent,
+            request_id=prepared.request_id,
+            decision=prepared.decision,
+            mode=str(prepared.run_metadata.get("chat_mode", "standard")),
+            high_risk_reasoning=bool(
+                int(prepared.run_metadata.get("intelligence_rung", 1)) >= 2
+                or prepared.run_metadata.get("high_stakes")
+            ),
+        )
         agent = self._with_resolved_model(agent, prepared.model_id)
         context = await self.tool_executor.context(
             request_id=prepared.request_id,
@@ -73,7 +83,15 @@ class ExecutionFlow:
         )
         return result
 
-    async def apply_prompt_overlay(self, agent: BaseAgent) -> BaseAgent:
+    async def apply_prompt_overlay(
+        self,
+        agent: BaseAgent,
+        *,
+        request_id: str | None = None,
+        decision: BrainDecision | None = None,
+        mode: str = "standard",
+        high_risk_reasoning: bool = False,
+    ) -> BaseAgent:
         """Return the agent with any active learned overlay appended to its prompt.
 
         Only the system prompt text changes: tools, permissions, memory policy
@@ -87,7 +105,56 @@ class ExecutionFlow:
         if self.overlay_manager is None:
             return agent
         try:
-            overlay = await self.overlay_manager.active_overlay_text(agent.name)
+            tools: tuple[str, ...] = ()
+            permission_level = 1
+            risk_level = "none"
+            if decision is not None:
+                tools = tuple(
+                    sorted(
+                        {call.tool for call in decision.planned_tool_calls}
+                        | set(decision.tools_needed)
+                    )
+                )
+                permission_level = decision.permission_level
+                risk_level = decision.risk_level
+            canary_context = (
+                CanaryContext(
+                    stable_request_id=request_id,
+                    source="chat",
+                    mode=mode,
+                    permission_level=permission_level,
+                    risk_level=risk_level,
+                    agent=agent.name,
+                    tool_names=tools,
+                    has_pending_approval=False,
+                    destructive=risk_level in {"code_write", "system_action"},
+                    external_side_effect=risk_level == "external_action",
+                    security_sensitive=permission_level >= 3,
+                    database_write=any(
+                        tool_name in {"create_reminder", "cancel_reminder"}
+                        for tool_name in tools
+                    ),
+                    repository_write=any(
+                        tool_name
+                        in {
+                            "patch_generator",
+                            "patch_applier",
+                            "write_file",
+                            "run_command",
+                            "test_runner",
+                            "git_commit",
+                        }
+                        for tool_name in tools
+                    ),
+                    high_risk_reasoning=high_risk_reasoning,
+                )
+                if request_id is not None
+                else None
+            )
+            overlay = await self.overlay_manager.active_overlay_text(
+                agent.name,
+                canary_context=canary_context,
+            )
         except Exception:
             return agent
         if not overlay:

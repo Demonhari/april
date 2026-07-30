@@ -52,6 +52,7 @@ from april_common.token_setup import legacy_plaintext_credentials_detected
 from services.april_runtime.model_registry import ModelRegistry
 from services.evaluation.model_quality import fixture_set_metadata
 from services.evolution.adapters import inspect_adapter_state
+from services.evolution.rollouts import inspect_rollout_state
 from services.memory.maintenance import check_database
 
 CheckStatus = Literal["ok", "warning", "blocker", "skipped"]
@@ -170,6 +171,15 @@ class ReadinessReport(BaseModel):
     lora_adapter_missing_count: int = 0
     adapter_lifecycle_consistent: bool = True
     incomplete_adapter_operation_count: int = 0
+    evolution_rollout_status: str = "disabled"
+    incomplete_rollout_transition_count: int = 0
+    active_canary_count: int = 0
+    expired_canary_count: int = 0
+    rollout_candidate_unavailable_count: int = 0
+    rollout_candidate_hash_mismatch_count: int = 0
+    rollout_pointer_database_disagreement_count: int = 0
+    rollout_rollback_required_count: int = 0
+    lora_canary_supported: bool = False
     overlay_eval_mode: str = "deterministic_fixture"
     production_real_runtime_eval_required: bool = False
     pending_real_runtime_overlay_blocker_count: int = 0
@@ -602,6 +612,40 @@ def build_readiness_report(
                     "disagreement requires Core startup reconciliation."
                 ),
                 action="Restart the APRIL Core API, then run april readiness.",
+            )
+        )
+
+    rollout_state = inspect_rollout_state(settings)
+    rollout_status = str(rollout_state["status"])
+    if rollout_status == "disabled":
+        checks.append(
+            ReadinessCheck(
+                name="evolution rollout safety",
+                status="skipped",
+                detail="Evolution rollouts and canary traffic are intentionally disabled.",
+            )
+        )
+    elif rollout_status in {"ok", "not_initialized"}:
+        checks.append(
+            ReadinessCheck(
+                name="evolution rollout safety",
+                status="ok",
+                detail=(
+                    "No unsafe rollout transition is present. LoRA canary remains "
+                    "explicitly unsupported by the current Runtime lifecycle."
+                ),
+            )
+        )
+    else:
+        checks.append(
+            ReadinessCheck(
+                name="evolution rollout safety",
+                status="blocker",
+                detail=(
+                    "An incomplete/expired rollout, artifact integrity failure, "
+                    "or active-pointer disagreement requires rollback."
+                ),
+                action=str(rollout_state.get("action") or "run april evolve rollout list"),
             )
         )
 
@@ -1340,6 +1384,25 @@ def build_readiness_report(
             if isinstance(adapter_state["incomplete_operation_count"], int)
             else 0
         ),
+        evolution_rollout_status=rollout_status,
+        incomplete_rollout_transition_count=int(
+            rollout_state["incomplete_transition_count"]
+        ),
+        active_canary_count=int(rollout_state["active_canary_count"]),
+        expired_canary_count=int(rollout_state["expired_canary_count"]),
+        rollout_candidate_unavailable_count=int(
+            rollout_state["candidate_unavailable_count"]
+        ),
+        rollout_candidate_hash_mismatch_count=int(
+            rollout_state["candidate_hash_mismatch_count"]
+        ),
+        rollout_pointer_database_disagreement_count=int(
+            rollout_state["pointer_database_disagreement_count"]
+        ),
+        rollout_rollback_required_count=int(
+            rollout_state["rollback_required_count"]
+        ),
+        lora_canary_supported=bool(rollout_state["lora_canary_supported"]),
         overlay_eval_mode=(
             "deterministic_fixture_plus_real_runtime"
             if production_real_runtime_eval_required

@@ -128,6 +128,18 @@ april desktop
 april doctor
 april eval
 april eval brain
+april evolve
+april evolve rollout
+april evolve rollout approval-request
+april evolve rollout cancel
+april evolve rollout canary-start
+april evolve rollout create
+april evolve rollout list
+april evolve rollout promote
+april evolve rollout rollback
+april evolve rollout shadow-start
+april evolve rollout show
+april evolve rollout status
 april finetune
 april finetune cancel
 april finetune doctor

@@ -195,6 +195,20 @@ class AdapterLifecycleManager:
         verification_report_path: Path | None = None,
     ) -> AdapterActionResult:
         _validate_model_id(model_id)
+        if self.settings.environment == "production":
+            return AdapterActionResult(
+                status="blocked",
+                model_id=model_id,
+                reason=(
+                    "direct production adapter activation is disabled; create a "
+                    "Phase 4B rollout. LoRA canary is currently unsupported until "
+                    "the Runtime provides a separate immutable model identity."
+                ),
+                next_command=(
+                    "run april evolve rollout create --type lora_adapter "
+                    f"--target-id {model_id} ..."
+                ),
+            )
         try:
             resolved_adapter = self._normalize_existing_path(adapter_path)
         except (AprilError, OSError) as exc:

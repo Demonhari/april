@@ -72,6 +72,7 @@ from apps.runner.commands.registry import (
     config_app,
     conversation_app,
     eval_app,
+    evolve_app,
     jobs_app,
     memory_app,
     model_app,
@@ -79,6 +80,7 @@ from apps.runner.commands.registry import (
     project_app,
     reminder_app,
     reports_app,
+    rollout_app,
     setup_app,
     task_app,
     user_profile_app,
@@ -130,6 +132,8 @@ april_app.add_typer(setup_app, name="setup")
 april_app.add_typer(user_profile_app, name="profile")
 april_app.add_typer(reports_app, name="reports")
 april_app.add_typer(jobs_app, name="jobs")
+april_app.add_typer(evolve_app, name="evolve")
+evolve_app.add_typer(rollout_app, name="rollout")
 april_app.add_typer(security_app, name="security")
 april_app.add_typer(audit_app, name="audit")
 april_app.add_typer(database_app, name="database")
@@ -139,6 +143,7 @@ register_model_compare(model_app)
 register_model_import_commands(model_app)
 register_speaker_commands(voice_app)
 
+from apps.runner.commands import evolve_rollout as _evolve_rollout  # noqa: E402
 from apps.runner.commands import runner_acceptance as _runner_acceptance  # noqa: E402
 from apps.runner.commands import (  # noqa: E402
     runner_configuration as _runner_configuration,
@@ -171,6 +176,7 @@ _COMMAND_MODULES = (
     _runner_acceptance,
     _runner_services,
     _runner_reports,
+    _evolve_rollout,
 )
 
 

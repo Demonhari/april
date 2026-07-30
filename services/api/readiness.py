@@ -38,6 +38,7 @@ from services.evolution.inspect import (
     count_pending_write_capable_overlay_candidates,
     evolution_kill_switch_active,
 )
+from services.evolution.rollouts import RolloutService
 from services.memory.maintenance import check_database
 from services.memory.migrations import SCHEMA_VERSION
 from services.tool_worker.limits import UnsafeToolWorkerSocket, validate_live_socket
@@ -117,10 +118,6 @@ async def readiness_payload(
     vector_health = active.vector_memory.health()
     memory_index_health = await active.memory_repository.health()
     vector = _redact_health_payload(vector_health)
-    # The embedding provider is a first-class readiness axis: hashed-token is the
-    # safe/offline default, runtime-local is the recommended hardened path. The
-    # active provider, whether it fell back, and whether the on-disk index matches
-    # are surfaced (booleans/enums only — never a path) so a silent mix is visible.
     configured_embedding_provider = active.settings.memory.embedding_provider
     active_embedding_provider = str(vector_health.get("embedding", "hashed-token"))
     embedding_index_compatible = bool(vector_health.get("compatible", True))
@@ -312,6 +309,25 @@ async def readiness_payload(
                 "message": "Adapter lifecycle state requires reconciliation.",
             }
         )
+    rollout_state = await RolloutService(
+        active.settings,
+        active.database,
+        audit=active.approvals.audit,
+    ).health()
+    if rollout_state["status"] == "degraded":
+        failure_reasons.append(
+            {
+                "code": "evolution_rollout_unsafe",
+                "message": (
+                    "An incomplete rollout, expired canary, artifact integrity "
+                    "failure, or active-pointer disagreement requires rollback."
+                ),
+                "action": str(
+                    rollout_state.get("action")
+                    or "run april evolve rollout list"
+                ),
+            }
+        )
     if active.settings.workers.tool_worker_enabled and (
         not tool_worker_protocol_ready or not tool_worker_self_check
     ):
@@ -425,6 +441,7 @@ async def readiness_payload(
                 count_pending_write_capable_overlay_candidates(active.settings)
             ),
             "pending_eval_case_count": count_pending_eval_cases(active.settings),
+            "rollouts": rollout_state,
         },
         # Redacted local config digest + per-type report freshness, so the Desktop
         # operator console and `doctor --daily-driver` can flag stale reports.

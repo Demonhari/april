@@ -361,6 +361,23 @@ class EvolutionSettings(BaseModel):
     prompt_overlay_max_chars: int = Field(default=1200, ge=0, le=20_000)
     model_drafted_overlays: bool = False
     user_model_autoapply: str = "safe_sections_only"
+    # Phase 4B rollout controls are independently opt-in. Enabling the Dreamer
+    # must never silently enable candidate creation, canary traffic, or
+    # promotion.
+    rollout_enabled: bool = False
+    automatic_candidate_creation: bool = False
+    canary_enabled: bool = False
+    automatic_promotion: bool = False
+    rollout_shadow_min_samples: int = Field(default=10, ge=1, le=10_000)
+    rollout_canary_min_samples: int = Field(default=20, ge=1, le=10_000)
+    rollout_canary_max_eligible_turns: int = Field(default=100, ge=1, le=100_000)
+    rollout_canary_fraction: float = Field(default=0.05, gt=0.0, le=0.25)
+    rollout_canary_max_hours: int = Field(default=24, ge=1, le=168)
+    rollout_max_pass_rate_regression: float = Field(default=0.0, ge=0.0, le=0.25)
+    rollout_max_structured_invalid_rate: float = Field(default=0.01, ge=0.0, le=1.0)
+    rollout_max_failure_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    rollout_max_latency_regression: float = Field(default=0.20, ge=0.0, le=2.0)
+    rollout_max_fallback_rate: float = Field(default=0.05, ge=0.0, le=1.0)
 
     @field_validator("window")
     @classmethod

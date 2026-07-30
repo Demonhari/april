@@ -211,6 +211,22 @@ evolution:
   prompt_overlay_max_chars: 1200
   model_drafted_overlays: false
   user_model_autoapply: safe_sections_only
+  # Phase 4B is separately disarmed. All four switches require an explicit
+  # reviewed config change; enabling the Dreamer alone does not start rollouts.
+  rollout_enabled: false
+  automatic_candidate_creation: false
+  canary_enabled: false
+  automatic_promotion: false
+  rollout_shadow_min_samples: 10
+  rollout_canary_min_samples: 20
+  rollout_canary_max_eligible_turns: 100
+  rollout_canary_fraction: 0.05
+  rollout_canary_max_hours: 24
+  rollout_max_pass_rate_regression: 0.0
+  rollout_max_structured_invalid_rate: 0.01
+  rollout_max_failure_rate: 0.05
+  rollout_max_latency_regression: 0.20
+  rollout_max_fallback_rate: 0.05
 
 # Budgets for /chat deep and council modes (intelligence ladder R3/R4).
 deep_mode:

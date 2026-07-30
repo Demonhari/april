@@ -41,6 +41,7 @@ from services.evolution.inspect import (
     set_evolution_kill_switch,
 )
 from services.evolution.playbook_miner import mine_playbook_candidates
+from services.evolution.rollouts import RolloutService
 from services.evolution.versions import PromptOverlayManager
 from services.evolution.write_guard import EvolutionWriteGuard
 from skills.playbooks import (
@@ -84,6 +85,15 @@ def register_evolution_routes(
             await active.orchestrator.routing_reliability.mark_negative_feedback(
                 agent_run_id=record.agent_run_id
             )
+            with contextlib.suppress(Exception):
+                await RolloutService(
+                    active.settings,
+                    active.database,
+                    audit=active.approvals.audit,
+                ).record_signal_for_agent_run(
+                    agent_run_id=record.agent_run_id,
+                    signal="negative_feedback",
+                )
         active.approvals.audit.write(
             {
                 "event_type": "feedback_recorded",

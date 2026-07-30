@@ -27,6 +27,9 @@ class ApprovalFlow:
         agent = self.agent_registry.get(agent_id)
         if agent is None:
             raise PermissionDeniedError("Unknown agent.", {"agent": agent_id})
+        # Direct specialist runs do not carry a routed, deterministic
+        # low-risk eligibility decision, so they always use the active
+        # baseline/full-activation overlay and are excluded from canary.
         agent = await self.apply_prompt_overlay(agent)
         agent, run_metadata = await self._effective_agent(agent)
         project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
@@ -243,6 +246,17 @@ class ApprovalFlow:
                     approval_outcome="denied",
                     final_status="denied",
                 )
+                if self.overlay_manager is not None:
+                    from services.evolution.rollouts import RolloutService
+
+                    await RolloutService(
+                        self.settings,
+                        self.memory.database,
+                        audit=self.approvals.audit,
+                    ).record_signal_for_agent_run(
+                        agent_run_id=suspended.agent_run_id,
+                        signal="approval_denied",
+                    )
             return {"status": "denied", "approval_id": approval_id}
         result = AgentResult(
             status="error",

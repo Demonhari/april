@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 
 async def run_migrations(database: Database) -> None:
@@ -432,6 +432,106 @@ async def _run_migrations_locked(database: Database) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_routing_outcomes_agent_run
         ON routing_outcomes(agent_run_id);
+
+        CREATE TABLE IF NOT EXISTS evolution_rollouts (
+            id TEXT PRIMARY KEY,
+            candidate_type TEXT NOT NULL CHECK (
+                candidate_type IN ('prompt_overlay', 'lora_adapter')
+            ),
+            target_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            candidate_sha256 TEXT NOT NULL,
+            candidate_artifact_path TEXT NOT NULL,
+            baseline_id TEXT NOT NULL,
+            baseline_sha256 TEXT NOT NULL,
+            baseline_artifact_path TEXT,
+            state TEXT NOT NULL CHECK (
+                state IN (
+                    'candidate', 'shadow_pending', 'shadow_running',
+                    'shadow_passed', 'canary_pending_approval',
+                    'canary_running', 'canary_passed',
+                    'activation_pending_approval', 'active', 'failed',
+                    'cancelled', 'rolled_back', 'rejected'
+                )
+            ),
+            configuration_json TEXT NOT NULL,
+            configuration_sha256 TEXT NOT NULL,
+            shadow_dataset_sha256 TEXT,
+            shadow_evidence_sha256 TEXT,
+            requested_minimum_samples INTEGER NOT NULL CHECK (
+                requested_minimum_samples > 0
+            ),
+            completed_sample_count INTEGER NOT NULL DEFAULT 0 CHECK (
+                completed_sample_count >= 0
+            ),
+            canary_traffic_fraction REAL NOT NULL DEFAULT 0.0 CHECK (
+                canary_traffic_fraction >= 0.0
+                AND canary_traffic_fraction <= 0.25
+            ),
+            canary_max_eligible_turns INTEGER CHECK (
+                canary_max_eligible_turns IS NULL
+                OR canary_max_eligible_turns > 0
+            ),
+            canary_eligible_turn_count INTEGER NOT NULL DEFAULT 0 CHECK (
+                canary_eligible_turn_count >= 0
+            ),
+            canary_selected_turn_count INTEGER NOT NULL DEFAULT 0 CHECK (
+                canary_selected_turn_count >= 0
+            ),
+            canary_expires_at TEXT,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            reason_code TEXT,
+            canary_approval_id TEXT REFERENCES approvals(id) ON DELETE RESTRICT,
+            activation_approval_id TEXT REFERENCES approvals(id) ON DELETE RESTRICT,
+            previous_active_artifact_json TEXT,
+            transition_phase TEXT,
+            shadow_job_id TEXT REFERENCES background_jobs(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            rolled_back_at TEXT,
+            version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+            UNIQUE(candidate_type, candidate_id, candidate_sha256)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_evolution_rollouts_state
+        ON evolution_rollouts(state, updated_at);
+
+        CREATE INDEX IF NOT EXISTS idx_evolution_rollouts_target
+        ON evolution_rollouts(candidate_type, target_id, created_at);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_evolution_one_running_canary
+        ON evolution_rollouts(candidate_type, target_id)
+        WHERE state = 'canary_running';
+
+        CREATE TABLE IF NOT EXISTS evolution_rollout_assignments (
+            rollout_id TEXT NOT NULL
+                REFERENCES evolution_rollouts(id) ON DELETE CASCADE,
+            request_key_sha256 TEXT NOT NULL,
+            selected INTEGER NOT NULL CHECK (selected IN (0, 1)),
+            eligible INTEGER NOT NULL CHECK (eligible IN (0, 1)),
+            outcome_recorded INTEGER NOT NULL DEFAULT 0 CHECK (
+                outcome_recorded IN (0, 1)
+            ),
+            safe_outcome_json TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            PRIMARY KEY(rollout_id, request_key_sha256)
+        );
+
+        CREATE TABLE IF NOT EXISTS evolution_rollout_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rollout_id TEXT NOT NULL
+                REFERENCES evolution_rollouts(id) ON DELETE CASCADE,
+            event_type TEXT NOT NULL,
+            reason_code TEXT,
+            safe_summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_evolution_rollout_events_rollout
+        ON evolution_rollout_events(rollout_id, id);
         """
     )
     columns = await conn.execute("PRAGMA table_info(approvals)")

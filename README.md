@@ -5,6 +5,8 @@
 > acceptance, locked dependencies, production macOS packaging, release
 > exclusion, and optional sensitive-memory encryption—is documented in
 > [docs/production-readiness-roadmap.md](docs/production-readiness-roadmap.md).
+> Phase 4B rollout operation and its real-evidence boundary are documented in
+> [docs/evolution-rollouts.md](docs/evolution-rollouts.md).
 
 APRIL is a private, local-first AI assistant MVP for macOS. It is CLI-first, uses a separate local model service called April Runtime, supports specialist agents, stores inspectable local memory, and enforces deterministic tool permissions with exact-action approvals.
 

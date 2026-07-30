@@ -27,6 +27,7 @@ class ContextFlow:
         project_id: str | None,
         repo_path: str | None,
         structured_specialists: bool = False,
+        mode: str = "standard",
     ) -> PreparedTurn:
         active_request_id = request_id or str(uuid.uuid4())
         project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
@@ -101,7 +102,21 @@ class ContextFlow:
             raise PermissionDeniedError(
                 "Unknown agent selected by brain.", {"agent": decision.agent}
             )
-        agent = await self.apply_prompt_overlay(agent)
+        predicted_selection = self.intelligence_ladder.select(
+            message=message,
+            decision=decision,
+            mode=mode,
+            effective_confidence=route_result.effective_confidence,
+        )
+        agent = await self.apply_prompt_overlay(
+            agent,
+            request_id=active_request_id,
+            decision=decision,
+            mode=mode,
+            high_risk_reasoning=(
+                predicted_selection.high_stakes or predicted_selection.rung >= 2
+            ),
+        )
         model_id = agent.model_id or decision.model_id
         run_metadata: dict[str, Any] = {
             **prepared_context.diagnostics(),
@@ -114,6 +129,16 @@ class ContextFlow:
             "routing_reliability_sample_count": route_result.reliability_sample_count,
             "routing_confidence_source": route_result.confidence_source,
         }
+        if self.overlay_manager is not None:
+            from services.evolution.rollouts import RolloutService
+
+            rollout_id = await RolloutService(
+                self.settings,
+                self.memory.database,
+                audit=self.approvals.audit,
+            ).rollout_for_request(active_request_id)
+            if rollout_id is not None:
+                run_metadata["rollout_id"] = rollout_id
         if agent.model_id is not None and decision.model_id != agent.model_id:
             decision = decision.model_copy(update={"model_id": agent.model_id})
             route_result = route_result.model_copy(update={"decision": decision})

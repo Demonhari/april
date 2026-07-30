@@ -144,6 +144,10 @@ def run_local_security_integrity_verification(home: Path) -> list[VerifyCheck]:
     database = check_database(settings.database_path, home=settings.home, full=False)
     backup = database.last_successful_backup
     backup_detail = str(backup.get("creation_timestamp", "known")) if backup else "none recorded"
+    from services.evolution.rollouts import inspect_rollout_state
+
+    rollout_state = inspect_rollout_state(settings)
+    rollout_safe = rollout_state["status"] in {"disabled", "ok", "not_initialized"}
     return [
         *run_local_sandbox_verification(home),
         VerifyCheck("credential store selected", True, store_name),
@@ -183,6 +187,15 @@ def run_local_security_integrity_verification(home: Path) -> list[VerifyCheck]:
         ),
         VerifyCheck("database WAL state", database.journal_mode == "wal", database.journal_mode),
         VerifyCheck("last successful backup", True, backup_detail),
+        VerifyCheck(
+            "evolution rollout safety",
+            rollout_safe,
+            (
+                "disabled by configuration"
+                if rollout_state["status"] == "disabled"
+                else str(rollout_state["status"])
+            ),
+        ),
     ]
 
 

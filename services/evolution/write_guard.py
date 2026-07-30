@@ -20,6 +20,9 @@ APPROVED_EVOLUTION_TABLES = frozenset(
         "playbook_runs",
         "model_adapters",
         "adapter_operations",
+        "evolution_rollouts",
+        "evolution_rollout_assignments",
+        "evolution_rollout_events",
         # D2 distill/consolidate: duplicate merges and contradiction
         # adjudication update rows (supersede/refresh/resolve) — never delete.
         "memories",

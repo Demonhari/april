@@ -250,6 +250,33 @@ class FinalizationFlow:
                 approval_outcome=approval_outcome,
                 regeneration_or_retry=regeneration_or_retry,
             )
+            if self.overlay_manager is not None:
+                from services.evolution.rollouts import RolloutService
+
+                await RolloutService(
+                    self.settings,
+                    self.memory.database,
+                    audit=self.approvals.audit,
+                ).record_canary_outcome_for_request(
+                    stable_request_id=prepared.request_id,
+                    outcome={
+                        "structured_output_valid": bool(
+                            prepared.route_result.structured_output_valid
+                        ),
+                        "repair_attempted": bool(prepared.route_result.repair_used),
+                        "tool_success": tool_outcome == "success",
+                        "tool_failure": tool_outcome == "failed",
+                        "approval_denied": approval_outcome == "denied",
+                        "regeneration": regeneration_or_retry,
+                        "runtime_failure": (
+                            final_status == "error" and tool_outcome != "failed"
+                        ),
+                        "hard_failure": (
+                            final_status == "error" and tool_outcome != "failed"
+                        ),
+                        "success": final_status in {"ok", "pending_approval"},
+                    },
+                )
         except Exception:
             # Reliability evidence is diagnostic and must never break the turn.
             return
