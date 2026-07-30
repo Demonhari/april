@@ -20,6 +20,39 @@ evidence of real model, microphone, thermal, signing, or notarization success.
 Skipped hardware, model, voice, thermal, signing, or notarization checks remain
 unverified; they are never counted as passed.
 
+## Remaining operator actions
+
+The implementation status and operating status are separate:
+
+| Status | Meaning |
+|---|---|
+| Implemented in code | The guarded local workflow and its automated fake-backend tests exist. |
+| Configured | The operator has supplied reviewed local paths and explicitly selected the intended provider or feature settings. |
+| Verified on real hardware | The real artifact and target Intel Mac completed the applicable live command and produced genuine evidence. |
+| Unavailable or disabled | A required local artifact, reviewed command, credential, or explicit feature enablement is absent. No success is inferred. |
+
+The remaining operator work must be performed manually on the target Intel Mac:
+
+1. Import the reviewed local Brain, coding, and reading GGUF files. APRIL does
+   not download them and an import does not load, activate, or select a model.
+2. Import and register `qwen3-4b Q4_K_M` with `role: reasoning`.
+3. Import and register `nomic-embed-text-v1.5 Q8` with `role: embedding`, then
+   explicitly change the embedding provider to Runtime-local and run
+   `run april memory reindex --wait`.
+4. Configure the local Whisper, Piper, and wake-word artifacts. Keep speaker
+   verification optional and disabled until its configured model passes live
+   verification.
+5. Run the complete two-turn voice verification and the
+   specialist-versus-shared-model benchmark on the target Intel Mac. Fake
+   Runtime results are not production evidence.
+6. Configure and review the fine-tuning trainer and evaluator commands before
+   explicitly enabling fine-tuning.
+7. Build, sign, notarize, and staple the application on a real macOS machine
+   with the operator's Apple credentials.
+
+Until each prerequisite is supplied, its status is **unavailable or disabled**;
+configuration alone is not real-hardware verification.
+
 ## Durable model, training, and Dream jobs
 
 `model_import` accepts an exact-approved absolute local source path, stages and
