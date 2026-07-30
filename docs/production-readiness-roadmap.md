@@ -69,7 +69,9 @@ from `configs/april.yaml`; job payloads cannot supply commands. Training require
 an exact level-4 approval, has bounded resources/output/runtime, and is
 non-restart-safe while the external trainer runs. Recovery marks an interrupted
 attempt and requires an explicit retry. Cancellation terminates the restricted
-process group. Results are registered only as inactive adapter candidates.
+process group. Durable acceptance, its initial event, and one-time approval
+consumption are atomic. Results are registered only as inactive adapter
+candidates.
 
 `dream_cycle` remains unavailable unless evolution is explicitly enabled. It is
 not automatically retryable and retains the existing sample, evaluation,

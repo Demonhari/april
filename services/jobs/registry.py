@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -91,6 +92,9 @@ class FinetunePayload(BaseModel):
     plan_id: str = Field(min_length=16, max_length=64, pattern=r"^[a-f0-9]+$")
 
 
+ApprovalPayloadBuilder = Callable[[dict[str, Any]], dict[str, Any]]
+
+
 @dataclass(frozen=True, slots=True)
 class JobTypeDefinition:
     name: str
@@ -104,10 +108,31 @@ class JobTypeDefinition:
     cancellation_behavior: str
     available: bool
     unavailable_code: str | None = None
+    approval_tool: str | None = None
+    approval_payload_builder: ApprovalPayloadBuilder | None = None
 
     def validate_payload(self, value: dict[str, Any]) -> dict[str, Any]:
         validated = TypeAdapter(self.payload_model).validate_python(value)
         return validated.model_dump(mode="json")
+
+    def expected_approval_payload(
+        self,
+        *,
+        tool: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            not self.approval_required
+            or self.approval_tool is None
+            or self.approval_payload_builder is None
+            or tool != self.approval_tool
+        ):
+            raise ValueError("approval_action_mismatch")
+        try:
+            expected = self.approval_payload_builder(args)
+            return self.validate_payload(expected)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("approval_action_mismatch") from exc
 
 
 class JobRegistry:
@@ -136,6 +161,19 @@ def default_job_registry(
     finetune_enabled: bool = False,
     evolution_enabled: bool = False,
 ) -> JobRegistry:
+    def configured_test_payload(args: dict[str, Any]) -> dict[str, Any]:
+        argv = args.get("argv", ["pytest"])
+        repo_path = args["repo_path"]
+        if not isinstance(argv, list) or not isinstance(repo_path, str):
+            raise ValueError("invalid_configured_test_approval")
+        return {"argv": argv, "cwd": repo_path}
+
+    def model_import_payload(args: dict[str, Any]) -> dict[str, Any]:
+        return dict(args)
+
+    def finetune_payload(args: dict[str, Any]) -> dict[str, Any]:
+        return {"plan_id": args["plan_id"]}
+
     def safe(
         name: str,
         payload_model: type[BaseModel],
@@ -170,6 +208,8 @@ def default_job_registry(
                 maximum_attempts=2,
                 cancellation_behavior="process_group",
                 available=True,
+                approval_tool="test_runner",
+                approval_payload_builder=configured_test_payload,
             ),
             JobTypeDefinition(
                 "model_import",
@@ -182,6 +222,8 @@ def default_job_registry(
                 maximum_attempts=2,
                 cancellation_behavior="cooperative",
                 available=True,
+                approval_tool="model_import",
+                approval_payload_builder=model_import_payload,
             ),
             JobTypeDefinition(
                 "model_import_verification",
@@ -231,6 +273,8 @@ def default_job_registry(
                 cancellation_behavior="process_group",
                 available=finetune_enabled,
                 unavailable_code="finetune_job_disabled",
+                approval_tool="finetune",
+                approval_payload_builder=finetune_payload,
             ),
             JobTypeDefinition(
                 "dream_cycle",

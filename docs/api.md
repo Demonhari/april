@@ -27,8 +27,11 @@ Core API:
 Job routes use existing Core authentication, typed allowlisted payloads, and
 bounded pagination (`limit` 1–100, `offset` 0–10000). Responses omit payloads,
 credentials, child environments, unrestricted command output, and model
-reasoning. A Level 3 configured-test job consumes an exact existing
-`test_runner` approval before it can be queued.
+reasoning. Every approval-required durable job atomically inserts the job and
+initial event while consuming its exact existing approval. This includes
+Level-3 `configured_test` and Level-4 `model_import` and explicitly enabled
+`finetune` jobs.
+
 - `GET /tasks`
 - `GET /projects`
 - `POST /projects`

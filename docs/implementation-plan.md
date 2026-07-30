@@ -126,11 +126,13 @@ native packaging.
   `run april verify --all-configured-models --require-real-model` to actually
   load/chat/stream/unload your local models. Until then, real-model readiness is
   `none`.
-- **LoRA training and adapter quality evidence: manual target-Mac work.** APRIL
-  records and gates adapter activation (`april evolve adapter ...`) but never
-  trains, scores, or downloads adapters. Activation requires an operator-created
-  perplexity evidence JSON and, in production, a fresh real-model verification
-  report that loaded the same adapter hash.
+- **LoRA training and adapter quality evidence: guided but operator-supplied.**
+  APRIL can validate and split a reviewed dataset, then launch only explicitly
+  configured local trainer and evaluator executables through an exact-approved
+  durable job. It never installs or downloads them, never invents scores, and
+  registers successful output only as an inactive candidate. Activation still
+  requires reviewed evidence and, in production, a fresh real-model
+  verification report that loaded the same adapter hash.
 - **Voice: code exists, live voice is unverified here.** Voice is off by default
   and requires the `.[voice]` extra plus whisper.cpp / Piper / wake-word
   binaries and models you install yourself, and macOS microphone permission.
@@ -182,8 +184,9 @@ native packaging.
   log/cache cleanup.
 - **Remaining v2 operator blockers are explicit.** The production speaker
   verifier adapter and manual runbook ship, but no speaker-embedding model is
-  present; the operator must supply and validate one on the target Mac. LoRA
-  training remains a supervised manual runbook.
+  present; the operator must supply and validate one on the target Mac. The
+  guided LoRA job remains operator-supervised and requires locally supplied,
+  reviewed trainer and evaluator executables.
   Governor load-time thread throttling and the dedicated SPA Adapters screen are
   implemented; neither claims target-Mac model quality or hardware validation.
 

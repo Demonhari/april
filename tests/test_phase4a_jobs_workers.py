@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from april_common.audit import AuditLogger
 from april_common.process_environment import ProcessCategory, build_process_environment
 from april_common.process_runner import (
     ProcessStatus,
@@ -30,6 +31,8 @@ from services.jobs.store import JobStore, JobTransitionError
 from services.jobs.worker import JobWorker
 from services.memory.database import Database
 from services.memory.migrations import SCHEMA_VERSION, run_migrations
+from services.permissions.approvals import ApprovalStore
+from services.permissions.schemas import ApprovalRequest
 from services.tool_worker.client import ToolWorkerClient
 from services.tool_worker.executor import ToolWorkerExecutor
 from services.tool_worker.limits import (
@@ -509,12 +512,39 @@ async def test_job_worker_delegates_approved_configured_test(
     await run_migrations(database)
     try:
         store = JobStore(database, default_job_registry())
-        job = await store.submit(
+        approval_args = {"argv": ["pytest"], "repo_path": str(tmp_path)}
+        approvals = ApprovalStore(
+            database,
+            AuditLogger(tmp_path / "audit.jsonl"),
+            expiry_seconds=300,
+        )
+        approval = await approvals.create(
+            ApprovalRequest(
+                tool="test_runner",
+                args=approval_args,
+                agent="local-operator",
+                permission_level=3,
+                risk_level="code_write",
+            ),
+            actor="local-user",
+            request_id="configured-test-create",
+        )
+        await approvals.approve_exact(
+            approval_id=approval.approval_id,
+            tool="test_runner",
+            args=approval_args,
+            actor="local-user",
+            request_id="configured-test-approve",
+        )
+        job, created = await store.submit_with_exact_approval(
             job_type="configured_test",
             payload={"argv": ["pytest"], "cwd": str(tmp_path)},
             owner="local-user",
-            approved=True,
+            approval_id=approval.approval_id,
+            approval_tool="test_runner",
+            approval_args=approval_args,
         )
+        assert created is True
         worker = JobWorker(
             settings=settings_tmp,
             database=database,

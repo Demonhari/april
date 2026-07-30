@@ -9,7 +9,7 @@ from typing import Any
 
 import aiosqlite
 
-from april_common.time import utc_now, utc_now_iso
+from april_common.time import parse_utc_iso, utc_now, utc_now_iso
 from services.jobs.registry import JobRegistry
 from services.jobs.schemas import (
     DEFAULT_JOB_LIST_LIMIT,
@@ -25,7 +25,7 @@ from services.jobs.schemas import (
     JobStatus,
 )
 from services.memory.database import Database
-from services.permissions.approvals import canonical_hash, legacy_canonical_hash
+from services.permissions.approvals import ApprovalStore, canonical_hash, legacy_canonical_hash
 
 _FORBIDDEN_STRUCTURED_KEYS = frozenset(
     {
@@ -70,11 +70,10 @@ class JobStore:
         owner: str,
         conversation_id: str | None = None,
         project_id: str | None = None,
-        approved: bool = False,
         job_id: str | None = None,
     ) -> JobRecord:
         definition = self.registry.require(job_type)
-        if definition.approval_required and not approved:
+        if definition.approval_required:
             raise JobTransitionError("approval_required")
         _reject_forbidden_keys(payload)
         validated = definition.validate_payload(payload)
@@ -82,31 +81,22 @@ class JobStore:
         now = utc_now_iso()
         identifier = job_id or str(uuid.uuid4())
         payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        bounded_owner = _bounded_code(owner, "owner")
+        bounded_conversation = _optional_bounded_identifier(conversation_id)
+        bounded_project = _optional_bounded_identifier(project_id)
         async with self.database.transaction() as connection:
-            try:
-                await connection.execute(
-                    """
-                    INSERT INTO background_jobs(
-                        id, job_type, status, payload_json, payload_hash, owner,
-                        conversation_id, project_id, progress_percent, attempt_count,
-                        maximum_attempts, cancellation_requested, created_at, updated_at
-                    ) VALUES(?, ?, 'queued', ?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?)
-                    """,
-                    (
-                        identifier,
-                        job_type,
-                        payload_json,
-                        payload_hash,
-                        _bounded_code(owner, "owner"),
-                        conversation_id,
-                        project_id,
-                        definition.maximum_attempts,
-                        now,
-                        now,
-                    ),
-                )
-            except aiosqlite.IntegrityError as exc:
-                raise JobTransitionError("duplicate_job_id") from exc
+            await self._insert_job_tx(
+                connection,
+                identifier=identifier,
+                job_type=job_type,
+                payload_json=payload_json,
+                payload_hash=payload_hash,
+                owner=bounded_owner,
+                conversation_id=bounded_conversation,
+                project_id=bounded_project,
+                maximum_attempts=definition.maximum_attempts,
+                created_at=now,
+            )
             await self._append_event_tx(
                 connection,
                 identifier,
@@ -144,6 +134,9 @@ class JobStore:
         payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         identifier = f"approved-{_bounded_identifier(approval_id)}"
         now = utc_now_iso()
+        bounded_owner = _bounded_code(owner, "owner")
+        bounded_conversation = _optional_bounded_identifier(conversation_id)
+        bounded_project = _optional_bounded_identifier(project_id)
         created = False
         async with self.database.transaction() as connection:
             cursor = await connection.execute(
@@ -169,6 +162,13 @@ class JobStore:
                 str(approval["tool"]) != approval_tool
                 or stored_args != approval_args
                 or not hash_matches
+                or int(approval["permission_level"]) != definition.permission_level
+                or not _approval_scope_matches(
+                    approval_args=approval_args,
+                    metadata=metadata,
+                    conversation_id=bounded_conversation,
+                    project_id=bounded_project,
+                )
             ):
                 raise JobTransitionError("approval_action_mismatch")
             status = str(approval["status"])
@@ -182,37 +182,40 @@ class JobStore:
                     row is None
                     or str(row["job_type"]) != job_type
                     or str(row["payload_hash"]) != payload_hash
+                    or str(row["owner"]) != bounded_owner
+                    or row["conversation_id"] != bounded_conversation
+                    or row["project_id"] != bounded_project
                 ):
                     raise JobTransitionError("approval_replay_mismatch")
                 return _record_from_row(row), False
+            if status == "expired":
+                raise JobTransitionError("approval_expired")
             if status != "approved":
                 raise JobTransitionError("approval_not_approved")
-            if str(approval["expires_at"]) < now:
-                raise JobTransitionError("approval_expired")
             try:
-                await connection.execute(
-                    """
-                    INSERT INTO background_jobs(
-                        id, job_type, status, payload_json, payload_hash, owner,
-                        conversation_id, project_id, progress_percent, attempt_count,
-                        maximum_attempts, cancellation_requested, created_at, updated_at
-                    ) VALUES(?, ?, 'queued', ?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?)
-                    """,
-                    (
-                        identifier,
-                        job_type,
-                        payload_json,
-                        payload_hash,
-                        _bounded_code(owner, "owner"),
-                        conversation_id,
-                        project_id,
-                        definition.maximum_attempts,
-                        now,
-                        now,
-                    ),
-                )
-            except aiosqlite.IntegrityError as exc:
-                raise JobTransitionError("duplicate_job_id") from exc
+                expired = parse_utc_iso(str(approval["expires_at"])) < utc_now()
+            except ValueError as exc:
+                raise JobTransitionError("approval_record_invalid") from exc
+            if expired:
+                raise JobTransitionError("approval_expired")
+            expected_payload = definition.expected_approval_payload(
+                tool=approval_tool,
+                args=approval_args,
+            )
+            if validated != expected_payload:
+                raise JobTransitionError("approval_action_mismatch")
+            await self._insert_job_tx(
+                connection,
+                identifier=identifier,
+                job_type=job_type,
+                payload_json=payload_json,
+                payload_hash=payload_hash,
+                owner=bounded_owner,
+                conversation_id=bounded_conversation,
+                project_id=bounded_project,
+                maximum_attempts=definition.maximum_attempts,
+                created_at=now,
+            )
             await self._append_event_tx(
                 connection,
                 identifier,
@@ -225,15 +228,13 @@ class JobStore:
                 {"ok": True, "job_id": identifier, "status": JobStatus.QUEUED.value},
                 sort_keys=True,
             )
-            updated = await connection.execute(
-                """
-                UPDATE approvals
-                SET status = 'consumed', consumed_at = ?, result_json = ?
-                WHERE id = ? AND status = 'approved'
-                """,
-                (now, result, approval_id),
+            consumed = await self._consume_approval_tx(
+                connection,
+                approval_id=approval_id,
+                result_json=result,
+                consumed_at=now,
             )
-            if updated.rowcount != 1:
+            if not consumed:
                 raise JobTransitionError("approval_consumption_race")
             created = True
             cursor = await connection.execute(
@@ -243,6 +244,62 @@ class JobStore:
             row = await cursor.fetchone()
             assert row is not None
         return _record_from_row(row), created
+
+    async def _insert_job_tx(
+        self,
+        connection: aiosqlite.Connection,
+        *,
+        identifier: str,
+        job_type: str,
+        payload_json: str,
+        payload_hash: str,
+        owner: str,
+        conversation_id: str | None,
+        project_id: str | None,
+        maximum_attempts: int,
+        created_at: str,
+    ) -> None:
+        try:
+            await connection.execute(
+                """
+                INSERT INTO background_jobs(
+                    id, job_type, status, payload_json, payload_hash, owner,
+                    conversation_id, project_id, progress_percent, attempt_count,
+                    maximum_attempts, cancellation_requested, created_at, updated_at
+                ) VALUES(?, ?, 'queued', ?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?)
+                """,
+                (
+                    identifier,
+                    job_type,
+                    payload_json,
+                    payload_hash,
+                    owner,
+                    conversation_id,
+                    project_id,
+                    maximum_attempts,
+                    created_at,
+                    created_at,
+                ),
+            )
+        except aiosqlite.IntegrityError as exc:
+            raise JobTransitionError("duplicate_job_id") from exc
+
+    async def _consume_approval_tx(
+        self,
+        connection: aiosqlite.Connection,
+        *,
+        approval_id: str,
+        result_json: str,
+        consumed_at: str,
+    ) -> bool:
+        result = json.loads(result_json)
+        assert isinstance(result, dict)
+        return await ApprovalStore.consume_in_transaction(
+            connection,
+            approval_id=approval_id,
+            result=result,
+            consumed_at=consumed_at,
+        )
 
     async def checkpoint(
         self,
@@ -793,6 +850,28 @@ def _bounded_identifier(value: str) -> str:
     if not value or len(value) > 128:
         raise ValueError("invalid_identifier")
     return value
+
+
+def _optional_bounded_identifier(value: str | None) -> str | None:
+    return None if value is None else _bounded_identifier(value)
+
+
+def _approval_scope_matches(
+    *,
+    approval_args: dict[str, Any],
+    metadata: dict[str, Any],
+    conversation_id: str | None,
+    project_id: str | None,
+) -> bool:
+    requested = {
+        "conversation_id": conversation_id,
+        "project_id": project_id,
+    }
+    for field, requested_value in requested.items():
+        for source in (approval_args, metadata):
+            if field in source and source[field] != requested_value:
+                return False
+    return True
 
 
 def _bounded_code(value: str, label: str) -> str:

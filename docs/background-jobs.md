@@ -22,7 +22,15 @@ explicitly enabled.
 `run april model import`, `run april model verify`, `run april memory reindex`,
 `run april model benchmark`, and `run april model compare-setups` submit these
 durable jobs.
-Import acceptance and one-time approval consumption are one SQLite transaction.
+
+For every exact-approved durable job type, including `model_import`,
+`configured_test`, and explicitly enabled `finetune`, job insertion, the
+initial submitted event, and one-time approval consumption are one SQLite
+transaction. A write failure rolls back all three. The approval ID is the
+deterministic idempotency key: an exact replay returns the original job, while
+changed action arguments, payload, job type, owner, project, or conversation
+scope fail closed.
+
 Comparison checkpoints completed model measurements so lease recovery or an
 explicit retry does not discard safe partial work.
 

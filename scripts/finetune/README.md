@@ -1,136 +1,99 @@
-# M15 — Local LoRA fine-tuning runbook (manual, CPU-only)
+# M15 — Guided local LoRA fine-tuning
 
-APRIL does **not** train models itself. This runbook documents the manual,
-fully-local path from APRIL's exported dataset to a LoRA adapter served by
-April Runtime, and states honestly which steps are automated and which are not.
+APRIL provides a reviewed, durable fine-tuning workflow around explicitly
+configured local trainer and evaluator executables. Fine-tuning is disabled by
+default. APRIL does not ship, install, or download a trainer, evaluator, model,
+dataset, or adapter, and it never activates a resulting adapter automatically.
 
-## What APRIL automates
+## Guided workflow
 
-1. **Dataset export** (implemented, tested):
+Check whether fine-tuning is enabled and whether both reviewed executables are
+configured and executable:
 
-   ```bash
-   run april evolve dataset export --name my-dataset
-   # → data/evolution/datasets/my-dataset.jsonl
-   ```
+```console
+run april finetune doctor
+```
 
-   The export is a reviewable JSONL file of chat prompt/response pairs, durable
-   memories, and preference pairs (`prompt`, `chosen`, `rejected`) when a
-   bad-rated reply has a real correction reply or a good-rated counterpart to
-   the same prompt. Negative-feedback conversations remain excluded from chat
-   rows; they contribute a preference row only when both sides exist. No chosen
-   response is fabricated. Deleted/superseded/expired memories and
-   sensitive-looking content (tokens, keys, passwords) are never exported.
-   **Review the file manually before training on it.**
+Create an immutable plan from a reviewed local JSONL dataset:
 
-2. **Adapter serving and lifecycle bookkeeping** (implemented, tested against
-   the fake/mocked backend): either set `adapter_path` on a model in
-   `configs/models.yaml` as a manual override, or activate a versioned pointer
-   under `data/evolution/adapters/` with `april evolve adapter activate`. The
-   Runtime never opens the API SQLite database; adapter resolution is:
-   explicit config `adapter_path` > active fenced pointer file > no adapter.
-   A configured-or-pointer-selected missing adapter file fails the load with an
-   actionable error instead of silently serving the base model.
+```console
+run april finetune plan \
+  --dataset /reviewed/local/dataset.jsonl \
+  --base-model-id april-brain
+```
 
-   ```yaml
-   models:
-     brain:
-       id: april-brain
-       path: models/granite3.3-2b-q4_k_m.gguf
-       adapter_path: models/adapters/april-brain-lora.gguf
-       ...
-   ```
+Planning validates strict chat, preference, and memory row schemas; rejects
+oversized, malformed, sensitive-location, and out-of-scope input; redacts
+likely credentials and sensitive paths; and creates deterministic, disjoint
+training and evaluation splits. The plan records hashes for the normalized
+dataset, both splits, reviewed configuration, base model, trainer, and
+evaluator. It also creates a pending exact level-4 approval.
 
-3. **Evidence JSON writing from already-measured scores** (implemented): APRIL
-   ships a small helper that records operator-provided base/adapter perplexity
-   numbers and the adapter SHA-256. It does not train and does not calculate
-   perplexity for you.
+After reviewing the manifest and approval, launch exactly that plan:
 
-   ```bash
-   .venv/bin/python scripts/finetune/write_perplexity_evidence.py \
-     --model-id april-brain \
-     --adapter-path /absolute/path/april-brain-lora.gguf \
-     --base-ppl 12.4 \
-     --adapter-ppl 11.9 \
-     --heldout-dataset data/evolution/datasets/my-heldout.jsonl \
-     --output data/evolution/adapters/evidence/april-brain.json
-   ```
+```console
+run april finetune --plan-id PLAN_ID --approval-id APPROVAL_ID
+```
 
-## What you must do manually (not automated, not verified here)
+The launch revalidates the immutable plan and exact approval, then atomically
+creates the durable job, its submitted event, and consumes the approval. An
+exact replay returns the original job. A changed plan, hash, adapter candidate,
+owner, or scope fails closed.
 
-Training does not run inside APRIL: there is no local training loop, no GPU
-assumption, and no network download. On an Intel MacBook Pro the practical
-path is CPU-only and slow — budget hours, not minutes, even for small models.
+Inspect or cancel the durable job:
 
-1. **Convert the dataset** to your trainer's format. Chat rows look like
-   `{"type": "chat", "prompt": ..., "response": ...}`; preference rows use
-   `{"type": "preference", "prompt": ..., "chosen": ..., "rejected": ...}`.
-   Most supervised trainers want a `{"text": "<prompt>\n<response>"}` or
-   chat-template format, while preference trainers have their own pair schema.
-   Write your own small converter; keep it outside APRIL's runtime.
+```console
+run april finetune status JOB_ID
+run april finetune cancel JOB_ID
+```
 
-2. **Train a LoRA adapter** with an external, locally-installed tool.
-   Two realistic CPU-only options:
-   - `llama.cpp` finetune tooling (`llama-finetune`, from the same llama.cpp
-     checkout family as your GGUF), which trains directly against a GGUF base
-     model and can emit a GGUF LoRA;
-   - PyTorch + PEFT on the original HF checkpoint, followed by
-     `llama.cpp/scripts/convert_lora_to_gguf.py` to produce a GGUF LoRA.
+## What the durable job runs
 
-3. **Place the adapter locally** (Git-ignored), e.g.
-   `models/adapters/april-brain-lora.gguf`.
+APRIL launches only the exact local trainer and evaluator executable paths and
+argument templates reviewed in `configs/april.yaml`. Job payloads cannot
+provide executable paths or commands. Child processes run with bounded time,
+output, resources, filesystem access, and denied network access. APRIL never
+installs a trainer or evaluator and never downloads their dependencies.
 
-4. **Measure held-out perplexity locally.** Use your training/eval tooling to
-   measure base-model perplexity and adapter perplexity on held-out personal
-   data. APRIL never synthesizes these scores; activation requires
-   `adapter_ppl <= base_ppl`.
+The trainer receives the hash-verified base model and deterministic training
+and evaluation paths. Its output must be a local GGUF adapter candidate.
+APRIL then invokes the configured evaluator for both the base model and
+candidate. Each successful evaluator invocation must return a finite, positive
+perplexity value in its final JSON output.
 
-5. **Write the evidence JSON** with the helper above, then verify the candidate
-   adapter like any other real-model change:
+APRIL never invents perplexity results. A missing value, invalid value,
+non-zero exit, cancellation, timeout, hash mismatch, or incomplete evaluation
+fails the job and cannot create passing evidence.
 
-   ```bash
-   .venv/bin/python scripts/finetune/write_perplexity_evidence.py \
-     --model-id april-brain \
-     --adapter-path /absolute/path/april-brain-lora.gguf \
-     --base-ppl BASE_PPL \
-     --adapter-ppl ADAPTER_PPL \
-     --heldout-dataset data/evolution/datasets/my-heldout.jsonl \
-     --output data/evolution/adapters/evidence/april-brain.json
-   run april model doctor
-   run april verify --all-configured-models --require-real-model \
-     --candidate-adapter-model-id april-brain \
-     --candidate-adapter-path /absolute/path/april-brain-lora.gguf \
-     --report data/verification/mac-readiness.json
-   ```
+On successful training and evaluation, APRIL writes hash-bound evidence and
+registers the adapter as an `inactive_candidate`. Metric eligibility requires
+candidate perplexity no worse than base perplexity, but that result alone never
+activates the adapter.
 
-6. **Activate or roll back the pointer.** In production, activation also
-   requires the fresh real-model verification report above to show the same
-   adapter SHA-256 was loaded. Rollback flips only the active pointer.
+## Verification and activation remain separate
 
-   ```bash
-   april evolve adapter activate april-brain /absolute/path/april-brain-lora.gguf \
-     --evidence data/evolution/adapters/evidence/april-brain.json \
-     --verification-report data/verification/mac-readiness.json
-   april evolve adapter list --model-id april-brain
-   april evolve adapter rollback april-brain
-   ```
+The launch output provides the next verification and activation commands. The
+candidate must still pass reviewed evidence and real-model verification,
+including verification that the same adapter bytes were loaded. Production
+activation requires a fresh qualifying real-model verification report.
 
-## Current blockers (why this is not one command)
+Activation is always an explicit operator action:
 
-- **No training dependency ships with APRIL.** Installing llama.cpp finetune
-  binaries or PyTorch/PEFT is a manual, local decision; APRIL never installs
-  packages or downloads tools/models.
-- **No GPU on the target Intel MacBook Pro.** CPU LoRA training works but is
-  slow; that trade-off is yours to accept per run.
-- **Perplexity measurement is manual.** APRIL can record evidence and enforce
-  the activation gate, but it does not run the evaluation or invent scores.
-  Missing evidence blocks activation with the next command to run.
-- **Production activation needs a real-model report.** In `APRIL_ENV=production`,
-  a fresh `--all-configured-models --require-real-model` report must have loaded
-  the same adapter hash. Fake verification never proves adapter quality.
-- **`llama-cpp-python` LoRA support varies by version.** `lora_path` is
-  honoured by the pinned `>=0.2.90` line, but confirm your installed wheel
-  supports the adapter format you produced (GGUF LoRA vs legacy ggml LoRA).
+```console
+run april verify --all-configured-models --require-real-model \
+  --candidate-adapter-model-id april-brain \
+  --candidate-adapter-path data/evolution/adapters/candidates/CANDIDATE.gguf
 
-Until you complete steps 1–6 on this Mac, LoRA serving is *wired but
-unverified* — treat an adapter the same way as any other real-model
-configuration that has not yet passed `--require-real-model` verification.
+run april evolve adapter activate april-brain \
+  data/evolution/adapters/candidates/CANDIDATE.gguf \
+  --evidence data/evolution/adapters/evidence/PLAN_ID.json \
+  --verification-report data/verification/mac-readiness.json
+```
+
+The existing manual `write_perplexity_evidence.py` helper remains available
+for adapters trained and evaluated outside the guided job. Operator-provided
+numbers are recorded as supplied; the helper does not measure them.
+
+Dream Cycle and autonomous evolution remain disabled by default. Neither can
+enable fine-tuning, choose a trainer, launch a fine-tune job, approve one,
+activate an adapter, or bypass the evidence and real-model gates.

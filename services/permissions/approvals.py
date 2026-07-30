@@ -211,22 +211,14 @@ class ApprovalStore:
             if record.status != "approved":
                 raise PermissionDeniedError("Approval has not been approved.")
             consumed_at = utc_now_iso()
-            cursor = await conn.execute(
-                """
-                UPDATE approvals
-                SET status = 'consumed', consumed_at = ?, result_json = ?
-                WHERE id = ? AND status = 'approved'
-                """,
-                (consumed_at, json.dumps(result, sort_keys=True), approval_id),
-            )
-            if cursor.rowcount != 1:
-                raise PermissionDeniedError("Approval has not been approved.")
-            await self._transition_suspended_after_consumption(
+            consumed = await self.consume_in_transaction(
                 conn,
                 approval_id=approval_id,
-                succeeded=result.get("ok") is True,
-                transitioned_at=consumed_at,
+                result=result,
+                consumed_at=consumed_at,
             )
+            if not consumed:
+                raise PermissionDeniedError("Approval has not been approved.")
         self.audit.write(
             {
                 "actor": actor,
@@ -242,6 +234,34 @@ class ApprovalStore:
                 "outcome": "consumed",
             }
         )
+
+    @classmethod
+    async def consume_in_transaction(
+        cls,
+        conn: Any,
+        *,
+        approval_id: str,
+        result: dict[str, Any],
+        consumed_at: str,
+    ) -> bool:
+        """Consume an approved action inside the caller's SQLite transaction."""
+        cursor = await conn.execute(
+            """
+            UPDATE approvals
+            SET status = 'consumed', consumed_at = ?, result_json = ?
+            WHERE id = ? AND status = 'approved'
+            """,
+            (consumed_at, json.dumps(result, sort_keys=True), approval_id),
+        )
+        if cursor.rowcount != 1:
+            return False
+        await cls._transition_suspended_after_consumption(
+            conn,
+            approval_id=approval_id,
+            succeeded=result.get("ok") is True,
+            transitioned_at=consumed_at,
+        )
+        return True
 
     async def deny(self, *, approval_id: str, actor: str, request_id: str) -> None:
         async with self.database.transaction() as conn:

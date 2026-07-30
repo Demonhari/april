@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
+from april_common.errors import PermissionDeniedError
 from services.api.dependencies import ApiContainer
 from services.jobs.schemas import (
     DEFAULT_JOB_LIST_LIMIT,
@@ -13,6 +14,24 @@ from services.jobs.schemas import (
     JobSubmission,
 )
 from services.jobs.store import JobNotFoundError, JobTransitionError
+
+_APPROVAL_CONFLICT_CODES = frozenset(
+    {
+        "approval_not_found",
+        "approval_not_approved",
+        "approval_expired",
+        "approval_action_mismatch",
+        "approval_replay_mismatch",
+        "approval_consumption_race",
+    }
+)
+
+
+def _approval_conflict(exc: Exception) -> HTTPException:
+    code = str(exc)
+    if code not in _APPROVAL_CONFLICT_CODES:
+        code = "approval_action_mismatch"
+    return HTTPException(status_code=409, detail=code)
 
 
 async def _scoped_job(active: ApiContainer, job_id: str) -> Any:
@@ -58,32 +77,35 @@ def register_job_routes(
         try:
             definition = active.job_store.registry.require(request.job_type)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        approved = False
-        atomically_accepted = False
+            raise HTTPException(status_code=409, detail="job_type_unavailable") from exc
         approval_id = request.approval_id
         request_id = http_request.headers.get("x-request-id") or str(uuid.uuid4())
         if definition.approval_required:
             if approval_id is None:
                 raise HTTPException(status_code=409, detail="approval_required")
-            record = await active.approvals.get(approval_id)
-            expected_payload: dict[str, Any]
-            if request.job_type == "configured_test" and record.tool == "test_runner":
-                expected_payload = {
-                    "argv": list(record.args.get("argv", ["pytest"])),
-                    "cwd": str(record.args.get("repo_path", "")),
-                }
-            elif request.job_type == "finetune" and record.tool == "finetune":
-                expected_payload = {"plan_id": str(record.args.get("plan_id", ""))}
-            elif request.job_type == "model_import" and record.tool == "model_import":
-                expected_payload = dict(record.args)
-            else:
-                raise HTTPException(status_code=409, detail="approval_action_mismatch")
-            validated_payload = definition.validate_payload(request.payload)
+            try:
+                record = await active.approvals.get(approval_id)
+            except PermissionDeniedError as exc:
+                raise HTTPException(status_code=409, detail="approval_not_found") from exc
+            try:
+                expected_payload = definition.expected_approval_payload(
+                    tool=record.tool,
+                    args=record.args,
+                )
+                validated_payload = definition.validate_payload(request.payload)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="approval_action_mismatch",
+                ) from exc
             if validated_payload != expected_payload:
                 raise HTTPException(status_code=409, detail="approval_action_mismatch")
-            if request.job_type == "model_import":
-                if record.status == "pending":
+            if record.status == "expired":
+                raise HTTPException(status_code=409, detail="approval_expired")
+            if record.status == "denied":
+                raise HTTPException(status_code=409, detail="approval_not_approved")
+            if record.status == "pending":
+                try:
                     await active.approvals.approve_exact(
                         approval_id=approval_id,
                         tool=record.tool,
@@ -91,60 +113,64 @@ def register_job_routes(
                         actor="local-user",
                         request_id=request_id,
                     )
-                try:
-                    job, created = await active.job_store.submit_with_exact_approval(
-                        job_type=request.job_type,
-                        payload=request.payload,
-                        owner="local-user",
-                        approval_id=approval_id,
-                        approval_tool=record.tool,
-                        approval_args=record.args,
-                        conversation_id=request.conversation_id,
-                        project_id=request.project_id,
-                    )
-                    if created:
-                        active.approvals.audit.write(
-                            {
-                                "actor": "local-user",
-                                "request_id": request_id,
-                                "event_type": "approval_consumed",
-                                "tool": record.tool,
-                                "approval_id": approval_id,
-                                "outcome": "consumed",
-                                "job_id": job.id,
-                            }
-                        )
-                except (ValueError, JobTransitionError) as exc:
-                    raise HTTPException(status_code=409, detail=str(exc)) from exc
-                atomically_accepted = True
-            else:
-                await active.approvals.approve_exact(
-                    approval_id=approval_id,
-                    tool=record.tool,
-                    args=record.args,
-                    actor="local-user",
-                    request_id=request_id,
-                )
-            approved = True
-        if not atomically_accepted:
+                except PermissionDeniedError:
+                    try:
+                        record = await active.approvals.get(approval_id)
+                    except PermissionDeniedError as exc:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="approval_not_found",
+                        ) from exc
+                    if record.status == "expired":
+                        raise HTTPException(
+                            status_code=409,
+                            detail="approval_expired",
+                        ) from None
+                    if record.status not in {"approved", "consumed"}:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="approval_not_approved",
+                        ) from None
+            elif record.status not in {"approved", "consumed"}:
+                raise HTTPException(status_code=409, detail="approval_not_approved")
             try:
-                job = await active.job_store.submit(
+                job, created = await active.job_store.submit_with_exact_approval(
                     job_type=request.job_type,
                     payload=request.payload,
                     owner="local-user",
+                    approval_id=approval_id,
+                    approval_tool=record.tool,
+                    approval_args=record.args,
                     conversation_id=request.conversation_id,
                     project_id=request.project_id,
-                    approved=approved,
                 )
-            except (ValueError, JobTransitionError) as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if approval_id is not None and approved and not atomically_accepted:
-            await active.approvals.consume(
-                approval_id=approval_id,
-                result={"ok": True, "job_id": job.id, "status": job.status.value},
-                actor="local-user",
-                request_id=request_id,
+            except (TypeError, ValueError, JobTransitionError) as exc:
+                raise _approval_conflict(exc) from exc
+            if created:
+                active.approvals.audit.write(
+                    {
+                        "actor": "local-user",
+                        "request_id": request_id,
+                        "event_type": "approval_consumed",
+                        "tool": record.tool,
+                        "approval_id": approval_id,
+                        "outcome": "consumed",
+                        "job_id": job.id,
+                    }
+                )
+            return job.model_dump(mode="json")
+        try:
+            job = await active.job_store.submit(
+                job_type=request.job_type,
+                payload=request.payload,
+                owner="local-user",
+                conversation_id=request.conversation_id,
+                project_id=request.project_id,
             )
+        except JobTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail="invalid_job_payload") from exc
         return job.model_dump(mode="json")
 
     @app.get("/jobs")

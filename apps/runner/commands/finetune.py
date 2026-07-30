@@ -10,6 +10,7 @@ import typer
 
 from apps.cli.render import console
 from april_common.audit import audit_logger_for_settings
+from april_common.errors import PermissionDeniedError
 from april_common.settings import AprilSettings, load_settings
 from services.finetune.dataset import FinetunePlan, create_finetune_plan, load_finetune_plan
 from services.jobs.registry import default_job_registry
@@ -144,13 +145,19 @@ async def _launch(plan_id: str, approval_id: str) -> dict[str, Any]:
         if record.tool != "finetune" or record.args != args:
             raise ValueError("Fine-tune approval does not match the immutable plan.")
         request_id = str(uuid.uuid4())
-        await approvals.approve_exact(
-            approval_id=approval_id,
-            tool="finetune",
-            args=args,
-            actor="local-user",
-            request_id=request_id,
-        )
+        if record.status == "pending":
+            try:
+                await approvals.approve_exact(
+                    approval_id=approval_id,
+                    tool="finetune",
+                    args=args,
+                    actor="local-user",
+                    request_id=request_id,
+                )
+            except PermissionDeniedError:
+                record = await approvals.get(approval_id)
+                if record.status not in {"approved", "consumed"}:
+                    raise
         store = JobStore(
             database,
             default_job_registry(
@@ -158,18 +165,26 @@ async def _launch(plan_id: str, approval_id: str) -> dict[str, Any]:
                 evolution_enabled=settings.evolution.enabled,
             ),
         )
-        job = await store.submit(
+        job, created = await store.submit_with_exact_approval(
             job_type="finetune",
             payload={"plan_id": plan.plan_id},
             owner="local-user",
-            approved=True,
-        )
-        await approvals.consume(
             approval_id=approval_id,
-            result={"ok": True, "job_id": job.id, "status": job.status.value},
-            actor="local-user",
-            request_id=request_id,
+            approval_tool="finetune",
+            approval_args=args,
         )
+        if created:
+            approvals.audit.write(
+                {
+                    "actor": "local-user",
+                    "request_id": request_id,
+                    "event_type": "approval_consumed",
+                    "tool": "finetune",
+                    "approval_id": approval_id,
+                    "outcome": "consumed",
+                    "job_id": job.id,
+                }
+            )
         return {
             "job_id": job.id,
             "status": job.status.value,

@@ -24,6 +24,7 @@ from apps.runner.speaker_live import (
     run_speaker_live_verification,
     write_speaker_live_report,
 )
+from april_common.audit import AuditLogger
 from april_common.credentials import InMemoryCredentialStore
 from april_common.process_runner import (
     ProcessStatus,
@@ -48,6 +49,8 @@ from services.memory.encryption import (
 from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.writer import MemoryWriter
+from services.permissions.approvals import ApprovalStore
+from services.permissions.schemas import ApprovalRequest
 from services.voice.microphone import Microphone, write_pcm_wav
 from services.wake.speaker import SpeakerVerifier
 
@@ -164,13 +167,54 @@ async def test_new_job_types_claim_once_cancel_recover_and_retry(settings_tmp) -
             payload=payloads["finetune"],
             owner="local-user",
         )
+    finetune_args = {
+        "plan_id": payloads["finetune"]["plan_id"],
+        "dataset_sha256": "1" * 64,
+        "configuration_sha256": "2" * 64,
+        "base_model_sha256": "3" * 64,
+        "trainer_sha256": "4" * 64,
+        "evaluator_sha256": "5" * 64,
+        "adapter_candidate_basename": "candidate.gguf",
+    }
+    approvals = ApprovalStore(
+        database,
+        AuditLogger(settings_tmp.audit_path),
+        expiry_seconds=300,
+    )
+    approval = await approvals.create(
+        ApprovalRequest(
+            tool="finetune",
+            args=finetune_args,
+            agent="local-operator",
+            permission_level=4,
+            risk_level="system_action",
+        ),
+        actor="local-user",
+        request_id="finetune-create",
+    )
+    await approvals.approve_exact(
+        approval_id=approval.approval_id,
+        tool="finetune",
+        args=finetune_args,
+        actor="local-user",
+        request_id="finetune-approve",
+    )
     for job_type, payload in payloads.items():
-        await store.submit(
-            job_type=job_type,
-            payload=payload,
-            owner="local-user",
-            approved=job_type == "finetune",
-        )
+        if job_type == "finetune":
+            await store.submit_with_exact_approval(
+                job_type=job_type,
+                payload=payload,
+                owner="local-user",
+                approval_id=approval.approval_id,
+                approval_tool="finetune",
+                approval_args=finetune_args,
+            )
+        else:
+            await store.submit(
+                job_type=job_type,
+                payload=payload,
+                owner="local-user",
+            )
     claims = await asyncio.gather(
         *(store.claim_next(worker_id=f"worker-{index}", lease_seconds=30) for index in range(8))
     )
