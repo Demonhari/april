@@ -89,7 +89,9 @@ async def test_decay_fades_low_confidence_without_deleting(settings_tmp) -> None
             confidence=0.31,
         )
         guard = EvolutionWriteGuard(settings_tmp)
-        now = datetime(2026, 7, 3, 3, 0, tzinfo=UTC)
+        # Keep the decay clock aligned with state listing's real clock. A fixed
+        # 2026 date made this test start failing after its 30-day grace elapsed.
+        now = utc_now()
         report = await apply_memory_decay(memory, guard=guard, now=now)
         assert report.decayed == 1
         assert report.faded == 1
