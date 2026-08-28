@@ -1,0 +1,119 @@
+# M15: any llama_cpp model may additionally set `adapter_path` to a local LoRA
+# adapter file. The llama_cpp backend applies it on top of the base GGUF at
+# load time; a configured-but-missing adapter is a load error (never a silent
+# base-model fallback). Adapters are local artifacts you train and place
+# yourself — see scripts/finetune/README.md for the CPU-only runbook.
+#   adapter_path: models/adapters/april-brain-lora.gguf
+models:
+  brain:
+    id: april-brain
+    name: granite3.3-2b
+    path: models/granite3.3-2b-q4_k_m.gguf
+    backend: llama_cpp
+    role: brain
+    chat_format: granite
+    threads: 8
+    context_size: 8192
+    temperature: 0.3
+    max_output_tokens: 1024
+    keep_loaded: true
+    idle_unload_seconds: null
+    priority: 100
+  coding:
+    id: april-coding
+    name: qwen3-1.7b
+    path: models/qwen3-1.7b-q8_0.gguf
+    backend: llama_cpp
+    role: coding
+    chat_format: qwen
+    threads: 8
+    context_size: 8192
+    temperature: 0.2
+    max_output_tokens: 2048
+    keep_loaded: false
+    idle_unload_seconds: 300
+    priority: 50
+  reading:
+    id: april-reading
+    name: qwen3-0.6b
+    path: models/qwen3-0.6b-q8_0.gguf
+    backend: llama_cpp
+    role: reading
+    chat_format: qwen
+    threads: 6
+    context_size: 4096
+    temperature: 0.2
+    max_output_tokens: 1024
+    keep_loaded: false
+    idle_unload_seconds: 300
+    priority: 40
+
+  # Optional manual recommendation for deep reasoning / architecture mode:
+  # Qwen3-4B Q4_K_M. It must be benchmarked on this Intel MacBook before it can
+  # become a recommended default. Deep and Council modes use role=reasoning when
+  # available and honestly fall back to Brain otherwise.
+  # The reasoning agent runs on the brain model by default and automatically
+  # upgrades to a registered role: reasoning model whenever one is available.
+  # Import a real GGUF with:
+  #   run april model import --role reasoning --id april-reasoning \
+  #     --name qwen3-4b --path /absolute/path/qwen3-4b-Q4_K_M.gguf \
+  #     --sha256 EXPECTED_SHA256
+  # then uncomment and adjust the entry below (commented out so it does not
+  # point at a missing file and degrade runtime health).
+  # reasoning:
+  #   id: april-reasoning
+  #   name: your-reasoning-model
+  #   path: models/your-reasoning-model-q4_k_m.gguf
+  #   backend: llama_cpp
+  #   role: reasoning
+  #   chat_format: qwen
+  #   threads: 8
+  #   context_size: 8192
+  #   temperature: 0.4
+  #   max_output_tokens: 2048
+  #   keep_loaded: false
+  #   idle_unload_seconds: 300
+  #   priority: 60
+
+  # Optional: a dedicated small local router. Leave brain.router_model_id null
+  # to alias routing to the Brain without a duplicate entry or duplicate load.
+  # If configured, this entry must use role: router and its id must be selected
+  # by brain.router_model_id in configs/april.yaml.
+  # router:
+  #   id: april-router
+  #   name: your-router-model
+  #   path: models/your-router-model-q4_k_m.gguf
+  #   backend: llama_cpp
+  #   role: router
+  #   threads: 4
+  #   context_size: 4096
+  #   temperature: 0.0
+  #   max_output_tokens: 512
+  #   keep_loaded: false
+  #   idle_unload_seconds: 300
+  #   priority: 70
+
+  # Optional manual recommendation: nomic-embed-text-v1.5 Q8 as role=embedding
+  # to enable runtime-local semantic
+  # memory embeddings. Without it, memory uses deterministic hashed-token
+  # embeddings (the default). Import a real GGUF embedding model with:
+  #   run april model import --role embedding --id april-embedding \
+  #     --name nomic-embed-text-v1.5 \
+  #     --path /absolute/path/nomic-embed-text-v1.5-Q8_0.gguf \
+  #     --sha256 EXPECTED_SHA256
+  # then set memory.embedding_provider=runtime-local (APRIL_MEMORY_EMBEDDING_PROVIDER)
+  # and run `run april memory reindex`. Keep this commented out until a real file
+  # exists so runtime health is not degraded by a missing path.
+  # embedding:
+  #   id: april-embedding
+  #   name: your-embedding-model
+  #   path: models/your-embedding-model-q4_k_m.gguf
+  #   backend: llama_cpp
+  #   role: embedding
+  #   threads: 4
+  #   context_size: 512
+  #   temperature: 0.0
+  #   max_output_tokens: 1
+  #   keep_loaded: true
+  #   idle_unload_seconds: null
+  #   priority: 30
