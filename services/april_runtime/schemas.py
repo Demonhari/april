@@ -150,6 +150,32 @@ class ModelOperationResponse(BaseModel):
     generation_threads: int | None = None
 
 
+class CandidateRuntimeRequest(BaseModel):
+    """Safe, hash-bound request for an isolated candidate instance."""
+
+    model_id: str
+    candidate_id: str
+    adapter_path: str
+    adapter_sha256: str
+    configuration_sha256: str
+    instance_id: str | None = None
+    load: bool = True
+    request_id: str | None = None
+
+
+class CandidateRuntimeResponse(BaseModel):
+    request_id: str
+    instance_id: str
+    model_id: str
+    candidate_id: str
+    base_model_sha256: str
+    adapter_sha256: str
+    configuration_sha256: str
+    state: ModelState
+    integrity_state: Literal["verified", "mismatch", "unknown"]
+    message: str
+
+
 class ModelInfo(BaseModel):
     id: str
     name: str
@@ -182,6 +208,12 @@ class ModelInfo(BaseModel):
     n_gpu_layers: int | None = None
     use_mmap: bool | None = None
     use_mlock: bool | None = None
+    model_instance_id: str | None = None
+    base_model_id: str | None = None
+    candidate_id: str | None = None
+    base_model_sha256: str | None = None
+    adapter_sha256: str | None = None
+    configuration_sha256: str | None = None
 
 
 class RuntimeHealth(BaseModel):
@@ -206,6 +238,12 @@ class RuntimeHealth(BaseModel):
     process_rss_bytes: int | None = None
     process_peak_rss_bytes: int | None = None
     process_memory_estimated: bool = True
+    lora_isolated_candidate_supported: bool = False
+    baseline_model_instance: str | None = None
+    candidate_instances: list[dict[str, Any]] = Field(default_factory=list)
+    candidate_integrity_state: str = "unknown"
+    rollout_state: str = "unknown"
+    rollback_required: bool = False
 
 
 class EmbedRequest(BaseModel):

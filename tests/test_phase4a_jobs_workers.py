@@ -5,6 +5,7 @@ import base64
 import os
 import secrets
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -33,9 +34,15 @@ from services.memory.database import Database
 from services.memory.migrations import SCHEMA_VERSION, run_migrations
 from services.permissions.approvals import ApprovalStore
 from services.permissions.schemas import ApprovalRequest
-from services.tool_worker.client import ToolWorkerClient
+from services.tool_worker.client import (
+    ToolWorkerClient,
+    ToolWorkerProcessManager,
+    ToolWorkerUnavailable,
+)
 from services.tool_worker.executor import ToolWorkerExecutor
 from services.tool_worker.limits import (
+    UnsafeToolWorkerSocket,
+    default_tool_worker_runtime_directory,
     prepare_runtime_directory,
     write_capability_file,
 )
@@ -396,6 +403,128 @@ async def test_tool_worker_owner_only_socket_protocol_and_idempotency() -> None:
             await restarted_task
         await restarted.close()
         shutil.rmtree(home)
+
+
+@pytest.mark.asyncio
+async def test_tool_worker_manager_start_stop_start_has_no_stale_endpoint(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ToolWorkerProcessManager(
+        april_home=tmp_path,
+        allowed_roots=(tmp_path,),
+        environment="development",
+    )
+    try:
+        first = await manager.start()
+        assert (await first.self_check(project_root=project)).ok is True
+        await manager.stop()
+        await manager.stop()
+        assert manager.process is None
+        assert not manager.socket_path.exists()
+
+        second = await manager.start()
+        assert (await second.self_check(project_root=project)).ok is True
+    finally:
+        await manager.stop()
+    assert manager.process is None
+    assert not manager.socket_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_tool_worker_manager_recovers_only_validated_stale_socket(
+    tmp_path: Path,
+) -> None:
+    runtime = prepare_runtime_directory(
+        default_tool_worker_runtime_directory(tmp_path),
+        april_home=tmp_path,
+    )
+    capability = secrets.token_urlsafe(32)
+    write_capability_file(runtime / "capability", capability, runtime_directory=runtime)
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(runtime / "worker.sock"))
+    stale.close()
+    os.chmod(runtime / "worker.sock", 0o600)
+    manager = ToolWorkerProcessManager(
+        april_home=tmp_path,
+        allowed_roots=(tmp_path,),
+        runtime_directory=runtime,
+        environment="development",
+    )
+    try:
+        client = await manager.start()
+        assert (await client.self_check(project_root=tmp_path)).ok is True
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_tool_worker_manager_rejects_unsafe_socket_and_external_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = prepare_runtime_directory(
+        default_tool_worker_runtime_directory(tmp_path),
+        april_home=tmp_path,
+    )
+    outside = tmp_path / "outside.sock"
+    outside.touch()
+    (runtime / "worker.sock").symlink_to(outside)
+    manager = ToolWorkerProcessManager(
+        april_home=tmp_path,
+        allowed_roots=(tmp_path,),
+        runtime_directory=runtime,
+    )
+    with pytest.raises(UnsafeToolWorkerSocket):
+        await manager.start()
+
+    (runtime / "worker.sock").unlink()
+    monkeypatch.setenv("APRIL_TOOL_WORKER_EXTERNAL", "1")
+    with pytest.raises(ToolWorkerUnavailable, match="external_unavailable"):
+        await manager.start()
+
+
+@pytest.mark.asyncio
+async def test_tool_worker_manager_reuses_live_external_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = prepare_runtime_directory(
+        default_tool_worker_runtime_directory(tmp_path),
+        april_home=tmp_path,
+    )
+    capability_path = runtime / "capability"
+    write_capability_file(
+        capability_path,
+        secrets.token_urlsafe(32),
+        runtime_directory=runtime,
+    )
+    server = ToolWorkerServer(
+        april_home=tmp_path,
+        socket_path=runtime / "worker.sock",
+        capability_path=capability_path,
+        allowed_roots=(tmp_path,),
+        environment="development",
+    )
+    await server.start()
+    task = asyncio.create_task(server.serve_forever())
+    monkeypatch.setenv("APRIL_TOOL_WORKER_EXTERNAL", "1")
+    manager = ToolWorkerProcessManager(
+        april_home=tmp_path,
+        allowed_roots=(tmp_path,),
+        runtime_directory=runtime,
+    )
+    try:
+        client = await manager.start()
+        assert (await client.self_check(project_root=tmp_path)).ok is True
+        assert manager.process is None
+    finally:
+        await manager.stop()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await server.close()
 
 
 def _git(repo: Path, *args: str) -> None:

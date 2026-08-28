@@ -26,6 +26,10 @@ class GenerationResult:
 class RuntimeBackend(ABC):
     supports_concurrent_generation: bool = False
     supports_native_batch_embeddings: bool = False
+    # A candidate is safe only when every instance owns its backend object.  The
+    # built-in backends satisfy this contract; lifecycle code also checks object
+    # identity at load time so an accidental singleton factory fails closed.
+    supports_isolated_instances: bool = True
 
     @abstractmethod
     async def load(self, model: ModelDefinition) -> None:

@@ -550,6 +550,10 @@ class ToolExecutionService:
             manager = ToolWorkerProcessManager(
                 april_home=self.settings.home,
                 allowed_roots=tuple(self.settings.allowed_roots),
+                environment=self.settings.environment,
+                development_unsandboxed_override=(
+                    self.settings.workers.development_unsandboxed_override
+                ),
             )
             try:
                 self.tool_worker = await manager.start()

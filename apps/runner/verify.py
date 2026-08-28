@@ -64,8 +64,15 @@ def _verification_health_failure(
     return "Runtime is not reachable."
 
 
-def run_fake_verification(home: Path) -> list[VerifyCheck]:
-    verifier = LauncherVerifier(home=home)
+def run_fake_verification(
+    home: Path,
+    *,
+    development_unsandboxed_override: bool = False,
+) -> list[VerifyCheck]:
+    verifier = LauncherVerifier(
+        home=home,
+        development_unsandboxed_override=development_unsandboxed_override,
+    )
     return [*verifier.run(), *run_local_sandbox_verification(home)]
 
 

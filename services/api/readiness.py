@@ -323,6 +323,7 @@ async def readiness_payload(
         active.settings,
         active.database,
         audit=active.approvals.audit,
+        runtime_client=active.runtime_client,
     ).health()
     if rollout_state["status"] == "degraded":
         failure_reasons.append(
@@ -478,6 +479,17 @@ async def readiness_payload(
             "kill_switch_active": evolution_kill_switch_active(active.settings),
             "scheduler_enabled": active.settings.scheduler.enabled,
             "scheduler_running": active.scheduler.running if active.scheduler else False,
+            "lora_canary": {
+                "supported": bool(rollout_state.get("lora_canary_supported", False)),
+                "readiness_reason": rollout_state.get("lora_canary_readiness_reason"),
+                "baseline_model_instance": rollout_state.get("baseline_model_instance"),
+                "candidate_instances": rollout_state.get("candidate_instances", []),
+                "candidate_integrity_state": rollout_state.get(
+                    "candidate_integrity_state", "unknown"
+                ),
+                "rollout_state": rollout_state.get("rollout_state", "unknown"),
+                "rollback_required": bool(rollout_state.get("rollback_required", False)),
+            },
             "overlay_eval_mode": (
                 "deterministic_fixture_plus_real_runtime"
                 if real_runtime_required

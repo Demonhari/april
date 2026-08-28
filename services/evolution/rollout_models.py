@@ -193,6 +193,7 @@ class CanarySelection:
     eligible: bool
     reason_code: str
     overlay_text: str | None = None
+    runtime_model_instance_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

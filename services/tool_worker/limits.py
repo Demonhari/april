@@ -30,10 +30,12 @@ def prepare_runtime_directory(path: Path, *, april_home: Path) -> Path:
         raise UnsafeToolWorkerSocket("runtime_directory_outside_april_home")
     resolved.mkdir(parents=True, mode=0o700, exist_ok=True)
     info = resolved.stat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise UnsafeToolWorkerSocket("runtime_directory_not_directory")
     if info.st_uid != os.getuid():
         raise UnsafeToolWorkerSocket("runtime_directory_wrong_owner")
-    if stat.S_IMODE(info.st_mode) & 0o077:
-        os.chmod(resolved, 0o700)
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        raise UnsafeToolWorkerSocket("unsafe_runtime_directory_mode")
     return resolved
 
 
@@ -41,22 +43,26 @@ def prepare_socket_path(path: Path, *, runtime_directory: Path) -> Path:
     runtime = runtime_directory.resolve(strict=True)
     if path.parent.resolve(strict=True) != runtime:
         raise UnsafeToolWorkerSocket("socket_outside_runtime_directory")
-    if path.is_symlink():
-        raise UnsafeToolWorkerSocket("socket_path_is_symlink")
-    if path.exists():
+    if os.path.lexists(path):
+        if path.is_symlink():
+            raise UnsafeToolWorkerSocket("socket_path_is_symlink")
         info = path.lstat()
         if info.st_uid != os.getuid() or not stat.S_ISSOCK(info.st_mode):
             raise UnsafeToolWorkerSocket("unsafe_existing_socket")
-        path.unlink()
+        raise UnsafeToolWorkerSocket("socket_already_exists")
+    if path.is_symlink():
+        raise UnsafeToolWorkerSocket("socket_path_is_symlink")
     return path
 
 
 def validate_live_socket(path: Path, *, runtime_directory: Path) -> str:
     if path.is_symlink():
         raise UnsafeToolWorkerSocket("socket_path_is_symlink")
+    if not os.path.lexists(path):
+        raise FileNotFoundError(path)
     if path.parent.resolve(strict=True) != runtime_directory.resolve(strict=True):
         raise UnsafeToolWorkerSocket("socket_outside_runtime_directory")
-    info = path.stat()
+    info = path.lstat()
     if info.st_uid != os.getuid() or not stat.S_ISSOCK(info.st_mode):
         raise UnsafeToolWorkerSocket("unsafe_socket")
     mode = stat.S_IMODE(info.st_mode)
@@ -68,11 +74,15 @@ def validate_live_socket(path: Path, *, runtime_directory: Path) -> str:
 def write_capability_file(path: Path, capability: str, *, runtime_directory: Path) -> None:
     if path.parent.resolve(strict=True) != runtime_directory.resolve(strict=True):
         raise UnsafeToolWorkerSocket("capability_outside_runtime_directory")
-    if path.is_symlink():
+    if os.path.lexists(path) and path.is_symlink():
         raise UnsafeToolWorkerSocket("capability_path_is_symlink")
     if path.exists():
         info = path.stat()
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        if (
+            info.st_uid != os.getuid()
+            or not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
             raise UnsafeToolWorkerSocket("unsafe_capability_file")
         path.unlink()
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -88,12 +98,39 @@ def read_capability_file(path: Path, *, runtime_directory: Path) -> str:
     ):
         raise UnsafeToolWorkerSocket("unsafe_capability_path")
     info = path.stat()
-    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+    if (
+        info.st_uid != os.getuid()
+        or not stat.S_ISREG(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
         raise UnsafeToolWorkerSocket("unsafe_capability_file")
     value = path.read_text(encoding="ascii")
     if not 32 <= len(value) <= 256:
         raise UnsafeToolWorkerSocket("invalid_capability")
     return value
+
+
+def socket_identity(path: Path, *, runtime_directory: Path) -> tuple[int, int]:
+    """Return the validated device/inode identity of an owner-only socket."""
+    validate_live_socket(path, runtime_directory=runtime_directory)
+    info = path.lstat()
+    return info.st_dev, info.st_ino
+
+
+def remove_owned_socket(
+    path: Path,
+    *,
+    runtime_directory: Path,
+    identity: tuple[int, int],
+) -> bool:
+    """Unlink only the exact validated socket created by this manager/server."""
+    if not os.path.lexists(path) or path.is_symlink():
+        return False
+    current = socket_identity(path, runtime_directory=runtime_directory)
+    if current != identity:
+        return False
+    path.unlink()
+    return True
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

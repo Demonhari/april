@@ -25,7 +25,7 @@ from services.memory.database import connect_sqlite, sqlite_write_transaction
 
 
 class LauncherVerifier:
-    def __init__(self, *, home: Path) -> None:
+    def __init__(self, *, home: Path, development_unsandboxed_override: bool = False) -> None:
         self.repo_home = home.expanduser().resolve()
         self.temp = Path(tempfile.mkdtemp(prefix="april-verify-"))
         self.verify_home = self.temp / "april_home"
@@ -35,6 +35,7 @@ class LauncherVerifier:
         self.api_port = verify_coordinator._free_port()
         self.api_token = "verify-token"
         self.runtime_token = "verify-runtime-token"
+        self.development_unsandboxed_override = development_unsandboxed_override
         self.runtime: subprocess.Popen[bytes] | None = None
         self.api: subprocess.Popen[bytes] | None = None
         self.runtime_log = self.temp / "runtime.log"
@@ -156,6 +157,9 @@ class LauncherVerifier:
                 "APRIL_HOME": str(self.verify_home),
                 "PYTHONPATH": str(self.repo_home),
                 "APRIL_RUNTIME_BACKEND": "fake",
+                "APRIL_DEVELOPMENT_UNSANDBOXED_OVERRIDE": (
+                    "true" if self.development_unsandboxed_override else "false"
+                ),
                 "APRIL_RUNTIME_PORT": str(self.runtime_port),
                 "APRIL_API_PORT": str(self.api_port),
                 "APRIL_RUNTIME_URL": self.runtime_url,

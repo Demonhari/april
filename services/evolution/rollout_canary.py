@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: F401
 # mypy: disable-error-code="attr-defined"
 import asyncio
+import contextlib
 import hashlib
 import json
 import re
@@ -74,8 +75,6 @@ class RolloutCanary(RolloutServiceBase):
         if not self.settings.evolution.canary_enabled:
             raise RolloutBlocked("canary_disabled")
         record = await self.require(rollout_id)
-        if record.candidate_type == "lora_adapter":
-            raise RolloutBlocked("lora_canary_unsupported")
         if record.state == "shadow_passed":
             record = await self._transition(record, "canary_pending_approval")
         if record.state != "canary_pending_approval":
@@ -132,6 +131,18 @@ class RolloutCanary(RolloutServiceBase):
                 },
             )
         running = await self.require(record.id)
+        if running.candidate_type == "lora_adapter":
+            try:
+                await self._prepare_lora_runtime(running)
+            except Exception as exc:
+                await self.rollback(
+                    running.id,
+                    reason_code="candidate_runtime_load_failed",
+                    automatic=True,
+                )
+                if isinstance(exc, RolloutBlocked):
+                    raise
+                raise RolloutBlocked("candidate_runtime_load_failed") from exc
         try:
             self._audit("evolution_rollout_canary_started", running)
         except Exception:
@@ -142,6 +153,211 @@ class RolloutCanary(RolloutServiceBase):
             )
             raise
         return running
+
+    async def _prepare_lora_runtime(self, record: RolloutRecord) -> dict[str, str]:
+        """Load the candidate in a separately addressable Runtime instance."""
+
+        client = self.runtime_client
+        if client is None:
+            raise RolloutBlocked("lora_isolated_candidate_runtime_unavailable")
+        self._audit("evolution_candidate_runtime_prepare_requested", record)
+        response = await client.prepare_candidate(
+            model_id=record.target_id,
+            candidate_id=record.candidate_id,
+            adapter_path=record.candidate_artifact_path,
+            adapter_sha256=record.candidate_sha256,
+            configuration_sha256=record.configuration_sha256,
+            instance_id=None,
+            load=True,
+            request_id=f"rollout:{record.id}:candidate-load",
+        )
+        values = {
+            "instance_id": str(response.instance_id),
+            "base_model_sha256": str(response.base_model_sha256),
+            "adapter_sha256": str(response.adapter_sha256),
+            "configuration_sha256": str(response.configuration_sha256),
+            "state": str(response.state),
+            "integrity_state": str(response.integrity_state),
+        }
+        if (
+            values["adapter_sha256"] != record.candidate_sha256
+            or values["configuration_sha256"] != record.configuration_sha256
+            or values["integrity_state"] != "verified"
+            or values["state"] != "loaded"
+        ):
+            with contextlib.suppress(Exception):
+                await client.unload_candidate(instance_id=values["instance_id"])
+            raise RolloutBlocked("candidate_runtime_integrity_mismatch")
+        now = utc_now_iso()
+        try:
+            async with self.database.transaction() as connection:
+                await connection.execute(
+                    """
+                INSERT INTO evolution_rollout_runtime(
+                    rollout_id, instance_id, base_model_id, base_model_sha256,
+                    adapter_id, adapter_sha256, configuration_sha256, status,
+                    integrity_state, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, 'loaded', 'verified', ?, ?)
+                ON CONFLICT(rollout_id) DO UPDATE SET
+                    instance_id = excluded.instance_id,
+                    base_model_id = excluded.base_model_id,
+                    base_model_sha256 = excluded.base_model_sha256,
+                    adapter_id = excluded.adapter_id,
+                    adapter_sha256 = excluded.adapter_sha256,
+                    configuration_sha256 = excluded.configuration_sha256,
+                    status = excluded.status,
+                    integrity_state = excluded.integrity_state,
+                    updated_at = excluded.updated_at
+                """,
+                    (
+                        record.id,
+                        values["instance_id"],
+                        record.target_id,
+                        values["base_model_sha256"],
+                        record.candidate_id,
+                        values["adapter_sha256"],
+                        values["configuration_sha256"],
+                        now,
+                        now,
+                    ),
+                )
+                await self._event_tx(
+                    connection,
+                    record.id,
+                    "candidate_runtime_loaded",
+                    summary={
+                        "instance_id": values["instance_id"],
+                        "base_model_sha256": values["base_model_sha256"],
+                        "adapter_sha256": values["adapter_sha256"],
+                        "configuration_sha256": values["configuration_sha256"],
+                    },
+                )
+        except Exception:
+            with contextlib.suppress(Exception):
+                await client.unload_candidate(instance_id=values["instance_id"])
+            raise
+        self._audit("evolution_candidate_runtime_loaded", record)
+        return values
+
+    async def select_lora_canary(
+        self,
+        *,
+        target_id: str,
+        context: CanaryContext,
+    ) -> CanarySelection:
+        if not (
+            self.settings.evolution.enabled
+            and self.settings.evolution.rollout_enabled
+            and self.settings.evolution.canary_enabled
+        ):
+            return CanarySelection(None, False, False, "canary_disabled")
+        row = await self.database.fetchone(
+            """
+            SELECT r.*, rr.instance_id, rr.status AS runtime_status,
+                   rr.integrity_state, rr.adapter_sha256, rr.configuration_sha256
+            FROM evolution_rollouts r
+            JOIN evolution_rollout_runtime rr ON rr.rollout_id = r.id
+            WHERE r.candidate_type = 'lora_adapter'
+              AND r.target_id = ?
+              AND r.state IN ('canary_running', 'active')
+            ORDER BY r.created_at DESC
+            LIMIT 1
+            """,
+            (target_id,),
+        )
+        if row is None:
+            return CanarySelection(None, False, False, "no_active_canary")
+        record = _record_from_row(row)
+        if record.state == "canary_running" and self._expiry_reason(record) is not None:
+            await self.rollback(record.id, reason_code="canary_expired", automatic=True)
+            return CanarySelection(record.id, False, False, "canary_expired")
+        if not self._artifact_matches(
+            Path(record.candidate_artifact_path), record.candidate_sha256
+        ):
+            await self.rollback(
+                record.id,
+                reason_code="candidate_artifact_unavailable_or_changed",
+                automatic=True,
+            )
+            return CanarySelection(
+                record.id, False, False, "candidate_artifact_unavailable_or_changed"
+            )
+        if (
+            str(row["runtime_status"]) != "loaded"
+            or str(row["integrity_state"]) != "verified"
+            or str(row["adapter_sha256"]) != record.candidate_sha256
+            or str(row["configuration_sha256"]) != record.configuration_sha256
+        ):
+            await self.rollback(
+                record.id,
+                reason_code="candidate_runtime_integrity_mismatch",
+                automatic=True,
+            )
+            return CanarySelection(record.id, False, False, "candidate_runtime_integrity_mismatch")
+        eligible, reason = _canary_eligible(context)
+        request_hash = _sha256_text(context.stable_request_id)
+        existing = await self.database.fetchone(
+            """
+            SELECT selected, eligible FROM evolution_rollout_assignments
+            WHERE rollout_id = ? AND request_key_sha256 = ?
+            """,
+            (record.id, request_hash),
+        )
+        if existing is not None:
+            return CanarySelection(
+                record.id,
+                bool(existing["selected"]),
+                bool(existing["eligible"]),
+                "selected" if bool(existing["selected"]) else reason,
+                runtime_model_instance_id=(
+                    str(row["instance_id"]) if bool(existing["selected"]) else None
+                ),
+            )
+        if not eligible:
+            selected = False
+        else:
+            max_turns = record.canary_max_eligible_turns
+            if max_turns is not None and record.canary_eligible_turn_count >= max_turns:
+                selected = False
+                reason = "canary_turn_limit_reached"
+            else:
+                bucket = int(
+                    hashlib.sha256(f"{record.id}:{context.stable_request_id}".encode()).hexdigest()[
+                        :16
+                    ],
+                    16,
+                ) / float(0xFFFFFFFFFFFFFFFF)
+                selected = bucket < record.canary_traffic_fraction
+        now = utc_now_iso()
+        try:
+            async with self.database.transaction() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO evolution_rollout_assignments(
+                        rollout_id, request_key_sha256, selected, eligible, created_at
+                    ) VALUES(?, ?, ?, ?, ?)
+                    """,
+                    (record.id, request_hash, int(selected), int(eligible), now),
+                )
+                await connection.execute(
+                    """
+                    UPDATE evolution_rollouts
+                    SET canary_eligible_turn_count = canary_eligible_turn_count + ?,
+                        canary_selected_turn_count = canary_selected_turn_count + ?,
+                        updated_at = ?, version = version + 1
+                    WHERE id = ? AND state IN ('canary_running', 'active')
+                    """,
+                    (int(eligible), int(selected), now, record.id),
+                )
+        except (sqlite3.IntegrityError, aiosqlite.IntegrityError):
+            return await self.select_lora_canary(target_id=target_id, context=context)
+        return CanarySelection(
+            record.id,
+            selected,
+            eligible,
+            "selected" if selected else ("not_selected" if eligible else reason),
+            runtime_model_instance_id=str(row["instance_id"]) if selected else None,
+        )
 
     async def select_prompt_canary(
         self,

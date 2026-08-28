@@ -4,18 +4,26 @@ import secrets
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from april_common.errors import AprilError, PermissionDeniedError, error_payload
+from april_common.errors import (
+    AprilError,
+    PermissionDeniedError,
+    RuntimeUnavailableError,
+    error_payload,
+)
 from april_common.settings import get_settings
 from services.april_runtime.health import runtime_health
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelRegistry
 from services.april_runtime.schemas import (
+    CandidateRuntimeRequest,
+    CandidateRuntimeResponse,
     ChatRequest,
     EmbedBatchRequest,
     EmbedBatchResponse,
@@ -150,6 +158,54 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
             state=state.state,
             message="unloaded",
             generation_threads=None,
+        )
+
+    @app.post("/runtime/candidates/prepare")
+    async def prepare_candidate(request: CandidateRuntimeRequest) -> CandidateRuntimeResponse:
+        request_id = request.request_id or str(uuid.uuid4())
+        state = await active_lifecycle.prepare_candidate(
+            model_id=request.model_id,
+            candidate_id=request.candidate_id,
+            adapter_path=Path(request.adapter_path),
+            adapter_sha256=request.adapter_sha256,
+            configuration_sha256=request.configuration_sha256,
+            instance_id=request.instance_id,
+            load=request.load,
+        )
+        identity = state.identity
+        if identity is None or identity.adapter_sha256 is None:
+            raise RuntimeUnavailableError("Candidate identity was not established safely.")
+        return CandidateRuntimeResponse(
+            request_id=request_id,
+            instance_id=identity.instance_id,
+            model_id=identity.model_id,
+            candidate_id=identity.candidate_id or request.candidate_id,
+            base_model_sha256=identity.base_model_sha256,
+            adapter_sha256=identity.adapter_sha256,
+            configuration_sha256=identity.configuration_sha256,
+            state=state.state,
+            integrity_state="verified",
+            message="candidate_loaded" if request.load else "candidate_prepared",
+        )
+
+    @app.post("/runtime/candidates/unload")
+    async def unload_candidate(request: CandidateRuntimeRequest) -> CandidateRuntimeResponse:
+        request_id = request.request_id or str(uuid.uuid4())
+        state = await active_lifecycle.unload_candidate(request.instance_id or "")
+        identity = state.identity
+        if identity is None or identity.adapter_sha256 is None:
+            raise RuntimeUnavailableError("Candidate identity was not established safely.")
+        return CandidateRuntimeResponse(
+            request_id=request_id,
+            instance_id=identity.instance_id,
+            model_id=identity.model_id,
+            candidate_id=identity.candidate_id or request.candidate_id,
+            base_model_sha256=identity.base_model_sha256,
+            adapter_sha256=identity.adapter_sha256,
+            configuration_sha256=identity.configuration_sha256,
+            state=state.state,
+            integrity_state="verified",
+            message="candidate_unloaded",
         )
 
     @app.get("/runtime/models")

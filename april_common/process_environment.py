@@ -113,6 +113,7 @@ _CATEGORY_APRIL_KEYS: dict[ProcessCategory, frozenset[str]] = {
             "APRIL_API_PORT",
             "APRIL_AUDIT_PATH",
             "APRIL_DATABASE_PATH",
+            "APRIL_DEVELOPMENT_UNSANDBOXED_OVERRIDE",
             "APRIL_LOGS_PATH",
             "APRIL_RUNTIME_BACKEND",
             "APRIL_RUNTIME_HOST",

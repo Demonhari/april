@@ -22,6 +22,9 @@ jobs:
       - name: Verify lockfile is current
         run: uv lock --check
 
+      - name: Verify pip compatibility pins match uv lock
+        run: python scripts/check_dependency_drift.py
+
       - name: Verify clean locked installation
         run: scripts/verify_locked_install.sh
 
@@ -55,6 +58,9 @@ jobs:
 
       - name: Git whitespace check
         run: git diff --check
+
+      - name: Verify pip compatibility pins match uv lock
+        run: python scripts/check_dependency_drift.py
 
       - name: Lint
         run: python -m ruff check .
@@ -91,7 +97,7 @@ jobs:
       - name: Fake verification
         env:
           APRIL_RUNTIME_BACKEND: fake
-        run: run april verify --fake
+        run: run april verify --fake --development-unsandboxed-override
 
   desktop-static:
     name: Desktop static Node checks

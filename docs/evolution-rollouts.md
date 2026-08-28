@@ -31,8 +31,10 @@ Good metrics never promote a candidate automatically.
 - CLI status, create, shadow, approval request, canary, promote, cancel, and
   rollback commands.
 - Offline, API, and verification readiness reporting.
-- An explicit `lora_canary_unsupported` failure. APRIL never switches a global
-  LoRA pointer per request.
+- Isolated immutable LoRA candidate Runtime instances with hash-bound identity;
+  APRIL never switches a global LoRA pointer per request. The capability remains
+  disabled by default and fails closed when Runtime support or integrity cannot
+  be proven.
 
 ## What automated tests prove
 

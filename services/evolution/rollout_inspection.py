@@ -71,7 +71,12 @@ def inspect_rollout_state(settings: AprilSettings) -> dict[str, Any]:
         "automatic_candidate_creation": settings.evolution.automatic_candidate_creation,
         "automatic_promotion": settings.evolution.automatic_promotion,
         "lora_canary_supported": False,
-        "lora_canary_readiness_reason": "lora_canary_unsupported",
+        "lora_canary_readiness_reason": "runtime_candidate_capability_unavailable",
+        "baseline_model_instance": None,
+        "candidate_instances": [],
+        "candidate_integrity_state": "unknown",
+        "rollout_state": "inactive",
+        "rollback_required": False,
         "incomplete_transition_count": 0,
         "active_canary_count": 0,
         "expired_canary_count": 0,
@@ -95,6 +100,21 @@ def inspect_rollout_state(settings: AprilSettings) -> dict[str, Any]:
         if table is None:
             return {**base, "status": "disabled" if not enabled else "not_initialized"}
         rows = list(connection.execute("SELECT * FROM evolution_rollouts"))
+        runtime_table = connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'evolution_rollout_runtime'
+            """
+        ).fetchone()
+        runtime_rows = (
+            list(
+                connection.execute(
+                    "SELECT * FROM evolution_rollout_runtime ORDER BY updated_at DESC"
+                )
+            )
+            if runtime_table is not None
+            else []
+        )
         active_prompt = {
             str(row["agent"]): str(row["content_hash"])
             for row in connection.execute(
@@ -103,6 +123,20 @@ def inspect_rollout_state(settings: AprilSettings) -> dict[str, Any]:
         }
     finally:
         connection.close()
+    runtime_payload = [
+        {
+            "rollout_id": str(row["rollout_id"]),
+            "instance_id": str(row["instance_id"]),
+            "base_model_id": str(row["base_model_id"]),
+            "base_model_sha256": str(row["base_model_sha256"]),
+            "adapter_id": str(row["adapter_id"]),
+            "adapter_sha256": str(row["adapter_sha256"]),
+            "configuration_sha256": str(row["configuration_sha256"]),
+            "status": str(row["status"]),
+            "integrity_state": str(row["integrity_state"]),
+        }
+        for row in runtime_rows
+    ]
     incomplete = 0
     active_canary = 0
     expired = 0
@@ -145,6 +179,10 @@ def inspect_rollout_state(settings: AprilSettings) -> dict[str, Any]:
             and active_prompt.get(str(row["target_id"])) == str(row["candidate_sha256"])
         ):
             disagreement += 1
+    runtime_rollback_required = sum(
+        1 for item in runtime_payload if item["status"] == "rollback_required"
+    )
+    rollback_required += runtime_rollback_required
     unsafe = bool(
         incomplete or expired or unavailable or mismatch or disagreement or rollback_required
     )
@@ -159,6 +197,18 @@ def inspect_rollout_state(settings: AprilSettings) -> dict[str, Any]:
         "candidate_hash_mismatch_count": mismatch,
         "pointer_database_disagreement_count": disagreement,
         "rollback_required_count": rollback_required,
+        "candidate_instances": runtime_payload,
+        "candidate_integrity_state": (
+            "mismatch"
+            if any(item["integrity_state"] == "mismatch" for item in runtime_payload)
+            else ("verified" if runtime_payload else "unknown")
+        ),
+        "rollout_state": (
+            "rollback_required"
+            if rollback_required
+            else ("canary_running" if active_canary else "inactive")
+        ),
+        "rollback_required": bool(rollback_required),
         "action": (
             "run april evolve rollout list, then inspect and rollback unsafe rollouts"
             if unsafe

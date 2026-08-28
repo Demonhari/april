@@ -297,6 +297,7 @@ def test_install_run_april_skip_pip_clean_checkout_does_not_create_venv(
     (repo / "scripts").mkdir(parents=True)
     (repo / "apps" / "runner").mkdir(parents=True)
     shutil.copy2(Path("scripts/install_run_april.sh"), repo / "scripts/install_run_april.sh")
+    shutil.copy2(Path("scripts/select_python.py"), repo / "scripts/select_python.py")
     shutil.copy2(Path("apps/runner/install.py"), repo / "apps/runner/install.py")
     (repo / "apps" / "__init__.py").write_text("", encoding="utf-8")
     (repo / "apps" / "runner" / "__init__.py").write_text("", encoding="utf-8")

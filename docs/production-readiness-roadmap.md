@@ -15,7 +15,7 @@ evidence of real model, microphone, thermal, signing, or notarization success.
 | Real GGUF load/chat/stream, prompt-eval timing, sustained performance, and setup comparison | Implemented but target-Mac verification required | Local model artifact and genuine real-runtime execution |
 | Voice endpointing and optional voice adapters | Implemented and tested | Live microphone and speaker checks require those devices and local voice artifacts |
 | Phase 4B prompt rollout state machine, shadow jobs, bounded canary, exact approvals, monitoring, reconciliation, and rollback | Implemented and fake/unit tested; disabled by default | Real reviewed-case A/B evidence with local GGUFs, owner approvals, and target-Intel-Mac canary evidence |
-| Phase 4B LoRA canary | Explicitly blocked as unsupported | Runtime support for a separately loaded immutable candidate model identity; global adapter switching is not accepted |
+| Phase 4B LoRA canary | Implemented in software; disabled by default | Runtime candidate capability, local adapter/base artifacts, reviewed evidence, exact approvals, and target-Mac canary execution |
 | Production `.app` structure and release exclusions | Implemented and tested | Target-Mac bundle validation |
 | Developer ID signing, notarization, stapling, and Gatekeeper | Implemented but target-Mac verification required | Real Apple signing identity, notary Keychain profile, and genuine Apple service execution |
 | Optional Intel macOS thermal-state sampling | Implemented and unit-tested | Genuine unprivileged `pmset -g therm` samples on the target Intel Mac |
@@ -86,8 +86,8 @@ activation path.
 
 ## Phase 4B rollout safety
 
-Schema 21 adds durable rollout, assignment, and safe-event records. Prompt
-overlays follow:
+Schema 21 rollout tables include durable rollout, assignment, safe-event, and
+hash-bound Runtime-candidate records. Prompt overlays follow:
 
 `candidate → shadow_pending → shadow_running → shadow_passed →`
 `canary_pending_approval → canary_running → canary_passed →`
@@ -115,10 +115,14 @@ destructive operations, and background evolution are excluded. Candidate
 answers are ordinary responses only for selected eligible canary requests;
 shadow answers are never user-visible.
 
-The current Runtime binds a LoRA adapter to the globally loaded model. It does
-not provide a second immutable candidate model identity for safe concurrent
-routing. Phase 4B therefore reports `lora_canary_unsupported`, refuses LoRA
-canary and promotion, and never toggles the global adapter per request.
+The Runtime provides separately addressable immutable candidate instances. Each
+candidate binds the base-model, adapter, and rollout-configuration hashes to its
+own backend object. Baseline requests never switch adapters, and only eligible
+standard low-risk requests can target a candidate. Candidate load/integrity
+failure, Runtime/database disagreement, interruption, or rollback-unload
+failure is fail-closed and surfaces `rollback_required`. The capability remains
+disabled by default; reviewed evidence, minimum samples, no-regression gates,
+owner approvals, and a bounded canary are still required.
 
 Canary and newly-active prompt outcomes feed safe aggregate monitoring.
 Integrity failure, Runtime failure, hard failure, regression threshold,
@@ -153,12 +157,14 @@ automatically. `run april readiness`, Core `/readiness`, and `run april verify`
 report disabled rollout state as disabled, while unsafe incomplete transitions
 are readiness failures.
 
-Automated tests use temporary SQLite databases, fake shadow evaluators, and no
-GGUFs. They cover the state machine, approvals, bounds, deterministic selection,
-concurrency, interruption, reconciliation, aggregate evidence, automatic
-rollback, exact restoration, audit-chain validity, defaults, and explicit LoRA
-blocking. They are not evidence that a real prompt, LoRA, GGUF, voice path, or
-Intel Mac canary passed.
+Automated tests use temporary SQLite databases, deterministic fake Runtime
+backends/evaluators, and no GGUFs. They cover the state machine, approvals,
+bounds, deterministic selection, concurrent baseline/candidate isolation,
+immutable identities, hash mismatch, candidate load failure, excluded flows,
+interruption/reconciliation, aggregate evidence, automatic rollback, exact
+restoration, audit-chain validity, defaults, and candidate timeout cleanup.
+They are not evidence that a real prompt, LoRA, GGUF, voice path, or Intel Mac
+canary passed.
 
 Fine-tune workflow:
 
@@ -290,6 +296,27 @@ uv sync --locked --extra dev
 uv lock --check
 scripts/verify_locked_install.sh
 ```
+
+The uv.lock file is authoritative for resolved versions. The checked-in
+constraints-dev.txt file is the deterministic pip/editable-install compatibility
+projection for base and development dependencies. CI verifies it mechanically
+with scripts/check_dependency_drift.py.
+
+The optional runtime, voice, and platform-specific wheels remain outside that
+base projection until a target-Mac installation provides genuine evidence for a
+safe pin. No invented llama-cpp-python pin is used.
+
+## Verification environment truthfulness
+
+Source implementation, fake/local verification, prerequisite readiness, real
+GGUF readiness, and hardened go-live are separate claims. A passing fake run
+does not establish real-model core readiness, target-Mac readiness, or hardened
+go-live readiness. On Linux/CI, the fake launcher may be run with the explicit
+--development-unsandboxed-override; it is rejected in production and reports
+that it provides no OS-enforced network or filesystem isolation. On macOS, fake
+verification must run through Seatbelt without that override. Voice, the
+reasoning specialist, runtime-local semantic embeddings, signing, notarisation,
+and native packaging remain optional or hardening/target-Mac steps.
 
 Hardware/runtime, voice, desktop, and security dependencies remain optional.
 Sensitive-memory AES-GCM uses the optional `security` extra; normal APRIL

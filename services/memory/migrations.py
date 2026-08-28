@@ -532,6 +532,28 @@ async def _run_migrations_locked(database: Database) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_evolution_rollout_events_rollout
         ON evolution_rollout_events(rollout_id, id);
+
+        CREATE TABLE IF NOT EXISTS evolution_rollout_runtime (
+            rollout_id TEXT PRIMARY KEY
+                REFERENCES evolution_rollouts(id) ON DELETE CASCADE,
+            instance_id TEXT NOT NULL UNIQUE,
+            base_model_id TEXT NOT NULL,
+            base_model_sha256 TEXT NOT NULL,
+            adapter_id TEXT NOT NULL,
+            adapter_sha256 TEXT NOT NULL,
+            configuration_sha256 TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('prepared', 'loaded', 'unloaded', 'load_failed', 'rollback_required')
+            ),
+            integrity_state TEXT NOT NULL CHECK (
+                integrity_state IN ('verified', 'mismatch', 'unknown')
+            ),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_evolution_rollout_runtime_status
+        ON evolution_rollout_runtime(status, updated_at);
         """
     )
     columns = await conn.execute("PRAGMA table_info(approvals)")

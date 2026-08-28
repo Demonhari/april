@@ -75,7 +75,11 @@ class RolloutActivation(RolloutServiceBase):
         self._require_rollouts_enabled()
         record = await self.require(rollout_id)
         if record.candidate_type == "lora_adapter":
-            raise RolloutBlocked("lora_canary_unsupported")
+            return await self._promote_lora(
+                record,
+                approval_id=approval_id,
+                readiness=readiness,
+            )
         if record.state != "canary_passed":
             raise InvalidRolloutTransition(
                 f"invalid_transition:{record.state}:activation_pending_approval"
@@ -213,6 +217,71 @@ class RolloutActivation(RolloutServiceBase):
             raise
         return active
 
+    async def _promote_lora(
+        self,
+        record: RolloutRecord,
+        *,
+        approval_id: str,
+        readiness: PromotionReadiness,
+    ) -> RolloutRecord:
+        if record.state != "canary_passed":
+            raise InvalidRolloutTransition(
+                f"invalid_transition:{record.state}:activation_pending_approval"
+            )
+        self._promotion_gate(record, readiness)
+        runtime = await self.database.fetchone(
+            "SELECT * FROM evolution_rollout_runtime WHERE rollout_id = ?",
+            (record.id,),
+        )
+        if runtime is None:
+            raise RolloutBlocked("candidate_runtime_identity_missing")
+        if (
+            str(runtime["status"]) != "loaded"
+            or str(runtime["integrity_state"]) != "verified"
+            or str(runtime["adapter_sha256"]) != record.candidate_sha256
+            or str(runtime["configuration_sha256"]) != record.configuration_sha256
+        ):
+            raise RolloutBlocked("candidate_runtime_integrity_mismatch")
+        tool, args = self._approval_action(record, "activation")
+        self._audit("evolution_rollout_activation_requested", record)
+        now = utc_now_iso()
+        async with self.database.transaction() as connection:
+            await self._validate_approval_tx(
+                connection,
+                approval_id=approval_id,
+                tool=tool,
+                args=args,
+            )
+            consumed = await ApprovalStore.consume_in_transaction(
+                connection,
+                approval_id=approval_id,
+                result={"ok": True, "rollout_id": record.id, "state": "active"},
+                consumed_at=now,
+            )
+            if not consumed:
+                raise RolloutBlocked("approval_consumption_race")
+            updated = await connection.execute(
+                """
+                UPDATE evolution_rollouts
+                SET state = 'active', transition_phase = NULL,
+                    activation_approval_id = ?, completed_at = ?,
+                    updated_at = ?, reason_code = NULL, version = version + 1
+                WHERE id = ? AND state = 'canary_passed' AND version = ?
+                """,
+                (approval_id, now, now, record.id, record.version),
+            )
+            if updated.rowcount != 1:
+                raise InvalidRolloutTransition("rollout_concurrency_conflict")
+            await self._event_tx(
+                connection,
+                record.id,
+                "rollout_activated",
+                summary={"runtime_instance_id": str(runtime["instance_id"])},
+            )
+        active = await self.require(record.id)
+        self._audit("evolution_rollout_activated", active)
+        return active
+
     async def cancel(
         self,
         rollout_id: str,
@@ -264,21 +333,114 @@ class RolloutActivation(RolloutServiceBase):
         record = await self.require(rollout_id)
         if record.state == "rolled_back":
             return record
-        if record.state in {"failed", "cancelled", "rejected"}:
+        if (
+            record.state in {"failed", "cancelled", "rejected"}
+            and record.transition_phase != "rollback_required"
+        ):
             return record
         if record.candidate_type == "lora_adapter":
-            # A LoRA rollout cannot reach canary/active with the current Runtime,
-            # so there is no global pointer to mutate here.
-            rolled = await self._transition(
-                record,
-                "rolled_back",
-                updates={
-                    "reason_code": _reason_code(reason_code),
-                    "rolled_back_at": utc_now_iso(),
-                    "completed_at": utc_now_iso(),
-                    "transition_phase": None,
-                },
+            runtime = await self.database.fetchone(
+                "SELECT * FROM evolution_rollout_runtime WHERE rollout_id = ?",
+                (record.id,),
             )
+            if runtime is not None and str(runtime["status"]) in {"loaded", "rollback_required"}:
+                client = self.runtime_client
+                if client is None:
+                    now = utc_now_iso()
+                    async with self.database.transaction() as connection:
+                        await connection.execute(
+                            """
+                            UPDATE evolution_rollouts
+                            SET state = 'failed', transition_phase = 'rollback_required',
+                                reason_code = ?, updated_at = ?, version = version + 1
+                            WHERE id = ?
+                            """,
+                            ("rollback_runtime_unavailable", now, record.id),
+                        )
+                        await self._event_tx(
+                            connection,
+                            record.id,
+                            "candidate_runtime_rollback_required",
+                            reason_code="rollback_runtime_unavailable",
+                        )
+                    return await self.require(record.id)
+                try:
+                    await client.unload_candidate(instance_id=str(runtime["instance_id"]))
+                except Exception:
+                    now = utc_now_iso()
+                    async with self.database.transaction() as connection:
+                        await connection.execute(
+                            """
+                            UPDATE evolution_rollouts
+                            SET state = 'failed', transition_phase = 'rollback_required',
+                                reason_code = ?, updated_at = ?, version = version + 1
+                            WHERE id = ?
+                            """,
+                            ("rollback_runtime_unavailable", now, record.id),
+                        )
+                        await self._event_tx(
+                            connection,
+                            record.id,
+                            "candidate_runtime_rollback_required",
+                            reason_code="rollback_runtime_unavailable",
+                        )
+                    return await self.require(record.id)
+                now = utc_now_iso()
+                async with self.database.transaction() as connection:
+                    await connection.execute(
+                        """
+                        UPDATE evolution_rollout_runtime
+                        SET status = 'unloaded', updated_at = ?
+                        WHERE rollout_id = ?
+                        """,
+                        (now, record.id),
+                    )
+                    await self._event_tx(
+                        connection,
+                        record.id,
+                        "candidate_runtime_unloaded",
+                        summary={"instance_id": str(runtime["instance_id"])},
+                    )
+                self._audit(
+                    "evolution_candidate_runtime_unloaded",
+                    record,
+                    reason=reason_code,
+                    automatic=automatic,
+                )
+            if record.state == "failed":
+                now = utc_now_iso()
+                async with self.database.transaction() as connection:
+                    updated = await connection.execute(
+                        """
+                        UPDATE evolution_rollouts
+                        SET state = 'rolled_back', reason_code = ?,
+                            rolled_back_at = ?, completed_at = ?,
+                            transition_phase = NULL, updated_at = ?, version = version + 1
+                        WHERE id = ? AND state = 'failed' AND transition_phase = 'rollback_required'
+                        """,
+                        (_reason_code(reason_code), now, now, now, record.id),
+                    )
+                    if updated.rowcount != 1:
+                        return await self.require(record.id)
+                    await self._event_tx(
+                        connection,
+                        record.id,
+                        "rollout_rolled_back",
+                        reason_code=_reason_code(reason_code),
+                        summary={"automatic": automatic},
+                    )
+                rolled = await self.require(record.id)
+            else:
+                rolled = await self._transition(
+                    record,
+                    "rolled_back",
+                    updates={
+                        "reason_code": _reason_code(reason_code),
+                        "rolled_back_at": utc_now_iso(),
+                        "completed_at": utc_now_iso(),
+                        "transition_phase": None,
+                    },
+                )
             self._audit(
                 "evolution_rollout_rolled_back",
                 rolled,

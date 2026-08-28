@@ -30,6 +30,7 @@ from apps.runner.verify import (
 from apps.runner.voice_live import VoiceLiveReport
 from apps.runner.wake_live import WakeWordLiveReport, run_sentinel_live_verification
 from april_common.config_fingerprint import config_fingerprint_digest
+from april_common.settings import load_settings
 
 _T = TypeVar("_T")
 
@@ -47,6 +48,14 @@ _ACCEPTANCE_STATUS_STYLE = {
 def verify(
     model_path: Path | None = typer.Argument(None),
     fake: bool = typer.Option(False, "--fake", help="Run deterministic fake-backend verification."),
+    development_unsandboxed_override: bool = typer.Option(
+        False,
+        "--development-unsandboxed-override",
+        help=(
+            "Development-only Linux/CI verification escape hatch; explicitly permits "
+            "restricted subprocesses without OS-enforced isolation."
+        ),
+    ),
     real_model: bool = typer.Option(False, "--real-model"),
     workflow: bool = typer.Option(False, "--workflow"),
     target_mac: bool = typer.Option(False, "--target-mac"),
@@ -98,6 +107,21 @@ def verify(
         max_rss_mb=max_rss_mb,
         min_routing_accuracy=min_routing_accuracy,
     )
+    if development_unsandboxed_override:
+        manager = _composition_api._manager()
+        manager_settings = getattr(manager, "settings", None)
+        environment = getattr(manager_settings, "environment", None)
+        if environment is None:
+            try:
+                environment = load_settings(root=manager.home).environment
+            except Exception:
+                environment = None
+        if environment != "development":
+            console.print(
+                "[red]--development-unsandboxed-override is valid only in development "
+                "with a readable configuration.[/red]"
+            )
+            raise typer.Exit(1)
     candidate_adapter_requested = (
         candidate_adapter_model_id is not None or candidate_adapter_path is not None
     )
@@ -258,7 +282,13 @@ def verify(
         if not all(check.ok for check in checks):
             raise typer.Exit(1)
         raise typer.Exit(0)
-    checks = _composition_api.run_fake_verification(_composition_api._manager().home)
+    if development_unsandboxed_override:
+        checks = _composition_api.run_fake_verification(
+            _composition_api._manager().home,
+            development_unsandboxed_override=True,
+        )
+    else:
+        checks = _composition_api.run_fake_verification(_composition_api._manager().home)
     if json_output:
         console.print_json(data={"checks": [asdict(check) for check in checks]})
     else:

@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 INSTALL_EXTRAS="dev"
 INSTALL_GLOBAL=0
 ADD_TO_PATH=0
@@ -42,6 +41,8 @@ fi
 
 echo "Detected architecture: $(uname -m)"
 cd "$ROOT_DIR"
+PYTHON_BIN="$("$ROOT_DIR/scripts/select_python.py" --path-only)"
+echo "Selected APRIL Python: $PYTHON_BIN ($("$PYTHON_BIN" -c 'import sys; print("Python %d.%d" % (sys.version_info.major, sys.version_info.minor))'))"
 if [[ "${APRIL_SETUP_SKIP_PIP:-0}" != "1" ]]; then
   "$PYTHON_BIN" -m venv .venv
   if [[ -n "$INSTALL_EXTRAS" ]]; then

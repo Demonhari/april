@@ -159,6 +159,12 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         token=active_settings.runtime.token,
         generation_thread_provider=governor.generation_thread_budget,
     )
+    await RolloutService(
+        active_settings,
+        database,
+        audit=audit,
+        runtime_client=runtime_client,
+    ).reconcile_startup()
     embedding = embedding_provider_from_config(
         active_settings.memory.embedding_provider,
         model_id=active_settings.memory.embedding_model_id,

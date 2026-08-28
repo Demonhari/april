@@ -117,6 +117,11 @@ def api_evidence_boundaries(
                 else "optional_unavailable"
             )
         ),
-        "lora_canary": "blocked_for_safety",
+        "lora_canary": (
+            "configured"
+            if rollout_state.get("lora_canary_supported")
+            and rollout_state.get("status") != "degraded"
+            else "blocked_for_safety"
+        ),
         "apple_release": "optional_unavailable",
     }

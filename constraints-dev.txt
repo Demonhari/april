@@ -1,14 +1,13 @@
-# Direct dependency constraints for reproducible APRIL runtime/dev/editable installs.
-# Regenerate intentionally from a provisioned dev environment with:
-#   .venv/bin/python -m pip freeze --exclude-editable
-# Then copy only base runtime dependencies, the [dev] extra, and build-backend
-# packages required by pyproject.toml for reproducible editable installs.
+# uv.lock is the authoritative resolved dependency graph. This checked-in file
+# is the deterministic pip/editable-install compatibility projection for the
+# direct base and [dev] requirements plus the build backend. Update its shared
+# pins from uv.lock when dependencies change; CI enforces that they agree.
 #
 # Do not add llama-cpp-python, sounddevice, openwakeword, GGUF files, or
 # platform-specific voice/runtime wheels to this base constraints file.
 hatchling==1.30.1
 aiosqlite==0.22.1
-fastapi==0.137.2
+fastapi==0.140.13
 httpx==0.28.1
 Jinja2==3.1.6
 numpy==2.4.6
@@ -16,10 +15,10 @@ pydantic==2.13.4
 pydantic-settings==2.14.2
 PyYAML==6.0.3
 rich==15.0.0
-typer==0.26.7
-uvicorn==0.49.0
+typer==0.27.0
+uvicorn==0.52.0
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
-ruff==0.15.18
-mypy==2.1.0
+ruff==0.16.0
+mypy==2.3.0

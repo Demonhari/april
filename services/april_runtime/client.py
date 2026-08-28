@@ -8,6 +8,8 @@ import httpx
 
 from april_common.errors import RuntimeUnavailableError
 from services.april_runtime.schemas import (
+    CandidateRuntimeRequest,
+    CandidateRuntimeResponse,
     ChatMessage,
     ChatRequest,
     ChatResponse,
@@ -193,6 +195,77 @@ class RuntimeClient:
         return await self._model_operation(
             "unload", model_id, request_id=request_id, generation_threads=None
         )
+
+    async def prepare_candidate(
+        self,
+        *,
+        model_id: str,
+        candidate_id: str,
+        adapter_path: str,
+        adapter_sha256: str,
+        configuration_sha256: str,
+        instance_id: str | None = None,
+        load: bool = True,
+        request_id: str | None = None,
+    ) -> CandidateRuntimeResponse:
+        request = CandidateRuntimeRequest(
+            model_id=model_id,
+            candidate_id=candidate_id,
+            adapter_path=adapter_path,
+            adapter_sha256=adapter_sha256,
+            configuration_sha256=configuration_sha256,
+            instance_id=instance_id,
+            load=load,
+            request_id=request_id,
+        )
+        return await self._candidate_operation("prepare", request)
+
+    async def unload_candidate(
+        self,
+        *,
+        instance_id: str,
+        model_id: str = "candidate",
+        candidate_id: str = "candidate",
+        adapter_sha256: str = "0" * 64,
+        configuration_sha256: str = "0" * 64,
+        request_id: str | None = None,
+    ) -> CandidateRuntimeResponse:
+        request = CandidateRuntimeRequest(
+            model_id=model_id,
+            candidate_id=candidate_id,
+            adapter_path="candidate",
+            adapter_sha256=adapter_sha256,
+            configuration_sha256=configuration_sha256,
+            instance_id=instance_id,
+            load=False,
+            request_id=request_id,
+        )
+        return await self._candidate_operation("unload", request)
+
+    async def _candidate_operation(
+        self, operation: str, request: CandidateRuntimeRequest
+    ) -> CandidateRuntimeResponse:
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/runtime/candidates/{operation}",
+                    json=request.model_dump(),
+                    headers=self.headers,
+                )
+        except httpx.HTTPError as exc:
+            raise RuntimeUnavailableError(
+                "April Runtime is offline.", {"url": self.base_url}
+            ) from exc
+        if response.status_code >= 400:
+            raise RuntimeUnavailableError(
+                "April Runtime returned an error.", _response_payload(response)
+            )
+        try:
+            return CandidateRuntimeResponse.model_validate(response.json())
+        except Exception as exc:
+            raise RuntimeUnavailableError(
+                "April Runtime returned a malformed candidate response."
+            ) from exc
 
     async def _model_operation(
         self,

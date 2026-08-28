@@ -45,6 +45,11 @@ async def _with_service(
             settings,
             database,
             audit=audit_logger_for_settings(settings),
+            runtime_client=RuntimeClient(
+                settings.runtime.url,
+                timeout=settings.runtime.request_timeout_seconds,
+                token=settings.runtime.token,
+            ),
         )
         return await action(settings, database, service)
     finally:

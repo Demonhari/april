@@ -180,6 +180,7 @@ class ToolWorkerExecutor:
             development_unsandboxed_override=self.development_unsandboxed_override,
         )
         if not check_ok:
+            failure_code = _git_failure_code(check_stderr, "git_apply_check_failed")
             return ToolWorkerResponse(
                 request_id=request.request_id,
                 ok=False,
@@ -187,7 +188,7 @@ class ToolWorkerExecutor:
                 stdout=check_stdout[: request.max_stdout_bytes],
                 stderr=(check_stderr or "git_apply_check_failed")[: request.max_stderr_bytes],
                 status="failed",
-                failure_code="git_apply_check_failed",
+                failure_code=failure_code,
                 data=_artifact_data(artifact),
             )
         code, stdout, stderr = await git_apply_bytes(
@@ -207,7 +208,7 @@ class ToolWorkerExecutor:
             stdout_truncated=len(stdout) > request.max_stdout_bytes,
             stderr_truncated=len(stderr) > request.max_stderr_bytes,
             status="completed" if code == 0 else "failed",
-            failure_code=None if code == 0 else "git_apply_failed",
+            failure_code=None if code == 0 else _git_failure_code(stderr, "git_apply_failed"),
             data=_artifact_data(artifact),
         )
 
@@ -379,6 +380,16 @@ def _process_response(request: ToolWorkerRequest, result: Any) -> ToolWorkerResp
         data={
             "resource_limits_applied": list(result.resource_limits.applied),
             "resource_limits_unsupported": list(result.resource_limits.unsupported),
+            **(
+                {
+                    "sandbox_backend": result.sandbox.backend.value,
+                    "development_unsandboxed_override": (
+                        result.sandbox.development_override_enabled
+                    ),
+                }
+                if result.sandbox is not None
+                else {}
+            ),
         },
     )
 
@@ -429,6 +440,8 @@ def _safe_validation_code(exc: Exception) -> str:
     if value in known:
         return value
     if isinstance(exc, PermissionDeniedError):
+        if "repository state" in value.lower() or "calculate" in value.lower():
+            return "git_state_unavailable"
         return "worker_permission_denied"
     if isinstance(exc, KeyError):
         return "worker_request_field_missing"
@@ -437,3 +450,13 @@ def _safe_validation_code(exc: Exception) -> str:
     if isinstance(exc, ValueError):
         return "worker_request_value_invalid"
     return "worker_validation_failed"
+
+
+def _git_failure_code(stderr: str, fallback: str) -> str:
+    """Convert restricted-process startup diagnostics to bounded reason codes."""
+    normalized = stderr.casefold()
+    if "sandbox_unavailable" in normalized:
+        return "sandbox_unavailable"
+    if "git command failed to start" in normalized:
+        return "git_state_unavailable"
+    return fallback

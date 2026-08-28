@@ -147,6 +147,61 @@ class ContextFlow:
             )
             model_id = resolution.model_id
             run_metadata["model_resolution"] = resolution.metadata()
+        # LoRA canaries use a separately loaded Runtime instance.  Selection is
+        # intentionally after the high-risk early-return branches above, and the
+        # same deterministic eligibility policy used by prompt canaries is
+        # applied here.  A candidate can therefore never reach approval, write,
+        # voice, background, or structured/deep execution paths.
+        if self.overlay_manager is not None and not structured_specialists:
+            from services.evolution.rollouts import CanaryContext, RolloutService
+
+            tools = tuple(
+                sorted(
+                    {call.tool for call in decision.planned_tool_calls} | set(decision.tools_needed)
+                )
+            )
+            selection = await RolloutService(
+                self.settings,
+                self.memory.database,
+                audit=self.approvals.audit,
+                runtime_client=self.runtime_client,
+            ).select_lora_canary(
+                target_id=model_id,
+                context=CanaryContext(
+                    stable_request_id=active_request_id,
+                    source="chat",
+                    mode=mode,
+                    permission_level=decision.permission_level,
+                    risk_level=decision.risk_level,
+                    agent=agent.name,
+                    tool_names=tools,
+                    destructive=decision.risk_level in {"code_write", "system_action"},
+                    external_side_effect=decision.risk_level == "external_action",
+                    security_sensitive=decision.permission_level >= 3,
+                    database_write=any(
+                        tool_name in {"create_reminder", "cancel_reminder"} for tool_name in tools
+                    ),
+                    repository_write=any(
+                        tool_name
+                        in {
+                            "patch_generator",
+                            "patch_applier",
+                            "write_file",
+                            "run_command",
+                            "test_runner",
+                            "git_commit",
+                        }
+                        for tool_name in tools
+                    ),
+                    high_risk_reasoning=(
+                        predicted_selection.high_stakes or predicted_selection.rung >= 2
+                    ),
+                ),
+            )
+            if selection.selected and selection.runtime_model_instance_id is not None:
+                model_id = selection.runtime_model_instance_id
+                run_metadata["rollout_id"] = selection.rollout_id
+                run_metadata["runtime_model_instance_id"] = selection.runtime_model_instance_id
         task_plan = task_plan_from_decision(
             decision,
             conversation_id=active_conversation_id,

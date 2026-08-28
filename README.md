@@ -32,12 +32,14 @@ APRIL supports Python 3.11 through 3.13 for the Core MVP. Optional local
 runtime and voice dependencies remain adapter-isolated.
 
 ```bash
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev]' -c constraints-dev.txt
 ```
 
-Using the pinned `constraints-dev.txt` keeps NumPy and the type-checking toolchain
-identical to CI. `make install-dev` installs the same `.[dev]` extra.
+`uv.lock` is the authoritative resolved graph. `constraints-dev.txt` is the
+checked-in pip compatibility projection for editable installs; CI runs
+`scripts/check_dependency_drift.py` so its shared pins cannot diverge from the
+lock. `make install-dev` installs the same `.[dev]` graph.
 
 ## Configuration
 
@@ -99,7 +101,7 @@ Development installs can use direct dependency constraints without pulling in
 optional runtime or voice wheels:
 
 ```bash
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev]' -c constraints-dev.txt
 ```
 
@@ -314,7 +316,12 @@ verification is not real-MacBook readiness.**
 
 The intended order from a fresh checkout to a hardened daily local assistant is:
 
-- **A. Fake developer verification** — `APRIL_RUNTIME_BACKEND=fake run april verify --fake` (and `--workflow`). Proves orchestration/permissions/contracts only.
+- **A. Fake developer verification** — on macOS,
+  `APRIL_RUNTIME_BACKEND=fake run april verify --fake`; on Linux/CI,
+  `APRIL_RUNTIME_BACKEND=fake run april verify --fake --development-unsandboxed-override`.
+  The explicit Linux flag is development-only and reports that OS-enforced
+  network/filesystem isolation was unavailable. Both commands prove
+  orchestration/permissions/contracts only.
 - **B. Real model core verification** — `run april verify --all-configured-models --require-real-model`. Real GGUF load/chat/stream/unload, strict-JSON brain routing with no fallback, specialist switching.
 - **C. Go-live core proof** — `run april go-live --write-report --start-services`. Reports **`real_model_core_status`** separately from the hardened rung.
 - **D. Full real workflow/security verification** — `run april verify --workflow --real-model`. Real routing smoke **plus** the full deterministic security checklist (patch approve/apply/replay/tamper/path-escape/repo-override/cwd-forcing/allowlist + audit/tool_call/agent_run records).
@@ -340,7 +347,7 @@ go-live report and the Desktop Readiness screen state both explicitly:
 
 | # | Rung | Exact command |
 |---|------|---------------|
-| 1 | Fake-backend developer verification | `APRIL_RUNTIME_BACKEND=fake run april verify --fake` |
+| 1 | Fake-backend developer verification | macOS: `APRIL_RUNTIME_BACKEND=fake run april verify --fake`; Linux/CI: `APRIL_RUNTIME_BACKEND=fake run april verify --fake --development-unsandboxed-override` |
 | 2 | Offline config validation | `run april config validate` · `run april readiness` |
 | 3 | Real runtime preflight | `pip install -e '.[runtime]'` then `run april readiness` (backend `llama_cpp`, GGUFs present) |
 | 4 | Real model chat/stream verification | `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json` |
@@ -739,16 +746,22 @@ run april verify --soak --fake --minutes 10 --report data/verification/soak.json
 
 ### Reproducible development environment
 
-Development and CI both install with the same pinned constraints so NumPy and the
-type-checking toolchain do not drift:
+`uv.lock` is the dependency source of truth. The pip compatibility projection
+is checked mechanically against it:
 
 ```bash
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev]' -c constraints-dev.txt
+python scripts/check_dependency_drift.py
 ```
 
 `constraints-dev.txt` intentionally excludes `llama-cpp-python`, voice wheels, and
 GGUF files; install those separately when you opt into the real runtime or voice.
+
+The setup scripts accept Python 3.11, 3.12, or 3.13, honor `PYTHON_BIN` (and
+`PYTHON` for the wrapper installer), choose a deterministic fallback, and print
+the selected executable/version. They never install Homebrew, use `sudo`,
+download models, or edit shell startup files unless `--add-to-path` is supplied.
 
 ### Intel vs Apple Silicon setup
 
@@ -787,7 +800,7 @@ scope (see "Out of scope / later milestones").
 1. Install APRIL:
 
 ```bash
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 make install-global-force
 export PATH="$HOME/.local/bin:$PATH"

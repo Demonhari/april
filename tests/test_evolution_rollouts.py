@@ -10,6 +10,7 @@ import pytest
 
 from april_common.audit import audit_logger_for_settings
 from april_common.settings import AprilSettings
+from services.april_runtime.schemas import CandidateRuntimeResponse
 from services.evolution.rollouts import (
     CanaryContext,
     InvalidRolloutTransition,
@@ -46,6 +47,57 @@ class FakeShadowEvaluator:
         if self.set_cancel and cancellation_event is not None:
             cancellation_event.set()
         return self.metrics
+
+
+class FakeCandidateRuntime:
+    def __init__(self, *, adapter_sha256: str | None = None) -> None:
+        self.adapter_sha256 = adapter_sha256
+        self.prepared: list[str] = []
+        self.unloaded: list[str] = []
+
+    async def prepare_candidate(self, **kwargs: Any) -> CandidateRuntimeResponse:
+        instance_id = f"candidate-instance-{kwargs['candidate_id']}"
+        self.prepared.append(instance_id)
+        return CandidateRuntimeResponse(
+            request_id=str(kwargs.get("request_id") or "request"),
+            instance_id=instance_id,
+            model_id=str(kwargs["model_id"]),
+            candidate_id=str(kwargs["candidate_id"]),
+            base_model_sha256="b" * 64,
+            adapter_sha256=self.adapter_sha256 or str(kwargs["adapter_sha256"]),
+            configuration_sha256=str(kwargs["configuration_sha256"]),
+            state="loaded",
+            integrity_state="verified",
+            message="candidate_loaded",
+        )
+
+    async def unload_candidate(
+        self, *, instance_id: str, **_kwargs: Any
+    ) -> CandidateRuntimeResponse:
+        self.unloaded.append(instance_id)
+        return CandidateRuntimeResponse(
+            request_id="unload",
+            instance_id=instance_id,
+            model_id="april-brain",
+            candidate_id="adapter-v1",
+            base_model_sha256="b" * 64,
+            adapter_sha256="a" * 64,
+            configuration_sha256="c" * 64,
+            state="unloaded",
+            integrity_state="verified",
+            message="candidate_unloaded",
+        )
+
+    async def health(self, *, timeout: float | None = None) -> dict[str, Any]:
+        del timeout
+        return {
+            "status": "ok",
+            "lora_isolated_candidate_supported": True,
+            "baseline_model_instance": "april-brain",
+            "candidate_instances": [
+                {"instance_id": item, "state": "loaded"} for item in self.prepared
+            ],
+        }
 
 
 def _enabled(settings: AprilSettings, **overrides: Any) -> AprilSettings:
@@ -757,7 +809,7 @@ async def test_defaults_disarm_evolution_dreamer_canary_and_promotion(
 
 
 @pytest.mark.asyncio
-async def test_lora_canary_is_explicitly_blocked_as_unsupported(
+async def test_lora_canary_requires_proven_isolated_runtime(
     settings_tmp: AprilSettings,
 ) -> None:
     settings = _enabled(settings_tmp)
@@ -780,8 +832,127 @@ async def test_lora_canary_is_explicitly_blocked_as_unsupported(
             evaluator=FakeShadowEvaluator(_passing_metrics()),
         )
         approval_id = await _approved(settings, database, service, shadow, "canary")
-        with pytest.raises(RolloutBlocked, match="lora_canary_unsupported"):
+        with pytest.raises(RolloutBlocked, match="lora_isolated_candidate_runtime_unavailable"):
             await service.start_canary(shadow.id, approval_id=approval_id)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_lora_canary_routes_only_eligible_requests_and_rolls_back_exact_instance(
+    settings_tmp: AprilSettings,
+) -> None:
+    settings = _enabled(settings_tmp, rollout_canary_min_samples=1)
+    database = await _database(settings)
+    try:
+        adapter = settings.evolution_path / "adapters" / "candidates" / "candidate.gguf"
+        adapter.parent.mkdir(parents=True, exist_ok=True)
+        adapter.write_bytes(b"GGUF-test-adapter")
+        _reviewed_case(settings)
+        runtime = FakeCandidateRuntime()
+        service = RolloutService(settings, database, runtime_client=runtime)
+        record = await service.create(
+            candidate_type="lora_adapter",
+            target_id="april-brain",
+            candidate_id="adapter-v1",
+            candidate_artifact_path=adapter,
+            minimum_samples=1,
+        )
+        shadow = await service.start_shadow(
+            record.id,
+            evaluator=FakeShadowEvaluator(_passing_metrics()),
+        )
+        running = await _start_canary(settings, database, service, shadow)
+        selected = None
+        selected_request_id = ""
+        for index in range(1000):
+            selected_request_id = f"lora-eligible-{index}"
+            candidate_selection = await service.select_lora_canary(
+                target_id="april-brain",
+                context=CanaryContext(
+                    stable_request_id=selected_request_id,
+                    agent="general_agent",
+                ),
+            )
+            if candidate_selection.selected:
+                selected = candidate_selection
+                break
+        assert selected is not None
+        assert selected.selected
+        assert selected.runtime_model_instance_id == runtime.prepared[0]
+        excluded = await service.select_lora_canary(
+            target_id="april-brain",
+            context=CanaryContext(
+                stable_request_id="lora-high-risk",
+                agent="coding_agent",
+                permission_level=3,
+                risk_level="code_write",
+                repository_write=True,
+            ),
+        )
+        assert excluded.selected is False
+        assert excluded.reason_code in {
+            "approval_requiring_interaction_excluded",
+            "write_or_external_risk_excluded",
+        }
+        passed = await service.record_canary_outcome(
+            rollout_id=running.id,
+            stable_request_id=selected_request_id,
+            outcome={"success": True},
+        )
+        assert passed.state == "canary_passed"
+        activation_approval = await _approved(settings, database, service, passed, "activation")
+        active = await service.promote(
+            passed.id,
+            approval_id=activation_approval,
+            readiness=PromotionReadiness(True, True),
+        )
+        assert active.state == "active"
+        rolled = await service.rollback(active.id, reason_code="test_rollback")
+        assert rolled.state == "rolled_back"
+        assert runtime.unloaded == [runtime.prepared[0]]
+        runtime_row = await database.fetchone(
+            "SELECT status FROM evolution_rollout_runtime WHERE rollout_id = ?",
+            (record.id,),
+        )
+        assert runtime_row is not None
+        assert runtime_row["status"] == "unloaded"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_lora_runtime_restart_reconciliation_fails_closed(
+    settings_tmp: AprilSettings,
+) -> None:
+    settings = _enabled(settings_tmp)
+    database = await _database(settings)
+    try:
+        adapter = settings.evolution_path / "adapters" / "candidates" / "restart.gguf"
+        adapter.parent.mkdir(parents=True, exist_ok=True)
+        adapter.write_bytes(b"GGUF-restart-adapter")
+        _reviewed_case(settings)
+        runtime = FakeCandidateRuntime()
+        service = RolloutService(settings, database, runtime_client=runtime)
+        record = await service.create(
+            candidate_type="lora_adapter",
+            target_id="april-brain",
+            candidate_id="adapter-restart",
+            candidate_artifact_path=adapter,
+            minimum_samples=2,
+        )
+        shadow = await service.start_shadow(
+            record.id,
+            evaluator=FakeShadowEvaluator(_passing_metrics()),
+        )
+        running = await _start_canary(settings, database, service, shadow)
+        restarted = RolloutService(settings, database)
+        result = await restarted.reconcile_startup()
+        assert result["reconciled_rollout_count"] == 1
+        reconciled = await restarted.require(running.id)
+        assert reconciled.state == "failed"
+        assert reconciled.transition_phase == "rollback_required"
+        assert reconciled.reason_code == "rollback_runtime_unavailable"
     finally:
         await database.close()
 

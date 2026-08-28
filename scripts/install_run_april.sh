@@ -37,15 +37,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-PYTHON_BIN="${PYTHON:-python3.11}"
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  PYTHON_BIN="python3"
-fi
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "ERROR: Could not find python3.11 or python3." >&2
-  echo "Set PYTHON to a valid Python 3.11 interpreter." >&2
-  exit 1
-fi
+PYTHON_BIN="$("$REPO_ROOT/scripts/select_python.py" --path-only)"
+echo "Selected APRIL Python: $PYTHON_BIN ($("$PYTHON_BIN" -c 'import sys; print("Python %d.%d" % (sys.version_info.major, sys.version_info.minor))'))"
 
 if [[ "${APRIL_INSTALL_SKIP_PIP:-0}" != "1" && ! -d ".venv" ]]; then
   "$PYTHON_BIN" -m venv .venv

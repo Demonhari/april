@@ -18,6 +18,8 @@ class JobWorkerProcessManager:
         self.runtime_directory = self.april_home / "data" / "runtime" / "job-worker"
         self.status_path = self.runtime_directory / "status.json"
         self.process: asyncio.subprocess.Process | None = None
+        self._process_loop: asyncio.AbstractEventLoop | None = None
+        self._owns_status = False
 
     async def start(self) -> bool:
         self.runtime_directory.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -43,8 +45,11 @@ class JobWorkerProcessManager:
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
         )
+        self._process_loop = asyncio.get_running_loop()
+        self._owns_status = True
         for _ in range(100):
             if self.process.returncode is not None:
+                await self.stop()
                 return False
             if self.status_path.exists():
                 return True
@@ -55,13 +60,48 @@ class JobWorkerProcessManager:
     async def stop(self) -> None:
         process = self.process
         self.process = None
-        if process is None or process.returncode is not None:
-            return
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGTERM)
+        if process is not None:
+            if process.returncode is None:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGTERM)
+                if self._process_loop is asyncio.get_running_loop():
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=3.0)
+                    except TimeoutError:
+                        with suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                        await process.wait()
+                else:
+                    await _reap_process_from_other_loop(process)
+            elif self._process_loop is asyncio.get_running_loop():
+                await process.wait()
+            _close_process_transport(process)
+            self._process_loop = None
+        if self._owns_status:
+            self.status_path.unlink(missing_ok=True)
+            self._owns_status = False
+
+
+async def _reap_process_from_other_loop(process: asyncio.subprocess.Process) -> None:
+    deadline = asyncio.get_running_loop().time() + 3.0
+    while asyncio.get_running_loop().time() < deadline:
         try:
-            await asyncio.wait_for(process.wait(), timeout=3.0)
-        except TimeoutError:
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await process.wait()
+            child_pid, _status = os.waitpid(process.pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if child_pid == process.pid:
+            return
+        await asyncio.sleep(0.02)
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    with suppress(ChildProcessError):
+        await asyncio.to_thread(os.waitpid, process.pid, 0)
+    _close_process_transport(process)
+
+
+def _close_process_transport(process: asyncio.subprocess.Process) -> None:
+    """Close an asyncio child transport after cross-loop OS-level reaping."""
+    transport = getattr(process, "_transport", None)
+    if transport is not None:
+        with suppress(Exception):
+            transport.close()

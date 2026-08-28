@@ -256,7 +256,7 @@ async def test_production_adapter_activation_requires_report(settings_tmp) -> No
         )
         assert blocked.status == "blocked"
         assert "Phase 4B rollout" in str(blocked.reason)
-        assert "LoRA canary is currently unsupported" in str(blocked.reason)
+        assert "isolated candidate Runtime instance" in str(blocked.reason)
         assert blocked.next_command is not None
         assert read_adapter_pointer(production.home, "april-brain") is None
 

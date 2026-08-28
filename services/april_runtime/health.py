@@ -38,6 +38,7 @@ def runtime_health(
     effective_backend = lifecycle.root_backend or backend
     simulated = effective_backend == "fake"
     has_backend_error = any(model.state == "error" for model in models)
+    candidate_readiness = lifecycle.candidate_readiness()
     # A working fake runtime is "ok" even though its configured GGUF paths do not
     # exist: it never loads them. Missing real-model paths stay informational in
     # ``missing_models`` so simulation is never mistaken for real readiness, and
@@ -64,6 +65,20 @@ def runtime_health(
         process_rss_bytes=metrics.rss_bytes,
         process_peak_rss_bytes=metrics.peak_rss_bytes,
         process_memory_estimated=metrics.estimated,
+        lora_isolated_candidate_supported=bool(
+            lifecycle.candidate_capability().get("supported", False)
+        ),
+        baseline_model_instance=str(candidate_readiness.get("baseline_model_instance"))
+        if candidate_readiness.get("baseline_model_instance") is not None
+        else None,
+        candidate_instances=(
+            list(candidate_items)
+            if isinstance(candidate_items := candidate_readiness.get("candidate_instances"), list)
+            else []
+        ),
+        candidate_integrity_state=str(
+            candidate_readiness.get("candidate_integrity_state", "unknown")
+        ),
     )
 
 

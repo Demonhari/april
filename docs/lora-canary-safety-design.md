@@ -1,14 +1,12 @@
 # LoRA canary safety design
 
-Status: **safety-blocked and not production-ready**.
+Status: **implemented in software; disabled by default and target-Mac evidence
+required**.
 
-APRIL currently resolves an active adapter through a model-level pointer and
-loads that adapter as part of the model lifecycle. That mechanism is suitable
-for an approved, atomic activation with exact rollback. It is not suitable for
-request-scoped canary traffic: changing the pointer or mutating one globally
-loaded model between requests can race concurrent work, leak candidate state
-across assignments, and make crash recovery ambiguous. APRIL therefore returns
-`lora_canary_unsupported`; it never switches the global adapter per request.
+APRIL resolves the baseline adapter through its normal model-level pointer, but
+LoRA canaries use a separately addressable Runtime instance. That instance owns
+an immutable backend and binds base-model, adapter, and rollout-configuration
+hashes. APRIL never switches the global adapter per request.
 
 ## Required Runtime architecture
 
@@ -70,5 +68,7 @@ Real-model acceptance on the target Intel Mac additionally requires:
   restoration;
 - owner review and exact Level 4 canary and activation approvals.
 
-Until all of this exists and passes real-model acceptance,
-`lora_canary_unsupported` remains the only safe result.
+When Runtime cannot prove isolated candidate capability, the safe result is a
+typed unavailable/blocking reason and no canary traffic is selected. Real-model
+and target-Mac acceptance remain operator evidence rather than claims made by
+these software tests.

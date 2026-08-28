@@ -69,12 +69,14 @@ class RolloutServiceBase:
         audit: AuditLogger | None = None,
         guard: EvolutionWriteGuard | None = None,
         fault_hook: FaultHook | None = None,
+        runtime_client: Any | None = None,
     ) -> None:
         self.settings = settings
         self.database = database
         self.audit = audit
         self.guard = guard or EvolutionWriteGuard(settings, audit=audit)
         self.fault_hook = fault_hook
+        self.runtime_client = runtime_client
 
     async def require(self, identifier: str) -> RolloutRecord:
         """Return a rollout record; provided by the persistence mixin."""

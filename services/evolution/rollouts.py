@@ -1,8 +1,8 @@
 """Compatibility facade for durable shadow/canary rollout safety.
 
-Safe LoRA canary remains fail-closed. It requires an independently addressable,
-immutable candidate Runtime identity (or separate candidate process); the
-current globally bound adapter lifecycle cannot provide request-scoped canary.
+LoRA canaries use an independently addressable immutable candidate Runtime
+identity. The service fails closed when that capability is not proven and never
+changes a global adapter pointer per request.
 """
 
 # Public rollout types and helpers remain available from this facade.

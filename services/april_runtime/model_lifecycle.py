@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
+import json
 import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from april_common.errors import AprilError, ModelUnavailableError, NotFoundError
@@ -27,6 +31,23 @@ from services.april_runtime.schemas import (
 
 BackendFactory = Callable[[ModelDefinition], RuntimeBackend]
 RuntimeStreamEventName = Literal["meta", "token", "usage", "done", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeModelIdentity:
+    """Immutable identity for one loaded model/adapter instance."""
+
+    instance_id: str
+    model_id: str
+    candidate_id: str | None
+    base_model_sha256: str
+    adapter_id: str | None
+    adapter_sha256: str | None
+    configuration_sha256: str
+
+    @property
+    def is_candidate(self) -> bool:
+        return self.candidate_id is not None
 
 
 class ResourceLoadGate(Protocol):
@@ -52,6 +73,8 @@ class ResourceLoadGate(Protocol):
 @dataclass(slots=True)
 class ModelRuntimeState:
     model: ModelDefinition
+    identity: RuntimeModelIdentity | None = None
+    base_model_id: str | None = None
     state: ModelState = "unloaded"
     backend: RuntimeBackend | None = None
     lifecycle_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -92,9 +115,14 @@ class ModelLifecycle:
         self.governor = governor
         self._policy_lock = asyncio.Lock()
         self._states = {
-            model.id: ModelRuntimeState(model=model, state=self._initial_state(model))
+            model.id: ModelRuntimeState(
+                model=model,
+                base_model_id=model.id,
+                state=self._initial_state(model),
+            )
             for model in registry.list()
         }
+        self._candidate_instance_ids: set[str] = set()
         self._backend_factory = backend_factory or self._default_backend_factory
 
     def _initial_state(self, model: ModelDefinition) -> ModelState:
@@ -123,6 +151,146 @@ class ModelLifecycle:
             return self._states[model_id]
         except KeyError as exc:
             raise NotFoundError("Model", {"model_id": model_id}) from exc
+
+    def get_instance(self, instance_id: str) -> ModelRuntimeState:
+        """Resolve either a registry model ID or an isolated instance ID."""
+
+        return self.get_state(instance_id)
+
+    def candidate_capability(self) -> dict[str, object]:
+        return {
+            "supported": bool(getattr(self._backend_factory, "supports_isolated_instances", True)),
+            "backend_instance_isolation": "per_candidate_backend_object",
+            "candidate_count": len(self._candidate_instance_ids),
+        }
+
+    def candidate_readiness(self) -> dict[str, object]:
+        candidates: list[dict[str, object]] = []
+        for instance_id in sorted(self._candidate_instance_ids):
+            state = self._states[instance_id]
+            identity = state.identity
+            candidates.append(
+                {
+                    "instance_id": instance_id,
+                    "model_id": state.base_model_id,
+                    "candidate_id": identity.candidate_id if identity else None,
+                    "state": state.state,
+                    "integrity_state": ("verified" if identity is not None else "unknown"),
+                    "base_model_sha256": identity.base_model_sha256 if identity else None,
+                    "adapter_sha256": identity.adapter_sha256 if identity else None,
+                    "configuration_sha256": (identity.configuration_sha256 if identity else None),
+                    "load_error": state.load_error,
+                    "active_requests": state.active_requests,
+                }
+            )
+        baseline = next(
+            (
+                state
+                for state in self._states.values()
+                if not (state.identity and state.identity.is_candidate)
+                and state.model.role == "brain"
+            ),
+            None,
+        )
+        return {
+            **self.candidate_capability(),
+            "baseline_model_instance": baseline.model.id if baseline else None,
+            "candidate_instances": candidates,
+            "candidate_integrity_state": (
+                "mismatch"
+                if any(item["integrity_state"] == "mismatch" for item in candidates)
+                else ("verified" if candidates else "unknown")
+            ),
+        }
+
+    async def prepare_candidate(
+        self,
+        *,
+        model_id: str,
+        candidate_id: str,
+        adapter_path: Path,
+        adapter_sha256: str,
+        configuration_sha256: str,
+        instance_id: str | None = None,
+        load: bool = True,
+    ) -> ModelRuntimeState:
+        """Create and optionally load an immutable, separately addressable LoRA instance."""
+
+        base = self.registry.get(model_id)
+        if base.role == "embedding":
+            raise ModelUnavailableError(model_id, "LoRA candidates cannot be embedding models.")
+        resolved_base = base.resolved_path(self.registry.root)
+        resolved_adapter = adapter_path.expanduser().resolve(strict=False)
+        if not _is_within(resolved_adapter, self.registry.root):
+            raise ModelUnavailableError(
+                model_id,
+                "Candidate adapter path is outside the Runtime model root.",
+            )
+        if not resolved_base.is_file() or resolved_base.is_symlink():
+            raise ModelUnavailableError(model_id, "Base model file is unavailable.")
+        if not resolved_adapter.is_file() or resolved_adapter.is_symlink():
+            raise ModelUnavailableError(model_id, "Candidate adapter file is unavailable.")
+        base_sha = _sha256_path(resolved_base)
+        actual_adapter_sha = _sha256_path(resolved_adapter)
+        if actual_adapter_sha != adapter_sha256:
+            raise ModelUnavailableError(model_id, "Candidate adapter hash mismatch.")
+        if len(configuration_sha256) != 64:
+            raise ModelUnavailableError(model_id, "Candidate configuration hash is invalid.")
+        stable_id = instance_id or _candidate_instance_id(
+            model_id,
+            candidate_id,
+            base_sha,
+            actual_adapter_sha,
+            configuration_sha256,
+        )
+        candidate_identity = RuntimeModelIdentity(
+            instance_id=stable_id,
+            model_id=model_id,
+            candidate_id=candidate_id,
+            base_model_sha256=base_sha,
+            adapter_id=candidate_id,
+            adapter_sha256=actual_adapter_sha,
+            configuration_sha256=configuration_sha256,
+        )
+        existing = self._states.get(stable_id)
+        if existing is not None:
+            if existing.identity != candidate_identity:
+                raise ModelUnavailableError(model_id, "Candidate instance identity is immutable.")
+            if load:
+                await self.load_candidate(stable_id)
+            return existing
+        candidate_model = base.model_copy(
+            update={
+                "id": stable_id,
+                "path": resolved_base,
+                "adapter_path": resolved_adapter,
+            }
+        )
+        state = ModelRuntimeState(
+            model=candidate_model,
+            identity=candidate_identity,
+            base_model_id=model_id,
+            state=self._initial_state(candidate_model),
+        )
+        self._states[stable_id] = state
+        self._candidate_instance_ids.add(stable_id)
+        try:
+            if load:
+                await self.load_candidate(stable_id)
+        except (asyncio.CancelledError, TimeoutError):
+            raise
+        except BaseException:
+            # Keep a diagnostic state for readiness, but never expose a partially
+            # loaded backend or let the failed candidate affect the baseline.
+            await self._close_failed_state(state)
+            raise
+        return state
+
+    async def unload_candidate(self, instance_id: str) -> ModelRuntimeState:
+        state = self.get_state(instance_id)
+        if state.identity is None or not state.identity.is_candidate:
+            raise ModelUnavailableError(instance_id, "Model instance is not a candidate.")
+        return await self.unload_model(instance_id)
 
     def list_models(self) -> list[ModelInfo]:
         return [self._model_info(state) for state in self._states.values()]
@@ -161,6 +329,12 @@ class ModelLifecycle:
             n_gpu_layers=state.model.n_gpu_layers,
             use_mmap=state.model.use_mmap,
             use_mlock=state.model.use_mlock,
+            model_instance_id=state.identity.instance_id if state.identity else state.model.id,
+            base_model_id=state.base_model_id or state.model.id,
+            candidate_id=state.identity.candidate_id if state.identity else None,
+            base_model_sha256=state.identity.base_model_sha256 if state.identity else None,
+            adapter_sha256=state.identity.adapter_sha256 if state.identity else None,
+            configuration_sha256=(state.identity.configuration_sha256 if state.identity else None),
         )
 
     def policy_snapshot(self) -> dict[str, object]:
@@ -236,9 +410,22 @@ class ModelLifecycle:
         state = self.get_state(model_id)
         if generation_threads is not None and generation_threads < 1:
             raise ValueError("generation_threads must be positive")
-        if self._is_specialist(state.model):
+        if self._is_specialist(state.model) and state.identity is None:
             self._check_resource_gate(state)
             await self._enforce_lifecycle(target_model_id=model_id)
+        elif state.identity is not None and state.identity.is_candidate:
+            self._check_resource_gate(state)
+            if (
+                self.max_loaded_specialist_models > 0
+                and state.state != "loaded"
+                and self._loaded_specialist_count() >= self.max_loaded_specialist_models
+            ):
+                raise ModelUnavailableError(
+                    model_id,
+                    "Candidate load would exceed the specialist instance limit; "
+                    "baseline was left untouched.",
+                    {"max_loaded_specialist_models": self.max_loaded_specialist_models},
+                )
         async with state.lifecycle_lock:
             if state.state == "loaded":
                 if generation_threads is None or state.loaded_threads == generation_threads:
@@ -297,18 +484,64 @@ class ModelLifecycle:
                 update["adapter_path"] = resolved_adapter
             resolved_model = state.model.model_copy(update=update)
             backend = self._backend_factory(resolved_model)
+            if not getattr(backend, "supports_isolated_instances", True):
+                state.state = "error"
+                state.load_error = "backend_does_not_support_isolated_instances"
+                raise ModelUnavailableError(
+                    model_id, "Backend cannot provide isolated model instances."
+                )
+            if any(
+                other.backend is backend
+                for other_id, other in self._states.items()
+                if other_id != model_id and other.backend is not None
+            ):
+                state.state = "error"
+                state.load_error = "backend_instance_reused"
+                raise ModelUnavailableError(
+                    model_id, "Backend instance is shared with another model."
+                )
             started = time.monotonic()
             try:
                 await backend.load(resolved_model)
+            except asyncio.CancelledError:
+                state.state = "error"
+                state.load_error = "candidate_load_cancelled"
+                state.backend = None
+                with contextlib.suppress(Exception):
+                    await backend.unload()
+                raise
             except Exception as exc:
                 state.state = "error"
                 state.load_error = str(exc)
                 state.backend = None
+                with contextlib.suppress(Exception):
+                    await backend.unload()
                 raise ModelUnavailableError(
                     model_id, "Unable to load model.", {"cause": str(exc)}
                 ) from exc
             state.backend = backend
             state.state = "loaded"
+            if state.identity is None:
+                state.identity = RuntimeModelIdentity(
+                    instance_id=state.model.id,
+                    model_id=state.model.id,
+                    candidate_id=None,
+                    base_model_sha256=(
+                        _sha256_path(resolved_model.path)
+                        if resolved_model.path.is_file()
+                        else hashlib.sha256(b"").hexdigest()
+                    ),
+                    adapter_id=(
+                        resolved_model.adapter_path.name if resolved_model.adapter_path else None
+                    ),
+                    adapter_sha256=(
+                        _sha256_path(resolved_model.adapter_path)
+                        if resolved_model.adapter_path is not None
+                        and resolved_model.adapter_path.is_file()
+                        else None
+                    ),
+                    configuration_sha256=_configuration_hash(resolved_model),
+                )
             state.loaded_threads = resolved_model.threads
             state.loaded_at = utc_now_iso()
             state.load_duration_ms = (time.monotonic() - started) * 1000
@@ -343,6 +576,25 @@ class ModelLifecycle:
     async def cleanup(self) -> None:
         for model_id in list(self._states):
             await self.unload_model(model_id)
+
+    async def _close_failed_state(self, state: ModelRuntimeState) -> None:
+        if state.backend is not None:
+            with contextlib.suppress(Exception):
+                await state.backend.unload()
+        state.backend = None
+        state.state = "error"
+
+    async def load_candidate(
+        self, instance_id: str, *, timeout_seconds: float | None = None
+    ) -> ModelRuntimeState:
+        try:
+            if timeout_seconds is None:
+                return await self.load_model(instance_id)
+            return await asyncio.wait_for(self.load_model(instance_id), timeout_seconds)
+        except (asyncio.CancelledError, TimeoutError):
+            with contextlib.suppress(Exception):
+                await self.unload_candidate(instance_id)
+            raise
 
     async def generate(self, request: ChatRequest) -> ChatResponse:
         request_id = request.request_id or str(uuid.uuid4())
@@ -652,3 +904,38 @@ class _NoopLock:
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         return None
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _candidate_instance_id(
+    model_id: str,
+    candidate_id: str,
+    base_sha256: str,
+    adapter_sha256: str,
+    configuration_sha256: str,
+) -> str:
+    material = "|".join((model_id, candidate_id, base_sha256, adapter_sha256, configuration_sha256))
+    suffix = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    return f"candidate:{model_id}:{candidate_id}:{suffix}"
+
+
+def _configuration_hash(model: ModelDefinition) -> str:
+    payload = model.model_dump(mode="json", exclude={"path", "adapter_path", "id"})
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True

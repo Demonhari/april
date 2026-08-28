@@ -15,6 +15,7 @@ from starlette.testclient import TestClient
 
 from april_common.errors import ModelUnavailableError
 from april_common.settings import AprilSettings, load_settings, reset_settings_cache
+from services.api.dependencies import ApiContainer
 from services.april_runtime.fake_backend import FakeBackend
 from services.april_runtime.schemas import ChatMessage, ChatResponse, Usage
 from services.memory.database import Database
@@ -51,8 +52,20 @@ def _close_tracked_test_clients(monkeypatch: pytest.MonkeyPatch) -> Iterator[Non
     try:
         yield
     finally:
+        containers: list[ApiContainer] = []
         for client in reversed(tracked):
+            app = getattr(client, "app", None)
+            container = getattr(getattr(app, "state", None), "container", None)
+            if isinstance(container, ApiContainer) and all(
+                container is seen for seen in containers
+            ):
+                containers.append(container)
             client.close()
+        # Direct TestClient construction does not enter FastAPI's lifespan.
+        # Close each discovered container after its client so owned workers,
+        # scheduler tasks, and the database are released deterministically.
+        for container in containers:
+            anyio.run(container.aclose)
 
 
 @pytest.fixture(autouse=True)

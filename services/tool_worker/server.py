@@ -4,8 +4,10 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import stat
 from collections import OrderedDict
+from contextlib import suppress
 from pathlib import Path
 
 from services.tool_worker.executor import ToolWorkerExecutor
@@ -14,6 +16,8 @@ from services.tool_worker.limits import (
     prepare_runtime_directory,
     prepare_socket_path,
     read_capability_file,
+    remove_owned_socket,
+    socket_identity,
 )
 from services.tool_worker.protocol import (
     ToolWorkerProtocolError,
@@ -55,6 +59,8 @@ class ToolWorkerServer:
             OrderedDict()
         )
         self._journal_path = self.runtime_directory / "request-outcomes.json"
+        self._owned_socket_identity: tuple[int, int] | None = None
+        self._shutdown_event: asyncio.Event | None = None
 
     async def start(self) -> None:
         runtime = prepare_runtime_directory(
@@ -75,21 +81,51 @@ class ToolWorkerServer:
         )
         self._server = await asyncio.start_unix_server(self._handle, path=socket_path)
         os.chmod(socket_path, 0o600)
+        self._owned_socket_identity = socket_identity(
+            socket_path,
+            runtime_directory=runtime,
+        )
 
     async def serve_forever(self) -> None:
         if self._server is None:
             await self.start()
         assert self._server is not None
-        async with self._server:
-            await self._server.serve_forever()
+        self._shutdown_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        installed: list[signal.Signals] = []
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(signum, self._shutdown_event.set)
+            except (NotImplementedError, RuntimeError):
+                # Signal handlers are unavailable outside the main thread; the
+                # caller's cancellation/finally path still closes securely.
+                continue
+            installed.append(signum)
+        try:
+            await self._shutdown_event.wait()
+        finally:
+            for signum in installed:
+                loop.remove_signal_handler(signum)
+            self._shutdown_event = None
 
     async def close(self) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        if self.socket_path.exists() and not self.socket_path.is_symlink():
-            self.socket_path.unlink()
+        identity = self._owned_socket_identity
+        self._owned_socket_identity = None
+        if identity is not None:
+            with suppress(FileNotFoundError, UnsafeToolWorkerSocket):
+                runtime = prepare_runtime_directory(
+                    self.runtime_directory,
+                    april_home=self.april_home,
+                )
+                remove_owned_socket(
+                    self.socket_path,
+                    runtime_directory=runtime,
+                    identity=identity,
+                )
 
     async def _handle(
         self,

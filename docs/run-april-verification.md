@@ -24,6 +24,17 @@ run april database restore --input /private/backups/april-current.april \
 `run april verify` without a model/fake/workflow flag is the bounded local
 security and integrity report. Full SQLite `integrity_check` remains explicit.
 
+On Linux CI, where macOS Seatbelt is unavailable, fake verification may use
+the explicit development-only override:
+
+```bash
+run april verify --fake --development-unsandboxed-override
+```
+
+The override is off by default, rejected outside development, and does not
+provide OS-enforced network or filesystem isolation. It is orchestration and
+contract evidence only, never real-model or target-Mac evidence.
+
 ```bash
 run april config validate
 run april config inspect

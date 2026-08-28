@@ -201,8 +201,8 @@ class AdapterLifecycleManager:
                 model_id=model_id,
                 reason=(
                     "direct production adapter activation is disabled; create a "
-                    "Phase 4B rollout. LoRA canary is currently unsupported until "
-                    "the Runtime provides a separate immutable model identity."
+                    "Phase 4B rollout. Use an isolated candidate Runtime instance "
+                    "and exact canary/activation approvals."
                 ),
                 next_command=(
                     "run april evolve rollout create --type lora_adapter "

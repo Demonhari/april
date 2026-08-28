@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import platform
+import secrets
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,6 +23,9 @@ from april_common.process_sandbox import (
     generate_seatbelt_profile,
     operation_policy,
 )
+from april_common.project_scope import inspect_patch_bytes
+from services.tool_worker.executor import ToolWorkerExecutor
+from services.tool_worker.schemas import ToolWorkerRequest
 
 
 def _policy(root: Path, *, network: NetworkPolicy = NetworkPolicy.DENY_ALL) -> SandboxPolicy:
@@ -96,6 +102,27 @@ def test_development_override_is_explicit_and_warns(tmp_path: Path) -> None:
     assert overridden.network_denial_available is False
     assert overridden.warning is not None
     assert "DEVELOPMENT ONLY" in overridden.warning
+
+
+@pytest.mark.asyncio
+async def test_linux_development_override_runs_fake_restricted_process(tmp_path: Path) -> None:
+    provider = HostProcessSandbox(system="Linux", sandbox_exec=tmp_path / "missing")
+    result = await run_restricted_process(
+        [sys.executable, "-c", "print('development-only')"],
+        cwd=tmp_path,
+        category=ProcessCategory.RESTRICTED_COMMAND,
+        timeout_seconds=5,
+        sandbox_policy=_policy(tmp_path),
+        sandbox_environment="development",
+        development_unsandboxed_override=True,
+        sandbox_provider=provider,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "development-only"
+    assert result.sandbox is not None
+    assert result.sandbox.backend is SandboxBackend.DEVELOPMENT_OVERRIDE
+    assert result.sandbox.network_denial_available is False
+    assert result.sandbox.filesystem_policy_available is False
 
 
 class _FakeProcess:
@@ -192,3 +219,71 @@ async def test_macos_seatbelt_denies_outbound_socket_when_operational(tmp_path: 
         sandbox_provider=provider,
     )
     assert denied.returncode != 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS Seatbelt integration")
+async def test_macos_seatbelt_exact_patch_inspect_check_apply(tmp_path: Path) -> None:
+    provider = HostProcessSandbox()
+    probe = await run_restricted_process(
+        [sys.executable, "-c", "print('seatbelt-probe')"],
+        cwd=tmp_path,
+        category=ProcessCategory.RESTRICTED_COMMAND,
+        timeout_seconds=5,
+        sandbox_policy=_policy(tmp_path),
+        sandbox_provider=provider,
+    )
+    if probe.returncode == 71 and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox-exec exists but the enclosing test sandbox denies profile application")
+    assert probe.returncode == 0, probe.stderr
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "file.txt").write_text("old\n", encoding="utf-8")
+    for args in (
+        ("init",),
+        ("config", "user.email", "april@example.invalid"),
+        ("config", "user.name", "APRIL Test"),
+        ("add", "file.txt"),
+        ("commit", "-m", "initial"),
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    patch = (
+        b"diff --git a/file.txt b/file.txt\n"
+        b"--- a/file.txt\n"
+        b"+++ b/file.txt\n"
+        b"@@ -1 +1 @@\n"
+        b"-old\n"
+        b"+new\n"
+    )
+    artifact = await inspect_patch_bytes(
+        patch_bytes=patch,
+        repo_root=repo,
+        sandbox_environment="development",
+    )
+    capability = secrets.token_urlsafe(32)
+    response = await ToolWorkerExecutor(
+        allowed_roots=(repo,),
+        capability=capability,
+        environment="development",
+    ).execute(
+        ToolWorkerRequest(
+            request_id="mac-seatbelt-patch",
+            capability=capability,
+            operation="patch_applier",
+            project_root=str(repo),
+            args={
+                "patch_base64": base64.b64encode(patch).decode("ascii"),
+                "patch_sha256": artifact.patch_sha256,
+                "patch_byte_length": artifact.patch_byte_length,
+                "affected_paths": artifact.affected_paths,
+                "repo_root": str(repo),
+                "repo_state_digest": artifact.repo_state_digest,
+            },
+            timeout_seconds=15,
+            max_stdout_bytes=4096,
+            max_stderr_bytes=4096,
+        )
+    )
+    assert response.ok is True, response
+    assert (repo / "file.txt").read_text(encoding="utf-8") == "new\n"

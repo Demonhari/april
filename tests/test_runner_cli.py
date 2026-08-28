@@ -442,6 +442,21 @@ def test_run_april_verify_fake_reports_table(tmp_path: Path, monkeypatch) -> Non
     assert "runtime health" in result.output
 
 
+def test_run_april_verify_rejects_unsandboxed_override_in_production(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = FakeManager(tmp_path)
+    manager.settings = type("ProductionSettings", (), {"environment": "production"})()
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    result = CliRunner().invoke(
+        app,
+        ["april", "verify", "--fake", "--development-unsandboxed-override"],
+    )
+    assert result.exit_code == 1
+    assert "valid only in development" in result.output
+
+
 def test_run_april_verify_fake_soak_short_mode(tmp_path: Path, monkeypatch) -> None:
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
