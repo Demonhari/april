@@ -185,6 +185,7 @@ def run_all_configured_models_verification(
     thresholds: ReportThresholds | None = None,
     candidate_adapter_model_id: str | None = None,
     candidate_adapter_path: Path | None = None,
+    routing_evaluation: bool | None = None,
 ) -> AllConfiguredModelsVerifier:
     verifier = AllConfiguredModelsVerifier(
         home=home,
@@ -194,6 +195,7 @@ def run_all_configured_models_verification(
         thresholds=thresholds,
         candidate_adapter_model_id=candidate_adapter_model_id,
         candidate_adapter_path=candidate_adapter_path,
+        routing_evaluation=routing_evaluation,
     )
     verifier.run()
     return verifier

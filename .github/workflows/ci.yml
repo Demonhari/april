@@ -25,6 +25,9 @@ jobs:
       - name: Verify pip compatibility pins match uv lock
         run: python scripts/check_dependency_drift.py
 
+      - name: Verify source hygiene
+        run: python scripts/check_source_hygiene.py
+
       - name: Verify clean locked installation
         run: scripts/verify_locked_install.sh
 
@@ -61,6 +64,9 @@ jobs:
 
       - name: Verify pip compatibility pins match uv lock
         run: python scripts/check_dependency_drift.py
+
+      - name: Verify source hygiene
+        run: python scripts/check_source_hygiene.py
 
       - name: Lint
         run: python -m ruff check .

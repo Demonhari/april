@@ -173,25 +173,25 @@ def verify(
             thresholds=thresholds,
             candidate_adapter_model_id=candidate_adapter_model_id,
             candidate_adapter_path=candidate_adapter_path,
+            routing_evaluation=require_real_model,
         )
         checks = verifier.checks
+        multi_report = verifier.build_report()
         if json_output:
-            console.print_json(data={"checks": [asdict(check) for check in checks]})
+            console.print_json(data=multi_report.model_dump())
         else:
             _composition_api._print_verification_table(
                 "APRIL All-Configured-Model Verification", checks
             )
+            _print_routing_summary(multi_report)
         if report is not None:
-            multi_report = verifier.build_report(
-                config_fingerprint=config_fingerprint_digest(_composition_api._manager().home)
-            )
             written = write_multi_model_report(multi_report, report)
             console.print(
                 f"[green]Wrote multi-model verification report to {written}[/green] "
                 f"(summary: {multi_report.summary}, "
                 f"verification_level: {multi_report.verification_level})"
             )
-        if not all(check.ok for check in checks):
+        if not all(check.ok for check in checks) or multi_report.summary == "fail":
             raise typer.Exit(1)
         raise typer.Exit(0)
     if target_mac:
@@ -295,6 +295,35 @@ def verify(
         _composition_api._print_verification_table("APRIL Verification", checks)
     if not all(check.ok for check in checks):
         raise typer.Exit(1)
+
+
+def _print_routing_summary(report: object) -> None:
+    """Render bounded Brain-routing counters and reason codes."""
+    table = Table(title="Brain routing evaluation")
+    table.add_column("Metric")
+    table.add_column("Value")
+    brain = next(
+        (
+            model
+            for model in getattr(report, "models", [])
+            if getattr(model, "role", None) == "brain"
+        ),
+        None,
+    )
+    routing = getattr(brain, "routing", None)
+    rows = {
+        "routing cases total": getattr(routing, "total", 0) if routing else 0,
+        "routing cases passed": getattr(routing, "passed", 0) if routing else 0,
+        "routing accuracy": getattr(routing, "accuracy", 0.0) if routing else 0.0,
+        "schema-valid count": getattr(routing, "schema_valid_count", 0) if routing else 0,
+        "model-repair count": getattr(routing, "model_repair_count", 0) if routing else 0,
+        "fallback count": getattr(routing, "fallback_count", 0) if routing else 0,
+        "threshold failures": ", ".join(getattr(report, "threshold_failures", [])) or "none",
+        "routing reason": getattr(brain, "routing_error_code", None) or "none",
+    }
+    for key, value in rows.items():
+        table.add_row(key, str(value))
+    console.print(table)
 
 
 def _voice_live_runner(settings: Any) -> Callable[[], VoiceLiveReport]:

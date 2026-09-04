@@ -3,6 +3,9 @@
 .*.april-credentials-rollback
 data/*.db
 data/*.db-*
+data/*.write.lock
+data/runtime/
+data/setup/
 data/backups/
 data/vector_index/
 data/patches/
@@ -24,6 +27,7 @@ logs/*.anchor
 logs/*.lock
 models/*.gguf
 models/*.bin
+configs/*.bak-*
 tools/voice/
 *.wav
 *.onnx

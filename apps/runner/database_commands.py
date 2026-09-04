@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -10,15 +12,113 @@ from apps.runner.service_manager import AprilServiceManager
 from april_common.audit import audit_logger_for_settings
 from april_common.errors import ConfigError
 from april_common.settings import load_settings
+from services.memory.database import Database
 from services.memory.maintenance import (
     BackupCancelled,
     DatabaseMaintenanceError,
     check_database,
     create_backup,
+    migration_plan,
     restore_backup,
 )
+from services.memory.migrations import run_migrations
 
 database_app = typer.Typer(help="SQLite integrity, backup, and restore operations.")
+
+
+@database_app.command("migrate")
+def database_migrate(
+    apply: bool = typer.Option(False, "--apply", help="Apply the planned migration."),
+    stop_services: bool = typer.Option(
+        False, "--stop-services", help="Stop APRIL services before applying."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show or explicitly apply the local database migration plan."""
+    try:
+        settings = load_settings()
+        plan = migration_plan(settings.database_path, home=settings.home)
+        if not apply:
+            payload = plan.to_dict()
+            payload["apply_command"] = "run april database migrate --apply"
+            if json_output:
+                console.print_json(data=payload)
+            else:
+                console.print(
+                    f"Database migration plan: {plan.status}; "
+                    f"schema={plan.current_schema_version}; "
+                    f"expected={plan.expected_schema_version}."
+                )
+                if plan.status == "migration_pending":
+                    console.print("Apply explicitly with: run april database migrate --apply")
+            raise typer.Exit(0 if plan.status in {"current", "migration_pending"} else 1)
+        if plan.status == "current":
+            console.print("Database is already current; no changes applied.")
+            raise typer.Exit(0)
+        if plan.status != "migration_pending":
+            raise DatabaseMaintenanceError(f"Migration refused: {plan.status}.")
+
+        manager = AprilServiceManager(home=settings.home)
+        daemon_status = read_daemon_status(settings)
+        daemon_running = isinstance(daemon_status.get("pid"), int)
+        service_status = manager.status()
+        running = service_status.runtime.running or service_status.api.running or daemon_running
+        if running and not stop_services:
+            raise DatabaseMaintenanceError(
+                "APRIL services are running; use --stop-services to authorize stopping them."
+            )
+        if running and stop_services:
+            if daemon_running:
+                stopped_daemon = stop_daemon(settings)
+                if stopped_daemon.get("status") != "stopped":
+                    raise DatabaseMaintenanceError("APRIL daemon could not be stopped safely.")
+            manager.stop()
+            current = manager.status()
+            if current.runtime.running or current.api.running:
+                raise DatabaseMaintenanceError("APRIL services could not be stopped safely.")
+
+        backup_root = settings.home / "data" / "backups" / "database-migrations"
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = backup_root / f"pre-migration-{stamp}"
+        backup = create_backup(
+            settings.database_path,
+            backup_path,
+            home=settings.home,
+            audit=audit_logger_for_settings(settings),
+        )
+
+        async def apply_migration() -> None:
+            database = Database(settings.database_path)
+            await database.connect()
+            try:
+                await run_migrations(database)
+            finally:
+                await database.close()
+
+        try:
+            asyncio.run(apply_migration())
+            post = check_database(settings.database_path, home=settings.home, full=True)
+            if not post.ok or post.schema_version != plan.expected_schema_version:
+                raise DatabaseMaintenanceError("Post-migration integrity verification failed.")
+        except BaseException:
+            # The pre-migration snapshot remains retained. The active database
+            # is never silently deleted or replaced after a failed apply.
+            raise
+    except (ConfigError, DatabaseMaintenanceError, OSError) as exc:
+        if json_output:
+            console.print_json(data={"ok": False, "reason_code": type(exc).__name__})
+        else:
+            console.print(f"[red]Database migration failed ({type(exc).__name__}).[/red]")
+        raise typer.Exit(1) from exc
+    if json_output:
+        console.print_json(
+            data={"ok": True, "status": "migrated", "schema_version": plan.expected_schema_version}
+        )
+    else:
+        console.print(
+            f"Database migrated to schema {plan.expected_schema_version}; "
+            f"backup retained as {backup.output.name}."
+        )
 
 
 @database_app.command("check")

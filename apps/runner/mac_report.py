@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from april_common.time import utc_now_iso
 
@@ -104,6 +104,17 @@ class RoutingCaseResult(BaseModel):
     routing_ok: bool = True
     ok: bool = False
     routing_method: str | None = None
+    expected_intent: str | None = None
+    actual_intent: str | None = None
+    expected_agent: str | None = None
+    actual_agent: str | None = None
+    expected_model_role: str | None = None
+    actual_model_role: str | None = None
+    tool_match: bool | None = None
+    permission_match: bool | None = None
+    risk_match: bool | None = None
+    confirmation_match: bool | None = None
+    mismatch_codes: list[str] = Field(default_factory=list)
 
 
 class RoutingReport(BaseModel):
@@ -124,6 +135,16 @@ class RoutingReport(BaseModel):
     model_repair_count: int = 0
     # Per-case redacted outcomes (id + structural verdicts + routing method only).
     cases: list[RoutingCaseResult] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def infer_legacy_schema_count(self) -> RoutingReport:
+        # Reports produced before per-case diagnostics had no cases list. Their
+        # zero default meant "not recorded", not "every decision invalid".
+        # New required evaluations always include cases and therefore retain a
+        # literal zero as a failure.
+        if self.total > 0 and not self.cases and self.schema_valid_count == 0:
+            self.schema_valid_count = self.total
+        return self
 
 
 class SkippedCheck(BaseModel):
@@ -192,6 +213,19 @@ def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
             routing_ok=bool(getattr(result, "routing_ok", getattr(result, "ok", False))),
             ok=bool(getattr(result, "ok", False)),
             routing_method=_routing_method_of(result),
+            expected_intent=getattr(result, "expected_intent", None),
+            actual_intent=(getattr(result, "actual", {}) or {}).get("intent"),
+            expected_agent=getattr(result, "expected_agent", None),
+            actual_agent=(getattr(result, "actual", {}) or {}).get("agent"),
+            expected_model_role=getattr(result, "expected_model_id", None),
+            actual_model_role=(getattr(result, "actual", {}) or {}).get("model_id"),
+            tool_match=_field_match(result, "tools_needed", "expected_tools"),
+            permission_match=_field_match(result, "permission_level", "expected_permission_level"),
+            risk_match=_field_match(result, "risk_level", "expected_risk_level"),
+            confirmation_match=_field_match(
+                result, "needs_confirmation", "expected_needs_confirmation"
+            ),
+            mismatch_codes=list(getattr(result, "mismatch_codes", [])),
         )
         for result in results
     ]
@@ -205,6 +239,14 @@ def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
         model_repair_count=model_repair_count,
         cases=cases,
     )
+
+
+def _field_match(result: object, actual_key: str, expected_attr: str) -> bool | None:
+    expected = getattr(result, expected_attr, None)
+    if expected is None:
+        return None
+    actual = getattr(result, "actual", {})
+    return isinstance(actual, dict) and actual.get(actual_key) == expected
 
 
 def threshold_failures(real_model: RealModelReport, thresholds: ReportThresholds) -> list[str]:

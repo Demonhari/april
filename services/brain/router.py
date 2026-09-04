@@ -3,7 +3,7 @@ from __future__ import annotations
 from agents.schemas import AGENT_NAMES
 from april_common.errors import AprilError, RuntimeUnavailableError
 from services.april_runtime.client import RuntimeClient
-from services.april_runtime.schemas import ChatMessage
+from services.april_runtime.schemas import ChatMessage, GenerationOptions
 from services.brain.deterministic_router import DeterministicRouter
 from services.brain.fallback_router import FallbackRouter
 from services.brain.parser import parse_with_repair
@@ -153,6 +153,10 @@ class BrainRouter:
                     ChatMessage(role="system", content=ROUTER_SYSTEM_PROMPT),
                     ChatMessage(role="user", content=routing_input),
                 ],
+                options=GenerationOptions(
+                    temperature=0.0,
+                    max_output_tokens=192,
+                ),
                 response_format=BRAIN_DECISION_RESPONSE_FORMAT,
                 request_id=request_id,
             )
@@ -174,6 +178,10 @@ class BrainRouter:
                         ),
                         ChatMessage(role="user", content=response.content),
                     ],
+                    options=GenerationOptions(
+                        temperature=0.0,
+                        max_output_tokens=192,
+                    ),
                     response_format=BRAIN_DECISION_RESPONSE_FORMAT,
                     request_id=request_id,
                 )

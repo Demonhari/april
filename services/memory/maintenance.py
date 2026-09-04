@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from april_common.audit import AuditLogger
 from april_common.time import utc_now_iso
@@ -53,6 +53,26 @@ class DatabaseCheckResult:
     integrity_check: str | None
     last_successful_backup: dict[str, Any] | None
     checked_at: str
+    failures: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+MigrationStatus = Literal[
+    "current",
+    "migration_pending",
+    "migration_ahead",
+    "migration_inconsistent",
+    "database_corrupt",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationPlan:
+    status: MigrationStatus
+    current_schema_version: int | None
+    expected_schema_version: int
     failures: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
@@ -191,6 +211,45 @@ def check_database(
         last_successful_backup=_last_backup(home),
         checked_at=utc_now_iso(),
         failures=tuple(failures),
+    )
+
+
+def migration_plan(database_path: Path, *, home: Path | None = None) -> MigrationPlan:
+    """Return a read-only, bounded description of the database migration state."""
+    check = check_database(database_path, home=home, full=True)
+    schema = check.schema_version
+    if not check.available or check.quick_check != "ok" or not check.foreign_key_consistent:
+        return MigrationPlan(
+            status="database_corrupt",
+            current_schema_version=schema,
+            expected_schema_version=SCHEMA_VERSION,
+            failures=check.failures or ("database_corrupt",),
+        )
+    if schema is None:
+        return MigrationPlan(
+            status="migration_inconsistent",
+            current_schema_version=None,
+            expected_schema_version=SCHEMA_VERSION,
+            failures=("migration_history_missing",),
+        )
+    if schema > SCHEMA_VERSION:
+        return MigrationPlan(
+            status="migration_ahead",
+            current_schema_version=schema,
+            expected_schema_version=SCHEMA_VERSION,
+            failures=("schema_ahead",),
+        )
+    if schema < SCHEMA_VERSION:
+        return MigrationPlan(
+            status="migration_pending",
+            current_schema_version=schema,
+            expected_schema_version=SCHEMA_VERSION,
+            failures=("migration_pending",),
+        )
+    return MigrationPlan(
+        status="current",
+        current_schema_version=schema,
+        expected_schema_version=SCHEMA_VERSION,
     )
 
 

@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: install install-dev test coverage lint format format-check typecheck dependency-drift desktop-js check ci run-runtime run-api cli install-global install-global-path install-global-force install-global-force-path verify-global uninstall-global
+.PHONY: install install-dev test coverage lint format format-check typecheck dependency-drift source-hygiene desktop-js check ci run-runtime run-api cli install-global install-global-path install-global-force install-global-force-path verify-global uninstall-global
 
 install:
 	$(PYTHON) -m venv $(VENV)
@@ -34,6 +34,9 @@ typecheck:
 dependency-drift:
 	$(PYTHON) scripts/check_dependency_drift.py
 
+source-hygiene:
+	$(PYTHON) scripts/check_source_hygiene.py
+
 desktop-js:
 	@if command -v node >/dev/null 2>&1; then \
 		node tests/js/desktop_token_bridge.test.cjs; \
@@ -53,7 +56,7 @@ check: lint format-check typecheck test
 # Full CI-equivalent gate, including compile, regular pytest, coverage threshold,
 # ResourceWarning-visible pytest, config validation, fake verification, and
 # desktop static checks when Node is available locally.
-ci: dependency-drift lint format-check typecheck desktop-js
+ci: dependency-drift source-hygiene lint format-check typecheck desktop-js
 	$(PY) -m compileall -q april_common apps services agents skills tests
 	$(PY) -m pytest -q -ra
 	$(PY) -m pytest --cov=april_common --cov=apps --cov=services --cov=agents --cov=skills --cov-report=term-missing --cov-fail-under=85

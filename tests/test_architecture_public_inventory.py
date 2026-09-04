@@ -112,6 +112,7 @@ april approve
 april ask
 april audit
 april audit verify
+april audit recover
 april briefing
 april chat
 april config
@@ -122,6 +123,7 @@ april conversation delete
 april database
 april database backup
 april database check
+april database migrate
 april database restore
 april deny
 april desktop

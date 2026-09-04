@@ -37,8 +37,14 @@ class BrainEvalResult(BaseModel):
     routing_ok: bool = True
     expected_intent: str
     expected_agent: str
+    expected_model_id: str | None = None
+    expected_tools: list[str] | None = None
+    expected_permission_level: int | None = None
+    expected_risk_level: str | None = None
+    expected_needs_confirmation: bool | None = None
     actual: dict[str, Any] = Field(default_factory=dict)
     detail: str = ""
+    mismatch_codes: list[str] = Field(default_factory=list)
 
 
 def load_brain_eval_cases(home: Path) -> list[BrainEvalCase]:
@@ -102,6 +108,12 @@ def _evaluate_case(
         elif actual_method not in {"model", "model_repair"}:
             mismatches.append(f"routing_method expected model/model_repair, got {actual_method!r}")
     routing_ok = not mismatches
+    mismatch_codes = _mismatch_codes(
+        case,
+        actual,
+        schema_valid=schema_valid,
+        allow_fallback=allow_fallback,
+    )
     return BrainEvalResult(
         id=case.id,
         ok=schema_valid and routing_ok,
@@ -109,9 +121,50 @@ def _evaluate_case(
         routing_ok=routing_ok,
         expected_intent=case.expected_intent,
         expected_agent=case.expected_agent,
+        expected_model_id=case.expected_model_id,
+        expected_tools=case.expected_tools,
+        expected_permission_level=case.expected_permission_level,
+        expected_risk_level=case.expected_risk_level,
+        expected_needs_confirmation=case.expected_needs_confirmation,
         actual=actual,
         detail="" if schema_valid and routing_ok else "; ".join(mismatches or ["schema invalid"]),
+        mismatch_codes=mismatch_codes,
     )
+
+
+def _mismatch_codes(
+    case: BrainEvalCase,
+    actual: dict[str, Any],
+    *,
+    schema_valid: bool,
+    allow_fallback: bool,
+) -> list[str]:
+    codes: list[str] = []
+    if not schema_valid:
+        codes.append("schema_invalid")
+        return codes
+    for key, code in (
+        ("intent", "intent_mismatch"),
+        ("agent", "agent_mismatch"),
+        ("model_id", "model_role_mismatch"),
+        ("permission_level", "permission_mismatch"),
+        ("risk_level", "risk_mismatch"),
+        ("needs_confirmation", "confirmation_mismatch"),
+    ):
+        expected = getattr(case, f"expected_{key}", None)
+        if expected is not None and actual.get(key) != expected:
+            codes.append(code)
+    if case.expected_tools is not None and sorted(actual.get("tools_needed", [])) != sorted(
+        case.expected_tools
+    ):
+        codes.append("tool_set_mismatch")
+    method = actual.get("routing_method")
+    if allow_fallback:
+        if case.expected_routing_method is not None and method != case.expected_routing_method:
+            codes.append("routing_method_mismatch")
+    elif method not in {"model", "model_repair"}:
+        codes.append("fallback_route" if method == "fallback" else "routing_provenance_invalid")
+    return codes
 
 
 def real_routing_report(cases: list[BrainEvalCase], decisions: list[Any]) -> RoutingReport:

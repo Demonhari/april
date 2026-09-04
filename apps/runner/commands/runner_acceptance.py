@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
@@ -306,25 +305,15 @@ def _collect_go_live_report(
 
     multi_model: MultiModelVerificationReport | None = None
     if preflight_ok:
-        # Brain routing eval is opt-in inside the verifier; go-live always wants it
-        # so it can prove strict-JSON routing with no fallback. Restore the prior
-        # value so the flag never leaks into the surrounding process.
-        previous = os.environ.get("APRIL_VERIFY_ROUTING_EVALS")
-        os.environ["APRIL_VERIFY_ROUTING_EVALS"] = "1"
-        try:
-            verifier = _composition_api.run_all_configured_models_verification(
-                home,
-                require_real_model=True,
-                max_output_tokens=max_output_tokens,
-                timeout=timeout,
-                thresholds=thresholds,
-            )
-            multi_model = verifier.build_report()
-        finally:
-            if previous is None:
-                os.environ.pop("APRIL_VERIFY_ROUTING_EVALS", None)
-            else:
-                os.environ["APRIL_VERIFY_ROUTING_EVALS"] = previous
+        verifier = _composition_api.run_all_configured_models_verification(
+            home,
+            require_real_model=True,
+            routing_evaluation=True,
+            max_output_tokens=max_output_tokens,
+            timeout=timeout,
+            thresholds=thresholds,
+        )
+        multi_model = verifier.build_report()
 
     try:
         settings = load_settings(root=home)

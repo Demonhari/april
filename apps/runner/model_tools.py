@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -40,7 +41,10 @@ MODEL_RUNTIME_FIELDS = {
 _BUNDLED_RUNTIME_DEFAULTS: dict[str, dict[str, Any]] = {
     "brain": {
         "threads": 8,
-        "context_size": 8192,
+        "context_size": 4096,
+        "n_batch": 128,
+        "n_gpu_layers": 0,
+        "use_mmap": True,
         "temperature": 0.3,
         "max_output_tokens": 1024,
         "keep_loaded": True,
@@ -48,19 +52,25 @@ _BUNDLED_RUNTIME_DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "coding": {
         "threads": 8,
-        "context_size": 8192,
+        "context_size": 4096,
+        "n_batch": 128,
+        "n_gpu_layers": 0,
+        "use_mmap": True,
         "temperature": 0.2,
         "max_output_tokens": 2048,
         "keep_loaded": False,
-        "idle_unload_seconds": 300,
+        "idle_unload_seconds": 180,
     },
     "reading": {
         "threads": 6,
-        "context_size": 4096,
+        "context_size": 2048,
+        "n_batch": 64,
+        "n_gpu_layers": 0,
+        "use_mmap": True,
         "temperature": 0.2,
         "max_output_tokens": 1024,
         "keep_loaded": False,
-        "idle_unload_seconds": 300,
+        "idle_unload_seconds": 120,
     },
 }
 
@@ -101,9 +111,16 @@ def _settings_config_path(home: Path) -> Path:
     return home / "configs" / "april.yaml"
 
 
-def _timestamped_backup(path: Path) -> Path:
-    backup = path.with_suffix(f"{path.suffix}.bak-{time.strftime('%Y%m%d%H%M%S')}")
+def _timestamped_backup(path: Path, *, home: Path) -> Path:
+    backup_dir = home / "data" / "backups" / "config"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(backup_dir, 0o700)
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    backup = backup_dir / f"{path.name}.bak-{stamp}"
     shutil.copy2(path, backup)
+    with contextlib.suppress(OSError):
+        os.chmod(backup, 0o600)
     return backup
 
 
@@ -294,7 +311,7 @@ def setup_model_set(
     imported: list[ModelImportResult] = []
     copied_during_command: list[Path] = []
     if apply:
-        backup = _timestamped_backup(config_path)
+        backup = _timestamped_backup(config_path, home=root)
         try:
             for entry in entries:
                 destination_existed = False
@@ -390,7 +407,7 @@ def setup_embedding_model(
     imported: ModelImportResult | None = None
     if apply:
         for config in (models_config, settings_config):
-            backups.append((config, _timestamped_backup(config)))
+            backups.append((config, _timestamped_backup(config, home=root)))
         try:
             imported = import_model(
                 home=root,
@@ -480,7 +497,7 @@ def setup_voice_stack(
 
     backup: Path | None = None
     if apply:
-        backup = _timestamped_backup(config_path)
+        backup = _timestamped_backup(config_path, home=root)
         try:
             data = _read_yaml(config_path)
             voice = data.setdefault("voice", {})

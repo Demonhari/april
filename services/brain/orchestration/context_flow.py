@@ -77,12 +77,41 @@ class ContextFlow:
             )
             decision = route_result.decision
         route_result = await self.routing_reliability.calibrate(route_result)
+        agent = self.agent_registry.get(decision.agent)
+        if agent is None:
+            raise PermissionDeniedError(
+                "Unknown agent selected by brain.", {"agent": decision.agent}
+            )
+        # Model output can advise on an agent, but the configured agent owns the
+        # model binding. Persist and execute the trusted role selection rather
+        # than allowing a generated model_id to select an arbitrary runtime.
+        if agent.model_id is not None and decision.model_id != agent.model_id:
+            decision = decision.model_copy(update={"model_id": agent.model_id})
+            route_result = route_result.model_copy(update={"decision": decision})
         await self.memory.record_conversation_event(
             conversation_id=active_conversation_id,
             event_type="brain_decision",
             payload={
                 "intent": decision.intent[:64],
                 "agent": decision.agent,
+                # The verification reader consumes this durable, redacted
+                # decision snapshot. Keep the fields needed to validate the
+                # route; never persist the prompt, raw model output, or tool
+                # arguments here.
+                "model_id": decision.model_id[:128],
+                "confidence": decision.confidence,
+                "high_stakes": decision.high_stakes,
+                "tools_needed": sorted({tool[:64] for tool in decision.tools_needed}),
+                "planned_tool_calls": [],
+                "memory_queries": [],
+                "permission_level": decision.permission_level,
+                "risk_level": decision.risk_level,
+                "needs_confirmation": decision.needs_confirmation,
+                "task_steps": [],
+                "decision_summary": "redacted routing decision",
+                "routing_method": route_result.route_source.value
+                if route_result.route_source.value in {"model", "model_repair", "fallback"}
+                else "fallback",
                 "route_source": route_result.route_source.value,
                 "matched_rule": route_result.matched_rule,
                 "fallback_reason": route_result.fallback_reason,
@@ -97,11 +126,6 @@ class ContextFlow:
                 ),
             },
         )
-        agent = self.agent_registry.get(decision.agent)
-        if agent is None:
-            raise PermissionDeniedError(
-                "Unknown agent selected by brain.", {"agent": decision.agent}
-            )
         predicted_selection = self.intelligence_ladder.select(
             message=message,
             decision=decision,
@@ -137,9 +161,6 @@ class ContextFlow:
             ).rollout_for_request(active_request_id)
             if rollout_id is not None:
                 run_metadata["rollout_id"] = rollout_id
-        if agent.model_id is not None and decision.model_id != agent.model_id:
-            decision = decision.model_copy(update={"model_id": agent.model_id})
-            route_result = route_result.model_copy(update={"decision": decision})
         if agent.name == "reasoning_agent":
             resolution = await resolve_reasoning_model(
                 runtime_client=self.runtime_client,
@@ -293,9 +314,10 @@ class ContextFlow:
             )
 
         planned_calls = self._planned_tool_calls(decision, message=message, project=project)
-        if decision.intent in {"approval_command", "rejection_command"}:
+        approval_tool = planned_calls[0].tool if planned_calls else None
+        if approval_tool in {"approve_action", "reject_action"}:
             approval_id = str(planned_calls[0].args["approval_id"])
-            if decision.intent == "approval_command":
+            if approval_tool == "approve_action":
                 approval_result = await self.approve_tool(
                     approval_id=approval_id,
                     actor=actor,

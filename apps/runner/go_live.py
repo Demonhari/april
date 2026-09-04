@@ -127,6 +127,9 @@ class GoLiveRoutingSummary(BaseModel):
     routing_failures: int = 0
     routing_fallback_count: int = 0
     model_repair_count: int = 0
+    accuracy: float = 0.0
+    threshold_failures: list[str] = Field(default_factory=list)
+    reason_code: str | None = None
 
     @property
     def passed_without_fallback(self) -> bool:
@@ -233,8 +236,8 @@ def _brain_routing(multi_model: MultiModelVerificationReport | None) -> GoLiveRo
         (model for model in multi_model.models if model.role == "brain"), None
     )
     routing = brain.routing if brain is not None else None
-    if routing is None or routing.total == 0:
-        return GoLiveRoutingSummary()
+    if routing is None:
+        return GoLiveRoutingSummary(reason_code=brain.routing_error_code if brain else None)
     return GoLiveRoutingSummary(
         report_exists=True,
         routing_cases_total=routing.total,
@@ -243,6 +246,11 @@ def _brain_routing(multi_model: MultiModelVerificationReport | None) -> GoLiveRo
         routing_failures=routing.failures,
         routing_fallback_count=routing.fallback_count,
         model_repair_count=routing.model_repair_count,
+        accuracy=routing.accuracy,
+        threshold_failures=[
+            failure for failure in multi_model.threshold_failures if "routing" in failure.lower()
+        ],
+        reason_code=brain.routing_error_code if brain else None,
     )
 
 
@@ -310,10 +318,21 @@ def _blockers(
         blockers.append("required GGUF model file(s) missing")
     # Real-model proof failures (only meaningful once real verification ran).
     if real_requested and acceptance.ran:
-        if acceptance.summary == "fail" or acceptance.checks_failed > 0:
+        if acceptance.summary != "pass" or acceptance.checks_failed > 0:
+            blockers.append("required real-model verification failed")
             blockers.append("real model load/chat/stream/unload failed")
+        if not routing.report_exists:
+            blockers.append("required brain routing report is missing")
+        elif routing.routing_cases_total == 0:
+            blockers.append("required brain routing evaluated zero cases")
+        elif routing.routing_schema_valid_count != routing.routing_cases_total:
+            blockers.append("required brain routing has schema-invalid decisions")
+        elif routing.routing_cases_passed != routing.routing_cases_total:
+            blockers.append("required brain routing did not pass every case")
         if routing.routing_fallback_count > 0:
             blockers.append("brain routing fell back during real-model routing eval")
+        if routing.reason_code:
+            blockers.append(f"brain routing evaluation {routing.reason_code}")
         if specialist.applicable and specialist.attempted and not specialist.verified:
             blockers.append("specialist switching failed")
     # Service lifecycle: only when the operator asked us to manage main services.
@@ -543,11 +562,16 @@ def build_go_live_report(
         embedding_runtime_local=embedding_runtime_local,
     )
     hardening_blockers: list[str] = []
+    if readiness.audit_chain_status == "corrupt":
+        hardening_blockers.append("audit chain is corrupt")
+    for failure in readiness.database_integrity_failures:
+        if failure not in hardening_blockers:
+            hardening_blockers.append(f"database {failure}")
     hardened_go_live_ready = (
         core_real_model_ready and not hardening_warnings and not hardening_blockers
     )
 
-    if blockers:
+    if blockers or hardening_blockers:
         final_status: FinalStatus = "fail"
     elif hardened_go_live_ready:
         final_status = "pass"

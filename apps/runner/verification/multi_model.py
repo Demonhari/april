@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shutil
 import time
 from collections.abc import Callable
@@ -59,6 +58,7 @@ class AllConfiguredModelsVerifier(
         thresholds: ReportThresholds | None = None,
         candidate_adapter_model_id: str | None = None,
         candidate_adapter_path: Path | None = None,
+        routing_evaluation: bool | None = None,
     ) -> None:
         self.plan = verify_coordinator.plan_multi_model_verification(home)
         available = [entry for entry in self.plan if entry.available]
@@ -67,6 +67,9 @@ class AllConfiguredModelsVerifier(
             home=home, model_path=nominal, max_output_tokens=max_output_tokens, timeout=timeout
         )
         self.require_real_model = require_real_model
+        self.routing_evaluation = (
+            require_real_model if routing_evaluation is None else routing_evaluation
+        )
         self.thresholds = thresholds or ReportThresholds()
         self.results: list[PerModelResult] = []
         self.specialist_switch: SpecialistSwitchReport | None = None
@@ -207,6 +210,7 @@ class AllConfiguredModelsVerifier(
             adapter_sha256=self._adapter_sha256(model),
             available=True,
             context_size=model.context_size,
+            routing_evaluation_required=self.routing_evaluation and model.role == "brain",
         )
         try:
             load_start = time.monotonic()
@@ -241,11 +245,11 @@ class AllConfiguredModelsVerifier(
                 ) = self._brain_structured_json_status(model.id)
                 if structured_detail:
                     result.failure_detail = structured_detail
-                if os.environ.get("APRIL_VERIFY_ROUTING_EVALS") == "1":
+                if self.routing_evaluation:
                     try:
                         result.routing = self._routing_report()
-                    except Exception:
-                        result.routing = None
+                    except Exception as exc:
+                        result.routing_error_code = _routing_error_code(exc)
         except Exception as exc:
             # Leave the unset booleans False; structural_ok stays False so the
             # model is reported as failed, never silently passed.
@@ -556,3 +560,14 @@ class AllConfiguredModelsVerifier(
             runtime_error=self.runtime_error,
             config_fingerprint=config_fingerprint,
         )
+
+
+def _routing_error_code(exc: BaseException) -> str:
+    """Return a bounded, non-secret diagnostic for a failed routing eval."""
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return "routing_timeout"
+    if isinstance(exc, httpx.HTTPError):
+        return "routing_http_error"
+    if isinstance(exc, (OSError, ConnectionError)):
+        return "routing_connection_error"
+    return "routing_evaluation_failed"

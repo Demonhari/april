@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from apps.runner.preflight import build_preflight_report
+from april_common.credentials import InMemoryCredentialStore
 
 pytestmark = pytest.mark.usefixtures("clean_april_environment")
 
@@ -56,7 +57,11 @@ def test_preflight_passes_in_real_mode_when_models_present(tmp_path: Path) -> No
     _copy_configs(tmp_path)
     _create_gguf_files(tmp_path)
     report = build_preflight_report(
-        tmp_path, fake=False, port_in_use=_free_port, pid_alive=_dead_pid
+        tmp_path,
+        fake=False,
+        port_in_use=_free_port,
+        pid_alive=_dead_pid,
+        credential_store=InMemoryCredentialStore(),
     )
     assert report.ok is True
     models = next(c for c in report.checks if c.name == "model files present")

@@ -3,13 +3,67 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agents.schemas import AgentName
 
 RiskLevel = Literal[
     "none", "read_only", "safe_write", "code_write", "system_action", "external_action"
 ]
+
+# Canonical fixture and policy vocabulary. Legacy spellings are accepted only
+# at the compatibility boundary below and are normalized before downstream use.
+CanonicalIntent = Literal[
+    "normal_conversation",
+    "planning",
+    "coding_repo_analysis",
+    "document_reading",
+    "creative_writing",
+    "deep_reasoning",
+    "memory_lookup",
+    "memory_write",
+    "patch_proposal",
+    "code_modification",
+    "command_execution",
+    "log_cleanup",
+    "package_install",
+    "external_action",
+    "ambiguous_request",
+    "prompt_injection",
+    "path_escape_attempt",
+    "sensitive_content",
+    "unsupported_tool",
+    "reminders",
+]
+
+_LEGACY_INTENT_ALIASES = {
+    "repository_search": "coding_repo_analysis",
+    "configured_test_execution": "command_execution",
+    "reminder_list": "reminders",
+    "reminder_cancel": "reminders",
+    "reminder_create": "reminders",
+    "destructive_action": "sensitive_content",
+    "destructive": "sensitive_content",
+    "path_escape": "path_escape_attempt",
+    "unknown_tool": "unsupported_tool",
+    "approval_command": "normal_conversation",
+    "rejection_command": "normal_conversation",
+    "direct_agent_run": "normal_conversation",
+    # Benchmark fixture category aliases are normalized only after the strict
+    # JSON boundary; the generated schema still exposes the canonical 20.
+    "git_status": "coding_repo_analysis",
+    "git_diff": "coding_repo_analysis",
+    "file_reading": "document_reading",
+    "file_search": "coding_repo_analysis",
+    "reminder_creation": "reminders",
+    "reminder_listing": "reminders",
+    "patch_preparation": "patch_proposal",
+    "test_execution": "command_execution",
+    "approval": "normal_conversation",
+    "rejection": "normal_conversation",
+    "destructive_external": "external_action",
+    "ambiguous_general": "ambiguous_request",
+}
 
 
 class PlannedToolCall(BaseModel):
@@ -19,7 +73,7 @@ class PlannedToolCall(BaseModel):
 
 
 class BrainDecision(BaseModel):
-    intent: str
+    intent: CanonicalIntent
     agent: AgentName
     model_id: str
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
@@ -33,6 +87,14 @@ class BrainDecision(BaseModel):
     task_steps: list[str] = Field(default_factory=list, max_length=8)
     decision_summary: str
     routing_method: Literal["model", "model_repair", "fallback"] = "model"
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_intent(cls, value: Any) -> Any:
+        if isinstance(value, dict) and isinstance(value.get("intent"), str):
+            value = dict(value)
+            value["intent"] = _LEGACY_INTENT_ALIASES.get(value["intent"], value["intent"])
+        return value
 
 
 class RouteSource(StrEnum):

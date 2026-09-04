@@ -32,6 +32,7 @@ from april_common.settings import (
     AprilSettings,
     load_settings,
 )
+from april_common.credentials import CredentialStore
 from services.april_runtime.model_registry import ModelRegistry
 
 PreflightStatus = Literal["pass", "warning", "fail"]
@@ -108,6 +109,7 @@ def build_preflight_report(
     fake: bool = False,
     port_in_use: PortChecker | None = None,
     pid_alive: PidAlive | None = None,
+    credential_store: CredentialStore | None = None,
 ) -> PreflightReport:
     """Build the startup preflight verdict. Pure over injected probes for testing."""
     home = home.expanduser().resolve()
@@ -116,7 +118,7 @@ def build_preflight_report(
     checks: list[PreflightCheck] = []
 
     try:
-        settings = load_settings(root=home)
+        settings = load_settings(root=home, credential_store=credential_store)
     except ConfigError as exc:
         return PreflightReport(
             fake=fake,

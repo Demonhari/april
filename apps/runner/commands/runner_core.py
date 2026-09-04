@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TypeVar
 
@@ -176,21 +175,13 @@ def _run_real_daily_checks(home: Path) -> None:
     reports_dir.mkdir(parents=True, exist_ok=True)
     fingerprint = config_fingerprint_digest(home)
     console.print("[bold]Running real model verification (this loads models)…[/bold]")
-    previous = os.environ.get("APRIL_VERIFY_ROUTING_EVALS")
-    os.environ["APRIL_VERIFY_ROUTING_EVALS"] = "1"
-    try:
-        verifier = _composition_api.run_all_configured_models_verification(
-            home, require_real_model=True
-        )
-        write_multi_model_report(
-            verifier.build_report(config_fingerprint=fingerprint),
-            reports_dir / "mac-readiness.json",
-        )
-    finally:
-        if previous is None:
-            os.environ.pop("APRIL_VERIFY_ROUTING_EVALS", None)
-        else:
-            os.environ["APRIL_VERIFY_ROUTING_EVALS"] = previous
+    verifier = _composition_api.run_all_configured_models_verification(
+        home, require_real_model=True, routing_evaluation=True
+    )
+    write_multi_model_report(
+        verifier.build_report(config_fingerprint=fingerprint),
+        reports_dir / "mac-readiness.json",
+    )
     console.print("[bold]Running real workflow verification…[/bold]")
     checks = _composition_api.run_workflow_verification(home, real_model=True)
     write_workflow_report(

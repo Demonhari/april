@@ -61,6 +61,8 @@ class PerModelResult(BaseModel):
     structured_brain_json_success: bool | None = None
     structured_brain_json_fallback: bool | None = None
     routing: RoutingReport | None = None
+    routing_evaluation_required: bool = False
+    routing_error_code: str | None = None
     # Specialist-only role-appropriate smoke prompt (None for the brain).
     smoke_success: bool | None = None
     smoke_schema_valid: bool | None = None
@@ -183,6 +185,17 @@ class MultiModelVerificationReport(BaseModel):
 def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThresholds) -> list[str]:
     failures: list[str] = []
     label = result.model_id
+    if result.role == "brain" and result.routing_evaluation_required:
+        if result.routing_error_code:
+            failures.append(f"{label}: routing evaluation {result.routing_error_code}")
+        elif result.routing is None:
+            failures.append(f"{label}: routing report missing")
+        elif result.routing.total == 0:
+            failures.append(f"{label}: routing report has zero cases")
+        elif result.routing.schema_valid_count != result.routing.total:
+            failures.append(f"{label}: routing schema-invalid decisions present")
+        elif result.routing.fallback_count > 0:
+            failures.append(f"{label}: routing fallback decisions present")
     if result.role == "brain" and result.routing is not None and result.routing.total > 0:
         min_accuracy = thresholds.min_routing_accuracy
         if min_accuracy is not None and result.routing.accuracy < min_accuracy:
@@ -244,6 +257,8 @@ def _summary(
     # A fake/simulated run is structurally fine at best — never real "pass".
     if simulated or not real_model_verified:
         return "degraded"
+    if threshold_failures_present and require_real_model:
+        return "fail"
     if threshold_failures_present or optional_skipped or not switch_ok:
         return "degraded"
     return "pass"
@@ -266,7 +281,8 @@ def _core_model_set_verified(
         return False
     configured_roles = {result.role for result in results}
     role_passes = _role_passes(results, thresholds)
-    if role_passes.get("brain") is not True:
+    brain = next((result for result in results if result.role == "brain"), None)
+    if role_passes.get("brain") is not True or brain is None or not _routing_required_ok(brain):
         return False
     for role in ("coding", "reading"):
         if role in configured_roles and role_passes.get(role) is not True:
@@ -284,6 +300,20 @@ def _specialist_switch_ok(
     if not switch_required:
         return True
     return bool(specialist_switch and specialist_switch.success)
+
+
+def _routing_required_ok(result: PerModelResult) -> bool:
+    if result.role != "brain" or not result.routing_evaluation_required:
+        return True
+    routing = result.routing
+    return bool(
+        routing is not None
+        and routing.total > 0
+        and routing.passed == routing.total
+        and routing.schema_valid_count == routing.total
+        and routing.fallback_count == 0
+        and result.routing_error_code is None
+    )
 
 
 def _verification_level(
@@ -343,6 +373,9 @@ def build_multi_model_report(
     failures: list[str] = []
     for result in attempted:
         failures.extend(per_model_threshold_failures(result, active_thresholds))
+    if require_real_model:
+        check_failures.extend(failures)
+    checks_failed = len(check_failures)
 
     models_passed = sum(1 for result in attempted if result.acceptance_ok(active_thresholds))
     real_models_exercised = 0 if simulated else len(attempted)
@@ -359,7 +392,10 @@ def build_multi_model_report(
     all_available_models_verified = (
         not simulated
         and bool(attempted)
-        and all(result.acceptance_ok(active_thresholds) for result in attempted)
+        and all(
+            result.acceptance_ok(active_thresholds) and _routing_required_ok(result)
+            for result in attempted
+        )
         and switch_ok
     )
     all_configured_models_verified = (
@@ -367,7 +403,10 @@ def build_multi_model_report(
         and bool(results)
         and len(attempted) == len(results)
         and all(result.available for result in results)
-        and all(result.acceptance_ok(active_thresholds) for result in results)
+        and all(
+            result.acceptance_ok(active_thresholds) and _routing_required_ok(result)
+            for result in results
+        )
         and switch_ok
     )
     verification_level = _verification_level(
