@@ -57,7 +57,7 @@ def _close_tracked_test_clients(monkeypatch: pytest.MonkeyPatch) -> Iterator[Non
             app = getattr(client, "app", None)
             container = getattr(getattr(app, "state", None), "container", None)
             if isinstance(container, ApiContainer) and all(
-                container is seen for seen in containers
+                container is not seen for seen in containers
             ):
                 containers.append(container)
             client.close()

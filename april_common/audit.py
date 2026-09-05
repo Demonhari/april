@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from april_common.credentials import CredentialKey, CredentialStore
+from april_common.credentials import CredentialKey, CredentialStore, CredentialStoreError
 from april_common.errors import AprilError
 from april_common.time import utc_now_iso
 
@@ -268,12 +268,15 @@ class AuditLogger:
             _flock(descriptor)
             self._recover_incomplete_final_line()
             verification = verify_audit_chain(self.path, anchor=self.anchor)
-            if verification.corrupt:
+            if not verification.valid:
+                issue_codes = [issue.code for issue in verification.issues]
                 raise AprilError(
-                    "AUDIT_CHAIN_CORRUPT",
-                    "Audit chain verification failed; append refused.",
+                    "AUDIT_CHAIN_CORRUPT"
+                    if verification.corrupt
+                    else "AUDIT_VERIFICATION_UNAVAILABLE",
+                    "Audit verification failed; append refused.",
                     500,
-                    {"issues": [issue.code for issue in verification.issues]},
+                    {"issues": issue_codes},
                 )
             if verification.anchor_lagged and verification.terminal_hash is not None:
                 self.anchor.set(
@@ -350,7 +353,13 @@ class AuditLogger:
         finally:
             os.close(file_descriptor)
 
-    def recover(self, *, reason: str, apply: bool = False) -> AuditRecoveryPlan:
+    def recover(
+        self,
+        *,
+        reason: str,
+        apply: bool = False,
+        approval_id: str | None = None,
+    ) -> AuditRecoveryPlan:
         """Plan or perform an explicit owner-approved chain recovery.
 
         Recovery quarantines evidence byte-for-byte and publishes a new chain
@@ -362,77 +371,110 @@ class AuditLogger:
                 "A bounded recovery reason is required.",
                 422,
             )
-        verification = self.verify()
-        issue_codes = tuple(sorted({issue.code for issue in verification.issues}))
-        if not verification.corrupt:
-            return AuditRecoveryPlan("not_required", issue_codes, verification.record_count)
-        if not apply:
-            return AuditRecoveryPlan("dry_run", issue_codes, verification.record_count)
-
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        quarantine_root = self.path.parent.parent / "data" / "backups" / "audit-quarantine"
-        quarantine_root.mkdir(parents=True, mode=0o700, exist_ok=True)
-        quarantine = Path(tempfile.mkdtemp(prefix="recovery-", dir=quarantine_root))
-        os.chmod(quarantine, 0o700)
-        try:
-            log_copy = quarantine / self.path.name
-            if self.path.exists():
-                shutil.copy2(self.path, log_copy)
-                os.chmod(log_copy, 0o600)
-            anchor_copy: Path | None = None
-            if isinstance(self.anchor, FileAuditAnchor) and self.anchor.path.exists():
-                anchor_copy = quarantine / self.anchor.path.name
-                shutil.copy2(self.anchor.path, anchor_copy)
-                os.chmod(anchor_copy, 0o600)
-            log_hash = (
-                _sha256_file(log_copy) if log_copy.exists() else hashlib.sha256(b"").hexdigest()
-            )
-            manifest = {
-                "schema_version": AUDIT_SCHEMA_VERSION,
-                "reason": reason.strip()[:240],
-                "issue_codes": list(issue_codes),
-                "quarantined_log_basename": log_copy.name,
-                "quarantined_log_sha256": log_hash,
-                "previous_terminal_sequence": verification.terminal_sequence,
-                "previous_terminal_hash": verification.terminal_hash,
-                "created_at": utc_now_iso(),
-            }
-            manifest_path = quarantine / "manifest.json"
-            _write_private_json(manifest_path, manifest)
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._thread_lock:
+            descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                _flock(descriptor)
+                verification = verify_audit_chain(self.path, anchor=self.anchor)
+                issue_codes = tuple(sorted({issue.code for issue in verification.issues}))
+                if not verification.valid and not verification.corrupt:
+                    return AuditRecoveryPlan("unavailable", issue_codes, verification.record_count)
+                if not verification.corrupt:
+                    return AuditRecoveryPlan("not_required", issue_codes, verification.record_count)
+                if not apply:
+                    return AuditRecoveryPlan("dry_run", issue_codes, verification.record_count)
 
-            staged = self.path.with_name(f".{self.path.name}.recovery-{uuid.uuid4().hex}")
-            staged_anchor = MemoryAuditAnchor()
-            staged_logger = AuditLogger(staged, anchor=staged_anchor)
-            staged_logger.write(
-                {
-                    "event_type": "audit_chain_recovery",
-                    "reason": reason.strip()[:240],
-                    "issue_codes": list(issue_codes),
-                    "quarantined_artifact_basename": log_copy.name,
-                    "quarantined_artifact_sha256": log_hash,
-                    "previous_terminal_sequence": verification.terminal_sequence,
-                    "previous_terminal_hash": verification.terminal_hash,
-                }
-            )
-            staged_result = staged_logger.verify()
-            if not staged_result.valid or staged_result.terminal_hash is None:
-                raise AprilError("AUDIT_RECOVERY_FAILED", "New audit chain did not verify.", 500)
-            os.replace(staged, self.path)
-            os.chmod(self.path, 0o600)
-            self.anchor.set(
-                _encode_anchor(staged_result.terminal_sequence or 1, staged_result.terminal_hash)
-            )
-            _fsync_directory(self.path.parent)
-            return AuditRecoveryPlan(
-                "recovered",
-                issue_codes,
-                verification.record_count,
-                quarantine.name,
-                log_hash,
-            )
-        except BaseException:
-            # Quarantine is deliberately retained on all failures.
-            raise
+                snapshot = self.path.read_bytes() if self.path.exists() else b""
+                anchor_snapshot = self.anchor.get()
+                quarantine_root = self.path.parent.parent / "data" / "backups" / "audit-quarantine"
+                quarantine_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+                quarantine = Path(tempfile.mkdtemp(prefix="recovery-", dir=quarantine_root))
+                os.chmod(quarantine, 0o700)
+                staged: Path | None = None
+                try:
+                    log_copy = quarantine / self.path.name
+                    if self.path.exists():
+                        shutil.copy2(self.path, log_copy)
+                        os.chmod(log_copy, 0o600)
+                    if isinstance(self.anchor, FileAuditAnchor) and self.anchor.path.exists():
+                        anchor_copy = quarantine / self.anchor.path.name
+                        shutil.copy2(self.anchor.path, anchor_copy)
+                        os.chmod(anchor_copy, 0o600)
+                    log_hash = (
+                        _sha256_file(log_copy)
+                        if log_copy.exists()
+                        else hashlib.sha256(b"").hexdigest()
+                    )
+                    manifest = {
+                        "schema_version": AUDIT_SCHEMA_VERSION,
+                        "reason": reason.strip()[:240],
+                        "issue_codes": list(issue_codes),
+                        "quarantined_log_basename": log_copy.name,
+                        "quarantined_log_sha256": log_hash,
+                        "previous_terminal_sequence": verification.terminal_sequence,
+                        "previous_terminal_hash": verification.terminal_hash,
+                        "approval_id": approval_id,
+                        "created_at": utc_now_iso(),
+                    }
+                    _write_private_json(quarantine / "manifest.json", manifest)
+
+                    staged = self.path.with_name(f".{self.path.name}.recovery-{uuid.uuid4().hex}")
+                    staged_anchor = MemoryAuditAnchor()
+                    staged_logger = AuditLogger(staged, anchor=staged_anchor)
+                    staged_logger.write(
+                        {
+                            "event_type": "audit_chain_recovery",
+                            "reason": reason.strip()[:240],
+                            "issue_codes": list(issue_codes),
+                            "quarantined_artifact_basename": log_copy.name,
+                            "quarantined_artifact_sha256": log_hash,
+                            "previous_terminal_sequence": verification.terminal_sequence,
+                            "previous_terminal_hash": verification.terminal_hash,
+                            "approval_id": approval_id,
+                        }
+                    )
+                    staged_result = staged_logger.verify()
+                    if not staged_result.valid or staged_result.terminal_hash is None:
+                        raise AprilError(
+                            "AUDIT_RECOVERY_FAILED", "New audit chain did not verify.", 500
+                        )
+                    current_snapshot = self.path.read_bytes() if self.path.exists() else b""
+                    if current_snapshot != snapshot or self.anchor.get() != anchor_snapshot:
+                        raise AprilError(
+                            "AUDIT_RECOVERY_CONCURRENT_CHANGE",
+                            "Audit log or protected anchor changed after recovery planning.",
+                            409,
+                        )
+                    os.replace(staged, self.path)
+                    os.chmod(self.path, 0o600)
+                    self.anchor.set(
+                        _encode_anchor(
+                            staged_result.terminal_sequence or 1, staged_result.terminal_hash
+                        )
+                    )
+                    _fsync_directory(self.path.parent)
+                    final_result = verify_audit_chain(self.path, anchor=self.anchor)
+                    if not final_result.valid:
+                        raise AprilError(
+                            "AUDIT_RECOVERY_FAILED",
+                            "Recovered audit chain did not verify with its protected anchor.",
+                            500,
+                        )
+                    return AuditRecoveryPlan(
+                        "recovered",
+                        issue_codes,
+                        verification.record_count,
+                        quarantine.name,
+                        log_hash,
+                    )
+                finally:
+                    if staged is not None:
+                        staged.unlink(missing_ok=True)
+            finally:
+                _funlock(descriptor)
+                os.close(descriptor)
 
 
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
@@ -502,13 +544,30 @@ def verify_audit_chain(path: Path, *, anchor: AuditAnchor | None = None) -> Audi
             terminal_hash=None,
             issues=(AuditIssue("audit_unreadable", None, "Audit log could not be read."),),
         )
-    result = _verify_bytes(data, anchor=anchor)
-    return result
+    try:
+        return _verify_bytes(data, anchor=anchor)
+    except CredentialStoreError:
+        return AuditVerification(
+            status="unavailable",
+            valid=False,
+            corrupt=False,
+            anchor_lagged=False,
+            record_count=0,
+            terminal_sequence=None,
+            terminal_hash=None,
+            issues=(
+                AuditIssue(
+                    "anchor_unavailable",
+                    None,
+                    "Protected audit anchor could not be read.",
+                ),
+            ),
+        )
 
 
 def _verify_bytes(data: bytes, *, anchor: AuditAnchor | None) -> AuditVerification:
     issues: list[AuditIssue] = []
-    records: list[dict[str, Any]] = []
+    records: list[tuple[int, dict[str, Any]]] = []
     raw_lines = data.splitlines(keepends=True)
     if data and not data.endswith(b"\n"):
         issues.append(
@@ -524,18 +583,18 @@ def _verify_bytes(data: bytes, *, anchor: AuditAnchor | None) -> AuditVerificati
         if not isinstance(record, dict):
             issues.append(AuditIssue("invalid_schema", line_number, "Record is not an object."))
             continue
-        records.append(record)
+        records.append((line_number, record))
 
     expected_sequence = 1
     previous_hash = GENESIS_HASH
     terminal_sequence: int | None = None
     terminal_hash: str | None = None
-    for line_number, record in enumerate(records, start=1):
+    for record_index, (line_number, record) in enumerate(records, start=1):
         if not _valid_record_schema(record):
             issues.append(AuditIssue("invalid_schema", line_number, "Record schema is invalid."))
             continue
         sequence = int(record["sequence"])
-        if line_number == 1 and (sequence != 1 or record["previous_hash"] != GENESIS_HASH):
+        if record_index == 1 and (sequence != 1 or record["previous_hash"] != GENESIS_HASH):
             issues.append(
                 AuditIssue("missing_genesis", line_number, "Audit genesis state is missing.")
             )
@@ -602,7 +661,7 @@ def _verify_bytes(data: bytes, *, anchor: AuditAnchor | None) -> AuditVerificati
             elif (
                 anchor_sequence == terminal_sequence - 1
                 and records
-                and records[-1].get("previous_hash") == anchor_hash
+                and records[-1][1].get("previous_hash") == anchor_hash
             ):
                 anchor_lagged = True
             elif anchor_sequence > terminal_sequence:

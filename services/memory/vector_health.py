@@ -296,6 +296,14 @@ class VectorHealth(VectorMemoryBase):
     def _audit_recovery(self, generation_id: str, reason: str) -> None:
         if self.audit is None:
             return
+        verification = self.audit.verify()
+        if not verification.valid:
+            issue_codes = ",".join(issue.code for issue in verification.issues)
+            issue_codes = issue_codes or verification.status
+            raise RuntimeError(
+                "Vector index repair requires a writable, valid audit trail; "
+                f"audit status={verification.status} ({issue_codes})."
+            )
         self.audit.write(
             {
                 "event": "memory.vector_index_recovery",

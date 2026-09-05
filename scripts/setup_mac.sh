@@ -17,7 +17,7 @@ Options:
   --runtime      Include the optional llama.cpp runtime extra.
   --voice        Include optional local voice dependencies.
   --base         Install only base APRIL dependencies, without the dev extra.
-  --global       Install the global run/april-run wrappers after setup.
+  --global       Install the global run/april-run/april wrappers after setup.
   --add-to-path  With --global, add ~/.local/bin to zsh/bash config.
 HELP
 }
@@ -63,9 +63,9 @@ fi
 echo "APRIL setup complete."
 if [[ "$INSTALL_GLOBAL" == "1" ]]; then
   if [[ "$ADD_TO_PATH" == "1" ]]; then
-    echo "Reload your shell, then run: run april --fake"
+    echo "Reload your shell, then run: run april --fake (or bare: april)"
   else
     echo 'If run is not found, use: export PATH="$HOME/.local/bin:$PATH"'
-    echo 'Then run: run april --fake'
+    echo 'Then run: run april --fake (or bare: april)'
   fi
 fi

@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -551,7 +552,7 @@ def test_run_april_verify_all_configured_cli_flags(tmp_path: Path, monkeypatch) 
             ]
 
         def build_report(self) -> object:
-            raise AssertionError("report should not be built without --report")
+            return SimpleNamespace(summary="pass", models=[], threshold_failures=[])
 
     def _fake_all_configured(home: Path, **kwargs: object) -> _StubAllVerifier:
         captured["home"] = home
@@ -594,7 +595,7 @@ def test_run_april_verify_mac_readiness_alias(tmp_path: Path, monkeypatch) -> No
             self.checks = [VerifyCheck(name="configured models", ok=True, detail="ok")]
 
         def build_report(self) -> object:
-            raise AssertionError("report should not be built without --report")
+            return SimpleNamespace(summary="pass", models=[], threshold_failures=[])
 
     monkeypatch.setattr(
         "apps.runner.main.run_all_configured_models_verification",
@@ -902,6 +903,7 @@ def test_setup_models_dry_run_writes_nothing_and_prints_basenames(
 
 def test_setup_models_apply_is_retired_without_mutation(tmp_path: Path, monkeypatch) -> None:
     _copy_configs(tmp_path)
+    existing_backups = set((tmp_path / "configs").glob("models.yaml.bak-*"))
     brain = tmp_path / "brain.gguf"
     brain.write_bytes(b"gguf")
     manager = FakeManager(tmp_path)
@@ -912,7 +914,7 @@ def test_setup_models_apply_is_retired_without_mutation(tmp_path: Path, monkeypa
     )
     assert result.exit_code == 1
     assert "Synchronous setup mutation is retired" in result.output
-    assert not list((tmp_path / "configs").glob("models.yaml.bak-*"))
+    assert set((tmp_path / "configs").glob("models.yaml.bak-*")) == existing_backups
 
 
 def test_setup_embeddings_dry_run_writes_nothing(tmp_path: Path, monkeypatch) -> None:
@@ -1162,7 +1164,7 @@ def test_setup_voice_dry_run_apply_and_missing_wake_word(tmp_path: Path, monkeyp
     assert data["voice"]["whisper_binary_path"] == str(whisper_bin.resolve())
     assert data["voice"]["piper_model_path"] == str(piper_model.resolve())
     assert data["voice"]["wake_word_model_path"] is None
-    assert list((tmp_path / "configs").glob("april.yaml.bak-*"))
+    assert list((tmp_path / "data" / "backups" / "config").glob("april.yaml.bak-*"))
 
 
 def test_setup_voice_missing_required_path_fails(tmp_path: Path, monkeypatch) -> None:
@@ -1720,6 +1722,7 @@ def test_memory_doctor(tmp_path: Path, monkeypatch) -> None:
 def test_memory_doctor_runtime_local_without_embedding_model_not_ready(
     tmp_path: Path, monkeypatch
 ) -> None:
+    monkeypatch.delenv("APRIL_HOME", raising=False)
     _copy_configs(tmp_path)
     config = tmp_path / "configs" / "april.yaml"
     data = yaml.safe_load(config.read_text(encoding="utf-8"))
@@ -1743,6 +1746,7 @@ def test_memory_doctor_runtime_local_without_embedding_model_not_ready(
 def test_memory_doctor_mismatched_vector_provider_requires_reindex(
     tmp_path: Path, monkeypatch
 ) -> None:
+    monkeypatch.delenv("APRIL_HOME", raising=False)
     _copy_configs(tmp_path)
     config = tmp_path / "configs" / "april.yaml"
     data = yaml.safe_load(config.read_text(encoding="utf-8"))
@@ -1803,6 +1807,7 @@ def test_memory_doctor_reports_recovery_generation_and_repair_command(
 
 
 def test_memory_doctor_json_redacts_paths(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("APRIL_HOME", raising=False)
     _copy_configs(tmp_path)
     model_path = tmp_path / "models" / "embed.gguf"
     model_path.parent.mkdir()
@@ -1841,6 +1846,7 @@ def test_memory_doctor_json_redacts_paths(tmp_path: Path, monkeypatch) -> None:
 def test_memory_doctor_verify_runtime_embedding_is_explicit_and_mocked(
     tmp_path: Path, monkeypatch
 ) -> None:
+    monkeypatch.delenv("APRIL_HOME", raising=False)
     _copy_configs(tmp_path)
     config = tmp_path / "configs" / "april.yaml"
     data = yaml.safe_load(config.read_text(encoding="utf-8"))

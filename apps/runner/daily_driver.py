@@ -228,7 +228,7 @@ def build_daily_driver_report(home: Path) -> DailyDriverReport:
     checks.append(_embedding_check(settings))
 
     # --- vector index compatibility -----------------------------------------
-    checks.append(_vector_index_check(home, settings))
+    checks.append(_vector_index_check(home, settings, audit_status=readiness.audit_chain_status))
 
     # --- voice milestone -----------------------------------------------------
     checks.append(_voice_check(readiness, latest, fingerprint=fingerprint))
@@ -476,7 +476,12 @@ def _embedding_check(settings: AprilSettings | None) -> DailyDriverCheck:
     )
 
 
-def _vector_index_check(home: Path, settings: AprilSettings | None) -> DailyDriverCheck:
+def _vector_index_check(
+    home: Path,
+    settings: AprilSettings | None,
+    *,
+    audit_status: str,
+) -> DailyDriverCheck:
     if settings is None:
         return DailyDriverCheck(
             name="vector index compatibility", status="warning", detail="settings unavailable"
@@ -496,6 +501,16 @@ def _vector_index_check(home: Path, settings: AprilSettings | None) -> DailyDriv
             detail="no index yet (built on first memory write)",
         )
     if health.get("status") == "not_ready":
+        if audit_status not in {"valid", "anchor_lagged"}:
+            return DailyDriverCheck(
+                name="vector index compatibility",
+                status="blocker",
+                detail=(
+                    "no valid vector-index generation is available; "
+                    f"audit chain {audit_status} must be resolved before reindexing"
+                ),
+                next_command="run april audit verify",
+            )
         return DailyDriverCheck(
             name="vector index compatibility",
             status="warning",
@@ -505,6 +520,16 @@ def _vector_index_check(home: Path, settings: AprilSettings | None) -> DailyDriv
     persisted = health.get("active_provider")
     active = settings.memory.embedding_provider
     if persisted is not None and persisted != active:
+        if audit_status not in {"valid", "anchor_lagged"}:
+            return DailyDriverCheck(
+                name="vector index compatibility",
+                status="blocker",
+                detail=(
+                    f"index built with '{persisted}' but provider is '{active}'; "
+                    f"audit chain {audit_status} must be resolved before reindexing"
+                ),
+                next_command="run april audit verify",
+            )
         return DailyDriverCheck(
             name="vector index compatibility",
             status="warning",
@@ -512,6 +537,16 @@ def _vector_index_check(home: Path, settings: AprilSettings | None) -> DailyDriv
             next_command=_MEMORY_REINDEX,
         )
     if health.get("fallback_active"):
+        if audit_status not in {"valid", "anchor_lagged"}:
+            return DailyDriverCheck(
+                name="vector index compatibility",
+                status="blocker",
+                detail=(
+                    "validated recovery generation is active; "
+                    f"audit chain {audit_status} must be resolved before repair"
+                ),
+                next_command="run april audit verify",
+            )
         return DailyDriverCheck(
             name="vector index compatibility",
             status="warning",

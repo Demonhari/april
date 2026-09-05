@@ -22,7 +22,7 @@ from apps.runner.verify import (
 from apps.runner.wake_live import run_sentinel_live_verification
 from april_common.errors import ConfigError
 from april_common.process_environment import ProcessCategory
-from april_common.process_runner import run_restricted_process_sync
+from april_common.process_runner import run_terminal_process_sync
 from april_common.settings import load_settings
 
 _T = TypeVar("_T")
@@ -85,16 +85,12 @@ def _effective_oneshot(ctx: typer.Context) -> bool:
 
 def _run_april_cli(args: list[str]) -> int:
     home = _composition._manager().home
-    completed = run_restricted_process_sync(
+    return run_terminal_process_sync(
         [sys.executable, "-m", "apps.cli.main", *args],
         cwd=home,
         category=ProcessCategory.CLI,
-        timeout_seconds=24 * 60 * 60,
-        max_stdout_bytes=10_000_000,
-        max_stderr_bytes=10_000_000,
         april_home=home,
     )
-    return completed.returncode if completed.returncode is not None else 1
 
 
 def _ensure_services(fake: bool) -> ServiceStatus:
@@ -125,7 +121,9 @@ def _delegate(args: list[str], *, fake: bool, oneshot: bool = False) -> None:
     finally:
         if oneshot and not before.ok:
             console.print("[yellow]Stopping APRIL services started for oneshot mode.[/yellow]")
-            _composition._print_status(manager.stop())
+            stop_started = getattr(manager, "stop_started_services", None)
+            stopped = stop_started(before) if callable(stop_started) else manager.stop()
+            _composition._print_status(stopped)
     raise typer.Exit(code)
 
 
@@ -196,8 +194,11 @@ def _doctor() -> None:
     local_bin = Path.home() / ".local" / "bin"
     run_path = local_bin / "run"
     april_run_path = local_bin / "april-run"
+    april_path = local_bin / "april"
     command_run = shutil.which("run")
     command_path = Path(command_run) if command_run else None
+    command_april = shutil.which("april")
+    command_april_path = Path(command_april) if command_april else None
     run_found = command_path is not None
     command_is_april = bool(command_path and is_april_wrapper(command_path))
     command_points_to_expected = bool(
@@ -212,6 +213,7 @@ def _doctor() -> None:
     table.add_row(".venv/bin/python exists", "yes" if python_exists else "no")
     table.add_row(f"{run_path} exists", "yes" if run_path.exists() else "no")
     table.add_row(f"{april_run_path} exists", "yes" if april_run_path.exists() else "no")
+    table.add_row(f"{april_path} exists", "yes" if april_path.exists() else "no")
     table.add_row("run wrapper APRIL-owned", "yes" if is_april_wrapper(run_path) else "no")
     table.add_row(
         "april-run wrapper APRIL-owned",
@@ -222,12 +224,19 @@ def _doctor() -> None:
         "april-run wrapper executable",
         "yes" if os.access(april_run_path, os.X_OK) else "no",
     )
+    table.add_row("april wrapper APRIL-owned", "yes" if is_april_wrapper(april_path) else "no")
+    table.add_row("april wrapper executable", "yes" if os.access(april_path, os.X_OK) else "no")
     table.add_row(f"{local_bin} in PATH", "yes" if path_contains_dir(local_bin) else "no")
     table.add_row("command -v run", command_run or "not found")
     table.add_row("command -v run is APRIL wrapper", "yes" if command_is_april else "no")
     table.add_row(
         "command -v run points to ~/.local/bin/run",
         "yes" if command_points_to_expected else "no",
+    )
+    table.add_row("command -v april", command_april or "not found")
+    table.add_row(
+        "command -v april is APRIL wrapper",
+        "yes" if command_april_path and is_april_wrapper(command_april_path) else "no",
     )
     table.add_row(
         "adapter pointer/database state",
@@ -278,6 +287,11 @@ def _doctor() -> None:
         console.print("make install-global-force")
     elif path_contains_dir(local_bin):
         console.print("[green]OK: run resolves to an APRIL wrapper visible in PATH.[/green]")
+    if not command_april_path or not is_april_wrapper(command_april_path):
+        console.print(
+            "[yellow]bare `april` is not an APRIL wrapper in PATH; run `make install-global` "
+            "from the repository.[/yellow]"
+        )
 
 
 def _print_verification_table(title: str, checks: list[VerifyCheck]) -> None:

@@ -113,6 +113,32 @@ class ApprovalStore:
             raise PermissionDeniedError("Approval does not exist.")
         return self._record_from_row(row)
 
+    async def validate_exact(
+        self,
+        *,
+        approval_id: str,
+        tool: str,
+        args: dict[str, Any],
+    ) -> ApprovalRecord:
+        """Check an approved, unexpired approval without consuming it."""
+        record = await self.get(approval_id)
+        if record.status != "approved":
+            raise PermissionDeniedError("Approval is not approved.", {"status": record.status})
+        try:
+            unexpired = parse_utc_iso(record.expires_at) >= utc_now()
+        except ValueError:
+            unexpired = False
+        if not unexpired:
+            raise PermissionDeniedError("Approval has expired.")
+        expected_hash = canonical_hash(tool, args, record.metadata)
+        legacy_hash = legacy_canonical_hash(tool, args)
+        hash_matches = record.canonical_hash == expected_hash or (
+            not record.metadata and record.canonical_hash == legacy_hash
+        )
+        if record.tool != tool or not hash_matches:
+            raise PermissionDeniedError("Approval arguments changed.")
+        return record
+
     async def approve_exact(
         self,
         *,
@@ -234,6 +260,69 @@ class ApprovalStore:
                 "outcome": "consumed",
             }
         )
+
+    async def consume_exact(
+        self,
+        *,
+        approval_id: str,
+        tool: str,
+        args: dict[str, Any],
+        result: dict[str, Any],
+        actor: str,
+        request_id: str,
+    ) -> ApprovalRecord:
+        """Validate and consume one approved, unexpired exact operation.
+
+        This is used by sensitive CLI operations that do not execute through
+        ``ToolExecutionService`` but still need the same one-time approval
+        guarantees. The operation binding is checked inside the transaction so
+        a caller cannot validate one action and consume another.
+        """
+        async with self.database.transaction() as conn:
+            cursor = await conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
+            row = await cursor.fetchone()
+            if row is None:
+                raise PermissionDeniedError("Approval does not exist.")
+            record = self._record_from_row(row)
+            if record.status != "approved":
+                raise PermissionDeniedError("Approval is not approved.", {"status": record.status})
+            try:
+                unexpired = parse_utc_iso(record.expires_at) >= utc_now()
+            except ValueError:
+                unexpired = False
+            if not unexpired:
+                raise PermissionDeniedError("Approval has expired.")
+            expected_hash = canonical_hash(tool, args, record.metadata)
+            legacy_hash = legacy_canonical_hash(tool, args)
+            hash_matches = record.canonical_hash == expected_hash or (
+                not record.metadata and record.canonical_hash == legacy_hash
+            )
+            if record.tool != tool or not hash_matches:
+                raise PermissionDeniedError("Approval arguments changed.")
+            consumed_at = utc_now_iso()
+            if not await self.consume_in_transaction(
+                conn,
+                approval_id=approval_id,
+                result=result,
+                consumed_at=consumed_at,
+            ):
+                raise PermissionDeniedError("Approval is no longer approved.")
+        self.audit.write(
+            {
+                "actor": actor,
+                "request_id": request_id,
+                "event_type": "approval_consumed",
+                "tool": record.tool,
+                "arguments": record.args,
+                "agent": record.agent,
+                "permission_level": record.permission_level,
+                "risk": record.risk_level,
+                "metadata": record.metadata,
+                "approval_id": approval_id,
+                "outcome": "consumed",
+            }
+        )
+        return record.model_copy(update={"status": "consumed"})
 
     @classmethod
     async def consume_in_transaction(

@@ -939,6 +939,21 @@ run april memory doctor
 run april eval brain --fake
 ```
 
+The global installer also installs an APRIL-owned `april` wrapper for bare
+session attachment and one-shot CLI use from any directory:
+
+```bash
+april
+april "plan my work today"
+april chat
+```
+
+`run` and `april-run` remain the runner/diagnostics entry points. All three
+wrappers use the repository `.venv` when present and otherwise a provisioned
+`python3.11`; shell activation is not required. `april --help` and offline
+diagnostics inspect local state only and do not start services or the
+microphone.
+
 `run april --fake` starts missing services with `APRIL_RUNTIME_BACKEND=fake`
 without editing `.env`. Services still bind to `127.0.0.1`; PID files are under
 `data/run/`, and logs are written to `logs/runtime.log` and `logs/api.log`.

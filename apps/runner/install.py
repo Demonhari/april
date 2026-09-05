@@ -8,10 +8,12 @@ from pathlib import Path
 
 APRIL_WRAPPER_MARKER = "# APRIL_RUN_WRAPPER=1"
 APRIL_RUN_COMMAND_MARKER = "# APRIL_RUN_COMMAND=python -m apps.runner.main"
+APRIL_CLI_COMMAND_MARKER = "# APRIL_CLI_COMMAND=python -m apps.cli.main"
 PATH_BLOCK_START = "# >>> APRIL launcher PATH >>>"
 PATH_BLOCK_END = "# <<< APRIL launcher PATH <<<"
 PATH_EXPORT_LINE = 'export PATH="$HOME/.local/bin:$PATH"'
-WRAPPER_NAMES = ("run", "april-run")
+WRAPPER_NAMES = ("run", "april-run", "april")
+RUNNER_WRAPPER_NAMES = ("run", "april-run")
 
 
 @dataclass(frozen=True)
@@ -21,14 +23,27 @@ class InstallResult:
 
 
 def wrapper_content(*, repo_root: Path) -> str:
+    return _wrapper_content(repo_root=repo_root, module="apps.runner.main")
+
+
+def cli_wrapper_content(*, repo_root: Path) -> str:
+    return _wrapper_content(repo_root=repo_root, module="apps.cli.main")
+
+
+def _wrapper_content(*, repo_root: Path, module: str) -> str:
     root = repo_root.expanduser().resolve()
+    escaped_root = str(root).replace("\\", "\\\\").replace('"', '\\"')
     return "\n".join(
         [
             "#!/usr/bin/env bash",
             APRIL_WRAPPER_MARKER,
-            APRIL_RUN_COMMAND_MARKER,
+            (
+                APRIL_RUN_COMMAND_MARKER
+                if module == "apps.runner.main"
+                else APRIL_CLI_COMMAND_MARKER
+            ),
             "set -euo pipefail",
-            f'export APRIL_HOME="{root}"',
+            f'export APRIL_HOME="{escaped_root}"',
             'export PYTHONPATH="$APRIL_HOME${PYTHONPATH:+:$PYTHONPATH}"',
             'APRIL_PYTHON="${APRIL_PYTHON:-}"',
             'if [[ -z "$APRIL_PYTHON" && -x "$APRIL_HOME/.venv/bin/python" ]]; then',
@@ -49,7 +64,7 @@ def wrapper_content(*, repo_root: Path) -> str:
             '  echo "Or set APRIL_PYTHON to an interpreter with APRIL dependencies." >&2',
             "  exit 1",
             "fi",
-            'exec "$APRIL_PYTHON" -m apps.runner.main "$@"',
+            f'exec "$APRIL_PYTHON" -m {module} "$@"',
             "",
         ]
     )
@@ -67,14 +82,22 @@ def install_wrappers(*, repo_root: Path, bin_dir: Path, force: bool = False) -> 
     bin_dir.mkdir(parents=True, exist_ok=True)
     installed: list[Path] = []
     skipped: list[Path] = []
-    content = wrapper_content(repo_root=repo_root)
-    for name in WRAPPER_NAMES:
-        target = bin_dir / name
+    contents = {
+        **{name: wrapper_content(repo_root=repo_root) for name in RUNNER_WRAPPER_NAMES},
+        "april": cli_wrapper_content(repo_root=repo_root),
+    }
+    targets = {name: bin_dir / name for name in WRAPPER_NAMES}
+    # Validate every destination before writing any wrapper, so a conflict
+    # cannot leave a partially installed launcher set behind.
+    for target in targets.values():
         if target.exists() and not is_april_wrapper(target) and not force:
             raise FileExistsError(
                 f"{target} already exists and is not APRIL-owned. "
                 "Re-run with --force to replace it."
             )
+    for name, target in targets.items():
+        content = contents[name]
+        target = bin_dir / name
         if target.exists() and is_april_wrapper(target) and target.read_text() == content:
             skipped.append(target)
             continue
@@ -102,6 +125,10 @@ def uninstall_wrappers(*, bin_dir: Path) -> InstallResult:
 def verify_wrappers(*, repo_root: Path, bin_dir: Path) -> list[str]:
     root = repo_root.expanduser().resolve()
     errors: list[str] = []
+    expected_modules = {
+        **dict.fromkeys(RUNNER_WRAPPER_NAMES, "apps.runner.main"),
+        "april": "apps.cli.main",
+    }
     for name in WRAPPER_NAMES:
         target = bin_dir.expanduser().resolve() / name
         if not target.exists():
@@ -112,7 +139,7 @@ def verify_wrappers(*, repo_root: Path, bin_dir: Path) -> list[str]:
             APRIL_WRAPPER_MARKER,
             str(root),
             "APRIL_PYTHON",
-            "-m apps.runner.main",
+            f"-m {expected_modules[name]}",
         ]
         for needle in required:
             if needle not in content:

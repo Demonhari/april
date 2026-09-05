@@ -1,11 +1,64 @@
 from __future__ import annotations
 
+import anyio
 import typer
 
 from apps.cli.render import console
 from april_common.audit import audit_logger_for_settings
-from april_common.errors import ConfigError
-from april_common.settings import load_settings
+from april_common.errors import AprilError, ConfigError
+from april_common.settings import AprilSettings, load_settings
+from services.memory.database import Database
+from services.permissions.approvals import ApprovalStore
+
+_RECOVERY_TOOL = "audit_recovery"
+
+
+async def _validate_recovery_approval(
+    settings: AprilSettings, approval_id: str, args: dict[str, object]
+) -> None:
+    database = Database(settings.database_path)
+    await database.connect()
+    try:
+        approvals = ApprovalStore(
+            database,
+            audit_logger_for_settings(settings),
+            expiry_seconds=settings.permissions.approval_expiry_seconds,
+        )
+        await approvals.validate_exact(
+            approval_id=approval_id,
+            tool=_RECOVERY_TOOL,
+            args=args,
+        )
+    finally:
+        await database.close()
+
+
+async def _consume_recovery_approval(
+    settings: AprilSettings,
+    approval_id: str,
+    args: dict[str, object],
+    result: dict[str, object],
+) -> None:
+    database = Database(settings.database_path)
+    await database.connect()
+    try:
+        audit = audit_logger_for_settings(settings)
+        approvals = ApprovalStore(
+            database,
+            audit,
+            expiry_seconds=settings.permissions.approval_expiry_seconds,
+        )
+        await approvals.consume_exact(
+            approval_id=approval_id,
+            tool=_RECOVERY_TOOL,
+            args=args,
+            result=result,
+            actor="local-user",
+            request_id=f"audit-recovery-{approval_id}",
+        )
+    finally:
+        await database.close()
+
 
 audit_app = typer.Typer(help="Verify APRIL's local hash-chained audit log.")
 
@@ -57,13 +110,41 @@ def recover_audit(
     try:
         settings = load_settings()
         if apply and settings.environment == "production" and not approval_id:
-            raise RuntimeError("production audit recovery requires an exact approval ID")
-        result = audit_logger_for_settings(settings).recover(reason=reason, apply=apply)
-    except (ConfigError, RuntimeError, ValueError) as exc:
+            raise RuntimeError(
+                "production audit recovery requires an exact approved approval ID; "
+                "this command never creates or bypasses approvals"
+            )
+        recovery_args = {"apply": True, "reason": reason.strip()}
+        if apply and settings.environment == "production":
+            assert approval_id is not None
+            anyio.run(_validate_recovery_approval, settings, approval_id, recovery_args)
+        result = audit_logger_for_settings(settings).recover(
+            reason=reason,
+            apply=apply,
+            approval_id=approval_id,
+        )
+        if (
+            apply
+            and settings.environment == "production"
+            and approval_id is not None
+            and result.status == "recovered"
+        ):
+            anyio.run(
+                _consume_recovery_approval,
+                settings,
+                approval_id,
+                recovery_args,
+                {"ok": True, "status": result.status},
+            )
+    except (AprilError, ConfigError, RuntimeError, ValueError) as exc:
         if json_output:
-            console.print_json(data={"status": "refused", "reason_code": type(exc).__name__})
+            reason_code = exc.code if isinstance(exc, AprilError) else type(exc).__name__
+            console.print_json(data={"status": "refused", "reason_code": reason_code})
         else:
-            console.print("[red]Audit recovery refused.[/red]")
+            if isinstance(exc, AprilError):
+                console.print(f"[red]Audit recovery refused: {exc.code}.[/red]")
+            else:
+                console.print("[red]Audit recovery refused.[/red]")
         raise typer.Exit(1) from exc
     if json_output:
         console.print_json(data=result.to_dict())
@@ -73,4 +154,6 @@ def recover_audit(
         if result.status == "dry_run":
             console.print("No files changed. Review, then add --apply explicitly.")
     if result.status == "dry_run" and apply:
+        raise typer.Exit(1)
+    if result.status == "unavailable":
         raise typer.Exit(1)

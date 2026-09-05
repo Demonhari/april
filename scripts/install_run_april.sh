@@ -9,7 +9,7 @@ show_help() {
   cat <<'HELP'
 Usage: scripts/install_run_april.sh [--force] [--add-to-path] [--shell zsh|bash]
 
-Installs APRIL-owned wrappers into ~/.local/bin. This script never uses sudo
+Installs APRIL-owned run, april-run, and bare april wrappers into ~/.local/bin. This script never uses sudo
 and only edits shell PATH config when --add-to-path is supplied.
 HELP
 }

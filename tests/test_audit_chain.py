@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from apps.runner.main import app
 from april_common.audit import AuditLogger, MemoryAuditAnchor
+from april_common.errors import AprilError, PermissionDeniedError
+from services.memory.database import Database
+from services.memory.migrations import run_migrations
+from services.permissions.approvals import ApprovalStore
+from services.permissions.schemas import ApprovalRequest
 
 
 def _process_audit_writer(path: str, count: int) -> None:
@@ -45,7 +53,7 @@ def test_valid_genesis_multi_event_and_secret_redaction(tmp_path: Path) -> None:
 
 
 def test_concurrent_thread_and_process_writers(tmp_path: Path) -> None:
-    path = tmp_path / "audit.jsonl"
+    path = tmp_path / "logs" / "audit.jsonl"
     logger = AuditLogger(path)
     with ThreadPoolExecutor(max_workers=8) as executor:
         list(
@@ -151,3 +159,100 @@ def test_audit_verify_cli_exit_codes_and_json(
     corrupt = runner.invoke(app, ["april", "audit", "verify", "--json"])
     assert corrupt.exit_code == 1
     assert json.loads(corrupt.stdout)["status"] == "corrupt"
+
+
+def test_recovery_quarantine_is_byte_exact_and_rechecks_concurrent_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "logs" / "audit.jsonl"
+    logger = AuditLogger(path)
+    logger.write({"event_type": "original", "value": "kept"})
+    original_bytes = path.read_bytes()
+    path.write_bytes(b"{}\n")
+    observed_copy = False
+    original_copy2 = shutil.copy2
+
+    def copy_then_mutate(source: Path, destination: Path, *args: object, **kwargs: object):
+        nonlocal observed_copy
+        result = original_copy2(source, destination, *args, **kwargs)
+        if source == path:
+            observed_copy = True
+            path.write_bytes(b'{"changed_after_plan":true}\n')
+        return result
+
+    monkeypatch.setattr("april_common.audit.shutil.copy2", copy_then_mutate)
+    with pytest.raises(AprilError) as error:
+        logger.recover(reason="test concurrent recovery", apply=True)
+    assert error.value.code == "AUDIT_RECOVERY_CONCURRENT_CHANGE"
+    assert observed_copy
+    quarantine_root = tmp_path / "data" / "backups" / "audit-quarantine"
+    quarantine_log = next(quarantine_root.glob("recovery-*/audit.jsonl"))
+    assert (
+        hashlib.sha256(quarantine_log.read_bytes()).hexdigest()
+        == hashlib.sha256(b"{}\n").hexdigest()
+    )
+    assert path.read_bytes() == b'{"changed_after_plan":true}\n'
+    assert original_bytes not in path.read_bytes()
+
+
+def test_recovery_anchor_failure_never_reports_success(tmp_path: Path) -> None:
+    class FailingAnchor(MemoryAuditAnchor):
+        fail = False
+
+        def set(self, value: str) -> None:
+            if self.fail:
+                raise AprilError("AUDIT_ANCHOR_FAILED", "injected", 500)
+            super().set(value)
+
+    anchor = FailingAnchor()
+    path = tmp_path / "logs" / "audit.jsonl"
+    logger = AuditLogger(path, anchor=anchor)
+    logger.write({"event_type": "one"})
+    path.write_text("{}\n", encoding="utf-8")
+    anchor.fail = True
+    with pytest.raises(AprilError, match="AUDIT_ANCHOR_FAILED"):
+        logger.recover(reason="test anchor failure", apply=True)
+    assert list((tmp_path / "data" / "backups" / "audit-quarantine").glob("recovery-*"))
+
+
+@pytest.mark.asyncio
+async def test_recovery_approval_requires_exact_unexpired_binding(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    audit = AuditLogger(settings_tmp.audit_path)
+    store = ApprovalStore(database, audit, expiry_seconds=60)
+    args = {"apply": True, "reason": "exact recovery"}
+    approval = await store.create(
+        ApprovalRequest(
+            tool="audit_recovery",
+            args=args,
+            permission_level=3,
+            risk_level="code_write",
+        ),
+        actor="test",
+        request_id="create-recovery",
+    )
+    await store.approve_exact(
+        approval_id=approval.approval_id,
+        tool="audit_recovery",
+        args=args,
+        actor="test",
+        request_id="approve-recovery",
+    )
+    with pytest.raises(PermissionDeniedError):
+        await store.consume_exact(
+            approval_id=approval.approval_id,
+            tool="audit_recovery",
+            args={"apply": True, "reason": "different recovery"},
+            result={"ok": True},
+            actor="test",
+            request_id="consume-recovery",
+        )
+    with pytest.raises(PermissionDeniedError):
+        await store.validate_exact(
+            approval_id="arbitrary-nonempty-id",
+            tool="audit_recovery",
+            args=args,
+        )
+    await database.close()

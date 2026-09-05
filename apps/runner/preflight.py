@@ -23,6 +23,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from apps.runner.mac_report import redact_reason
+from april_common.credentials import CredentialStore
 from april_common.errors import ConfigError
 from april_common.settings import (
     KNOWN_DEFAULT_API_TOKENS,
@@ -32,7 +33,6 @@ from april_common.settings import (
     AprilSettings,
     load_settings,
 )
-from april_common.credentials import CredentialStore
 from services.april_runtime.model_registry import ModelRegistry
 
 PreflightStatus = Literal["pass", "warning", "fail"]

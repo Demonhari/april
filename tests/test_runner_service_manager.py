@@ -11,18 +11,20 @@ from typing import IO
 import pytest
 
 from apps.runner.install import (
+    APRIL_CLI_COMMAND_MARKER,
     APRIL_WRAPPER_MARKER,
     PATH_BLOCK_START,
     add_path_block,
     install_wrappers,
     path_contains_dir,
     shell_config_path,
+    uninstall_wrappers,
     wrapper_content,
 )
 from apps.runner.install import (
     main as install_main,
 )
-from apps.runner.service_manager import AprilServiceManager
+from apps.runner.service_manager import AprilServiceManager, ServiceInfo, ServiceStatus
 
 
 class FakeProcess:
@@ -124,6 +126,78 @@ def test_installer_creates_executable_wrappers(tmp_path: Path) -> None:
         assert f'export APRIL_HOME="{tmp_path.resolve()}"' in content
         assert "APRIL_PYTHON" in content
         assert "apps.runner.main" in content
+    april_path = bin_dir / "april"
+    assert april_path in result.installed
+    assert os.access(april_path, os.X_OK)
+    assert APRIL_CLI_COMMAND_MARKER in april_path.read_text(encoding="utf-8")
+    assert "apps.cli.main" in april_path.read_text(encoding="utf-8")
+
+
+def test_installer_quotes_repository_paths_and_is_idempotent(tmp_path: Path) -> None:
+    repo = tmp_path / "APRIL repo with spaces"
+    repo.mkdir()
+    bin_dir = tmp_path / "bin with spaces"
+    first = install_wrappers(repo_root=repo, bin_dir=bin_dir)
+    second = install_wrappers(repo_root=repo, bin_dir=bin_dir)
+    assert len(first.installed) == 3
+    assert len(second.skipped) == 3
+    assert f'export APRIL_HOME="{repo.resolve()}"' in (bin_dir / "april").read_text()
+
+
+def test_bare_april_wrapper_runs_outside_repository_without_activation(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin with spaces"
+    install_wrappers(repo_root=Path.cwd(), bin_dir=bin_dir)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env.pop("APRIL_PYTHON", None)
+    result = subprocess.run(
+        ["april", "--help"],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Usage:" in result.stdout
+    assert "chat" in result.stdout
+    assert not (tmp_path / "data" / "run").exists()
+
+    activated_env = dict(env)
+    activated_env["VIRTUAL_ENV"] = sys.prefix
+    activated_env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{activated_env['PATH']}"
+    activated_env["APRIL_PYTHON"] = sys.executable
+    activated = subprocess.run(
+        ["april", "--help"],
+        cwd=tmp_path,
+        env=activated_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert activated.returncode == 0, activated.stderr
+    assert "Usage:" in activated.stdout
+
+
+def test_uninstall_removes_only_april_owned_wrappers(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    install_wrappers(repo_root=tmp_path, bin_dir=bin_dir)
+    foreign = bin_dir / "foreign"
+    foreign.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    result = uninstall_wrappers(bin_dir=bin_dir)
+    assert {path.name for path in result.installed} == {"run", "april-run", "april"}
+    assert foreign.exists()
+    assert not any((bin_dir / name).exists() for name in ("run", "april-run", "april"))
+
+
+def test_installer_preflights_all_conflicts_without_partial_install(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "april").write_text("#!/bin/sh\necho another tool\n", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="not APRIL-owned"):
+        install_wrappers(repo_root=tmp_path, bin_dir=bin_dir)
+    assert not (bin_dir / "run").exists()
+    assert not (bin_dir / "april-run").exists()
 
 
 def test_installer_refuses_non_april_run_without_force(tmp_path: Path) -> None:
@@ -244,6 +318,37 @@ def test_stop_removes_pid_files(tmp_path: Path, monkeypatch) -> None:
     assert not (run_dir / "api.pid").exists()
     assert (202, signal.SIGTERM) in signals
     assert (101, signal.SIGTERM) in signals
+
+
+def test_stop_started_services_preserves_preexisting_service(tmp_path: Path) -> None:
+    run_dir = tmp_path / "data" / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "runtime.pid").write_text("101", encoding="utf-8")
+    (run_dir / "api.pid").write_text("202", encoding="utf-8")
+    alive = {101, 202}
+    signals: list[tuple[int, int]] = []
+
+    def pid_exists(pid: int) -> bool:
+        return pid in alive
+
+    def pid_signal(pid: int, sig: int) -> None:
+        signals.append((pid, sig))
+        alive.discard(pid)
+
+    manager = AprilServiceManager(
+        home=tmp_path,
+        pid_exists=pid_exists,
+        pid_signal=pid_signal,
+        health_getter=lambda _url, _timeout: True,
+        sleep=lambda _seconds: None,
+    )
+    before = ServiceStatus(
+        runtime=ServiceInfo("runtime", 101, True, True, tmp_path / "runtime.log"),
+        api=ServiceInfo("api", None, False, False, tmp_path / "api.log"),
+    )
+    manager.stop_started_services(before)
+    assert (202, signal.SIGTERM) in signals
+    assert (101, signal.SIGTERM) not in signals
 
 
 def test_start_uses_home_even_from_other_cwd(tmp_path: Path, monkeypatch) -> None:

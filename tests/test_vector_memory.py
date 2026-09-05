@@ -479,6 +479,40 @@ def test_invalid_current_falls_back_and_explicit_repair_switches_pointer(
     assert _current_generation(tmp_path) == recovery
 
 
+def test_repair_does_not_switch_pointer_when_audit_is_unavailable(tmp_path: Path) -> None:
+    from april_common.audit import AuditVerification
+
+    class BrokenAudit:
+        def verify(self) -> AuditVerification:
+            return AuditVerification(
+                status="corrupt",
+                valid=False,
+                corrupt=True,
+                anchor_lagged=False,
+                record_count=1,
+                terminal_sequence=1,
+                terminal_hash="0" * 64,
+            )
+
+        def write(self, entry: dict[str, object]) -> None:
+            raise AssertionError("unavailable audit must block before writing")
+
+    memory = VectorMemory(tmp_path, audit=BrokenAudit())  # type: ignore[arg-type]
+    memory.upsert(record_id="1", content="first", metadata=metadata("h1"))
+    recovery = _current_generation(tmp_path)
+    memory.upsert(record_id="2", content="second", metadata=metadata("h2"))
+    broken = _current_generation(tmp_path)
+    records_path = tmp_path / "generations" / broken / "records.json"
+    records_path.write_text(
+        records_path.read_text(encoding="utf-8").replace("second", "tampered"),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="writable, valid audit trail"):
+        memory.repair_index(apply=True)
+    assert _current_generation(tmp_path) == broken
+    assert recovery != broken
+
+
 def test_missing_current_generation_and_no_valid_generation_are_safe(tmp_path: Path) -> None:
     memory = VectorMemory(tmp_path)
     (tmp_path / "CURRENT").write_text("g-20260101T000000000000Z-aaaaaaaaaaaa\n", encoding="utf-8")

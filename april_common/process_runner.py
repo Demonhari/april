@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -270,6 +271,44 @@ def run_restricted_process_sync(
             process_launcher=process_launcher,
         )
     )
+
+
+def run_terminal_process_sync(
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    category: ProcessCategory,
+    april_home: Path | None = None,
+) -> int:
+    """Run a trusted foreground command attached to the caller's terminal.
+
+    This remains separate from the restricted process helper: APRIL's own CLI
+    needs terminal input and output, while workers and tools retain captured
+    streams and DEVNULL input.
+    """
+    normalized_argv = _validate_argv(argv)
+    resolved_cwd = cwd.expanduser().resolve(strict=True)
+    if not resolved_cwd.is_dir():
+        raise ValueError("Process cwd must be an existing directory.")
+    environment = build_process_environment(category, april_home=april_home)
+    process = subprocess.Popen(
+        list(normalized_argv),
+        cwd=str(resolved_cwd),
+        env=environment,
+        stdin=None,
+        stdout=None,
+        stderr=None,
+        shell=False,
+        start_new_session=False,
+    )
+    try:
+        return process.wait()
+    except KeyboardInterrupt:
+        if process.poll() is None:
+            process.terminate()
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=1.0)
+        raise
 
 
 async def _bounded_read(

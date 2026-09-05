@@ -65,9 +65,9 @@ class VectorRecovery(VectorMemoryBase):
             staging = self._abandoned_staging_ids_unlocked()
             applied = False
             if apply and candidate is not None:
+                self._audit_recovery(candidate, pointer_reason or "repair_requested")
                 self._switch_current_unlocked(candidate)
                 applied = True
-                self._audit_recovery(candidate, pointer_reason or "repair_requested")
                 self._cleanup_staging_unlocked()
                 self._cleanup_generations_unlocked()
                 pointer_state = "valid"

@@ -284,7 +284,11 @@ def build_readiness_report(
     try:
         audit_size = settings.audit_path.stat().st_size if settings.audit_path.exists() else 0
         if audit_size <= 4 * 1024 * 1024:
-            audit_status = audit_logger_for_settings(settings).verify().status
+            audit_status = (
+                audit_logger_for_settings(settings, credential_store=credential_store)
+                .verify()
+                .status
+            )
         else:
             audit_status = "explicit_verification_required"
     except (OSError, RuntimeError):

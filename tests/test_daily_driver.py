@@ -8,10 +8,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from apps.runner.daily_driver import build_daily_driver_report
+from apps.runner.daily_driver import _vector_index_check, build_daily_driver_report
 from apps.runner.readiness import ReadinessReport
 from april_common.config_fingerprint import config_fingerprint_digest
+from april_common.settings import load_settings
 from april_common.time import utc_now
+from services.memory.schemas import VectorMetadata
+from services.memory.vector_memory import VectorMemory
 
 pytestmark = pytest.mark.usefixtures("clean_april_environment")
 
@@ -75,6 +78,32 @@ def test_daily_driver_redacted_and_schema(tmp_path: Path) -> None:
         "audit log",
     ):
         assert expected in names
+
+
+def test_vector_repair_is_blocked_until_audit_is_verified(tmp_path: Path) -> None:
+    home = _ready_home(tmp_path)
+    settings = load_settings(root=home)
+    vector = VectorMemory(settings.vector_index_path)
+    metadata = VectorMetadata(
+        source_type="test",
+        source_id="test",
+        content_hash="hash",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    vector.upsert(record_id="one", content="first", metadata=metadata)
+    vector.upsert(record_id="two", content="second", metadata=metadata)
+    active = vector.health()["effective_generation"]
+    records = settings.vector_index_path / "generations" / active / "records.json"
+    records.write_text(
+        records.read_text(encoding="utf-8").replace("second", "tampered"),
+        encoding="utf-8",
+    )
+
+    check = _vector_index_check(home, settings, audit_status="corrupt")
+
+    assert check.status == "blocker"
+    assert check.next_command == "run april audit verify"
+    assert "before repair" in check.detail
 
 
 def test_core_ready_with_fresh_matching_real_report(

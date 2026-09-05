@@ -135,6 +135,14 @@ class AprilServiceManager:
         self._stop_service(self.runtime_pid_path)
         return self.status()
 
+    def stop_started_services(self, before: ServiceStatus) -> ServiceStatus:
+        """Stop only services absent before a one-shot invocation started."""
+        if not before.api.running:
+            self._stop_service(self.api_pid_path)
+        if not before.runtime.running:
+            self._stop_service(self.runtime_pid_path)
+        return self.status()
+
     def restart(self, *, fake_backend: bool = False) -> ServiceStatus:
         self.stop()
         return self.start(fake_backend=fake_backend)

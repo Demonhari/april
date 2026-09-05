@@ -650,8 +650,7 @@ def apply_model_profile(
     if not isinstance(profile, dict):
         raise ConfigError(f"Unknown model profile: {profile_name}")
     config_path = _config_path(root)
-    backup = config_path.with_suffix(f".yaml.bak-{time.strftime('%Y%m%d%H%M%S')}")
-    shutil.copy2(config_path, backup)
+    backup = _timestamped_backup(config_path, home=root)
     data = _read_yaml(config_path)
     models = data.get("models")
     if not isinstance(models, dict):

@@ -130,6 +130,25 @@ Do not paste `.env`, Keychain output, Authorization headers, audit payloads, or
 the credential file into bug reports. Readiness and verification intentionally
 report only credential availability and backend selection.
 
+## Audit verification and recovery
+
+Inspect the chain without changing it:
+
+```bash
+run april audit verify --json
+run april audit recover --json
+```
+
+Recovery is dry-run by default. Applying recovery requires an exact, approved,
+unexpired `audit_recovery` operation in production, bound to the precise
+`reason` and `apply=true` action. APRIL locks and snapshots the audit log and
+protected anchor, quarantines the original bytes under
+`data/backups/audit-quarantine/` with checksums and owner-only permissions, and
+refuses to claim success if the log, anchor, approval, or audit write changes
+unexpectedly. Do not delete the original log or anchor to make readiness pass.
+If no approved operation exists, the production CLI refuses recovery; it does
+not create or accept an operator-supplied arbitrary approval string.
+
 ## Threat-model boundary
 
 This phase protects against casual plaintext-secret disclosure, inheritance of

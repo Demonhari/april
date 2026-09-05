@@ -5,6 +5,7 @@ from pathlib import Path
 
 from apps.runner.verification.types import VerifyCheck, VerifyStatus
 from april_common.audit import audit_logger_for_settings
+from april_common.credentials import CredentialStore
 from april_common.errors import ConfigError
 from april_common.process_sandbox import SandboxBackend, sandbox_capabilities
 from april_common.settings import load_settings
@@ -64,10 +65,12 @@ def run_local_sandbox_verification(home: Path) -> list[VerifyCheck]:
     ]
 
 
-def run_local_security_integrity_verification(home: Path) -> list[VerifyCheck]:
+def run_local_security_integrity_verification(
+    home: Path, *, credential_store: CredentialStore | None = None
+) -> list[VerifyCheck]:
     """Run redacted local security checks without exposing credential values."""
     try:
-        settings = load_settings(root=home)
+        settings = load_settings(root=home, credential_store=credential_store)
     except (ConfigError, RuntimeError) as exc:
         return [
             VerifyCheck(
@@ -84,7 +87,7 @@ def run_local_security_integrity_verification(home: Path) -> list[VerifyCheck]:
             else "legacy-development-default"
         )
     legacy = legacy_plaintext_credentials_detected(settings.home)
-    audit_result = audit_logger_for_settings(settings).verify()
+    audit_result = audit_logger_for_settings(settings, credential_store=credential_store).verify()
     database = check_database(settings.database_path, home=settings.home, full=False)
     backup = database.last_successful_backup
     backup_detail = str(backup.get("creation_timestamp", "known")) if backup else "none recorded"
@@ -108,7 +111,7 @@ def run_local_security_integrity_verification(home: Path) -> list[VerifyCheck]:
             not legacy,
             "detected; run security credentials migrate" if legacy else "not detected",
         ),
-        VerifyCheck("audit chain", not audit_result.corrupt, audit_result.status),
+        VerifyCheck("audit chain", audit_result.valid, audit_result.status),
         VerifyCheck("database quick_check", database.quick_check == "ok", database.quick_check),
         VerifyCheck(
             "database foreign keys",
