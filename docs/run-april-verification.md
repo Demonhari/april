@@ -50,6 +50,14 @@ GGUF paths already registered in `configs/models.yaml`; for a single-model
 check, provide the path explicitly, for example
 `run april verify --real-model /absolute/path/to/model.gguf`.
 
+Fake verification stores its application and audit test data in an isolated
+temporary home. A passing fake audit check therefore does not validate or repair
+the audit chain in the normal APRIL home, and synthetic recovery tests do not
+recover it either. An access failure is distinct from corrupt history; recovered
+historical bytes remain unverified evidence. The standalone real workflow also
+requires its explicit GGUF path (or an explicitly set `APRIL_TEST_GGUF_PATH`);
+`--all-configured-models` is the separate path that uses registered model files.
+
 On Linux CI, where macOS Seatbelt is unavailable, fake verification may use
 the explicit development-only override:
 
@@ -72,7 +80,7 @@ run april verify --soak --fake --minutes 10
 run april verify --workflow
 run april verify --target-mac
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
-run april verify --workflow --real-model --report data/verification/workflow-real.json
+run april verify --workflow --real-model /absolute/path/to/model.gguf --report data/verification/workflow-real.json
 run april setup models --brain /absolute/path/granite.gguf --coding /absolute/path/qwen-coding.gguf --reading /absolute/path/qwen-reading.gguf --dry-run
 run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run
 run april setup app-stub
@@ -113,7 +121,7 @@ Run target-Mac setup and real verification in this order:
 5. Validate with `run april setup models ... --dry-run`, then import each role with exact-approved `run april model import ... --sha256 EXPECTED_SHA256`
 6. `pip install -e '.[runtime]'`
 7. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json`
-8. `run april verify --workflow --real-model --report data/verification/workflow-real.json`
+8. `run april verify --workflow --real-model /absolute/path/to/model.gguf --report data/verification/workflow-real.json`
 9. Optional voice setup/doctor/live verification:
    `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`,
    `run april voice doctor`,

@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+import os
 import re
+import shlex
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -15,8 +17,14 @@ from april_common.audit import (
     AuditLogger,
     AuditRecoveryPlan,
     AuditVerification,
+    CredentialAuditAnchor,
     MemoryAuditAnchor,
     verify_audit_chain,
+)
+from april_common.credentials import (
+    CredentialKey,
+    CredentialStoreError,
+    InMemoryCredentialStore,
 )
 from april_common.errors import AprilError, PermissionDeniedError
 from services.memory.database import Database
@@ -155,6 +163,65 @@ def test_terminal_truncation_malformed_line_and_anchor_lag(tmp_path: Path) -> No
     assert unavailable.corrupt is False
 
 
+def test_anchor_access_failures_are_unavailable_but_bad_values_are_corrupt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "anchor-cases.jsonl"
+    logger = AuditLogger(path)
+    logger.write({"event_type": "one"})
+    anchor_path = path.with_name("anchor-cases.jsonl.anchor")
+
+    anchor_path.unlink()
+    anchor_path.mkdir()
+    os.chmod(anchor_path, 0o700)
+    unreadable = AuditLogger(path).verify()
+    assert unreadable.status == "unavailable"
+    assert unreadable.corrupt is False
+    assert {issue.code for issue in unreadable.issues} == {"anchor_unavailable"}
+    anchor_path.rmdir()
+
+    anchor_path.write_text("not-json", encoding="utf-8")
+    os.chmod(anchor_path, 0o600)
+    malformed = AuditLogger(path).verify()
+    assert malformed.status == "corrupt"
+    assert malformed.corrupt is True
+    assert "invalid_terminal_anchor" in {issue.code for issue in malformed.issues}
+
+    anchor_path.write_bytes(b"\xff")
+    malformed_bytes = AuditLogger(path).verify()
+    assert malformed_bytes.status == "corrupt"
+    assert "invalid_terminal_anchor" in {issue.code for issue in malformed_bytes.issues}
+
+    class FailingCredentialStore(InMemoryCredentialStore):
+        def get(self, key: CredentialKey) -> str | None:
+            raise CredentialStoreError("injected credential read failure")
+
+    injected = AuditLogger(
+        path,
+        anchor=CredentialAuditAnchor(FailingCredentialStore()),
+    ).verify()
+    assert injected.status == "unavailable"
+    assert injected.corrupt is False
+    assert {issue.code for issue in injected.issues} == {"anchor_unavailable"}
+
+
+def test_insecure_file_anchor_permissions_are_an_integrity_blocker(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("owner-only file permissions are POSIX-specific")
+    path = tmp_path / "insecure-anchor.jsonl"
+    logger = AuditLogger(path)
+    logger.write({"event_type": "one"})
+    anchor_path = path.with_name("insecure-anchor.jsonl.anchor")
+    os.chmod(anchor_path, 0o644)
+
+    result = AuditLogger(path).verify()
+
+    assert result.status == "corrupt"
+    assert result.corrupt is True
+    assert result.valid is False
+    assert "insecure_anchor_permissions" in {issue.code for issue in result.issues}
+
+
 def test_audit_verify_cli_exit_codes_and_json(
     tmp_path: Path,
     monkeypatch: object,
@@ -261,6 +328,72 @@ def test_recovery_cli_plan_consent_and_apply_output_is_actionable(
     backup = tmp_path / "data" / "backups" / "audit-quarantine" / quarantine.group(1)
     assert (backup / "audit.jsonl").read_bytes() == original_bytes
     assert "unverified historical evidence" not in applied.stdout
+
+
+def test_recovery_json_guidance_uses_returned_ids_and_custom_recovery_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    monkeypatch.setenv("APRIL_ENV", "test")
+    path = tmp_path / "custom" / "logs" / "audit.jsonl"
+    monkeypatch.setenv("APRIL_AUDIT_PATH", str(path))
+    logger = AuditLogger(path)
+    logger.write({"event_type": "original"})
+    path.write_bytes(b"{}\n")
+
+    runner = CliRunner()
+    planned = runner.invoke(app, ["april", "audit", "recover", "--json"])
+    assert planned.exit_code == 0, planned.output
+    plan_payload = json.loads(planned.stdout)
+    approval_command = plan_payload["next_commands"][0]
+    assert approval_command == (
+        "run april audit recover --approve "
+        f"--plan-id {plan_payload['plan_id']} "
+        f"--plan-digest {plan_payload['plan_digest']} --json"
+    )
+    assert plan_payload["canonical_target"] == str(path.resolve())
+
+    approval_args = shlex.split(approval_command)[1:]
+    approved = runner.invoke(app, approval_args)
+    assert approved.exit_code == 0, approved.output
+    approval_payload = json.loads(approved.stdout)
+    approval_id = approval_payload["approval_id"]
+    apply_command = approval_payload["next_commands"][0]
+    assert apply_command == (
+        "run april audit recover --apply "
+        f"--plan-id {plan_payload['plan_id']} "
+        f"--approval-id {approval_id} --json"
+    )
+
+    apply_args = shlex.split(apply_command)[1:]
+    applied = runner.invoke(app, apply_args)
+    assert applied.exit_code == 0, applied.output
+    applied_payload = json.loads(applied.stdout)
+    assert applied_payload["status"] == "recovered"
+    assert applied_payload["next_commands"] == [
+        "run april audit verify --json",
+        "run april readiness",
+        "run april start --preflight",
+    ]
+    assert AuditLogger(path).verify().valid
+
+
+def test_recovery_human_guidance_derives_custom_quarantine_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    monkeypatch.setenv("APRIL_ENV", "test")
+    path = tmp_path / "custom" / "logs" / "audit.jsonl"
+    monkeypatch.setenv("APRIL_AUDIT_PATH", str(path))
+    logger = AuditLogger(path)
+    logger.write({"event_type": "original"})
+    path.write_bytes(b"{}\n")
+
+    result = CliRunner().invoke(app, ["april", "audit", "recover"])
+
+    assert result.exit_code == 0, result.output
+    assert "Quarantine: custom/data/backups/audit-quarantine/" in result.output
+    assert "Quarantine: data/backups/audit-quarantine/" not in result.output
 
 
 def test_recovery_quarantine_is_byte_exact_and_rechecks_concurrent_changes(tmp_path: Path) -> None:

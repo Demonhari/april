@@ -3,11 +3,48 @@ from __future__ import annotations
 import typer
 
 from apps.cli.render import console
-from april_common.audit import audit_logger_for_settings
+from april_common.audit import AuditLogger, audit_logger_for_settings
 from april_common.errors import AprilError, ConfigError
-from april_common.settings import load_settings
+from april_common.settings import AprilSettings, load_settings
 
 audit_app = typer.Typer(help="Verify APRIL's local hash-chained audit log.")
+
+
+def _approval_command(plan_id: str | None, plan_digest: str | None) -> str | None:
+    if not plan_id or not plan_digest:
+        return None
+    prefix = "run april audit recover --approve"
+    return f"{prefix} --plan-id {plan_id} --plan-digest {plan_digest} --json"
+
+
+def _apply_command(plan_id: str | None, approval_id: str | None) -> str | None:
+    if not plan_id or not approval_id:
+        return None
+    return f"run april audit recover --apply --plan-id {plan_id} --approval-id {approval_id} --json"
+
+
+def _verification_commands() -> list[str]:
+    return [
+        "run april audit verify --json",
+        "run april readiness",
+        "run april start --preflight",
+    ]
+
+
+def _quarantine_location(settings: AprilSettings, audit: AuditLogger, directory: str | None) -> str:
+    """Display the actual recovery root without exposing an unrelated absolute path."""
+    if not directory:
+        return "unavailable"
+    recovery_root = audit.recovery_root
+    location = (recovery_root / directory).resolve()
+    home = settings.home.resolve()
+    try:
+        return str(location.relative_to(home))
+    except ValueError:
+        # Custom audit paths can place the recovery root outside APRIL_HOME.
+        # Keep the operator-useful location, while JSON reports retain their
+        # existing path-redacted shape.
+        return str(location)
 
 
 @audit_app.command("verify")
@@ -73,7 +110,15 @@ def recover_audit(
                 raise RuntimeError("--approve requires --plan-id from a prior recovery plan.")
             approval_result = audit.approve_recovery(plan_id=plan_id, plan_digest=plan_digest)
             if json_output:
-                console.print_json(data=approval_result)
+                payload = dict(approval_result)
+                returned_approval_id = approval_result.get("approval_id")
+                next_command = _apply_command(
+                    plan_id,
+                    returned_approval_id if isinstance(returned_approval_id, str) else None,
+                )
+                if next_command is not None:
+                    payload["next_commands"] = [next_command]
+                console.print_json(data=payload)
             else:
                 console.print(f"Audit recovery consent recorded for plan {plan_id}.")
                 console.print(f"Approval ID: {approval_result['approval_id']}")
@@ -130,6 +175,8 @@ def recover_audit(
             ):
                 if key in details:
                     payload[key] = details[key]
+            if status == "incomplete" and isinstance(payload.get("resume_command"), str):
+                payload["next_commands"] = [payload["resume_command"]]
             console.print_json(data=payload)
         else:
             if isinstance(exc, AprilError):
@@ -157,7 +204,17 @@ def recover_audit(
                 console.print("[red]Audit recovery refused.[/red]")
         raise typer.Exit(1) from exc
     if json_output:
-        console.print_json(data=result.to_dict())
+        payload = result.to_dict()
+        next_commands: list[str] = []
+        if result.status == "dry_run":
+            approval = _approval_command(result.plan_id, result.plan_digest)
+            if approval is not None:
+                next_commands.append(approval)
+        elif result.status == "recovered":
+            next_commands.extend(_verification_commands())
+        if next_commands:
+            payload["next_commands"] = next_commands
+        console.print_json(data=payload)
     else:
         issues = ",".join(result.issue_codes) or "none"
         console.print(f"Audit recovery: {result.status}; issues={issues}.")
@@ -173,16 +230,14 @@ def recover_audit(
                 f"Record count: {result.record_count}\n"
                 f"Issue codes: {issues}\n"
                 f"Original log SHA-256: {result.quarantined_log_sha256}\n"
-                f"Quarantine: data/backups/audit-quarantine/{result.quarantine_directory}"
+                f"Quarantine: {_quarantine_location(settings, audit, result.quarantine_directory)}"
             )
             console.print(
                 "Applying creates a NEW audit chain; the original bytes remain preserved "
                 "as unverified historical evidence."
             )
             console.print(
-                "Approval command: "
-                f"run april audit recover --approve --plan-id {result.plan_id} "
-                f"--plan-digest {result.plan_digest} --json",
+                f"Approval command: {_approval_command(result.plan_id, result.plan_digest)}",
                 markup=False,
             )
         elif result.status == "recovered":

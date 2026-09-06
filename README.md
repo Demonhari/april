@@ -252,6 +252,14 @@ new verifiable chain; the old bytes remain unverified historical evidence.
 Afterward rerun `run april audit verify --json`, `run april readiness`, real
 model verification, and `run april start --preflight`.
 
+`run april verify --fake` uses an isolated temporary application and audit home;
+its passing audit check does not validate or repair the audit chain in the normal
+APRIL home. Synthetic recovery tests likewise never recover a real installation.
+An unavailable anchor or log is an access/verification failure, not evidence of
+corrupt history; a corrupt chain requires the separate reviewed recovery flow.
+Recovered historical bytes remain unverified evidence and are never advertised
+as newly authenticated.
+
 ### Memory embeddings (honest default)
 
 Local memory and repo/document vector search default to **deterministic
@@ -365,7 +373,7 @@ go-live report and the Desktop Readiness screen state both explicitly:
 | 3 | Real runtime preflight | `pip install -e '.[runtime]'` then `run april readiness` (backend `llama_cpp`, GGUFs present) |
 | 4 | Real model chat/stream verification | `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json` |
 | 5 | Real specialist switching verification | same `--all-configured-models` run (verifies brain-resident specialist switching) |
-| 6 | Real workflow + full security checklist | `run april verify --workflow --real-model --report data/verification/workflow-real.json` (real routing smoke **plus** the deterministic patch/security checklist) |
+| 6 | Real workflow + full security checklist | `run april verify --workflow --real-model /absolute/path/to/model.gguf --report data/verification/workflow-real.json` (real routing smoke **plus** the deterministic patch/security checklist) |
 | 6b | Runtime-local embeddings + reindex | `run april memory doctor` · `run april model import --role embedding … --sha256 …` · explicit provider selection · `run april memory reindex --wait` |
 | 7 | Voice push-to-talk verification | `run april voice doctor` then `run april voice verify-live --report data/verification/voice-live.json` |
 | 8 | Wake-word verification | `run april voice verify-wake-live --report data/verification/wake-live.json` (requires a configured wake-word ONNX model) |
@@ -426,7 +434,7 @@ Next commands:
   run april setup tokens
   run april model import --role embedding --id april-embedding --name LOCAL_EMBEDDING --path /absolute/path/to/embedding.gguf --sha256 EXPECTED_SHA256
   run april memory reindex
-  run april verify --workflow --real-model --report data/verification/workflow-real.json
+  run april verify --workflow --real-model /absolute/path/to/model.gguf --report data/verification/workflow-real.json
 ```
 
 Supporting commands:
@@ -486,7 +494,7 @@ On a target Mac, run setup and verification in this order (or run
 5. Validate local GGUFs with `run april setup models ... --dry-run`, then import each model through exact-approved `run april model import ... --sha256 EXPECTED_SHA256`.
 6. `pip install -e '.[runtime]'`
 7. `run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json` — real model **core** verification.
-8. `run april verify --workflow --real-model --report data/verification/workflow-real.json` — real routing smoke **plus** the full deterministic security checklist.
+8. `run april verify --workflow --real-model /absolute/path/to/model.gguf --report data/verification/workflow-real.json` — real routing smoke **plus** the full deterministic security checklist.
 9. `run april go-live --write-report --start-services` — the real-model-only go-live proof (real models + strict-JSON routing without fallback + specialist switching + clean service lifecycle). It reports **`real_model_core_status`** separately from **`hardened_go_live_ready`**, so a working real-model core is never hidden behind a hardening warning (dev tokens, non-runtime-local embeddings).
 10. Hardened memory (recommended): import Nomic manually with `run april model import --role embedding ... --sha256 EXPECTED_SHA256`, select `runtime-local` explicitly, then run `run april memory reindex --wait`. Switching providers changes the vector space, so the reindex is required.
 11. Optional voice (not part of the first real-model go-live milestone) setup/doctor/live verification: `run april setup voice --whisper-binary /path/to/whisper.cpp/main --whisper-model /path/to/ggml-base.en.bin --piper-binary /path/to/piper --piper-model /path/to/voice.onnx --dry-run`, `run april voice doctor`, then `run april voice verify-live --report data/verification/voice-live.json`. The Core API `/readiness` reports a single redacted `voice_milestone` (`disabled` → `not_configured` → `push_to_talk_ready` → `wake_word_ready` → `full_voice_loop_ready` → `live_verified` → `wake_live_verified`).
@@ -519,7 +527,7 @@ run april verify --real-model /absolute/path/to/model.gguf
 run april model benchmark REGISTERED_MODEL_ID --wait
 run april verify --target-mac --require-real-model /absolute/path/to/model.gguf
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
-run april verify --workflow --real-model --report data/verification/workflow-real.json
+run april verify --workflow --real-model /absolute/path/to/model.gguf --report data/verification/workflow-real.json
 ```
 
 `run april setup models` is validation-only. Synchronous `--apply` is retired;
@@ -1401,7 +1409,7 @@ run april verify --fake
 run april verify --soak --fake --minutes 10
 run april verify --target-mac
 run april verify --all-configured-models --require-real-model --report data/verification/mac-readiness.json
-run april verify --workflow --real-model --report data/verification/workflow-real.json
+run april verify --workflow --real-model /absolute/path/to/model.gguf --report data/verification/workflow-real.json
 node tests/js/desktop_token_bridge.test.cjs
 node tests/js/desktop_dashboard.test.cjs
 node --check apps/desktop/web/app.js

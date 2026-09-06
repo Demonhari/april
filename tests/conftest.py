@@ -13,6 +13,7 @@ import anyio
 import pytest
 from starlette.testclient import TestClient
 
+import april_common.settings as settings_module
 from april_common.errors import ModelUnavailableError
 from april_common.settings import AprilSettings, load_settings, reset_settings_cache
 from services.api.dependencies import ApiContainer
@@ -124,19 +125,34 @@ def _pin_llama_cpp(monkeypatch: pytest.MonkeyPatch, *, available: bool) -> None:
     monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
 
 
-@pytest.fixture
-def clean_april_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove host ``APRIL_*`` overrides for config-driven builder tests.
+@pytest.fixture(autouse=True)
+def clean_april_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Remove host ``APRIL_*`` overrides before every unit test.
 
     Readiness and startup-preflight builders intentionally honour every supported
-    APRIL environment override in production. Tests that construct a temporary
-    home from copied config files must therefore clear the developer shell's
-    APRIL variables, just as the adjacent llama.cpp fixtures pin the optional
-    dependency probe instead of inheriting host state.
+    APRIL environment override in production. Any test that constructs a
+    temporary home must therefore start with a clean environment rather than
+    inheriting the developer's APRIL_HOME, path overrides, dotenv selection, or
+    credential-store selection. Tests that intentionally exercise an override
+    set it after this fixture has run.
     """
     for key in tuple(os.environ):
         if key.startswith("APRIL_"):
             monkeypatch.delenv(key, raising=False)
+    real_read_dotenv = settings_module._read_dotenv
+    repository_env = (settings_module.project_root() / ".env").resolve()
+
+    def read_test_dotenv(path: Path, supported_keys: frozenset[str]) -> dict[str, str]:
+        if path.expanduser().resolve() == repository_env:
+            return {}
+        return real_read_dotenv(path, supported_keys)
+
+    monkeypatch.setattr(settings_module, "_read_dotenv", read_test_dotenv)
+    reset_settings_cache()
+    try:
+        yield
+    finally:
+        reset_settings_cache()
 
 
 @pytest.fixture
@@ -152,7 +168,11 @@ def llama_cpp_missing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def settings_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AprilSettings:
+def settings_tmp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_april_environment: None,
+) -> AprilSettings:
     monkeypatch.setenv("APRIL_HOME", str(tmp_path))
     monkeypatch.setenv("APRIL_ENV", "test")
     monkeypatch.setenv("APRIL_RUNTIME_BACKEND", "fake")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ from apps.runner.voice_conversation_live import VoiceConversationLiveReport
 from apps.runner.voice_live import VoiceLiveReport
 from apps.runner.wake_live import WakeWordLiveReport
 from april_common.errors import ConfigError
-from april_common.settings import load_settings
+from april_common.settings import get_settings, load_settings, reset_settings_cache
 from services.memory.schemas import VectorMetadata
 from services.memory.vector_memory import VectorMemory
 
@@ -68,6 +69,62 @@ class FakeManager:
 
     def logs(self, *, lines: int = 80) -> str:
         return f"runtime log\napi log\nlines={lines}"
+
+
+@pytest.fixture
+def synthetic_host_april_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_april_environment: None,
+) -> Path:
+    """Seed host-looking APRIL overrides without using any host-owned paths."""
+    host = tmp_path / "simulated-host-home"
+    credential_file = tmp_path / "simulated-host-credentials.json"
+    (host / "data" / "vector_index").mkdir(parents=True)
+    (host / "logs").mkdir()
+    (host / "data" / "april.db").write_bytes(b"host-database-sentinel")
+    (host / "data" / "vector_index" / "sentinel").write_bytes(b"host-vector-sentinel")
+    (host / "logs" / "audit.jsonl").write_bytes(b"host-audit-sentinel\n")
+    credential_file.write_text(
+        '{"format_version":1,"credentials":{}}\n',
+        encoding="utf-8",
+    )
+    os.chmod(credential_file, 0o600)
+    for key, value in {
+        "APRIL_HOME": str(host),
+        "APRIL_ENV": "test",
+        "APRIL_RUNTIME_BACKEND": "fake",
+        "APRIL_DATABASE_PATH": str(host / "data" / "april.db"),
+        "APRIL_VECTOR_INDEX_PATH": str(host / "data" / "vector_index"),
+        "APRIL_AUDIT_PATH": str(host / "logs" / "audit.jsonl"),
+        "APRIL_LOGS_PATH": str(host / "logs"),
+        "APRIL_CREDENTIAL_STORE": "file",
+        "APRIL_CREDENTIAL_FILE_PATH": str(credential_file),
+    }.items():
+        monkeypatch.setenv(key, value)
+    reset_settings_cache()
+    return host
+
+
+@pytest.fixture
+def isolated_runner_workspace(
+    synthetic_host_april_overrides: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path]:
+    """Reproduce inherited host state, then establish the intended test home."""
+    # Prove the cache can contain the synthetic host home before the isolation
+    # boundary. The fixture must clear both the environment and this cache.
+    assert get_settings().home == synthetic_host_april_overrides.resolve()
+    for key in tuple(os.environ):
+        if key.startswith("APRIL_"):
+            monkeypatch.delenv(key, raising=False)
+    reset_settings_cache()
+    workspace = tmp_path / "intended-test-workspace"
+    try:
+        yield synthetic_host_april_overrides, workspace
+    finally:
+        reset_settings_cache()
 
 
 def test_run_april_status_does_not_start_services(tmp_path: Path, monkeypatch) -> None:
@@ -1029,6 +1086,42 @@ def test_memory_doctor_reports_reindex_command(tmp_path: Path, monkeypatch) -> N
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["reindex_command"] == "run april memory reindex"
+
+
+def _filesystem_snapshot(root: Path) -> dict[str, bytes | None]:
+    snapshot: dict[str, bytes | None] = {}
+    for path in sorted(root.rglob("*")):
+        relative = str(path.relative_to(root))
+        snapshot[relative] = None if path.is_dir() else path.read_bytes()
+    return snapshot
+
+
+def test_memory_settings_and_vector_writes_stay_in_intended_workspace(
+    isolated_runner_workspace: tuple[Path, Path],
+) -> None:
+    host, workspace = isolated_runner_workspace
+    before = _filesystem_snapshot(host)
+    credential_file = host.parent / "simulated-host-credentials.json"
+    credential_before = credential_file.read_bytes()
+    _copy_configs(workspace)
+
+    settings = load_settings(root=workspace)
+    assert settings.home == workspace.resolve()
+    vector = VectorMemory(settings.vector_index_path)
+    vector.upsert(
+        record_id="isolated-record",
+        content="synthetic workspace content",
+        metadata=VectorMetadata(
+            source_type="test",
+            source_id="isolated",
+            content_hash="synthetic-hash",
+            created_at="2026-09-06T00:00:00Z",
+        ),
+    )
+
+    assert (workspace / "data" / "vector_index").exists()
+    assert _filesystem_snapshot(host) == before
+    assert credential_file.read_bytes() == credential_before
 
 
 def test_setup_models_rejects_missing_and_non_gguf(tmp_path: Path, monkeypatch) -> None:

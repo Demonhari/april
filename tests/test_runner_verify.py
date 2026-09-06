@@ -148,19 +148,25 @@ def test_infer_chat_format_from_basename() -> None:
     assert _infer_chat_format_from_basename("some-random-model.gguf") == "generic"
 
 
-def test_standalone_verifier_sets_chat_format_for_fabricated_model(tmp_path: Path) -> None:
+def test_standalone_verifier_sets_chat_format_for_fabricated_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The standalone single-file verifier fabricates a model entry with no
     # operator chat_format; it must inject one from the basename so chat does not
     # fail with "Unsupported chat template" for every supplied model.
     repo_home = Path.cwd()
     model_path = tmp_path / "granite-test-q4_k_m.gguf"
     model_path.write_bytes(b"GGUF stub")
+    ports = iter([19801, 19802])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
     verifier = RealModelVerifier(home=repo_home, model_path=model_path)
-    verifier._prepare()
-    written = yaml.safe_load((verifier.verify_home / "configs" / "models.yaml").read_text())
-    for role in ("brain", "coding", "reading"):
-        assert written["models"][role]["chat_format"] == "granite"
-    shutil.rmtree(verifier.temp, ignore_errors=True)
+    try:
+        verifier._prepare()
+        written = yaml.safe_load((verifier.verify_home / "configs" / "models.yaml").read_text())
+        for role in ("brain", "coding", "reading"):
+            assert written["models"][role]["chat_format"] == "granite"
+    finally:
+        shutil.rmtree(verifier.temp, ignore_errors=True)
 
 
 def test_fake_brain_routing_passes_without_models_or_voice() -> None:

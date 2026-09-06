@@ -119,7 +119,13 @@ class FileAuditAnchor:
             return self.path.read_text(encoding="utf-8").strip() or None
         except FileNotFoundError:
             return None
-        except (OSError, UnicodeDecodeError) as exc:
+        except UnicodeDecodeError as exc:
+            raise AprilError(
+                "AUDIT_ANCHOR_INVALID",
+                "Protected audit anchor is malformed.",
+                422,
+            ) from exc
+        except OSError as exc:
             raise AprilError(
                 "AUDIT_ANCHOR_FAILED",
                 "Unable to read the protected audit anchor.",
@@ -1175,7 +1181,26 @@ def verify_audit_chain(path: Path, *, anchor: AuditAnchor | None = None) -> Audi
         )
     try:
         return _verify_bytes(data, anchor=anchor)
-    except (CredentialStoreError, AprilError, OSError):
+    except (CredentialStoreError, OSError):
+        return AuditVerification(
+            status="unavailable",
+            valid=False,
+            corrupt=False,
+            anchor_lagged=False,
+            record_count=0,
+            terminal_sequence=None,
+            terminal_hash=None,
+            issues=(
+                AuditIssue(
+                    "anchor_unavailable",
+                    None,
+                    "Protected audit anchor could not be read.",
+                ),
+            ),
+        )
+    except AprilError as exc:
+        if exc.code != "AUDIT_ANCHOR_FAILED":
+            raise
         return AuditVerification(
             status="unavailable",
             valid=False,
@@ -1257,14 +1282,38 @@ def _verify_bytes(data: bytes, *, anchor: AuditAnchor | None) -> AuditVerificati
 
     anchor_lagged = False
     if anchor is not None:
+        anchor_value: str | None
+        insecure_anchor = False
         try:
-            protected = _decode_anchor(anchor.get())
-        except (AprilError, ValueError):
+            anchor_value = anchor.get()
+        except AprilError as exc:
+            if exc.code == "AUDIT_ANCHOR_INVALID":
+                issues.append(
+                    AuditIssue("invalid_terminal_anchor", None, "Protected anchor is invalid.")
+                )
+                anchor_value = None
+            elif exc.code == "AUDIT_ANCHOR_INSECURE":
+                issues.append(
+                    AuditIssue(
+                        "insecure_anchor_permissions",
+                        None,
+                        "Protected audit anchor permissions are insecure.",
+                    )
+                )
+                insecure_anchor = True
+                anchor_value = None
+            else:
+                raise
+        try:
+            protected = _decode_anchor(anchor_value)
+        except (TypeError, ValueError):
             issues.append(
                 AuditIssue("invalid_terminal_anchor", None, "Protected anchor is invalid.")
             )
             protected = None
-        if protected is None:
+        if insecure_anchor:
+            pass
+        elif protected is None:
             if terminal_sequence == 1 and records:
                 anchor_lagged = True
             elif records:
