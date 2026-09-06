@@ -34,9 +34,11 @@ from services.memory.vector_memory import (
     VectorMemory,
 )
 
-EXPECTED_READINESS_FIELD_COUNT = 101
+# Readiness schema v1 intentionally gained three defaulted audit-integrity
+# fields. They are additive metadata; no v1 field was removed or renamed.
+EXPECTED_READINESS_FIELD_COUNT = 104
 EXPECTED_READINESS_SCHEMA_SHA256 = (
-    "51d481986fac9a66fb61a3e6efcc530eea7a695cd21f9cfe0fc2abf9b314afc0"
+    "6885b7bf448da80709189314258d2b57c88b05ff54ba6aad8748c05e5a586e07"
 )
 
 EXPECTED_LEGACY_CLI_COMMANDS = {
@@ -155,6 +157,28 @@ def test_readiness_public_imports_and_schema_are_stable() -> None:
     fields = "\n".join(sorted(ReadinessReport.model_fields))
     assert len(ReadinessReport.model_fields) == EXPECTED_READINESS_FIELD_COUNT
     assert hashlib.sha256(fields.encode()).hexdigest() == EXPECTED_READINESS_SCHEMA_SHA256
+
+
+def test_readiness_audit_fields_are_defaulted_v1_extensions() -> None:
+    report = ReadinessReport(
+        generated_at="",
+        os="",
+        cpu_architecture="",
+        python_version="",
+        runtime_backend="",
+        runtime_is_fake=False,
+        llama_cpp_python_available=False,
+        environment="",
+        voice_enabled=False,
+    )
+    payload = report.model_dump()
+    assert report.schema_version == 1
+    assert report.audit_chain_issue_codes == []
+    assert report.audit_chain_record_count == 0
+    assert report.audit_chain_verification_required is False
+    assert payload["audit_chain_issue_codes"] == []
+    assert payload["audit_chain_record_count"] == 0
+    assert payload["audit_chain_verification_required"] is False
 
 
 def test_verifier_facade_preserves_moved_public_imports() -> None:

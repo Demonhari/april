@@ -41,7 +41,10 @@ from apps.runner.readiness_models import (
     ReadinessReport,
     VoiceArtifact,
 )
-from apps.runner.readiness_security import _token_status
+from apps.runner.readiness_security import (
+    _append_runtime_security_checks,
+    _audit_readiness_check,
+)
 from apps.runner.readiness_voice import (
     _daemon_status,
     _sentinel_live_status,
@@ -50,90 +53,20 @@ from apps.runner.readiness_voice import (
     _voice_conversation_live_status,
     _voice_live_status,
 )
-from april_common.audit import audit_logger_for_settings, audit_startup_decision
 from april_common.credentials import CredentialStore, CredentialStoreError
-from april_common.errors import AprilError, ConfigError
+from april_common.errors import ConfigError
 from april_common.hardware_profile import safe_hardware_profile
-from april_common.process_sandbox import SandboxBackend, sandbox_capabilities
 from april_common.settings import (
-    KNOWN_DEFAULT_API_TOKENS,
-    KNOWN_DEFAULT_RUNTIME_TOKENS,
-    PLACEHOLDER_API_TOKENS,
-    PLACEHOLDER_RUNTIME_TOKENS,
     AprilSettings,
     load_settings,
 )
 from april_common.time import utc_now_iso
-from april_common.token_setup import legacy_plaintext_credentials_detected
 from services.api.production_activation import finetuning_readiness
 from services.april_runtime.model_registry import ModelRegistry
 from services.evaluation.model_quality import fixture_set_metadata
 from services.evolution.adapters import inspect_adapter_state
 from services.evolution.rollouts import inspect_rollout_state
 from services.memory.maintenance import check_database
-
-_OFFLINE_AUDIT_MAX_BYTES = 4 * 1024 * 1024
-
-
-def _audit_readiness_check(
-    settings: AprilSettings,
-    *,
-    credential_store: CredentialStore | None,
-) -> tuple[str, list[str], int, bool, ReadinessCheck]:
-    """Verify a bounded audit log without exposing payloads or paths."""
-    try:
-        audit_size = settings.audit_path.stat().st_size if settings.audit_path.exists() else 0
-        if audit_size > _OFFLINE_AUDIT_MAX_BYTES:
-            status = "unverified_size_limit"
-            issue_codes = ["verification_skipped_size_limit"]
-            issue_details = issue_codes
-            record_count = 0
-            verification_required = True
-        else:
-            decision = audit_startup_decision(
-                settings,
-                credential_store=credential_store,
-                logger_factory=audit_logger_for_settings,
-            )
-            status = decision.status
-            issue_details = list(decision.issue_lines)
-            issue_codes = list(decision.issue_codes)
-            record_count = decision.record_count
-            verification_required = status == "unavailable"
-    except (AprilError, CredentialStoreError, OSError, RuntimeError):
-        status = "unavailable"
-        issue_codes = ["verification_unavailable"]
-        issue_details = issue_codes
-        record_count = 0
-        verification_required = True
-
-    if status in {"valid", "anchor_lagged"}:
-        check_status: CheckStatus = "ok"
-        action = None
-    else:
-        check_status = "blocker"
-        action = "run april audit verify --json"
-        if status == "corrupt":
-            action += "; then review with run april audit recover --json"
-    if status == "corrupt":
-        detail = "corrupt; historical records remain unverified"
-    elif status == "unavailable":
-        detail = "unavailable; verification could not be completed"
-    elif status == "unverified_size_limit":
-        detail = (
-            "unverified; offline inspection skipped this audit because it exceeds the 4 MiB bound"
-        )
-    else:
-        detail = status
-    if issue_details:
-        detail += "; issues=" + ",".join(issue_details)[:180]
-    return (
-        status,
-        issue_codes,
-        record_count,
-        verification_required,
-        ReadinessCheck(name="audit chain", status=check_status, detail=detail, action=action),
-    )
 
 
 def build_readiness_report(
@@ -281,92 +214,11 @@ def build_readiness_report(
             )
         )
 
-    # --- development tokens --------------------------------------------------
-    api_status = _token_status(settings.api.token, KNOWN_DEFAULT_API_TOKENS, PLACEHOLDER_API_TOKENS)
-    runtime_status = _token_status(
-        settings.runtime.token, KNOWN_DEFAULT_RUNTIME_TOKENS, PLACEHOLDER_RUNTIME_TOKENS
-    )
-    token_statuses = {api_status, runtime_status}
-    if "placeholder-insecure" in token_statuses:
-        # The .env.example placeholders are not secret. They are fine to discover
-        # locally but must be replaced before any non-local exposure; never "ok".
-        checks.append(
-            ReadinessCheck(
-                name="api/runtime tokens",
-                status="warning",
-                detail="Insecure placeholder tokens from .env.example are still active.",
-                action=_SETUP_TOKENS,
-            )
-        )
-    elif "default-development" in token_statuses:
-        # Default tokens are fine for local development; they must be rotated
-        # before any non-local exposure. A warning, not a hard model blocker.
-        checks.append(
-            ReadinessCheck(
-                name="api/runtime tokens",
-                status="warning",
-                detail="Default development tokens are still active.",
-                action=_SETUP_TOKENS,
-            )
-        )
-    elif "missing" in token_statuses:
-        checks.append(
-            ReadinessCheck(
-                name="api/runtime tokens",
-                status="warning",
-                detail="A loopback token is not configured.",
-                action=_SETUP_TOKENS,
-            )
-        )
-    else:
-        checks.append(ReadinessCheck(name="api/runtime tokens", status="ok", detail="configured"))
-
-    credential_store_selected: str = settings.security.credential_store
-    if credential_store_selected == "auto":
-        credential_store_selected = (
-            "macos-keychain"
-            if settings.environment == "production" and platform.system() == "Darwin"
-            else "legacy-development-default"
-        )
-    legacy_plaintext = legacy_plaintext_credentials_detected(settings.home)
-    checks.append(
-        ReadinessCheck(
-            name="credential store",
-            status="warning" if legacy_plaintext else "ok",
-            detail=(
-                f"{credential_store_selected}; legacy plaintext credential detected"
-                if legacy_plaintext
-                else credential_store_selected
-            ),
-            action=("run april security credentials migrate" if legacy_plaintext else None),
-        )
-    )
-    sandbox = sandbox_capabilities(
-        environment=settings.environment,
-        development_override=settings.workers.development_unsandboxed_override,
-    )
-    sandbox_status: CheckStatus = "ok"
-    if sandbox.backend is SandboxBackend.UNAVAILABLE:
-        sandbox_status = "blocker" if settings.environment == "production" else "warning"
-    elif sandbox.development_override_enabled:
-        sandbox_status = "warning"
-    checks.append(
-        ReadinessCheck(
-            name="Tool Worker OS sandbox",
-            status=sandbox_status,
-            detail=(
-                sandbox.warning
-                or (
-                    f"{sandbox.backend.value}; network denial and filesystem policy are OS-enforced"
-                )
-            ),
-            action=(
-                "Run APRIL on macOS with /usr/bin/sandbox-exec available."
-                if sandbox.backend is SandboxBackend.UNAVAILABLE
-                else None
-            ),
-        )
-    )
+    security_readiness = _append_runtime_security_checks(settings, checks)
+    api_status = security_readiness.api_status
+    runtime_status = security_readiness.runtime_status
+    credential_store_selected = security_readiness.credential_store_selected
+    legacy_plaintext = security_readiness.legacy_plaintext
     database_status = check_database(settings.database_path, home=settings.home)
     checks.append(
         ReadinessCheck(

@@ -623,7 +623,7 @@ def test_readiness_distinguishes_corrupt_and_unavailable_audit(
             )
 
     monkeypatch.setattr(
-        "apps.runner.readiness_report.audit_logger_for_settings",
+        "apps.runner.readiness_security.audit_logger_for_settings",
         lambda settings, **kwargs: UnavailableAudit(),
     )
     unavailable = build_readiness_report(home)
