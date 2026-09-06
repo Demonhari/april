@@ -232,8 +232,10 @@ def readiness(json_output: bool = typer.Option(False, "--json")) -> None:
     report = _composition_api.build_readiness_report(_composition_api._manager().home)
     if json_output:
         console.print_json(data=report.model_dump())
-        return
-    _print_readiness(report)
+    else:
+        _print_readiness(report)
+    if report.blockers:
+        raise typer.Exit(1)
 
 
 def _print_readiness(report: ReadinessReport) -> None:

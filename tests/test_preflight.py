@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
+from typer.testing import CliRunner
 
+from apps.runner.main import app
 from apps.runner.preflight import build_preflight_report
+from april_common.audit import AuditVerification
 from april_common.credentials import CredentialKey, InMemoryCredentialStore
 
 pytestmark = pytest.mark.usefixtures("clean_april_environment")
@@ -75,6 +79,84 @@ def test_preflight_fails_real_mode_without_models(tmp_path: Path) -> None:
     )
     assert report.ok is False
     assert "model files present" in report.failures
+
+
+@pytest.mark.parametrize("fake", [False, True])
+def test_preflight_blocks_corrupt_audit_even_in_fake_mode(tmp_path: Path, fake: bool) -> None:
+    _copy_configs(tmp_path)
+    audit_path = tmp_path / "logs" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_bytes(b"{}\n{}\n{}\n")
+    report = build_preflight_report(
+        tmp_path, fake=fake, port_in_use=_free_port, pid_alive=_dead_pid
+    )
+    check = next(item for item in report.checks if item.name == "audit chain integrity")
+    assert report.ok is False
+    assert check.status == "fail"
+    assert "corrupt" in check.detail
+    assert "audit chain integrity" in report.failures
+
+
+def test_preflight_distinguishes_unavailable_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _copy_configs(tmp_path)
+
+    class UnavailableAudit:
+        def verify(self) -> AuditVerification:
+            return AuditVerification(
+                status="unavailable",
+                valid=False,
+                corrupt=False,
+                anchor_lagged=False,
+                record_count=0,
+                terminal_sequence=None,
+                terminal_hash=None,
+            )
+
+    monkeypatch.setattr(
+        "apps.runner.preflight.audit_logger_for_settings",
+        lambda settings, **kwargs: UnavailableAudit(),
+    )
+    report = build_preflight_report(
+        tmp_path, fake=True, port_in_use=_free_port, pid_alive=_dead_pid
+    )
+    check = next(item for item in report.checks if item.name == "audit chain integrity")
+    assert report.ok is False
+    assert check.status == "fail"
+    assert "unavailable" in check.detail
+
+
+@pytest.mark.parametrize("fake", [False, True])
+def test_start_preflight_invalid_audit_spawns_no_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake: bool
+) -> None:
+    _copy_configs(tmp_path)
+    audit_path = tmp_path / "logs" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_bytes(b"{}\n{}\n{}\n")
+    actual_preflight = build_preflight_report
+
+    def isolated_preflight(home: Path, **kwargs: object):
+        return actual_preflight(home, port_in_use=_free_port, pid_alive=_dead_pid, **kwargs)
+
+    monkeypatch.setattr("apps.runner.main.build_preflight_report", isolated_preflight)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: SimpleNamespace(home=tmp_path))
+    spawned = False
+
+    def forbidden(_fake: bool):
+        nonlocal spawned
+        spawned = True
+        raise AssertionError("services must not start when audit preflight fails")
+
+    monkeypatch.setattr("apps.runner.main._ensure_services", forbidden)
+    args = ["april", "start", "--preflight"]
+    if fake:
+        args.append("--fake")
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 1, result.output
+    assert spawned is False
+    assert "audit chain integrity" in result.output
 
 
 def test_preflight_fails_real_mode_with_fake_backend(tmp_path: Path) -> None:

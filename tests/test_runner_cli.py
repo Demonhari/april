@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from apps.runner.install import install_wrappers
 from apps.runner.main import app
 from apps.runner.model_tools import setup_model_set, setup_voice_stack
+from apps.runner.readiness import ReadinessCheck, ReadinessReport
 from apps.runner.service_manager import ServiceInfo, ServiceStatus
 from apps.runner.soak import SoakReport
 from apps.runner.verify import VerifyCheck
@@ -756,12 +757,14 @@ def test_readiness_cli_human_and_json_are_offline_and_redacted(tmp_path: Path, m
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     runner = CliRunner()
     human = runner.invoke(app, ["april", "readiness"])
-    assert human.exit_code == 0, human.output
+    assert human.exit_code == 1, human.output
     assert "readiness" in human.output.lower()
+    assert "preflight blocked" in human.output
+    assert "No preflight blockers" not in human.output
     assert "run april verify" in human.output
 
     structured = runner.invoke(app, ["april", "readiness", "--json"])
-    assert structured.exit_code == 0, structured.output
+    assert structured.exit_code == 1, structured.output
     payload = json.loads(structured.output)
     assert "real_model_ready" in payload
     assert payload["real_model_ready"] is False
@@ -773,6 +776,72 @@ def test_readiness_cli_human_and_json_are_offline_and_redacted(tmp_path: Path, m
     # Offline + redacted: no absolute home path, no token value in JSON output.
     assert str(tmp_path) not in structured.output
     assert "local-dev-token" not in structured.output
+
+
+def test_readiness_corrupt_audit_blocks_human_and_json(tmp_path: Path, monkeypatch) -> None:
+    _copy_configs(tmp_path)
+    audit_path = tmp_path / "logs" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_bytes(b"{}\n{}\n{}\n")
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    runner = CliRunner()
+
+    human = runner.invoke(app, ["april", "readiness"])
+    assert human.exit_code == 1, human.output
+    assert "preflight blocked" in human.output
+    assert "audit chain" in human.output
+    assert "invalid_schema" in human.output
+    assert "No preflight blockers" not in human.output
+
+    structured = runner.invoke(app, ["april", "readiness", "--json"])
+    assert structured.exit_code == 1, structured.output
+    payload = json.loads(structured.output)
+    assert payload["audit_chain_status"] == "corrupt"
+    audit_check = next(check for check in payload["checks"] if check["name"] == "audit chain")
+    assert audit_check["status"] == "blocker"
+    assert "invalid_schema(line 1)" in audit_check["detail"]
+
+
+def test_readiness_optional_warnings_do_not_fail_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = ReadinessReport(
+        generated_at="2026-09-06T00:00:00Z",
+        os="Darwin test",
+        cpu_architecture="x86_64",
+        python_version="3.12",
+        runtime_backend="llama_cpp",
+        runtime_is_fake=False,
+        llama_cpp_python_available=True,
+        environment="development",
+        voice_enabled=False,
+        real_model_preflight_ready=True,
+        checks=[ReadinessCheck(name="optional capability", status="warning", detail="optional")],
+        warnings=["optional capability"],
+    )
+    monkeypatch.setattr(
+        "apps.runner.main.build_readiness_report",
+        lambda _home: report,
+    )
+    result = CliRunner().invoke(app, ["april", "readiness", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["blockers"] == []
+
+
+def test_fake_verification_json_states_isolated_evidence_scope(tmp_path: Path, monkeypatch) -> None:
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    monkeypatch.setattr(
+        "apps.runner.main.run_fake_verification",
+        lambda home: [VerifyCheck(name="runtime health", ok=True, detail="ok")],
+    )
+    result = CliRunner().invoke(app, ["april", "verify", "--fake", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["evidence_scope"]["audit_home"] == "isolated_temporary_april_home"
+    assert payload["evidence_scope"]["actual_home_audit_verified"] is False
+    assert payload["evidence_scope"]["model_evidence"] == "fake_only"
 
 
 def test_daily_driver_doctor_cli_human_and_json(tmp_path: Path, monkeypatch) -> None:

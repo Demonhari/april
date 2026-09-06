@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -10,7 +11,13 @@ import pytest
 from typer.testing import CliRunner
 
 from apps.runner.main import app
-from april_common.audit import AuditLogger, AuditRecoveryPlan, AuditVerification, MemoryAuditAnchor
+from april_common.audit import (
+    AuditLogger,
+    AuditRecoveryPlan,
+    AuditVerification,
+    MemoryAuditAnchor,
+    verify_audit_chain,
+)
 from april_common.errors import AprilError, PermissionDeniedError
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
@@ -140,6 +147,13 @@ def test_terminal_truncation_malformed_line_and_anchor_lag(tmp_path: Path) -> No
     assert lag.anchor_lagged
     assert terminal["sequence"] == 1
 
+    unavailable_path = tmp_path / "unavailable-audit"
+    unavailable_path.mkdir()
+    unavailable = verify_audit_chain(unavailable_path)
+    assert unavailable.status == "unavailable"
+    assert unavailable.valid is False
+    assert unavailable.corrupt is False
+
 
 def test_audit_verify_cli_exit_codes_and_json(
     tmp_path: Path,
@@ -158,6 +172,95 @@ def test_audit_verify_cli_exit_codes_and_json(
     corrupt = runner.invoke(app, ["april", "audit", "verify", "--json"])
     assert corrupt.exit_code == 1
     assert json.loads(corrupt.stdout)["status"] == "corrupt"
+
+
+def test_recovery_cli_plan_consent_and_apply_output_is_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    monkeypatch.setenv("APRIL_ENV", "test")
+    path = tmp_path / "logs" / "audit.jsonl"
+    logger = AuditLogger(path)
+    logger.write({"event_type": "original"})
+    path.write_bytes(b'{}\n{}\n{"private_token":"must-not-print"}\n')
+    anchor_path = path.with_name("audit.jsonl.anchor")
+    anchor_path.unlink()
+    original_bytes = path.read_bytes()
+
+    planned = CliRunner().invoke(
+        app,
+        ["april", "audit", "recover", "--reason", "owner reviewed"],
+    )
+    assert planned.exit_code == 0, planned.output
+    assert path.read_bytes() == original_bytes
+    assert not anchor_path.exists()
+    planned_text = " ".join(planned.output.split())
+    assert "The active audit log and protected anchor were not changed" in planned_text
+    assert (
+        "A quarantine backup, recovery plan, and recovery-journal entry were created"
+        in planned_text
+    )
+    assert "must-not-print" not in planned_text
+
+    plan_id = re.search(r"Plan ID: ([a-f0-9]{32})", planned_text)
+    plan_digest = re.search(r"Plan digest: ([a-f0-9]{64})", planned_text)
+    quarantine = re.search(
+        r"Quarantine: data/backups/audit-quarantine/(recovery-[^ ]+)", planned_text
+    )
+    assert plan_id is not None
+    assert plan_digest is not None
+    assert quarantine is not None
+    assert "Expires at:" in planned_text
+    assert "Original log SHA-256:" in planned_text
+    assert "creates a NEW audit chain" in planned_text
+    assert (
+        f"run april audit recover --approve --plan-id {plan_id.group(1)} "
+        f"--plan-digest {plan_digest.group(1)} --json" in planned_text
+    )
+
+    consent = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "audit",
+            "recover",
+            "--approve",
+            "--plan-id",
+            plan_id.group(1),
+            "--plan-digest",
+            plan_digest.group(1),
+        ],
+    )
+    assert consent.exit_code == 0, consent.output
+    consent_text = " ".join(consent.output.split())
+    approval_match = re.search(r"Approval ID: (recovery:[^ ]+)", consent_text)
+    assert approval_match is not None
+    approval_id = approval_match.group(1)
+    assert (
+        f"run april audit recover --apply --plan-id {plan_id.group(1)} "
+        f"--approval-id {approval_id} --json" in consent_text
+    )
+
+    applied = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "audit",
+            "recover",
+            "--apply",
+            "--plan-id",
+            plan_id.group(1),
+            "--approval-id",
+            approval_id,
+            "--json",
+        ],
+    )
+    assert applied.exit_code == 0, applied.output
+    assert json.loads(applied.stdout)["status"] == "recovered"
+    assert AuditLogger(path).verify().valid
+    backup = tmp_path / "data" / "backups" / "audit-quarantine" / quarantine.group(1)
+    assert (backup / "audit.jsonl").read_bytes() == original_bytes
+    assert "unverified historical evidence" not in applied.stdout
 
 
 def test_recovery_quarantine_is_byte_exact_and_rechecks_concurrent_changes(tmp_path: Path) -> None:

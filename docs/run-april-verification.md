@@ -24,6 +24,32 @@ run april database restore --input /private/backups/april-current.april \
 `run april verify` without a model/fake/workflow flag is the bounded local
 security and integrity report. Full SQLite `integrity_check` remains explicit.
 
+Audit recovery is a separate owner-reviewed sequence. First verify the active
+chain, then create and inspect a plan when recovery is appropriate:
+
+```bash
+run april audit verify --json
+run april audit recover --reason "owner-reviewed repair"
+run april audit recover --approve --plan-id PLAN_ID --plan-digest PLAN_DIGEST --json
+run april audit recover --apply --plan-id PLAN_ID --approval-id APPROVAL_ID --json
+run april audit verify --json
+run april readiness
+run april verify --all-configured-models --require-real-model \
+  --report data/verification/mac-readiness.json
+run april start --preflight
+```
+
+Planning does not replace the active log or protected anchor, but it does create
+the owner-only quarantine backup, immutable manifest, and recovery-journal
+entry. Applying creates a new chain and leaves the original bytes as
+unverified historical evidence. Use the exact IDs returned by the plan and
+consent commands. If apply reports `status: incomplete`, resume with its
+displayed command after checking the phase and anchor state; do not delete or
+manually replace any audit artifact. The real-model command above uses the
+GGUF paths already registered in `configs/models.yaml`; for a single-model
+check, provide the path explicitly, for example
+`run april verify --real-model /absolute/path/to/model.gguf`.
+
 On Linux CI, where macOS Seatbelt is unavailable, fake verification may use
 the explicit development-only override:
 
@@ -33,7 +59,10 @@ run april verify --fake --development-unsandboxed-override
 
 The override is off by default, rejected outside development, and does not
 provide OS-enforced network or filesystem isolation. It is orchestration and
-contract evidence only, never real-model or target-Mac evidence.
+contract evidence only, never real-model or target-Mac evidence. Fake
+verification uses a temporary isolated APRIL home; a passing temporary audit
+check does not verify or repair the normal APRIL home. The sandbox result still
+describes the capability of the host running the check.
 
 ```bash
 run april config validate

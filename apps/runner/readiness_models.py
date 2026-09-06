@@ -97,6 +97,9 @@ class ReadinessReport(BaseModel):
     credential_store_selected: str = "unknown"
     legacy_plaintext_credential_detected: bool = False
     audit_chain_status: str = "unknown"
+    audit_chain_issue_codes: list[str] = Field(default_factory=list)
+    audit_chain_record_count: int = 0
+    audit_chain_verification_required: bool = False
     database_quick_check: str = "not_run"
     database_foreign_key_consistent: bool = False
     database_wal_state: str = "unknown"

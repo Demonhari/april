@@ -15,7 +15,7 @@ def verify_audit(json_output: bool = typer.Option(False, "--json")) -> None:
     try:
         settings = load_settings()
         result = audit_logger_for_settings(settings).verify()
-    except (ConfigError, RuntimeError) as exc:
+    except (AprilError, ConfigError, OSError, RuntimeError) as exc:
         if json_output:
             console.print_json(
                 data={
@@ -77,6 +77,12 @@ def recover_audit(
             else:
                 console.print(f"Audit recovery consent recorded for plan {plan_id}.")
                 console.print(f"Approval ID: {approval_result['approval_id']}")
+                console.print(
+                    "Apply command: "
+                    f"run april audit recover --apply --plan-id {plan_id} "
+                    f"--approval-id {approval_result['approval_id']} --json",
+                    markup=False,
+                )
             return
         if apply and settings.environment == "production" and (not approval_id or not plan_id):
             raise RuntimeError(
@@ -156,7 +162,37 @@ def recover_audit(
         issues = ",".join(result.issue_codes) or "none"
         console.print(f"Audit recovery: {result.status}; issues={issues}.")
         if result.status == "dry_run":
-            console.print("No files changed. Review, then add --apply explicitly.")
+            console.print(
+                "The active audit log and protected anchor were not changed. "
+                "A quarantine backup, recovery plan, and recovery-journal entry were created."
+            )
+            console.print(
+                f"Plan ID: {result.plan_id}\n"
+                f"Plan digest: {result.plan_digest}\n"
+                f"Expires at: {result.expires_at}\n"
+                f"Record count: {result.record_count}\n"
+                f"Issue codes: {issues}\n"
+                f"Original log SHA-256: {result.quarantined_log_sha256}\n"
+                f"Quarantine: data/backups/audit-quarantine/{result.quarantine_directory}"
+            )
+            console.print(
+                "Applying creates a NEW audit chain; the original bytes remain preserved "
+                "as unverified historical evidence."
+            )
+            console.print(
+                "Approval command: "
+                f"run april audit recover --approve --plan-id {result.plan_id} "
+                f"--plan-digest {result.plan_digest} --json",
+                markup=False,
+            )
+        elif result.status == "recovered":
+            console.print(
+                "The new audit chain and protected anchor verified successfully. "
+                "The quarantined original remains unverified historical evidence."
+            )
+            console.print("Next: run april audit verify --json", markup=False)
+            console.print("Next: run april readiness", markup=False)
+            console.print("Next: run april start --preflight", markup=False)
     if result.status == "dry_run" and apply:
         raise typer.Exit(1)
     if result.status == "unavailable":

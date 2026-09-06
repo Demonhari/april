@@ -1164,9 +1164,9 @@ def verify_audit_chain(path: Path, *, anchor: AuditAnchor | None = None) -> Audi
         data = b""
     except OSError:
         return AuditVerification(
-            status="corrupt",
+            status="unavailable",
             valid=False,
-            corrupt=True,
+            corrupt=False,
             anchor_lagged=False,
             record_count=0,
             terminal_sequence=None,
@@ -1175,7 +1175,7 @@ def verify_audit_chain(path: Path, *, anchor: AuditAnchor | None = None) -> Audi
         )
     try:
         return _verify_bytes(data, anchor=anchor)
-    except CredentialStoreError:
+    except (CredentialStoreError, AprilError, OSError):
         return AuditVerification(
             status="unavailable",
             valid=False,

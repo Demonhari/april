@@ -50,9 +50,9 @@ from apps.runner.readiness_voice import (
     _voice_conversation_live_status,
     _voice_live_status,
 )
-from april_common.audit import audit_logger_for_settings
-from april_common.credentials import CredentialStore
-from april_common.errors import ConfigError
+from april_common.audit import AuditVerification, audit_logger_for_settings
+from april_common.credentials import CredentialStore, CredentialStoreError
+from april_common.errors import AprilError, ConfigError
 from april_common.hardware_profile import safe_hardware_profile
 from april_common.process_sandbox import SandboxBackend, sandbox_capabilities
 from april_common.settings import (
@@ -72,6 +72,70 @@ from services.evolution.adapters import inspect_adapter_state
 from services.evolution.rollouts import inspect_rollout_state
 from services.memory.maintenance import check_database
 
+_OFFLINE_AUDIT_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _audit_readiness_check(
+    settings: AprilSettings,
+    *,
+    credential_store: CredentialStore | None,
+) -> tuple[str, list[str], int, bool, ReadinessCheck]:
+    """Verify a bounded audit log without exposing payloads or paths."""
+    try:
+        audit_size = settings.audit_path.stat().st_size if settings.audit_path.exists() else 0
+        if audit_size > _OFFLINE_AUDIT_MAX_BYTES:
+            status = "unverified_size_limit"
+            issue_codes = ["verification_skipped_size_limit"]
+            issue_details = issue_codes
+            record_count = 0
+            verification_required = True
+        else:
+            result: AuditVerification = audit_logger_for_settings(
+                settings, credential_store=credential_store
+            ).verify()
+            status = result.status
+            issue_details = [
+                f"{issue.code}{f'(line {issue.line})' if issue.line is not None else ''}"
+                for issue in result.issues
+            ]
+            issue_codes = sorted({issue.code for issue in result.issues})
+            record_count = result.record_count
+            verification_required = False
+    except (AprilError, CredentialStoreError, OSError, RuntimeError):
+        status = "unavailable"
+        issue_codes = ["verification_unavailable"]
+        issue_details = issue_codes
+        record_count = 0
+        verification_required = True
+
+    if status in {"valid", "anchor_lagged"}:
+        check_status: CheckStatus = "ok"
+        action = None
+    else:
+        check_status = "blocker"
+        action = "run april audit verify --json"
+        if status == "corrupt":
+            action += "; then review with run april audit recover --json"
+    if status == "corrupt":
+        detail = "corrupt; historical records remain unverified"
+    elif status == "unavailable":
+        detail = "unavailable; verification could not be completed"
+    elif status == "unverified_size_limit":
+        detail = (
+            "unverified; offline inspection skipped this audit because it exceeds the 4 MiB bound"
+        )
+    else:
+        detail = status
+    if issue_details:
+        detail += "; issues=" + ",".join(issue_details)[:180]
+    return (
+        status,
+        issue_codes,
+        record_count,
+        verification_required,
+        ReadinessCheck(name="audit chain", status=check_status, detail=detail, action=action),
+    )
+
 
 def build_readiness_report(
     home: Path, *, credential_store: CredentialStore | None = None
@@ -81,7 +145,7 @@ def build_readiness_report(
 
     try:
         settings = load_settings(root=root, credential_store=credential_store)
-    except ConfigError as exc:
+    except (ConfigError, CredentialStoreError) as exc:
         # A broken config blocks everything; report it honestly rather than crash.
         return ReadinessReport(
             generated_at=utc_now_iso(),
@@ -93,17 +157,40 @@ def build_readiness_report(
             llama_cpp_python_available=importlib.util.find_spec("llama_cpp") is not None,
             environment="unknown",
             voice_enabled=False,
+            audit_chain_status="unavailable",
+            audit_chain_issue_codes=["verification_unavailable"],
+            audit_chain_verification_required=True,
             checks=[
                 ReadinessCheck(
                     name="configuration load",
                     status="blocker",
                     detail=redact_reason(str(exc)),
                     action="run april config validate",
-                )
+                ),
+                ReadinessCheck(
+                    name="audit chain",
+                    status="blocker",
+                    detail=(
+                        "unavailable; settings/credential-store loading prevented "
+                        "audit verification."
+                    ),
+                    action="run april audit verify --json",
+                ),
             ],
-            blockers=["configuration load"],
-            next_actions=["run april config validate"],
+            blockers=["configuration load", "audit chain"],
+            next_actions=["run april audit verify --json", "run april config validate"],
         )
+
+    # Audit integrity is the first operational safety check so its diagnosis
+    # and recovery guidance precede optional model suggestions.
+    (
+        audit_status,
+        audit_issue_codes,
+        audit_record_count,
+        audit_verification_required,
+        audit_check,
+    ) = _audit_readiness_check(settings, credential_store=credential_store)
+    checks.append(audit_check)
 
     (
         backend,
@@ -278,28 +365,6 @@ def build_readiness_report(
                 "Run APRIL on macOS with /usr/bin/sandbox-exec available."
                 if sandbox.backend is SandboxBackend.UNAVAILABLE
                 else None
-            ),
-        )
-    )
-    try:
-        audit_size = settings.audit_path.stat().st_size if settings.audit_path.exists() else 0
-        if audit_size <= 4 * 1024 * 1024:
-            audit_status = (
-                audit_logger_for_settings(settings, credential_store=credential_store)
-                .verify()
-                .status
-            )
-        else:
-            audit_status = "explicit_verification_required"
-    except (OSError, RuntimeError):
-        audit_status = "unavailable"
-    checks.append(
-        ReadinessCheck(
-            name="audit chain",
-            status=("ok" if audit_status in {"valid", "anchor_lagged"} else "warning"),
-            detail=audit_status,
-            action=(
-                "run april audit verify" if audit_status not in {"valid", "anchor_lagged"} else None
             ),
         )
     )
@@ -657,6 +722,9 @@ def build_readiness_report(
         credential_store_selected=credential_store_selected,
         legacy_plaintext_credential_detected=legacy_plaintext,
         audit_chain_status=audit_status,
+        audit_chain_issue_codes=audit_issue_codes,
+        audit_chain_record_count=audit_record_count,
+        audit_chain_verification_required=audit_verification_required,
         database_quick_check=database_status.quick_check,
         database_foreign_key_consistent=database_status.foreign_key_consistent,
         database_wal_state=database_status.journal_mode,

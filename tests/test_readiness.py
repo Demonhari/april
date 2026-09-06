@@ -12,6 +12,7 @@ import yaml
 
 from apps.runner.readiness import ReadinessReport, build_readiness_report
 from apps.runner.readiness_inspection import _benchmark_evidence
+from april_common.audit import AuditLogger
 from april_common.benchmark_evidence import evaluate_benchmark_evidence
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.credentials import CredentialKey, InMemoryCredentialStore
@@ -568,6 +569,83 @@ def test_broken_config_reports_a_single_blocker(tmp_path: Path) -> None:
     report = build_readiness_report(tmp_path)
     assert report.real_model_ready is False
     assert "model registry" in report.blockers
+
+
+def test_readiness_accepts_empty_and_anchor_lagged_audit_states(tmp_path: Path) -> None:
+    home = _write_home(tmp_path)
+    empty = build_readiness_report(home)
+    empty_check = _check(empty, "audit chain")
+    assert empty.audit_chain_status == "valid"
+    assert empty_check is not None
+    assert empty_check.status == "ok"
+    assert "audit chain" not in empty.blockers
+
+    audit_path = home / "logs" / "audit.jsonl"
+    logger = AuditLogger(audit_path)
+    logger.write({"event_type": "one"})
+    anchor_path = audit_path.with_name("audit.jsonl.anchor")
+    anchor_path.unlink()
+    lagged = build_readiness_report(home)
+    lagged_check = _check(lagged, "audit chain")
+    assert lagged.audit_chain_status == "anchor_lagged"
+    assert lagged_check is not None
+    assert lagged_check.status == "ok"
+
+
+def test_readiness_distinguishes_corrupt_and_unavailable_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _write_home(tmp_path)
+    audit_path = home / "logs" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_bytes(b"{}\n{}\n{}\n")
+    corrupt = build_readiness_report(home)
+    corrupt_check = _check(corrupt, "audit chain")
+    assert corrupt.audit_chain_status == "corrupt"
+    assert corrupt_check is not None
+    assert corrupt_check.status == "blocker"
+    assert "invalid_schema(line 1)" in corrupt_check.detail
+    assert "audit chain" in corrupt.blockers
+    assert corrupt.real_model_preflight_ready is False
+
+    class UnavailableAudit:
+        def verify(self):
+            from april_common.audit import AuditVerification
+
+            return AuditVerification(
+                status="unavailable",
+                valid=False,
+                corrupt=False,
+                anchor_lagged=False,
+                record_count=0,
+                terminal_sequence=None,
+                terminal_hash=None,
+            )
+
+    monkeypatch.setattr(
+        "apps.runner.readiness_report.audit_logger_for_settings",
+        lambda settings, **kwargs: UnavailableAudit(),
+    )
+    unavailable = build_readiness_report(home)
+    unavailable_check = _check(unavailable, "audit chain")
+    assert unavailable.audit_chain_status == "unavailable"
+    assert unavailable_check is not None
+    assert unavailable_check.status == "blocker"
+    assert "audit chain" in unavailable.blockers
+
+
+def test_large_audit_is_unverified_and_blocks_offline_readiness(tmp_path: Path) -> None:
+    home = _write_home(tmp_path)
+    audit_path = home / "logs" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+    report = build_readiness_report(home)
+    check = _check(report, "audit chain")
+    assert report.audit_chain_status == "unverified_size_limit"
+    assert report.audit_chain_verification_required is True
+    assert check is not None
+    assert check.status == "blocker"
+    assert "unverified" in check.detail
 
 
 # ---------------------------------------------------------------------------

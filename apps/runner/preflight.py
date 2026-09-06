@@ -23,7 +23,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from apps.runner.mac_report import redact_reason
-from april_common.credentials import CredentialStore
+from april_common.audit import AuditVerification, audit_logger_for_settings
+from april_common.credentials import CredentialStore, CredentialStoreError
 from april_common.errors import ConfigError
 from april_common.settings import (
     KNOWN_DEFAULT_API_TOKENS,
@@ -119,14 +120,22 @@ def build_preflight_report(
 
     try:
         settings = load_settings(root=home, credential_store=credential_store)
-    except ConfigError as exc:
+    except (ConfigError, CredentialStoreError) as exc:
         return PreflightReport(
             fake=fake,
             ok=False,
             checks=[
                 PreflightCheck(
                     name="config valid", status="fail", detail=redact_reason(str(exc))[:240]
-                )
+                ),
+                PreflightCheck(
+                    name="audit chain integrity",
+                    status="fail",
+                    detail=(
+                        "unavailable; settings/credential-store loading prevented "
+                        "audit verification"
+                    ),
+                ),
             ],
         )
 
@@ -167,6 +176,49 @@ def build_preflight_report(
         checks.append(
             PreflightCheck(name="tokens hardened", status="pass", detail="tokens are configured")
         )
+
+    # Audit integrity is never relaxed by development or fake mode. This is a
+    # full check here (unlike the bounded offline readiness report) because
+    # preflight is the gate immediately before service startup.
+    try:
+        audit_result: AuditVerification = audit_logger_for_settings(
+            settings, credential_store=credential_store
+        ).verify()
+        audit_status = audit_result.status
+        audit_issues = ", ".join(
+            f"{issue.code}{f' line {issue.line}' if issue.line is not None else ''}"
+            for issue in audit_result.issues
+        )[:180]
+        if audit_status in {"valid", "anchor_lagged"}:
+            audit_detail = f"{audit_status}; records={audit_result.record_count}"
+            audit_check_status: PreflightStatus = "pass"
+        elif audit_status == "corrupt":
+            audit_detail = (
+                "corrupt; audit recovery is required before startup; "
+                "review with run april audit recover --json"
+            )
+            audit_check_status = "fail"
+        else:
+            audit_detail = (
+                "unavailable; audit verification could not be completed; "
+                "run april audit verify --json"
+            )
+            audit_check_status = "fail"
+        if audit_issues:
+            audit_detail += f"; issues={audit_issues}"
+    except (ConfigError, CredentialStoreError, OSError, RuntimeError):
+        audit_status = "unavailable"
+        audit_detail = (
+            "unavailable; audit verification could not be completed; run april audit verify --json"
+        )
+        audit_check_status = "fail"
+    checks.append(
+        PreflightCheck(
+            name="audit chain integrity",
+            status=audit_check_status,
+            detail=audit_detail,
+        )
+    )
 
     # --- runtime backend -----------------------------------------------------
     backend = settings.runtime.backend

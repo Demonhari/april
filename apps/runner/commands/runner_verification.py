@@ -290,8 +290,26 @@ def verify(
     else:
         checks = _composition_api.run_fake_verification(_composition_api._manager().home)
     if json_output:
-        console.print_json(data={"checks": [asdict(check) for check in checks]})
+        console.print_json(
+            data={
+                "checks": [asdict(check) for check in checks],
+                "evidence_scope": {
+                    "audit_home": "isolated_temporary_april_home",
+                    "actual_home_audit_verified": False,
+                    "model_evidence": "fake_only",
+                    "sandbox_capability": "current_host_capability",
+                },
+            }
+        )
     else:
+        console.print(
+            "Fake verification uses an isolated temporary APRIL home; its audit check "
+            "does not verify or repair this installation's audit chain."
+        )
+        console.print(
+            "Fake-model results are plumbing/security evidence, not real-model quality "
+            "or performance evidence. Sandbox checks report this host's capabilities."
+        )
         _composition_api._print_verification_table("APRIL Verification", checks)
     if not all(check.ok for check in checks):
         raise typer.Exit(1)

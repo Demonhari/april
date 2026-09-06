@@ -225,19 +225,32 @@ service, loads no model, opens no microphone, downloads nothing, and installs
 nothing. It prints actionable commands only; paths and tokens are redacted.
 
 ```bash
-run april readiness          # human-readable table + next commands
-run april readiness --json   # machine-readable, redacted report
+run april readiness          # human-readable table; exit 1 on blockers
+run april readiness --json   # machine-readable report; exit 1 on blockers
 ```
 
 It reports, with a blocker/warning/skipped verdict each: the runtime backend
 (fake vs `llama_cpp`), whether the `llama-cpp-python` extra is installed, which
 configured GGUF model files are missing, the whisper.cpp / Piper / wake-word
 artifacts (only blocking when voice is enabled), whether default development
-tokens are still active, and the exact next command for each gap. The JSON
-`*_preflight_ready` fields mean prerequisites appear present; `real_model_ready`
-and `voice_ready` remain false because offline readiness does not load a GGUF or
-run live voice verification. `run april readiness` only diagnoses; it never
-fixes anything for you.
+tokens are still active, audit-chain integrity, and the exact next command for
+each gap. A corrupt, unavailable, or size-limited audit is a blocker; a
+genuinely empty new audit is valid. The JSON `*_preflight_ready` fields mean
+prerequisites appear present; `real_model_ready` and `voice_ready` remain false
+because offline readiness does not load a GGUF or run live voice verification.
+Readiness never repairs anything, but exits nonzero when a safety blocker is
+present. A large audit is reported as unverified and can be checked fully with
+`run april audit verify --json`.
+
+If recovery is appropriate, keep the owner-reviewed steps separate: verify the
+active chain, run `run april audit recover --reason "owner-reviewed repair"`
+and inspect the returned plan, then run the exact returned `--approve` command
+with its plan ID/digest and the exact returned `--apply` command with its
+approval ID. Planning creates a quarantine backup, manifest, and recovery
+journal entry without replacing the active log or anchor. Applying creates a
+new verifiable chain; the old bytes remain unverified historical evidence.
+Afterward rerun `run april audit verify --json`, `run april readiness`, real
+model verification, and `run april start --preflight`.
 
 ### Memory embeddings (honest default)
 
@@ -369,6 +382,10 @@ Ground rules that hold at every rung:
   the Core API reach models over loopback HTTP.
 - **Fake verification is not real-MacBook readiness.** A green `--fake` run proves
   orchestration, permissions, and contracts, not real models, audio, or packaging.
+  Its application and audit checks use an isolated temporary APRIL home, so a
+  passing temporary audit check does not verify or repair the normal APRIL home.
+  Fake-model results are not model quality/performance evidence, and sandbox
+  checks describe the current host's capability.
 - **External actions stay disabled** unless explicitly enabled in config
   (`permissions.external_actions_enabled`).
 
@@ -420,10 +437,11 @@ Supporting commands:
   each step `done` / `warning` / `blocker` / `next`. It detects state only; it
   never installs, downloads, or mutates anything.
 - **`run april start --preflight`** (add `--fake` for development) — runs a safe
-  startup preflight (config valid, tokens hardened in production, backend not fake
-  unless `--fake`, model files present, writable db/index/log/report paths, ports
-  available, no stale locks) and **refuses to start services unless preflight
-  passes**. Preflight itself starts nothing and loads no model.
+  startup preflight (config valid, tokens hardened in production, audit-chain
+  integrity, backend not fake unless `--fake`, model files present, writable
+  db/index/log/report paths, ports available, no stale locks) and **refuses to
+  start services unless preflight passes**. Preflight itself starts nothing and
+  loads no model; fake mode does not waive audit integrity.
 
 **Reports can become stale.** Each newly generated real-model / workflow /
 go-live report embeds a *redacted, local* config fingerprint (Item below). A
