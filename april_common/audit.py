@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -178,6 +179,64 @@ class AuditVerification:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class AuditStartupDecision:
+    """Safe, redacted classification used before operational startup."""
+
+    accepted: bool
+    status: str
+    issue_codes: tuple[str, ...]
+    issue_lines: tuple[str, ...]
+    record_count: int
+    reason: str
+    next_commands: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "accepted": self.accepted,
+            "status": self.status,
+            "issue_codes": list(self.issue_codes),
+            "issue_lines": list(self.issue_lines),
+            "record_count": self.record_count,
+            "reason": self.reason,
+            "next_commands": list(self.next_commands),
+        }
+
+    @property
+    def operator_message(self) -> str:
+        if self.accepted:
+            return f"Audit chain accepted ({self.status}); records={self.record_count}."
+        lines = [
+            f"APRIL cannot start because the local audit chain is {self.status}.",
+            "No operational services were started.",
+            "Run:",
+            "  run april audit verify --json",
+        ]
+        if self.status == "corrupt":
+            lines.extend(
+                [
+                    "Then review:",
+                    '  run april audit recover --reason "owner-reviewed recovery"',
+                ]
+            )
+        else:
+            lines.append(
+                "Do not create a new chain for an unavailable audit; resolve the access "
+                "failure and verify again."
+            )
+        if self.issue_lines:
+            lines.append("Safe diagnosis: " + ", ".join(self.issue_lines) + ".")
+        return "\n".join(lines)
+
+
+class AuditStartupBlocked(RuntimeError):
+    """Raised when an operational startup path fails the audit safety gate."""
+
+    def __init__(self, decision: AuditStartupDecision) -> None:
+        self.decision = decision
+        super().__init__(decision.operator_message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1163,6 +1222,80 @@ def audit_logger_for_settings(
     return AuditLogger(settings.audit_path, anchor=anchor)
 
 
+def audit_startup_decision(
+    settings: AprilSettings,
+    *,
+    credential_store: CredentialStore | None = None,
+    audit: AuditLogger | None = None,
+    logger_factory: Callable[..., AuditLogger] | None = None,
+) -> AuditStartupDecision:
+    """Perform the authoritative full audit check required before startup.
+
+    This intentionally does not use readiness's bounded large-log shortcut and
+    never repairs or appends to the chain. ``logger_factory`` is injectable so
+    readiness/preflight tests retain their existing synthetic stores.
+    """
+    try:
+        logger = audit
+        if logger is None:
+            factory = logger_factory or audit_logger_for_settings
+            logger = factory(settings, credential_store=credential_store)
+        result = logger.verify()
+    except (CredentialStoreError, OSError, RuntimeError):
+        return AuditStartupDecision(
+            accepted=False,
+            status="unavailable",
+            issue_codes=("verification_unavailable",),
+            issue_lines=("verification_unavailable",),
+            record_count=0,
+            reason="Audit verification could not be completed.",
+            next_commands=("run april audit verify --json",),
+        )
+    except AprilError as exc:
+        if exc.code not in {"AUDIT_ANCHOR_FAILED", "AUDIT_VERIFICATION_UNAVAILABLE"}:
+            raise
+        return AuditStartupDecision(
+            accepted=False,
+            status="unavailable",
+            issue_codes=("verification_unavailable",),
+            issue_lines=("verification_unavailable",),
+            record_count=0,
+            reason="Audit verification could not be completed.",
+            next_commands=("run april audit verify --json",),
+        )
+
+    issue_lines = tuple(
+        f"{issue.code}(line {issue.line})" if issue.line is not None else issue.code
+        for issue in result.issues[:12]
+    )
+    issue_codes = tuple(sorted({issue.code for issue in result.issues}))[:12]
+    accepted = result.status in {"valid", "anchor_lagged"} and result.valid
+    if accepted:
+        reason = f"Audit chain accepted ({result.status}); records={result.record_count}."
+        next_commands: tuple[str, ...] = ()
+    elif result.status == "corrupt" or result.corrupt:
+        reason = "Audit chain is corrupt; historical records remain unverified."
+        next_commands = (
+            "run april audit verify --json",
+            'run april audit recover --reason "owner-reviewed recovery"',
+        )
+    elif result.status == "unavailable":
+        reason = "Audit verification is unavailable; storage or credentials could not be verified."
+        next_commands = ("run april audit verify --json",)
+    else:
+        reason = f"Audit status {result.status!r} is not accepted for operational startup."
+        next_commands = ("run april audit verify --json",)
+    return AuditStartupDecision(
+        accepted=accepted,
+        status=result.status,
+        issue_codes=issue_codes,
+        issue_lines=issue_lines,
+        record_count=result.record_count,
+        reason=reason,
+        next_commands=next_commands,
+    )
+
+
 def verify_audit_chain(path: Path, *, anchor: AuditAnchor | None = None) -> AuditVerification:
     try:
         data = path.read_bytes()
@@ -1311,38 +1444,19 @@ def _verify_bytes(data: bytes, *, anchor: AuditAnchor | None) -> AuditVerificati
                 AuditIssue("invalid_terminal_anchor", None, "Protected anchor is invalid.")
             )
             protected = None
-        if insecure_anchor:
-            pass
-        elif protected is None:
-            if terminal_sequence == 1 and records:
-                anchor_lagged = True
-            elif records:
-                issues.append(
-                    AuditIssue(
-                        "missing_terminal_anchor",
-                        None,
-                        "Protected terminal anchor is missing.",
+        if not insecure_anchor:
+            if protected is None:
+                if terminal_sequence == 1 and records:
+                    anchor_lagged = True
+                elif records:
+                    issues.append(
+                        AuditIssue(
+                            "missing_terminal_anchor",
+                            None,
+                            "Protected terminal anchor is missing.",
+                        )
                     )
-                )
-        elif terminal_sequence is None:
-            issues.append(
-                AuditIssue(
-                    "terminal_truncation",
-                    None,
-                    "Audit records are missing compared with the protected anchor.",
-                )
-            )
-        else:
-            anchor_sequence, anchor_hash = protected
-            if anchor_sequence == terminal_sequence and anchor_hash == terminal_hash:
-                pass
-            elif (
-                anchor_sequence == terminal_sequence - 1
-                and records
-                and records[-1][1].get("previous_hash") == anchor_hash
-            ):
-                anchor_lagged = True
-            elif anchor_sequence > terminal_sequence:
+            elif terminal_sequence is None:
                 issues.append(
                     AuditIssue(
                         "terminal_truncation",
@@ -1351,13 +1465,31 @@ def _verify_bytes(data: bytes, *, anchor: AuditAnchor | None) -> AuditVerificati
                     )
                 )
             else:
-                issues.append(
-                    AuditIssue(
-                        "terminal_anchor_mismatch",
-                        None,
-                        "Protected anchor does not match the terminal record.",
+                anchor_sequence, anchor_hash = protected
+                if anchor_sequence == terminal_sequence and anchor_hash == terminal_hash:
+                    pass
+                elif (
+                    anchor_sequence == terminal_sequence - 1
+                    and records
+                    and records[-1][1].get("previous_hash") == anchor_hash
+                ):
+                    anchor_lagged = True
+                elif anchor_sequence > terminal_sequence:
+                    issues.append(
+                        AuditIssue(
+                            "terminal_truncation",
+                            None,
+                            "Audit records are missing compared with the protected anchor.",
+                        )
                     )
-                )
+                else:
+                    issues.append(
+                        AuditIssue(
+                            "terminal_anchor_mismatch",
+                            None,
+                            "Protected anchor does not match the terminal record.",
+                        )
+                    )
 
     corrupt = bool(issues)
     if anchor_lagged and not issues:

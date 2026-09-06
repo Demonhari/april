@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
 
+from april_common.audit import audit_startup_decision
 from april_common.service_health import probe_service_health
 from april_common.settings import AprilSettings, get_settings
 from services.api.application import create_application
@@ -37,6 +39,10 @@ app = create_app()
 
 def main() -> None:
     settings: AprilSettings = get_settings()
+    decision = audit_startup_decision(settings)
+    if not decision.accepted:
+        print(decision.operator_message, file=sys.stderr)
+        raise SystemExit(1)
     uvicorn.run(
         "services.api.server:app",
         host=settings.api.host,

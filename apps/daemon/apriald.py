@@ -13,7 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from april_common.audit import AuditLogger, audit_logger_for_settings
+from april_common.audit import (
+    AuditLogger,
+    AuditStartupBlocked,
+    AuditStartupDecision,
+    audit_logger_for_settings,
+    audit_startup_decision,
+)
 from april_common.process_environment import (
     ProcessCategory,
     build_process_environment,
@@ -168,6 +174,10 @@ class AprialdSupervisor:
         self._stopped = False
 
     async def start(self) -> None:
+        decision = audit_startup_decision(self.settings, audit=self.audit)
+        if not decision.accepted:
+            _write_blocked_status(self.settings, decision)
+            raise AuditStartupBlocked(decision)
         self.lock.acquire()
         _write_pid_file(self.settings, os.getpid())
         self._audit("daemon_start")
@@ -185,7 +195,15 @@ class AprialdSupervisor:
         self._write_status(await self.health())
 
     async def run_forever(self, *, interval_seconds: float = 2.0) -> None:
-        await self.start()
+        try:
+            await self.start()
+        except AuditStartupBlocked:
+            # Keep the LaunchAgent alive in a bounded blocked state. With
+            # KeepAlive enabled, exiting here would create a restart storm
+            # while the owner reviews or repairs the audit chain explicitly.
+            while not self._stopped:
+                await self.sleep(interval_seconds)
+            return
         try:
             while not self._stopped:
                 await self.supervise_once()
@@ -674,6 +692,10 @@ def start_daemon_background(
     health_probe: Callable[[str], bool] | None = None,
     fake_backend: bool = False,
 ) -> dict[str, object]:
+    decision = audit_startup_decision(settings)
+    if not decision.accepted:
+        _write_blocked_status(settings, decision)
+        raise AuditStartupBlocked(decision)
     current = read_daemon_status(settings)
     current_pid = current.get("pid")
     if isinstance(current_pid, int) and _pid_alive(current_pid):
@@ -774,6 +796,10 @@ def stop_daemon(
 def autostart_if_needed(
     settings: AprilSettings, *, fake_backend: bool | None = None
 ) -> dict[str, object]:
+    decision = audit_startup_decision(settings)
+    if not decision.accepted:
+        _write_blocked_status(settings, decision)
+        raise AuditStartupBlocked(decision)
     status = read_daemon_status(settings)
     pid = status.get("pid")
     if isinstance(pid, int) and _pid_alive(pid):
@@ -832,6 +858,40 @@ def _write_status_payload(settings: AprilSettings, payload: dict[str, object]) -
     tmp_path.replace(path)
 
 
+def _write_blocked_status(settings: AprilSettings, decision: AuditStartupDecision) -> None:
+    """Persist only bounded audit classification for safe daemon diagnostics."""
+    children = [
+        {
+            "name": name,
+            "status": "blocked",
+            "pid": None,
+            "restarts": 0,
+            "last_exit_code": None,
+            "detail": "audit_chain_integrity",
+            "paused_reason": "audit_chain_integrity",
+            "degraded_reason": None,
+        }
+        for name in ("runtime", "tool_worker", "job_worker", "api", "sentinel")
+    ]
+    _write_status_payload(
+        settings,
+        {
+            "schema_version": 1,
+            "status": "blocked",
+            "pid": None,
+            "generated_at": utc_now_iso(),
+            "blocker": "audit_chain_integrity",
+            "audit_status": decision.status,
+            "audit_issue_codes": list(decision.issue_codes),
+            "audit_issue_lines": list(decision.issue_lines),
+            "detail": decision.reason,
+            "next_commands": list(decision.next_commands),
+            "children": children,
+            "governor": {"allowed": None, "reasons": []},
+        },
+    )
+
+
 def _read_status_payload(settings: AprilSettings) -> dict[str, Any] | None:
     path = daemon_status_path(settings)
     try:
@@ -852,9 +912,21 @@ def _merge_daemon_status(
     merged["details_available"] = payload is not None
     if payload is None:
         return merged
-    for key in ("generated_at", "children", "governor"):
+    for key in (
+        "generated_at",
+        "children",
+        "governor",
+        "blocker",
+        "audit_status",
+        "audit_issue_codes",
+        "audit_issue_lines",
+        "detail",
+        "next_commands",
+    ):
         if key in payload:
             merged[key] = payload[key]
+    if payload.get("status") == "blocked":
+        merged["status"] = "blocked"
     if "supervisor_status" not in merged and "status" in payload:
         merged["supervisor_status"] = payload["status"]
     return merged

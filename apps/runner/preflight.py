@@ -23,7 +23,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from apps.runner.mac_report import redact_reason
-from april_common.audit import AuditVerification, audit_logger_for_settings
+from april_common.audit import audit_logger_for_settings, audit_startup_decision
 from april_common.credentials import CredentialStore, CredentialStoreError
 from april_common.errors import ConfigError
 from april_common.settings import (
@@ -181,21 +181,21 @@ def build_preflight_report(
     # full check here (unlike the bounded offline readiness report) because
     # preflight is the gate immediately before service startup.
     try:
-        audit_result: AuditVerification = audit_logger_for_settings(
-            settings, credential_store=credential_store
-        ).verify()
-        audit_status = audit_result.status
-        audit_issues = ", ".join(
-            f"{issue.code}{f' line {issue.line}' if issue.line is not None else ''}"
-            for issue in audit_result.issues
-        )[:180]
-        if audit_status in {"valid", "anchor_lagged"}:
-            audit_detail = f"{audit_status}; records={audit_result.record_count}"
+        decision = audit_startup_decision(
+            settings,
+            credential_store=credential_store,
+            logger_factory=audit_logger_for_settings,
+        )
+        audit_status = decision.status
+        audit_issues = ", ".join(decision.issue_lines)[:180]
+        if decision.accepted:
+            audit_detail = f"{audit_status}; records={decision.record_count}"
             audit_check_status: PreflightStatus = "pass"
         elif audit_status == "corrupt":
             audit_detail = (
                 "corrupt; audit recovery is required before startup; "
-                "review with run april audit recover --json"
+                "run april audit verify --json, then review with run april audit recover "
+                '--reason "owner-reviewed recovery"'
             )
             audit_check_status = "fail"
         else:

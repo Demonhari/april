@@ -24,6 +24,25 @@ run april database restore --input /private/backups/april-current.april \
 `run april verify` without a model/fake/workflow flag is the bounded local
 security and integrity report. Full SQLite `integrity_check` remains explicit.
 
+Audit integrity is a mandatory operational startup gate, including for normal
+`run april`, `chat`, `ask`, desktop, voice, daemon, and bare `april` paths.
+`--preflight` adds the broader configuration, model, port, ownership, and
+runtime checks; `--fake` changes the model backend but never waives audit
+integrity. After the audit is valid, use:
+
+```bash
+run april audit verify --json
+run april readiness
+run april start --preflight
+april
+```
+
+Direct `make run-runtime` / `make run-api` or `python -m services.api.server`
+commands are development diagnostics, not a recommended operational bypass.
+The direct API executable also refuses to serve when the selected audit is not
+accepted, while pure FastAPI application construction remains available to
+tests.
+
 Audit recovery is a separate owner-reviewed sequence. First verify the active
 chain, then create and inspect a plan when recovery is appropriate:
 

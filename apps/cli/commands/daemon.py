@@ -44,6 +44,7 @@ def daemon_uninstall() -> None:
 def daemon_start() -> None:
     from apps.daemon.apriald import start_daemon_background, wait_for_core_health
     from apps.daemon.launchd import LaunchdManager
+    from april_common.audit import AuditStartupBlocked
 
     settings = get_settings()
     manager = LaunchdManager(settings)
@@ -56,7 +57,17 @@ def daemon_start() -> None:
             return
         print_jsonish({"status": "degraded", "launchd": action})
         raise typer.Exit(1)
-    print_jsonish(start_daemon_background(settings))
+    try:
+        print_jsonish(start_daemon_background(settings))
+    except AuditStartupBlocked as exc:
+        print_jsonish(
+            {
+                "blocker": "audit_chain_integrity",
+                **exc.decision.to_dict(),
+                "status": "blocked",
+            }
+        )
+        raise typer.Exit(1) from exc
 
 
 @daemon_app.command("stop")
@@ -82,8 +93,18 @@ def daemon_stop() -> None:
 def daemon_status() -> None:
     from apps.daemon.apriald import read_daemon_status
     from apps.daemon.launchd import LaunchdManager
+    from april_common.audit import audit_startup_decision
 
     settings = get_settings()
     status = read_daemon_status(settings)
+    decision = audit_startup_decision(settings)
+    if not decision.accepted:
+        status.update(
+            {
+                "blocker": "audit_chain_integrity",
+                **decision.to_dict(),
+                "status": "blocked",
+            }
+        )
     status["launchd"] = LaunchdManager(settings).status()
     print_jsonish(status)

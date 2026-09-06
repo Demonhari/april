@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import IO, Protocol
 from urllib.parse import urlparse
 
+from april_common.audit import AuditStartupBlocked, audit_startup_decision
 from april_common.process_environment import (
     ProcessCategory,
     build_process_environment,
@@ -139,6 +140,7 @@ class AprilServiceManager:
         return status
 
     def start(self, *, fake_backend: bool = False) -> ServiceStatus:
+        self._require_audit_startup()
         self._ensure_dirs()
         current = self.status()
         # ``backend`` is the effective backend identity shared with apriald:
@@ -199,8 +201,16 @@ class AprilServiceManager:
         return self.status()
 
     def restart(self, *, fake_backend: bool = False) -> ServiceStatus:
+        # Check before stopping an existing healthy installation. A corrupt or
+        # unavailable chain must not turn a safe refusal into needless outage.
+        self._require_audit_startup()
         self.stop()
         return self.start(fake_backend=fake_backend)
+
+    def _require_audit_startup(self) -> None:
+        decision = audit_startup_decision(self.settings)
+        if not decision.accepted:
+            raise AuditStartupBlocked(decision)
 
     def _read_lifecycle(self) -> dict[str, object] | None:
         try:

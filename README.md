@@ -451,6 +451,20 @@ Supporting commands:
   start services unless preflight passes**. Preflight itself starts nothing and
   loads no model; fake mode does not waive audit integrity.
 
+Audit integrity is also a mandatory gate for normal `run april`, `chat`, `ask`,
+desktop, voice, daemon, and bare `april` startup paths. `--fake` changes only
+the runtime backend; it cannot bypass the selected home's audit gate. A blocked
+daemon remains in a bounded diagnostic state until the owner explicitly
+restarts it after recovery, so LaunchAgent `KeepAlive` cannot create a crash
+loop. Use this sequence after the audit is valid:
+
+```bash
+run april audit verify --json
+run april readiness
+run april start --preflight
+april
+```
+
 **Reports can become stale.** Each newly generated real-model / workflow /
 go-live report embeds a *redacted, local* config fingerprint (Item below). A
 report is stale when it is older than its per-type TTL (real-model / workflow /
@@ -865,6 +879,11 @@ run april ask "April, plan my work today."
 ```
 
 ## Start Services
+
+The controlled operational startup path is `run april start --preflight` after
+the audit verification and readiness commands above. The following direct
+commands are retained for development diagnostics only; they are not a way to
+bypass the audit gate:
 
 Terminal 1:
 

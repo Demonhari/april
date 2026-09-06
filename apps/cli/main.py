@@ -35,6 +35,7 @@ from apps.cli.render import (
     print_jsonish,
     print_models,
 )
+from april_common.audit import AuditStartupBlocked, audit_startup_decision
 from april_common.settings import get_settings
 
 app.add_typer(model_app, name="model")
@@ -76,6 +77,10 @@ def _maybe_autostart_daemon() -> None:
     """Best-effort apriald autostart before attach/one-shot, when configured."""
     global _DAEMON_AUTOSTART_REPORTED
     settings = get_settings()
+    decision = audit_startup_decision(settings)
+    if not decision.accepted:
+        console.print(decision.operator_message, markup=False)
+        raise typer.Exit(1)
     if not settings.daemon.autostart_on_cli:
         return
     try:
@@ -99,6 +104,9 @@ def _maybe_autostart_daemon() -> None:
         return
     try:
         autostart_if_needed(settings, fake_backend=settings.runtime.backend == "fake")
+    except AuditStartupBlocked as exc:
+        console.print(exc.decision.operator_message, markup=False)
+        raise typer.Exit(1) from exc
     except Exception as exc:
         if not _DAEMON_AUTOSTART_REPORTED:
             console.print(f"[yellow]Daemon autostart failed: {exc}[/yellow]")

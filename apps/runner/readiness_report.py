@@ -50,7 +50,7 @@ from apps.runner.readiness_voice import (
     _voice_conversation_live_status,
     _voice_live_status,
 )
-from april_common.audit import AuditVerification, audit_logger_for_settings
+from april_common.audit import audit_logger_for_settings, audit_startup_decision
 from april_common.credentials import CredentialStore, CredentialStoreError
 from april_common.errors import AprilError, ConfigError
 from april_common.hardware_profile import safe_hardware_profile
@@ -90,17 +90,16 @@ def _audit_readiness_check(
             record_count = 0
             verification_required = True
         else:
-            result: AuditVerification = audit_logger_for_settings(
-                settings, credential_store=credential_store
-            ).verify()
-            status = result.status
-            issue_details = [
-                f"{issue.code}{f'(line {issue.line})' if issue.line is not None else ''}"
-                for issue in result.issues
-            ]
-            issue_codes = sorted({issue.code for issue in result.issues})
-            record_count = result.record_count
-            verification_required = False
+            decision = audit_startup_decision(
+                settings,
+                credential_store=credential_store,
+                logger_factory=audit_logger_for_settings,
+            )
+            status = decision.status
+            issue_details = list(decision.issue_lines)
+            issue_codes = list(decision.issue_codes)
+            record_count = decision.record_count
+            verification_required = status == "unavailable"
     except (AprilError, CredentialStoreError, OSError, RuntimeError):
         status = "unavailable"
         issue_codes = ["verification_unavailable"]

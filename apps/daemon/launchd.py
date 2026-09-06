@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from april_common.audit import audit_startup_decision
 from april_common.process_environment import ProcessCategory
 from april_common.process_runner import RestrictedProcessResult, run_restricted_process_sync
 from april_common.settings import AprilSettings
@@ -104,6 +105,9 @@ class LaunchdManager:
         return f"{self.domain_target}/{LABEL}"
 
     def bootstrap(self) -> dict[str, object]:
+        blocked = self._audit_blocked()
+        if blocked is not None:
+            return blocked
         if self.platform != "darwin":
             return self._unsupported()
         if bool(self.status()["loaded"]):
@@ -137,6 +141,9 @@ class LaunchdManager:
         }
 
     def kickstart(self) -> dict[str, object]:
+        blocked = self._audit_blocked()
+        if blocked is not None:
+            return blocked
         if self.platform != "darwin":
             return self._unsupported()
         if not bool(self.status()["loaded"]):
@@ -157,6 +164,24 @@ class LaunchdManager:
             "supported": False,
             "changed": False,
             "detail": "launchd is supported only on macOS",
+        }
+
+    def _audit_blocked(self) -> dict[str, object] | None:
+        decision = audit_startup_decision(self.settings)
+        if decision.accepted:
+            return None
+        return {
+            "supported": self.platform == "darwin",
+            "loaded": False,
+            "started": False,
+            "changed": False,
+            "status": "blocked",
+            "blocker": "audit_chain_integrity",
+            "audit_status": decision.status,
+            "audit_issue_codes": list(decision.issue_codes),
+            "audit_issue_lines": list(decision.issue_lines),
+            "detail": decision.reason,
+            "next_commands": list(decision.next_commands),
         }
 
     def _run(self, argv: Sequence[str]) -> RestrictedProcessResult:
