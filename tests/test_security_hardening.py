@@ -5,19 +5,39 @@ import stat
 import pytest
 
 from april_common.audit import redact
+from april_common.credentials import CredentialKey, InMemoryCredentialStore
 from april_common.errors import ConfigError
 from april_common.settings import load_settings, reset_settings_cache
 from april_common.token_setup import generate_tokens, write_token_env_file
 
 
 def test_default_tokens_rejected_outside_development_and_test(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_real_credential_selection,
 ) -> None:
     monkeypatch.setenv("APRIL_ENV", "production")
     monkeypatch.setenv("APRIL_HOME", str(tmp_path))
     reset_settings_cache()
     with pytest.raises(ConfigError, match="Known development tokens"):
-        load_settings(root=tmp_path)
+        load_settings(root=tmp_path, credential_store=InMemoryCredentialStore())
+    reset_settings_cache()
+
+
+def test_production_rejects_injected_default_credentials_without_keychain(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, no_real_credential_selection
+) -> None:
+    monkeypatch.setenv("APRIL_ENV", "production")
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    reset_settings_cache()
+    store = InMemoryCredentialStore(
+        {
+            CredentialKey.API_TOKEN: "local-dev-token",
+            CredentialKey.RUNTIME_TOKEN: "local-dev-runtime-token",
+        }
+    )
+    with pytest.raises(ConfigError):
+        load_settings(root=tmp_path, credential_store=store)
     reset_settings_cache()
 
 

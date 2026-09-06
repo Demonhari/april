@@ -9,6 +9,7 @@ import pytest
 
 import april_common.settings as settings_module
 from apps.runner.service_manager import AprilServiceManager
+from april_common.credentials import CredentialKey, InMemoryCredentialStore
 from april_common.errors import ConfigError
 from april_common.settings import load_settings, reset_settings_cache
 from april_common.token_setup import GeneratedTokens, write_token_env_file
@@ -244,7 +245,9 @@ def test_nonempty_relative_optional_path_still_resolves(
 
 
 def test_production_rejects_change_me_placeholder_tokens(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_real_credential_selection: None,
 ) -> None:
     monkeypatch.setenv("APRIL_ENV", "production")
     monkeypatch.setenv("APRIL_HOME", str(tmp_path))
@@ -255,25 +258,43 @@ def test_production_rejects_change_me_placeholder_tokens(
         tmp_path / ".env",
         "APRIL_API_TOKEN=change-me-local-token\nAPRIL_RUNTIME_TOKEN=change-me-runtime-token\n",
     )
+    store = InMemoryCredentialStore(
+        {
+            CredentialKey.API_TOKEN: "change-me-local-token",
+            CredentialKey.RUNTIME_TOKEN: "change-me-runtime-token",
+        }
+    )
     with pytest.raises(ConfigError):
-        load_settings(root=tmp_path)
+        load_settings(root=tmp_path, credential_store=store)
     reset_settings_cache()
 
 
-def test_production_rejects_blank_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_production_rejects_blank_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_real_credential_selection: None,
+) -> None:
     monkeypatch.setenv("APRIL_ENV", "production")
     monkeypatch.setenv("APRIL_HOME", str(tmp_path))
     # Strong API token but a blank runtime token: the blank must still be rejected.
     monkeypatch.setenv("APRIL_API_TOKEN", "a-strong-real-api-token-value-123456")
     monkeypatch.setenv("APRIL_RUNTIME_TOKEN", "")
     reset_settings_cache()
+    store = InMemoryCredentialStore(
+        {
+            CredentialKey.API_TOKEN: "valid-api-token",
+            CredentialKey.RUNTIME_TOKEN: "",
+        }
+    )
     with pytest.raises(ConfigError):
-        load_settings(root=tmp_path)
+        load_settings(root=tmp_path, credential_store=store)
     reset_settings_cache()
 
 
 def test_production_rejects_plaintext_tokens(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_real_credential_selection: None,
 ) -> None:
     monkeypatch.setenv("APRIL_ENV", "production")
     monkeypatch.setenv("APRIL_HOME", str(tmp_path))
@@ -281,7 +302,33 @@ def test_production_rejects_plaintext_tokens(
     monkeypatch.setenv("APRIL_RUNTIME_TOKEN", "a-strong-real-runtime-token-value-654321")
     reset_settings_cache()
     with pytest.raises(ConfigError):
-        load_settings(root=tmp_path)
+        load_settings(root=tmp_path, credential_store=InMemoryCredentialStore())
+    reset_settings_cache()
+
+
+def test_production_uses_valid_stored_credentials_over_insecure_plaintext(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_real_credential_selection: None,
+) -> None:
+    monkeypatch.setenv("APRIL_ENV", "production")
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    reset_settings_cache()
+    _write(
+        tmp_path / ".env",
+        "APRIL_API_TOKEN=change-me-local-token\nAPRIL_RUNTIME_TOKEN=change-me-runtime-token\n",
+    )
+    store = InMemoryCredentialStore(
+        {
+            CredentialKey.API_TOKEN: "stored-api-token-1234567890",
+            CredentialKey.RUNTIME_TOKEN: "stored-runtime-token-1234567890",
+        }
+    )
+
+    settings = load_settings(root=tmp_path, credential_store=store)
+
+    assert settings.api.token == "stored-api-token-1234567890"
+    assert settings.runtime.token == "stored-runtime-token-1234567890"
     reset_settings_cache()
 
 

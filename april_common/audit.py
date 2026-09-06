@@ -187,6 +187,10 @@ class AuditRecoveryPlan:
     original_anchor_sha256: str | None = None
     expires_at: str | None = None
     approval_id: str | None = None
+    phase: str | None = None
+    log_changed: bool | None = None
+    anchor_state: str | None = None
+    resume_command: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -382,6 +386,7 @@ class AuditLogger:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         with self._thread_lock:
             descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            plan: dict[str, Any] | None = None
             try:
                 _flock(descriptor)
                 plan = self._load_recovery_plan(plan_id) if apply else None
@@ -445,6 +450,16 @@ class AuditLogger:
                     issue_codes=issue_codes,
                     verification=verification,
                 )
+            except AprilError as exc:
+                details: dict[str, Any] = {
+                    "phase": "claim" if plan is not None else "preflight",
+                    "log_changed": self._recovery_log_changed(plan) if plan else False,
+                    "anchor_state": "unchanged",
+                    "plan_id": plan.get("plan_id") if plan else plan_id,
+                    "approval_id": approval_id,
+                }
+                details.update(exc.details)
+                raise AprilError(exc.code, exc.message, exc.status_code, details) from exc
             finally:
                 _funlock(descriptor)
                 os.close(descriptor)
@@ -812,9 +827,151 @@ class AuditLogger:
         quarantine = self.recovery_root / str(plan["quarantine_directory"])
         candidate = quarantine / "candidate-audit.jsonl"
         candidate_anchor = quarantine / "candidate-anchor.json"
+        phase = "staging"
+        anchor_state = "not_checked"
+        try:
+            candidate_bytes, expected_anchor = self._prepare_recovery_candidate(
+                plan=plan,
+                quarantine=quarantine,
+                candidate=candidate,
+                candidate_anchor=candidate_anchor,
+                approval_id=approval_id,
+                reason=reason,
+                issue_codes=issue_codes,
+                verification=verification,
+            )
+            current = self.path.read_bytes() if self.path.exists() else b""
+            original_bytes = self._original_bytes(plan)
+            if current == original_bytes:
+                phase = "log_publication"
+                staged_path = self.path.with_name(f".{self.path.name}.recovery-{uuid.uuid4().hex}")
+                descriptor = os.open(staged_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    _write_all(descriptor, candidate_bytes)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                os.replace(staged_path, self.path)
+                os.chmod(self.path, 0o600)
+                _fsync_directory(self.path.parent)
+            elif current != candidate_bytes:
+                raise AprilError(
+                    "AUDIT_RECOVERY_CONCURRENT_CHANGE",
+                    "Audit log changed during recovery publication.",
+                    409,
+                )
+            phase = "journal_log_publication"
+            events = self._recovery_events_for(str(plan["plan_id"]))
+            if not any(event["event_type"] == "log_published" for event in events):
+                self._append_recovery_event(
+                    "log_published",
+                    {
+                        "plan_id": plan["plan_id"],
+                        "approval_id": approval_id,
+                        "sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+                    },
+                )
+            phase = "anchor_publication"
+            anchor_state = "checking"
+            current_anchor = self.anchor.get()
+            if current_anchor != expected_anchor:
+                if current_anchor not in {plan.get("original_anchor"), None}:
+                    raise AprilError(
+                        "AUDIT_RECOVERY_CONCURRENT_CHANGE",
+                        "Protected anchor changed during recovery publication.",
+                        409,
+                    )
+                self.anchor.set(expected_anchor)
+                anchor_state = "updated"
+            else:
+                anchor_state = "already_published"
+            phase = "journal_anchor_publication"
+            events = self._recovery_events_for(str(plan["plan_id"]))
+            if not any(event["event_type"] == "anchor_published" for event in events):
+                self._append_recovery_event(
+                    "anchor_published",
+                    {
+                        "plan_id": plan["plan_id"],
+                        "approval_id": approval_id,
+                        "anchor_sha256": hashlib.sha256(expected_anchor.encode()).hexdigest(),
+                    },
+                )
+            phase = "verification"
+            final_result = verify_audit_chain(self.path, anchor=self.anchor)
+            if not final_result.valid:
+                raise AprilError(
+                    "AUDIT_RECOVERY_FAILED",
+                    "Recovered audit chain did not verify with its protected anchor.",
+                    500,
+                )
+            phase = "journal_finalization"
+            events = self._recovery_events_for(str(plan["plan_id"]))
+            if not any(event["event_type"] == "completed" for event in events):
+                self._append_recovery_event(
+                    "completed",
+                    {
+                        "plan_id": plan["plan_id"],
+                        "approval_id": approval_id,
+                        "candidate_sha256": plan["candidate_sha256"],
+                    },
+                )
+            return AuditRecoveryPlan(
+                "recovered",
+                issue_codes,
+                verification.record_count,
+                str(plan["quarantine_directory"]),
+                plan["original_log_sha256"],
+                plan["plan_id"],
+                plan["plan_digest"],
+                plan["canonical_target"],
+                plan["original_anchor_sha256"],
+                plan["expires_at"],
+                approval_id,
+                "completed",
+                self._recovery_log_changed(plan),
+                "verified",
+                self._recovery_resume_command(plan, approval_id),
+            )
+        except AprilError as exc:
+            log_changed = self._recovery_log_changed(plan)
+            details = self._recovery_state(
+                plan,
+                approval_id=approval_id,
+                phase=phase,
+                log_changed=log_changed,
+                anchor_state=anchor_state,
+            )
+            details.update(exc.details)
+            raise AprilError(exc.code, exc.message, exc.status_code, details) from exc
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise AprilError(
+                "AUDIT_RECOVERY_INCOMPLETE",
+                "Recovery publication stopped before the operation was complete.",
+                409,
+                self._recovery_state(
+                    plan,
+                    approval_id=approval_id,
+                    phase=phase,
+                    log_changed=self._recovery_log_changed(plan),
+                    anchor_state=anchor_state,
+                ),
+            ) from exc
+
+    def _prepare_recovery_candidate(
+        self,
+        *,
+        plan: dict[str, Any],
+        quarantine: Path,
+        candidate: Path,
+        candidate_anchor: Path,
+        approval_id: str,
+        reason: str,
+        issue_codes: tuple[str, ...],
+        verification: AuditVerification,
+    ) -> tuple[bytes, str]:
+        """Validate or finish staging; a candidate alone is never sufficient."""
         if not candidate.exists() and "candidate_sha256" not in plan:
-            staged_anchor = MemoryAuditAnchor()
-            staged_logger = AuditLogger(candidate, anchor=staged_anchor)
+            staged_logger = AuditLogger(candidate, anchor=MemoryAuditAnchor())
             staged_logger.write(
                 {
                     "event_type": "audit_chain_recovery",
@@ -833,99 +990,116 @@ class AuditLogger:
                     },
                 }
             )
-            _write_private_json(candidate_anchor, {"value": staged_anchor.get()})
-            plan["candidate_sha256"] = _sha256_file(candidate)
-            plan["candidate_anchor"] = staged_anchor.get()
-            _write_private_json(quarantine / "manifest.json", plan)
         if candidate.exists():
             candidate_bytes = candidate.read_bytes()
         else:
             candidate_bytes = self.path.read_bytes() if self.path.exists() else b""
-            if hashlib.sha256(candidate_bytes).hexdigest() != plan.get("candidate_sha256"):
-                raise AprilError(
-                    "AUDIT_RECOVERY_INCOMPLETE",
-                    "The recovery candidate is missing after publication interruption.",
-                    409,
-                )
-        expected_anchor = str(plan["candidate_anchor"])
-        current = self.path.read_bytes() if self.path.exists() else b""
-        original_bytes = self._original_bytes(plan)
-        if current == original_bytes:
-            staged_path = self.path.with_name(f".{self.path.name}.recovery-{uuid.uuid4().hex}")
-            descriptor = os.open(staged_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                _write_all(descriptor, candidate_bytes)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            os.replace(staged_path, self.path)
-            os.chmod(self.path, 0o600)
-            _fsync_directory(self.path.parent)
-        elif current != candidate_bytes:
+        candidate_sha256, expected_anchor = self._validate_recovery_candidate(
+            candidate_bytes, plan=plan, approval_id=approval_id
+        )
+        if plan.get("candidate_sha256") not in {None, candidate_sha256}:
             raise AprilError(
                 "AUDIT_RECOVERY_CONCURRENT_CHANGE",
-                "Audit log changed during recovery publication.",
+                "Recovery candidate changed after it was validated.",
                 409,
             )
-        events = self._recovery_events_for(str(plan["plan_id"]))
-        if not any(event["event_type"] == "log_published" for event in events):
-            self._append_recovery_event(
-                "log_published",
-                {
-                    "plan_id": plan["plan_id"],
-                    "approval_id": approval_id,
-                    "sha256": hashlib.sha256(candidate_bytes).hexdigest(),
-                },
+        if candidate_sha256 != hashlib.sha256(candidate_bytes).hexdigest():
+            raise AprilError(
+                "AUDIT_RECOVERY_INCOMPLETE", "Recovery candidate checksum is invalid.", 409
             )
-        current_anchor = self.anchor.get()
-        if current_anchor != expected_anchor:
-            if current_anchor not in {plan.get("original_anchor"), None}:
+        if candidate_anchor.exists():
+            try:
+                anchor_payload = json.loads(candidate_anchor.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise AprilError(
-                    "AUDIT_RECOVERY_CONCURRENT_CHANGE",
-                    "Protected anchor changed during recovery publication.",
+                    "AUDIT_RECOVERY_INCOMPLETE",
+                    "Recovery candidate anchor metadata is incomplete or invalid.",
+                    409,
+                ) from exc
+            if not isinstance(anchor_payload, dict) or (
+                anchor_payload.get("value") != expected_anchor
+            ):
+                raise AprilError(
+                    "AUDIT_RECOVERY_INCOMPLETE",
+                    "Recovery candidate anchor metadata does not match its validated candidate.",
                     409,
                 )
-            self.anchor.set(expected_anchor)
-        events = self._recovery_events_for(str(plan["plan_id"]))
-        if not any(event["event_type"] == "anchor_published" for event in events):
-            self._append_recovery_event(
-                "anchor_published",
-                {
-                    "plan_id": plan["plan_id"],
-                    "approval_id": approval_id,
-                    "anchor_sha256": hashlib.sha256(expected_anchor.encode()).hexdigest(),
-                },
-            )
-        final_result = verify_audit_chain(self.path, anchor=self.anchor)
-        if not final_result.valid:
+        else:
+            _write_private_json(candidate_anchor, {"value": expected_anchor})
+        plan_updates = dict(plan)
+        plan_updates["candidate_sha256"] = candidate_sha256
+        plan_updates["candidate_anchor"] = expected_anchor
+        if (
+            plan.get("candidate_sha256") != candidate_sha256
+            or plan.get("candidate_anchor") != expected_anchor
+        ):
+            _write_private_json(quarantine / "manifest.json", plan_updates)
+        plan.update(plan_updates)
+        return candidate_bytes, expected_anchor
+
+    def _validate_recovery_candidate(
+        self, candidate_bytes: bytes, *, plan: dict[str, Any], approval_id: str
+    ) -> tuple[str, str]:
+        result = _verify_bytes(candidate_bytes, anchor=None)
+        if not result.valid or result.record_count != 1 or result.terminal_hash is None:
             raise AprilError(
-                "AUDIT_RECOVERY_FAILED",
-                "Recovered audit chain did not verify with its protected anchor.",
-                500,
+                "AUDIT_RECOVERY_INCOMPLETE",
+                "Recovery candidate is not a complete valid audit chain.",
+                409,
             )
-        events = self._recovery_events_for(str(plan["plan_id"]))
-        if not any(event["event_type"] == "completed" for event in events):
-            self._append_recovery_event(
-                "completed",
-                {
-                    "plan_id": plan["plan_id"],
-                    "approval_id": approval_id,
-                    "candidate_sha256": plan["candidate_sha256"],
-                },
+        try:
+            records = [json.loads(line) for line in candidate_bytes.decode("utf-8").splitlines()]
+            payload = records[0]["payload"]
+        except (UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise AprilError(
+                "AUDIT_RECOVERY_INCOMPLETE",
+                "Recovery candidate provenance is invalid.",
+                409,
+            ) from exc
+        if (
+            records[0].get("event_type") != "audit_chain_recovery"
+            or not isinstance(payload, dict)
+            or payload.get("recovery_plan_id") != plan.get("plan_id")
+            or payload.get("recovery_plan_digest") != plan.get("plan_digest")
+            or payload.get("approval_id") != approval_id
+            or payload.get("quarantined_artifact_sha256") != plan.get("original_log_sha256")
+        ):
+            raise AprilError(
+                "AUDIT_RECOVERY_INCOMPLETE",
+                "Recovery candidate is not bound to the approved immutable plan.",
+                409,
             )
-        return AuditRecoveryPlan(
-            "recovered",
-            issue_codes,
-            verification.record_count,
-            str(plan["quarantine_directory"]),
-            plan["original_log_sha256"],
-            plan["plan_id"],
-            plan["plan_digest"],
-            plan["canonical_target"],
-            plan["original_anchor_sha256"],
-            plan["expires_at"],
-            approval_id,
+        return hashlib.sha256(candidate_bytes).hexdigest(), _encode_anchor(
+            result.terminal_sequence or 0, result.terminal_hash
         )
+
+    def _recovery_log_changed(self, plan: dict[str, Any]) -> bool:
+        current = self.path.read_bytes() if self.path.exists() else b""
+        return hashlib.sha256(current).hexdigest() != plan.get("original_log_sha256")
+
+    def _recovery_resume_command(self, plan: dict[str, Any], approval_id: str) -> str:
+        return (
+            "run april audit recover --apply "
+            f"--plan-id {plan['plan_id']} --approval-id {approval_id} --json"
+        )
+
+    def _recovery_state(
+        self,
+        plan: dict[str, Any],
+        *,
+        approval_id: str,
+        phase: str,
+        log_changed: bool,
+        anchor_state: str,
+    ) -> dict[str, Any]:
+        return {
+            "phase": phase,
+            "log_changed": log_changed,
+            "anchor_state": anchor_state,
+            "plan_id": plan.get("plan_id"),
+            "approval_id": approval_id,
+            "resume_command": self._recovery_resume_command(plan, approval_id),
+        }
 
     def _original_bytes(self, plan: dict[str, Any]) -> bytes:
         original = self.recovery_root / str(plan["quarantine_directory"]) / self.path.name

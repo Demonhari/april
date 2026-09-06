@@ -170,6 +170,16 @@ def settings_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AprilSettin
             monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture
+def no_real_credential_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent credential-injection tests from consulting host Keychain state."""
+
+    def fail_selection(*args: object, **kwargs: object) -> None:
+        pytest.fail("real credential selection must not run in this unit test")
+
+    monkeypatch.setattr("april_common.credentials.select_credential_store", fail_selection)
+
+
 class InProcessToolWorker:
     """Test-only adapter preserving Tool Worker validation without host IPC."""
 

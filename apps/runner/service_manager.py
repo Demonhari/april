@@ -141,7 +141,11 @@ class AprilServiceManager:
     def start(self, *, fake_backend: bool = False) -> ServiceStatus:
         self._ensure_dirs()
         current = self.status()
-        requested_backend = "fake" if fake_backend else "real"
+        # ``backend`` is the effective backend identity shared with apriald:
+        # fake mode is explicit, while real mode uses the configured runtime
+        # backend (normally ``llama_cpp``).  A generic "real" label made a
+        # healthy daemon look incompatible with an ordinary runner start.
+        requested_backend = "fake" if fake_backend else self.settings.runtime.backend
         if current.backend is not None and current.backend != requested_backend:
             raise RuntimeError(
                 f"APRIL services are already owned by {current.owner} in {current.backend} mode; "

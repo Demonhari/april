@@ -149,6 +149,25 @@ unexpectedly. Do not delete the original log or anchor to make readiness pass.
 If no approved operation exists, the production CLI refuses recovery; it does
 not create or accept an operator-supplied arbitrary approval string.
 
+The supported owner flow is plan, review, consent, then apply:
+
+```bash
+run april audit recover --reason "describe the reviewed repair" --json
+run april audit recover --plan-id PLAN_ID --plan-digest PLAN_DIGEST --approve --json
+run april audit recover --apply --plan-id PLAN_ID --approval-id APPROVAL_ID --json
+```
+
+The plan's quarantine directory preserves the original log and protected-anchor
+snapshot. Candidate log, candidate-anchor metadata, manifest, and recovery
+journal records are staged and validated independently. A candidate file alone
+does not authorize publication. If output reports `status: incomplete`, use its
+redacted `phase`, `log_changed`, `anchor_state`, and `resume_command`; do not
+replace files manually or create a new approval. Resumption revalidates the
+immutable plan and claimed operation, preserves newer state, and returns
+`status: recovered` only after the published chain verifies. A refusal before
+publication reports `log_changed: false`; it requires correcting the stated
+plan/consent problem rather than retrying an arbitrary operation.
+
 ## Threat-model boundary
 
 This phase protects against casual plaintext-secret disclosure, inheritance of

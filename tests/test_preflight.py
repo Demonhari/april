@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from apps.runner.preflight import build_preflight_report
-from april_common.credentials import InMemoryCredentialStore
+from april_common.credentials import CredentialKey, InMemoryCredentialStore
 
 pytestmark = pytest.mark.usefixtures("clean_april_environment")
 
@@ -104,7 +104,9 @@ def test_preflight_fails_when_foreign_process_holds_port(tmp_path: Path) -> None
     assert any(name.endswith("port available") for name in report.failures)
 
 
-def test_preflight_production_blocks_default_tokens(tmp_path: Path) -> None:
+def test_preflight_production_blocks_default_tokens(
+    tmp_path: Path, no_real_credential_selection
+) -> None:
     _copy_configs(tmp_path)
     _create_gguf_files(tmp_path)
     config = tmp_path / "configs" / "april.yaml"
@@ -112,7 +114,16 @@ def test_preflight_production_blocks_default_tokens(tmp_path: Path) -> None:
     data["environment"] = "production"
     config.write_text(yaml.safe_dump(data), encoding="utf-8")
     report = build_preflight_report(
-        tmp_path, fake=False, port_in_use=_free_port, pid_alive=_dead_pid
+        tmp_path,
+        fake=False,
+        port_in_use=_free_port,
+        pid_alive=_dead_pid,
+        credential_store=InMemoryCredentialStore(
+            {
+                CredentialKey.API_TOKEN: "local-dev-token",
+                CredentialKey.RUNTIME_TOKEN: "local-dev-runtime-token",
+            }
+        ),
     )
     # Default tokens in production are rejected at the settings layer, so preflight
     # fails fast (the dedicated token/hardening check is defense in depth).

@@ -152,7 +152,7 @@ def test_mixed_runner_chat_entry_reuses_fake_lifecycle_and_stop_is_final(
     assert reused.api.pid == started.api.pid
     assert reused.backend == "fake"
     assert chat_entry.popen_factory.calls == []  # type: ignore[attr-defined]
-    with pytest.raises(RuntimeError, match="incompatible real reuse"):
+    with pytest.raises(RuntimeError, match="incompatible llama_cpp reuse"):
         chat_entry.start(fake_backend=False)
 
     stopped = chat_entry.stop()
@@ -160,6 +160,58 @@ def test_mixed_runner_chat_entry_reuses_fake_lifecycle_and_stop_is_final(
     assert not stopped.api.running
     assert not alive
     assert chat_entry.status().owner == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("backend", "fake_request"),
+    [("llama_cpp", False), ("fake", True)],
+)
+def test_daemon_effective_backend_is_reused_without_duplicate_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    fake_request: bool,
+) -> None:
+    monkeypatch.delenv("APRIL_HOME", raising=False)
+    popen = FakePopen()
+    manager = AprilServiceManager(
+        home=tmp_path,
+        popen_factory=popen,
+        health_getter=lambda _url, _timeout: True,
+        pid_exists=lambda _pid: True,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_daemon_children",
+        lambda: (backend, {"runtime": 301, "api": 302}),
+    )
+
+    status = manager.status()
+    assert status.owner == "daemon"
+    assert status.backend == backend
+    reused = manager.start(fake_backend=fake_request)
+    assert reused.owner == "daemon"
+    assert reused.backend == backend
+    assert popen.calls == []
+
+
+def test_daemon_fake_real_mismatch_is_rejected_without_switching_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("APRIL_HOME", raising=False)
+    manager = AprilServiceManager(
+        home=tmp_path,
+        popen_factory=FakePopen(),
+        health_getter=lambda _url, _timeout: True,
+        pid_exists=lambda _pid: True,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_daemon_children",
+        lambda: ("llama_cpp", {"runtime": 401, "api": 402}),
+    )
+    with pytest.raises(RuntimeError, match="incompatible fake reuse"):
+        manager.start(fake_backend=True)
 
 
 def test_wrapper_content_includes_april_home(tmp_path: Path) -> None:

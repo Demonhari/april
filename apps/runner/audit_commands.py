@@ -62,7 +62,7 @@ def recover_audit(
     plan_digest: str | None = typer.Option(None, "--plan-digest"),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Dry-run or explicitly recover a corrupt local audit chain."""
+    """Plan, consent to, apply, or resume a corrupt local audit-chain recovery."""
     try:
         settings = load_settings()
         if apply and approve:
@@ -92,10 +92,61 @@ def recover_audit(
     except (AprilError, ConfigError, RuntimeError, ValueError) as exc:
         if json_output:
             reason_code = exc.code if isinstance(exc, AprilError) else type(exc).__name__
-            console.print_json(data={"status": "refused", "reason_code": reason_code})
+            details = dict(exc.details) if isinstance(exc, AprilError) else {}
+            status = (
+                "incomplete"
+                if (
+                    isinstance(exc, AprilError)
+                    and (
+                        details.get("log_changed") is True
+                        or exc.code == "AUDIT_RECOVERY_INCOMPLETE"
+                        or details.get("phase")
+                        in {
+                            "log_publication",
+                            "journal_log_publication",
+                            "anchor_publication",
+                            "journal_anchor_publication",
+                            "verification",
+                            "journal_finalization",
+                        }
+                    )
+                )
+                else "refused"
+            )
+            payload = {"status": status, "reason_code": reason_code}
+            for key in (
+                "phase",
+                "log_changed",
+                "anchor_state",
+                "plan_id",
+                "approval_id",
+                "resume_command",
+            ):
+                if key in details:
+                    payload[key] = details[key]
+            console.print_json(data=payload)
         else:
             if isinstance(exc, AprilError):
-                console.print(f"[red]Audit recovery refused: {exc.code}.[/red]")
+                label = (
+                    "incomplete"
+                    if (
+                        exc.details.get("log_changed")
+                        or exc.code == "AUDIT_RECOVERY_INCOMPLETE"
+                        or exc.details.get("phase")
+                        in {
+                            "log_publication",
+                            "journal_log_publication",
+                            "anchor_publication",
+                            "journal_anchor_publication",
+                            "verification",
+                            "journal_finalization",
+                        }
+                    )
+                    else "refused"
+                )
+                console.print(f"[red]Audit recovery {label}: {exc.code}.[/red]")
+                if exc.details.get("resume_command"):
+                    console.print(f"Resume with: {exc.details['resume_command']}")
             else:
                 console.print("[red]Audit recovery refused.[/red]")
         raise typer.Exit(1) from exc

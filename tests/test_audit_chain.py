@@ -10,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from apps.runner.main import app
-from april_common.audit import AuditLogger, AuditVerification, MemoryAuditAnchor
+from april_common.audit import AuditLogger, AuditRecoveryPlan, AuditVerification, MemoryAuditAnchor
 from april_common.errors import AprilError, PermissionDeniedError
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
@@ -198,13 +198,16 @@ def test_recovery_anchor_failure_never_reports_success(tmp_path: Path) -> None:
     plan = logger.recover(reason="test anchor failure", apply=False)
     consent = logger.approve_recovery(plan_id=str(plan.plan_id))
     anchor.fail = True
-    with pytest.raises(AprilError, match="AUDIT_ANCHOR_FAILED"):
+    with pytest.raises(AprilError, match="AUDIT_ANCHOR_FAILED") as error:
         logger.recover(
             reason="test anchor failure",
             apply=True,
             plan_id=str(plan.plan_id),
             approval_id=str(consent["approval_id"]),
         )
+    assert error.value.details["phase"] == "anchor_publication"
+    assert error.value.details["log_changed"] is True
+    assert error.value.details["anchor_state"] == "checking"
     assert list((tmp_path / "data" / "backups" / "audit-quarantine").glob("recovery-*"))
 
 
@@ -292,13 +295,15 @@ def test_recovery_resumes_after_log_publication_before_finalization(
         return original_append(event_type, payload)
 
     monkeypatch.setattr(logger, "_append_recovery_event", interrupt)
-    with pytest.raises(RuntimeError, match="interrupted"):
+    with pytest.raises(AprilError, match="AUDIT_RECOVERY_INCOMPLETE") as error:
         logger.recover(
             reason="interruption test",
             apply=True,
             plan_id=str(plan.plan_id),
             approval_id=str(consent["approval_id"]),
         )
+    assert error.value.details["phase"] == "journal_log_publication"
+    assert error.value.details["log_changed"] is True
     monkeypatch.setattr(logger, "_append_recovery_event", original_append)
     resumed = logger.recover(
         reason="interruption test",
@@ -308,6 +313,139 @@ def test_recovery_resumes_after_log_publication_before_finalization(
     )
     assert resumed.status == "recovered"
     assert logger.verify().valid
+
+
+def _approved_recovery_fixture(tmp_path: Path) -> tuple[Path, AuditRecoveryPlan, str]:
+    path = tmp_path / "logs" / "audit.jsonl"
+    logger = AuditLogger(path)
+    logger.write({"event_type": "original"})
+    path.write_bytes(b"{}\n")
+    plan = logger.plan_recovery(reason="staging interruption", expiry_seconds=60)
+    consent = logger.approve_recovery(plan_id=str(plan.plan_id))
+    return path, plan, str(consent["approval_id"])
+
+
+def test_recovery_candidate_creation_interruption_is_resumable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, plan, approval_id = _approved_recovery_fixture(tmp_path)
+    original_write = AuditLogger.write
+
+    def interrupt(self: AuditLogger, entry: dict[str, object]) -> None:
+        original_write(self, entry)
+        if self.path.name == "candidate-audit.jsonl":
+            raise RuntimeError("interrupted after candidate creation")
+
+    monkeypatch.setattr(AuditLogger, "write", interrupt)
+    with pytest.raises(AprilError, match="AUDIT_RECOVERY_INCOMPLETE") as error:
+        AuditLogger(path).recover(
+            reason="staging interruption",
+            apply=True,
+            plan_id=str(plan.plan_id),
+            approval_id=approval_id,
+        )
+    assert error.value.details["phase"] == "staging"
+    assert error.value.details["log_changed"] is False
+    monkeypatch.setattr(AuditLogger, "write", original_write)
+    resumed = AuditLogger(path).recover(
+        reason="staging interruption",
+        apply=True,
+        plan_id=str(plan.plan_id),
+        approval_id=approval_id,
+    )
+    assert resumed.status == "recovered"
+    assert AuditLogger(path).verify().valid
+
+
+def test_recovery_journal_finalization_interruption_is_resumable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, plan, approval_id = _approved_recovery_fixture(tmp_path)
+    logger = AuditLogger(path)
+    original_append = logger._append_recovery_event
+
+    def interrupt(event_type: str, payload: dict[str, object]):
+        if event_type == "completed":
+            raise RuntimeError("interrupted during journal finalization")
+        return original_append(event_type, payload)
+
+    monkeypatch.setattr(logger, "_append_recovery_event", interrupt)
+    with pytest.raises(AprilError, match="AUDIT_RECOVERY_INCOMPLETE") as error:
+        logger.recover(
+            reason="staging interruption",
+            apply=True,
+            plan_id=str(plan.plan_id),
+            approval_id=approval_id,
+        )
+    assert error.value.details["phase"] == "journal_finalization"
+    assert error.value.details["log_changed"] is True
+    monkeypatch.setattr(logger, "_append_recovery_event", original_append)
+    resumed = AuditLogger(path).recover(
+        reason="staging interruption",
+        apply=True,
+        plan_id=str(plan.plan_id),
+        approval_id=approval_id,
+    )
+    assert resumed.status == "recovered"
+    assert AuditLogger(path).verify().valid
+
+
+def test_recovery_staging_requires_anchor_metadata_and_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, plan, approval_id = _approved_recovery_fixture(tmp_path)
+    import april_common.audit as audit_module
+
+    original_write_json = audit_module._write_private_json
+
+    def interrupt_before_anchor(path_arg: Path, payload: dict[str, object]) -> None:
+        if path_arg.name == "candidate-anchor.json":
+            raise RuntimeError("interrupted before candidate anchor metadata")
+        original_write_json(path_arg, payload)
+
+    monkeypatch.setattr(audit_module, "_write_private_json", interrupt_before_anchor)
+    with pytest.raises(AprilError, match="AUDIT_RECOVERY_INCOMPLETE") as error:
+        AuditLogger(path).recover(
+            reason="staging interruption",
+            apply=True,
+            plan_id=str(plan.plan_id),
+            approval_id=approval_id,
+        )
+    assert error.value.details["phase"] == "staging"
+    monkeypatch.setattr(audit_module, "_write_private_json", original_write_json)
+
+    def interrupt_before_manifest(path_arg: Path, payload: dict[str, object]) -> None:
+        if path_arg.name == "manifest.json":
+            raise RuntimeError("interrupted before manifest publication")
+        original_write_json(path_arg, payload)
+
+    monkeypatch.setattr(audit_module, "_write_private_json", interrupt_before_manifest)
+    with pytest.raises(AprilError, match="AUDIT_RECOVERY_INCOMPLETE") as error:
+        AuditLogger(path).recover(
+            reason="staging interruption",
+            apply=True,
+            plan_id=str(plan.plan_id),
+            approval_id=approval_id,
+        )
+    assert error.value.details["phase"] == "staging"
+    assert (
+        next(
+            (tmp_path / "data" / "backups" / "audit-quarantine").glob(
+                "recovery-*/candidate-anchor.json"
+            ),
+            None,
+        )
+        is not None
+    )
+    monkeypatch.setattr(audit_module, "_write_private_json", original_write_json)
+    resumed = AuditLogger(path).recover(
+        reason="staging interruption",
+        apply=True,
+        plan_id=str(plan.plan_id),
+        approval_id=approval_id,
+    )
+    assert resumed.status == "recovered"
+    assert AuditLogger(path).verify().valid
 
 
 def test_recovery_journal_tampering_is_fail_closed(tmp_path: Path) -> None:
@@ -348,6 +486,54 @@ def test_unavailable_audit_verification_has_distinct_cli_failure(
     result = CliRunner().invoke(app, ["april", "audit", "verify", "--json"])
     assert result.exit_code == 2
     assert json.loads(result.stdout)["status"] == "unavailable"
+
+
+def test_recovery_cli_reports_partial_publication_truthfully(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    monkeypatch.setenv("APRIL_ENV", "test")
+
+    class PartialAudit:
+        def recover(self, **_kwargs: object) -> AuditRecoveryPlan:
+            raise AprilError(
+                "AUDIT_ANCHOR_FAILED",
+                "injected anchor failure",
+                500,
+                {
+                    "phase": "anchor_publication",
+                    "log_changed": True,
+                    "anchor_state": "update_failed",
+                    "plan_id": "a" * 32,
+                    "approval_id": "recovery:test",
+                    "resume_command": "run april audit recover --apply --json",
+                },
+            )
+
+    monkeypatch.setattr(
+        "apps.runner.audit_commands.audit_logger_for_settings", lambda settings: PartialAudit()
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "april",
+            "audit",
+            "recover",
+            "--apply",
+            "--plan-id",
+            "a" * 32,
+            "--approval-id",
+            "recovery:test",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "incomplete"
+    assert payload["reason_code"] == "AUDIT_ANCHOR_FAILED"
+    assert payload["log_changed"] is True
+    assert payload["anchor_state"] == "update_failed"
+    assert "resume_command" in payload
 
 
 @pytest.mark.asyncio
