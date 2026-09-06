@@ -19,6 +19,8 @@ from services.api.dependencies import ApiContainer
 from services.april_runtime.fake_backend import FakeBackend
 from services.april_runtime.schemas import ChatMessage, ChatResponse, Usage
 from services.memory.database import Database
+from services.tool_worker.executor import ToolWorkerExecutor
+from services.tool_worker.schemas import ToolWorkerRequest, ToolWorkerResponse
 
 
 def pytest_sessionfinish() -> None:
@@ -166,6 +168,45 @@ def settings_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AprilSettin
     for key in list(os.environ):
         if key.startswith("APRIL_"):
             monkeypatch.delenv(key, raising=False)
+
+
+class InProcessToolWorker:
+    """Test-only adapter preserving Tool Worker validation without host IPC."""
+
+    def __init__(self, settings: AprilSettings) -> None:
+        self.capability = "test-in-process-tool-worker-capability"
+        self.executor = ToolWorkerExecutor(
+            allowed_roots=tuple(settings.allowed_roots),
+            capability=self.capability,
+            # Keep the adapter in-process and avoid host IPC/macOS sandbox
+            # restrictions while retaining the executor's patch byte/hash and
+            # project-boundary checks.
+            environment=None,
+            development_unsandboxed_override=settings.workers.development_unsandboxed_override,
+        )
+
+    async def execute(
+        self,
+        *,
+        request_id: str,
+        operation: str,
+        project_root: Path,
+        args: dict[str, object],
+        timeout_seconds: float,
+        max_stdout_bytes: int = 100_000,
+        max_stderr_bytes: int = 100_000,
+    ) -> ToolWorkerResponse:
+        request = ToolWorkerRequest(
+            request_id=request_id,
+            capability=self.capability,
+            operation=operation,  # type: ignore[arg-type]
+            project_root=str(project_root),
+            args=args,
+            timeout_seconds=timeout_seconds,
+            max_stdout_bytes=max_stdout_bytes,
+            max_stderr_bytes=max_stderr_bytes,
+        )
+        return await self.executor.execute(request)
 
 
 class FakeRuntimeClient:

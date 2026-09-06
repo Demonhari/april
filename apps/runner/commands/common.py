@@ -128,7 +128,9 @@ def _delegate(args: list[str], *, fake: bool, oneshot: bool = False) -> None:
 
 
 def _print_status(status: ServiceStatus) -> None:
-    table = Table(title="APRIL Services")
+    table = Table(
+        title=f"APRIL Services (owner={status.owner}, backend={status.backend or 'unknown'})"
+    )
     table.add_column("Service")
     table.add_column("PID")
     table.add_column("Running")
@@ -159,6 +161,8 @@ def _status_payload(status: ServiceStatus) -> dict[str, Any]:
             "healthy": status.api.healthy,
             "log_path": str(status.api.log_path),
         },
+        "owner": status.owner,
+        "backend": status.backend,
         "ok": status.ok,
     }
 

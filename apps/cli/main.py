@@ -79,6 +79,15 @@ def _maybe_autostart_daemon() -> None:
     if not settings.daemon.autostart_on_cli:
         return
     try:
+        # Runner-managed services are already the authenticated installation
+        # lifecycle.  Do not start a second supervisor merely because its own
+        # PID file is absent; a second supervisor would restart services after
+        # an explicit runner stop.
+        from apps.runner.service_manager import AprilServiceManager
+
+        existing = AprilServiceManager(home=settings.home).status()
+        if existing.runtime.running or existing.api.running:
+            return
         from apps.daemon.apriald import autostart_if_needed
     except ImportError:
         if not _DAEMON_AUTOSTART_REPORTED:
@@ -89,7 +98,7 @@ def _maybe_autostart_daemon() -> None:
             _DAEMON_AUTOSTART_REPORTED = True
         return
     try:
-        autostart_if_needed(settings)
+        autostart_if_needed(settings, fake_backend=settings.runtime.backend == "fake")
     except Exception as exc:
         if not _DAEMON_AUTOSTART_REPORTED:
             console.print(f"[yellow]Daemon autostart failed: {exc}[/yellow]")

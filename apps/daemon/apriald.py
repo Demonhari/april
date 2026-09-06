@@ -148,6 +148,7 @@ class AprialdSupervisor:
         clock: Clock = time.monotonic,
         stable_after_seconds: float = 30.0,
         audit: AuditLogger | None = None,
+        fake_backend: bool = False,
     ) -> None:
         self.settings = settings
         self.process_factory = process_factory or self._spawn_process
@@ -158,9 +159,11 @@ class AprialdSupervisor:
         self.clock = clock
         self.stable_after_seconds = stable_after_seconds
         self.audit = audit or audit_logger_for_settings(settings)
+        self.runtime_backend = "fake" if fake_backend else settings.runtime.backend
         self.lock = DaemonLock(daemon_lock_path(settings))
         self.children: dict[str, ChildRuntime] = {
-            spec.name: ChildRuntime(spec=spec) for spec in default_child_specs(settings)
+            spec.name: ChildRuntime(spec=spec)
+            for spec in default_child_specs(settings, fake_backend=fake_backend)
         }
         self._stopped = False
 
@@ -383,7 +386,10 @@ class AprialdSupervisor:
         return ChildHealth(runtime.spec.name, "running", process.pid, runtime.restarts)
 
     def _write_status(self, health: DaemonHealth) -> None:
-        _write_status_payload(self.settings, _daemon_health_payload(health, pid=os.getpid()))
+        _write_status_payload(
+            self.settings,
+            _daemon_health_payload(health, pid=os.getpid(), runtime_backend=self.runtime_backend),
+        )
 
     def _write_stopped_status(self) -> None:
         children = [
@@ -457,7 +463,9 @@ class AprialdSupervisor:
         )
 
 
-def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
+def default_child_specs(
+    settings: AprilSettings, *, fake_backend: bool = False
+) -> tuple[ChildSpec, ...]:
     python = sys.executable
     specs = [
         ChildSpec(
@@ -466,6 +474,7 @@ def default_child_specs(settings: AprilSettings) -> tuple[ChildSpec, ...]:
             health_url=settings.runtime.url.rstrip("/") + "/runtime/health",
             health_token=settings.runtime.token,
             process_category=ProcessCategory.RUNTIME,
+            environment_overrides=((("APRIL_RUNTIME_BACKEND", "fake"),) if fake_backend else ()),
         ),
     ]
     external_overrides: list[tuple[str, str]] = []
@@ -663,6 +672,7 @@ def start_daemon_background(
     settings: AprilSettings,
     *,
     health_probe: Callable[[str], bool] | None = None,
+    fake_backend: bool = False,
 ) -> dict[str, object]:
     current = read_daemon_status(settings)
     current_pid = current.get("pid")
@@ -676,6 +686,11 @@ def start_daemon_background(
         source=without_raw_credentials(),
         april_home=settings.home,
     )
+    if fake_backend:
+        # The daemon is itself launched from a CLI process and therefore
+        # cannot infer a runner's in-process fake override unless it is carried
+        # explicitly to the supervised child process.
+        env["APRIL_RUNTIME_BACKEND"] = "fake"
     with log_path.open("ab") as log_file, Path(os.devnull).open("rb") as devnull:
         process = subprocess.Popen(
             [sys.executable, "-m", "apps.daemon.apriald"],
@@ -702,7 +717,12 @@ def start_daemon_background(
             },
         )
         raise
-    return {"status": "running", "pid": process.pid, "log_path": str(log_path)}
+    return {
+        "status": "running",
+        "pid": process.pid,
+        "log_path": str(log_path),
+        "backend": "fake" if fake_backend else settings.runtime.backend,
+    }
 
 
 def stop_daemon(
@@ -751,13 +771,16 @@ def stop_daemon(
     return {"status": "stopped", "pid": None}
 
 
-def autostart_if_needed(settings: AprilSettings) -> dict[str, object]:
+def autostart_if_needed(
+    settings: AprilSettings, *, fake_backend: bool | None = None
+) -> dict[str, object]:
     status = read_daemon_status(settings)
     pid = status.get("pid")
     if isinstance(pid, int) and _pid_alive(pid):
         wait_for_core_health(settings)
         return status
-    return start_daemon_background(settings)
+    effective_fake = settings.runtime.backend == "fake" if fake_backend is None else fake_backend
+    return start_daemon_background(settings, fake_backend=effective_fake)
 
 
 def _sync_health_probe(url: str) -> bool:
@@ -770,11 +793,14 @@ def _write_pid_file(settings: AprilSettings, pid: int) -> None:
     path.write_text(f"{pid}\n", encoding="utf-8")
 
 
-def _daemon_health_payload(health: DaemonHealth, *, pid: int | None) -> dict[str, object]:
+def _daemon_health_payload(
+    health: DaemonHealth, *, pid: int | None, runtime_backend: str | None = None
+) -> dict[str, object]:
     return {
         "schema_version": 1,
         "status": health.status,
         "pid": pid,
+        "runtime_backend": runtime_backend,
         "generated_at": utc_now_iso(),
         "children": [_child_health_payload(child) for child in health.children],
         "governor": {

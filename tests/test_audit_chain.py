@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
-import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -11,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from apps.runner.main import app
-from april_common.audit import AuditLogger, MemoryAuditAnchor
+from april_common.audit import AuditLogger, AuditVerification, MemoryAuditAnchor
 from april_common.errors import AprilError, PermissionDeniedError
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
@@ -161,30 +160,17 @@ def test_audit_verify_cli_exit_codes_and_json(
     assert json.loads(corrupt.stdout)["status"] == "corrupt"
 
 
-def test_recovery_quarantine_is_byte_exact_and_rechecks_concurrent_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_recovery_quarantine_is_byte_exact_and_rechecks_concurrent_changes(tmp_path: Path) -> None:
     path = tmp_path / "logs" / "audit.jsonl"
     logger = AuditLogger(path)
     logger.write({"event_type": "original", "value": "kept"})
     original_bytes = path.read_bytes()
     path.write_bytes(b"{}\n")
-    observed_copy = False
-    original_copy2 = shutil.copy2
-
-    def copy_then_mutate(source: Path, destination: Path, *args: object, **kwargs: object):
-        nonlocal observed_copy
-        result = original_copy2(source, destination, *args, **kwargs)
-        if source == path:
-            observed_copy = True
-            path.write_bytes(b'{"changed_after_plan":true}\n')
-        return result
-
-    monkeypatch.setattr("april_common.audit.shutil.copy2", copy_then_mutate)
+    plan = logger.recover(reason="test concurrent recovery", apply=False)
+    path.write_bytes(b'{"changed_after_plan":true}\n')
     with pytest.raises(AprilError) as error:
-        logger.recover(reason="test concurrent recovery", apply=True)
-    assert error.value.code == "AUDIT_RECOVERY_CONCURRENT_CHANGE"
-    assert observed_copy
+        logger.approve_recovery(plan_id=str(plan.plan_id))
+    assert error.value.code == "AUDIT_RECOVERY_PLAN_STALE"
     quarantine_root = tmp_path / "data" / "backups" / "audit-quarantine"
     quarantine_log = next(quarantine_root.glob("recovery-*/audit.jsonl"))
     assert (
@@ -209,10 +195,159 @@ def test_recovery_anchor_failure_never_reports_success(tmp_path: Path) -> None:
     logger = AuditLogger(path, anchor=anchor)
     logger.write({"event_type": "one"})
     path.write_text("{}\n", encoding="utf-8")
+    plan = logger.recover(reason="test anchor failure", apply=False)
+    consent = logger.approve_recovery(plan_id=str(plan.plan_id))
     anchor.fail = True
     with pytest.raises(AprilError, match="AUDIT_ANCHOR_FAILED"):
-        logger.recover(reason="test anchor failure", apply=True)
+        logger.recover(
+            reason="test anchor failure",
+            apply=True,
+            plan_id=str(plan.plan_id),
+            approval_id=str(consent["approval_id"]),
+        )
     assert list((tmp_path / "data" / "backups" / "audit-quarantine").glob("recovery-*"))
+
+
+def test_recovery_plan_consent_claim_and_apply_preserve_evidence(tmp_path: Path) -> None:
+    path = tmp_path / "logs" / "audit.jsonl"
+    logger = AuditLogger(path)
+    logger.write({"event_type": "original", "value": "kept"})
+    original_bytes = path.read_bytes()
+    path.write_bytes(b"{}\n")
+
+    plan = logger.plan_recovery(reason="owner reviewed test recovery", expiry_seconds=60)
+    assert plan.status == "dry_run"
+    consent = logger.approve_recovery(plan_id=str(plan.plan_id), plan_digest=plan.plan_digest)
+    recovered = logger.recover(
+        reason="owner reviewed test recovery",
+        apply=True,
+        plan_id=str(plan.plan_id),
+        approval_id=str(consent["approval_id"]),
+    )
+
+    assert recovered.status == "recovered"
+    assert logger.verify().valid
+    quarantine = Path(str(plan.quarantine_directory))
+    backup = tmp_path / "data" / "backups" / "audit-quarantine" / quarantine
+    assert (backup / "audit.jsonl").read_bytes() == b"{}\n"
+    assert (backup / "manifest.json").stat().st_mode & 0o077 == 0
+    assert (
+        tmp_path / "data" / "backups" / "audit-recovery-journal.jsonl"
+    ).stat().st_mode & 0o077 == 0
+    assert original_bytes not in path.read_bytes()
+    with pytest.raises(AprilError, match="AUDIT_RECOVERY_REPLAY"):
+        logger.recover(
+            reason="owner reviewed test recovery",
+            apply=True,
+            plan_id=str(plan.plan_id),
+            approval_id=str(consent["approval_id"]),
+        )
+
+
+def test_recovery_rejects_stale_consent_and_expiry_before_claim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "logs" / "audit.jsonl"
+    logger = AuditLogger(path)
+    logger.write({"event_type": "original"})
+    path.write_bytes(b"{}\n")
+    stale_plan = logger.plan_recovery(reason="stale test", expiry_seconds=60)
+    path.write_bytes(b'{"changed":true}\n')
+    with pytest.raises(AprilError, match="AUDIT_RECOVERY_PLAN_STALE"):
+        logger.approve_recovery(plan_id=str(stale_plan.plan_id))
+
+    path.write_bytes(b"{}\n")
+    plan = logger.plan_recovery(reason="expiry test", expiry_seconds=60)
+    consent = logger.approve_recovery(plan_id=str(plan.plan_id))
+    real_now = __import__("april_common.audit", fromlist=["utc_now_iso"]).utc_now_iso
+    monkeypatch.setattr(
+        "april_common.audit.utc_now_iso",
+        lambda: "9999-01-01T00:00:00Z",
+    )
+    with pytest.raises(AprilError, match="AUDIT_RECOVERY_EXPIRED"):
+        logger.recover(
+            reason="expiry test",
+            apply=True,
+            plan_id=str(plan.plan_id),
+            approval_id=str(consent["approval_id"]),
+        )
+    monkeypatch.setattr("april_common.audit.utc_now_iso", real_now)
+    assert path.read_bytes() == b"{}\n"
+
+
+def test_recovery_resumes_after_log_publication_before_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "logs" / "audit.jsonl"
+    logger = AuditLogger(path)
+    logger.write({"event_type": "original"})
+    path.write_bytes(b"{}\n")
+    plan = logger.plan_recovery(reason="interruption test", expiry_seconds=60)
+    consent = logger.approve_recovery(plan_id=str(plan.plan_id))
+    original_append = logger._append_recovery_event
+
+    def interrupt(event_type: str, payload: dict[str, object]):
+        if event_type == "log_published":
+            raise RuntimeError("interrupted after publication")
+        return original_append(event_type, payload)
+
+    monkeypatch.setattr(logger, "_append_recovery_event", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        logger.recover(
+            reason="interruption test",
+            apply=True,
+            plan_id=str(plan.plan_id),
+            approval_id=str(consent["approval_id"]),
+        )
+    monkeypatch.setattr(logger, "_append_recovery_event", original_append)
+    resumed = logger.recover(
+        reason="interruption test",
+        apply=True,
+        plan_id=str(plan.plan_id),
+        approval_id=str(consent["approval_id"]),
+    )
+    assert resumed.status == "recovered"
+    assert logger.verify().valid
+
+
+def test_recovery_journal_tampering_is_fail_closed(tmp_path: Path) -> None:
+    path = tmp_path / "logs" / "audit.jsonl"
+    logger = AuditLogger(path)
+    logger.write({"event_type": "original"})
+    path.write_bytes(b"{}\n")
+    plan = logger.plan_recovery(reason="journal test")
+    journal = tmp_path / "data" / "backups" / "audit-recovery-journal.jsonl"
+    record = json.loads(journal.read_text(encoding="utf-8").splitlines()[0])
+    record["payload"]["plan_id"] = "tampered"
+    journal.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(AprilError, match="AUDIT_RECOVERY_JOURNAL_CORRUPT"):
+        logger.approve_recovery(plan_id=str(plan.plan_id))
+
+
+def test_unavailable_audit_verification_has_distinct_cli_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APRIL_HOME", str(tmp_path))
+    monkeypatch.setenv("APRIL_ENV", "test")
+
+    class UnavailableAudit:
+        def verify(self) -> AuditVerification:
+            return AuditVerification(
+                status="unavailable",
+                valid=False,
+                corrupt=False,
+                anchor_lagged=False,
+                record_count=0,
+                terminal_sequence=None,
+                terminal_hash=None,
+            )
+
+    monkeypatch.setattr(
+        "apps.runner.audit_commands.audit_logger_for_settings", lambda settings: UnavailableAudit()
+    )
+    result = CliRunner().invoke(app, ["april", "audit", "verify", "--json"])
+    assert result.exit_code == 2
+    assert json.loads(result.stdout)["status"] == "unavailable"
 
 
 @pytest.mark.asyncio

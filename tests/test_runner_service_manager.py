@@ -18,6 +18,7 @@ from apps.runner.install import (
     install_wrappers,
     path_contains_dir,
     shell_config_path,
+    shell_literal,
     uninstall_wrappers,
     wrapper_content,
 )
@@ -102,10 +103,69 @@ def test_service_manager_uses_argv_arrays_and_fake_env(tmp_path: Path, monkeypat
     assert runtime_call["env"]["APRIL_HOME"] == str(tmp_path)
 
 
+def test_mixed_runner_chat_entry_reuses_fake_lifecycle_and_stop_is_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("APRIL_HOME", raising=False)
+    alive = set()
+    first_popen = FakePopen()
+
+    def pid_exists(pid: int) -> bool:
+        return pid in alive
+
+    def start_process(args, **kwargs):
+        process = first_popen(args, **kwargs)
+        alive.add(process.pid)
+        return process
+
+    def stop_process(pid: int, sig: int) -> None:
+        if sig == signal.SIGTERM:
+            alive.discard(pid)
+
+    runner = AprilServiceManager(
+        home=tmp_path,
+        python_executable="/test/python",
+        popen_factory=start_process,
+        health_getter=lambda _url, _timeout: True,
+        pid_exists=pid_exists,
+        pid_signal=stop_process,
+        sleep=lambda _seconds: None,
+    )
+    started = runner.start(fake_backend=True)
+    assert started.owner == "runner"
+    assert started.backend == "fake"
+    assert len(alive) == 2
+
+    # A fresh chat entry observes the installation lifecycle and reuses both
+    # services instead of starting an independent supervisor or children.
+    chat_entry = AprilServiceManager(
+        home=tmp_path,
+        python_executable="/test/python",
+        popen_factory=FakePopen(),
+        health_getter=lambda _url, _timeout: True,
+        pid_exists=pid_exists,
+        pid_signal=stop_process,
+        sleep=lambda _seconds: None,
+    )
+    reused = chat_entry.start(fake_backend=True)
+    assert reused.runtime.pid == started.runtime.pid
+    assert reused.api.pid == started.api.pid
+    assert reused.backend == "fake"
+    assert chat_entry.popen_factory.calls == []  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="incompatible real reuse"):
+        chat_entry.start(fake_backend=False)
+
+    stopped = chat_entry.stop()
+    assert not stopped.runtime.running
+    assert not stopped.api.running
+    assert not alive
+    assert chat_entry.status().owner == "unknown"
+
+
 def test_wrapper_content_includes_april_home(tmp_path: Path) -> None:
     content = wrapper_content(repo_root=tmp_path)
     assert APRIL_WRAPPER_MARKER in content
-    assert f'export APRIL_HOME="{tmp_path.resolve()}"' in content
+    assert f"export APRIL_HOME={shell_literal(str(tmp_path.resolve()))}" in content
     assert "APRIL_PYTHON" in content
     assert "APRIL is not importable" in content
     assert "apps.runner.main" in content
@@ -123,7 +183,7 @@ def test_installer_creates_executable_wrappers(tmp_path: Path) -> None:
         assert os.access(path, os.X_OK)
         content = path.read_text(encoding="utf-8")
         assert APRIL_WRAPPER_MARKER in content
-        assert f'export APRIL_HOME="{tmp_path.resolve()}"' in content
+        assert f"export APRIL_HOME={shell_literal(str(tmp_path.resolve()))}" in content
         assert "APRIL_PYTHON" in content
         assert "apps.runner.main" in content
     april_path = bin_dir / "april"
@@ -141,7 +201,32 @@ def test_installer_quotes_repository_paths_and_is_idempotent(tmp_path: Path) -> 
     second = install_wrappers(repo_root=repo, bin_dir=bin_dir)
     assert len(first.installed) == 3
     assert len(second.skipped) == 3
-    assert f'export APRIL_HOME="{repo.resolve()}"' in (bin_dir / "april").read_text()
+    assert (
+        f"export APRIL_HOME={shell_literal(str(repo.resolve()))}" in (bin_dir / "april").read_text()
+    )
+
+
+def test_wrapper_treats_expansion_like_path_text_as_literal(tmp_path: Path) -> None:
+    marker = tmp_path / "substitution-ran"
+    repo = tmp_path / "APRIL $HOME $(touch substitution-ran) `printf nope` 'quoted'"
+    repo.mkdir()
+    bin_dir = tmp_path / "bin"
+    install_wrappers(repo_root=repo, bin_dir=bin_dir)
+    env = dict(os.environ)
+    env["APRIL_PYTHON"] = sys.executable
+    result = subprocess.run(
+        [str(bin_dir / "run"), "--help"],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    assert f"export APRIL_HOME={shell_literal(str(repo.resolve()))}" in (bin_dir / "run").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_bare_april_wrapper_runs_outside_repository_without_activation(tmp_path: Path) -> None:
@@ -150,6 +235,9 @@ def test_bare_april_wrapper_runs_outside_repository_without_activation(tmp_path:
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env.pop("APRIL_PYTHON", None)
+    # Provision the interpreter explicitly; this test must not depend on a
+    # host python3.11 or the repository's own .venv.
+    env["APRIL_PYTHON"] = sys.executable
     result = subprocess.run(
         ["april", "--help"],
         cwd=tmp_path,

@@ -173,7 +173,10 @@ class ApprovalRecord(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     permission_level: int
     risk_level: str
-    status: Literal["pending", "approved", "denied", "expired", "consumed"]
+    # ``audit_failed`` is terminal.  It is deliberately not an authorization
+    # state: a transition whose audit publication failed must remain visible
+    # for diagnosis without being usable by any executor.
+    status: Literal["pending", "approved", "denied", "expired", "consumed", "audit_failed"]
     expires_at: str
     created_at: str
     consumed_at: str | None = None

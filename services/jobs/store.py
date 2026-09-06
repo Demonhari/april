@@ -9,6 +9,7 @@ from typing import Any
 
 import aiosqlite
 
+from april_common.audit import AuditLogger
 from april_common.time import parse_utc_iso, utc_now, utc_now_iso
 from services.jobs.registry import JobRegistry
 from services.jobs.schemas import (
@@ -58,9 +59,12 @@ class JobTransitionError(JobStoreError):
 
 
 class JobStore:
-    def __init__(self, database: Database, registry: JobRegistry) -> None:
+    def __init__(
+        self, database: Database, registry: JobRegistry, audit: AuditLogger | None = None
+    ) -> None:
         self.database = database
         self.registry = registry
+        self.audit = audit
 
     async def submit(
         self,
@@ -138,6 +142,7 @@ class JobStore:
         bounded_conversation = _optional_bounded_identifier(conversation_id)
         bounded_project = _optional_bounded_identifier(project_id)
         created = False
+        audit_error: Exception | None = None
         async with self.database.transaction() as connection:
             cursor = await connection.execute(
                 "SELECT * FROM approvals WHERE id = ?",
@@ -243,6 +248,29 @@ class JobStore:
             )
             row = await cursor.fetchone()
             assert row is not None
+            if self.audit is not None:
+                try:
+                    self.audit.write(
+                        {
+                            "actor": owner,
+                            "request_id": f"job-submit-{approval_id}",
+                            "event_type": "approval_consumed",
+                            "tool": approval_tool,
+                            "approval_id": approval_id,
+                            "outcome": "consumed",
+                            "job_id": identifier,
+                        }
+                    )
+                except Exception as exc:
+                    audit_error = exc
+                    await ApprovalStore._mark_audit_failed(
+                        connection,
+                        approval_id=approval_id,
+                        error=exc,
+                        prior_status="consumed",
+                    )
+        if audit_error is not None:
+            raise audit_error
         return _record_from_row(row), created
 
     async def _insert_job_tx(

@@ -10,7 +10,7 @@ import tempfile
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -181,6 +181,12 @@ class AuditRecoveryPlan:
     record_count: int
     quarantine_directory: str | None = None
     quarantined_log_sha256: str | None = None
+    plan_id: str | None = None
+    plan_digest: str | None = None
+    canonical_target: str | None = None
+    original_anchor_sha256: str | None = None
+    expires_at: str | None = None
+    approval_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -218,6 +224,10 @@ class AuditLogger:
         self.path = path.expanduser().resolve(strict=False)
         self.lock_path = self.path.with_name(f"{self.path.name}.lock")
         self.anchor = anchor or FileAuditAnchor(self.path.with_name(f"{self.path.name}.anchor"))
+        self.recovery_root = self.path.parent.parent / "data" / "backups" / "audit-quarantine"
+        self.recovery_journal = (
+            self.path.parent.parent / "data" / "backups" / "audit-recovery-journal.jsonl"
+        )
         with _THREAD_LOCKS_GUARD:
             self._thread_lock = _THREAD_LOCKS.setdefault(self.lock_path, threading.Lock())
 
@@ -359,12 +369,9 @@ class AuditLogger:
         reason: str,
         apply: bool = False,
         approval_id: str | None = None,
+        plan_id: str | None = None,
     ) -> AuditRecoveryPlan:
-        """Plan or perform an explicit owner-approved chain recovery.
-
-        Recovery quarantines evidence byte-for-byte and publishes a new chain
-        atomically. It never truncates or rewrites the quarantined artifact.
-        """
+        """Plan or perform an explicit owner-approved chain recovery."""
         if not reason.strip() or len(reason) > 240:
             raise AprilError(
                 "AUDIT_RECOVERY_INVALID",
@@ -377,104 +384,552 @@ class AuditLogger:
             descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
             try:
                 _flock(descriptor)
+                plan = self._load_recovery_plan(plan_id) if apply else None
+                if apply and plan_id is not None and plan is None:
+                    raise AprilError(
+                        "AUDIT_RECOVERY_PLAN_INVALID",
+                        "Recovery plan was not found.",
+                        404,
+                    )
                 verification = verify_audit_chain(self.path, anchor=self.anchor)
+                # A claimed operation may be resumed after publication. Its
+                # authorization was checked at claim time, so do not re-expire
+                # it merely because the newly published chain now verifies.
+                if apply and plan is not None:
+                    self._check_plan_snapshot_or_publication(plan)
+                    if approval_id is None:
+                        raise AprilError(
+                            "AUDIT_RECOVERY_APPROVAL_REQUIRED",
+                            "Owner consent is required for recovery.",
+                            403,
+                        )
+                    self._claim_recovery(plan, approval_id=approval_id)
+                    return self._publish_recovery(
+                        plan,
+                        approval_id=approval_id,
+                        reason=str(plan["reason"]),
+                        issue_codes=tuple(str(code) for code in plan.get("issue_codes", [])),
+                        verification=verification,
+                    )
                 issue_codes = tuple(sorted({issue.code for issue in verification.issues}))
                 if not verification.valid and not verification.corrupt:
                     return AuditRecoveryPlan("unavailable", issue_codes, verification.record_count)
                 if not verification.corrupt:
                     return AuditRecoveryPlan("not_required", issue_codes, verification.record_count)
                 if not apply:
-                    return AuditRecoveryPlan("dry_run", issue_codes, verification.record_count)
+                    return self._create_recovery_plan(
+                        reason=reason.strip(),
+                        issue_codes=issue_codes,
+                        verification=verification,
+                    )
 
-                snapshot = self.path.read_bytes() if self.path.exists() else b""
-                anchor_snapshot = self.anchor.get()
-                quarantine_root = self.path.parent.parent / "data" / "backups" / "audit-quarantine"
-                quarantine_root.mkdir(parents=True, mode=0o700, exist_ok=True)
-                quarantine = Path(tempfile.mkdtemp(prefix="recovery-", dir=quarantine_root))
-                os.chmod(quarantine, 0o700)
-                staged: Path | None = None
-                try:
-                    log_copy = quarantine / self.path.name
-                    if self.path.exists():
-                        shutil.copy2(self.path, log_copy)
-                        os.chmod(log_copy, 0o600)
-                    if isinstance(self.anchor, FileAuditAnchor) and self.anchor.path.exists():
-                        anchor_copy = quarantine / self.anchor.path.name
-                        shutil.copy2(self.anchor.path, anchor_copy)
-                        os.chmod(anchor_copy, 0o600)
-                    log_hash = (
-                        _sha256_file(log_copy)
-                        if log_copy.exists()
-                        else hashlib.sha256(b"").hexdigest()
+                plan = self._load_recovery_plan(plan_id)
+                if plan is None:
+                    raise AprilError(
+                        "AUDIT_RECOVERY_PLAN_REQUIRED",
+                        "Apply requires an immutable recovery plan.",
+                        409,
                     )
-                    manifest = {
-                        "schema_version": AUDIT_SCHEMA_VERSION,
-                        "reason": reason.strip()[:240],
-                        "issue_codes": list(issue_codes),
-                        "quarantined_log_basename": log_copy.name,
-                        "quarantined_log_sha256": log_hash,
-                        "previous_terminal_sequence": verification.terminal_sequence,
-                        "previous_terminal_hash": verification.terminal_hash,
-                        "approval_id": approval_id,
-                        "created_at": utc_now_iso(),
-                    }
-                    _write_private_json(quarantine / "manifest.json", manifest)
-
-                    staged = self.path.with_name(f".{self.path.name}.recovery-{uuid.uuid4().hex}")
-                    staged_anchor = MemoryAuditAnchor()
-                    staged_logger = AuditLogger(staged, anchor=staged_anchor)
-                    staged_logger.write(
-                        {
-                            "event_type": "audit_chain_recovery",
-                            "reason": reason.strip()[:240],
-                            "issue_codes": list(issue_codes),
-                            "quarantined_artifact_basename": log_copy.name,
-                            "quarantined_artifact_sha256": log_hash,
-                            "previous_terminal_sequence": verification.terminal_sequence,
-                            "previous_terminal_hash": verification.terminal_hash,
-                            "approval_id": approval_id,
-                        }
+                self._check_plan_snapshot(plan)
+                if approval_id is None:
+                    raise AprilError(
+                        "AUDIT_RECOVERY_APPROVAL_REQUIRED",
+                        "Owner consent is required for recovery.",
+                        403,
                     )
-                    staged_result = staged_logger.verify()
-                    if not staged_result.valid or staged_result.terminal_hash is None:
-                        raise AprilError(
-                            "AUDIT_RECOVERY_FAILED", "New audit chain did not verify.", 500
-                        )
-                    current_snapshot = self.path.read_bytes() if self.path.exists() else b""
-                    if current_snapshot != snapshot or self.anchor.get() != anchor_snapshot:
-                        raise AprilError(
-                            "AUDIT_RECOVERY_CONCURRENT_CHANGE",
-                            "Audit log or protected anchor changed after recovery planning.",
-                            409,
-                        )
-                    os.replace(staged, self.path)
-                    os.chmod(self.path, 0o600)
-                    self.anchor.set(
-                        _encode_anchor(
-                            staged_result.terminal_sequence or 1, staged_result.terminal_hash
-                        )
-                    )
-                    _fsync_directory(self.path.parent)
-                    final_result = verify_audit_chain(self.path, anchor=self.anchor)
-                    if not final_result.valid:
-                        raise AprilError(
-                            "AUDIT_RECOVERY_FAILED",
-                            "Recovered audit chain did not verify with its protected anchor.",
-                            500,
-                        )
-                    return AuditRecoveryPlan(
-                        "recovered",
-                        issue_codes,
-                        verification.record_count,
-                        quarantine.name,
-                        log_hash,
-                    )
-                finally:
-                    if staged is not None:
-                        staged.unlink(missing_ok=True)
+                self._claim_recovery(plan, approval_id=approval_id)
+                return self._publish_recovery(
+                    plan,
+                    approval_id=approval_id,
+                    reason=reason.strip(),
+                    issue_codes=issue_codes,
+                    verification=verification,
+                )
             finally:
                 _funlock(descriptor)
                 os.close(descriptor)
+
+    def plan_recovery(self, *, reason: str, expiry_seconds: int = 900) -> AuditRecoveryPlan:
+        """Create a durable immutable recovery plan without changing the chain."""
+        if not reason.strip() or len(reason) > 240:
+            raise AprilError(
+                "AUDIT_RECOVERY_INVALID", "A bounded recovery reason is required.", 422
+            )
+        if expiry_seconds <= 0 or expiry_seconds > 86_400:
+            raise AprilError("AUDIT_RECOVERY_INVALID", "Recovery expiry is out of bounds.", 422)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._thread_lock:
+            descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                _flock(descriptor)
+                verification = verify_audit_chain(self.path, anchor=self.anchor)
+                if not verification.corrupt:
+                    if not verification.valid:
+                        return AuditRecoveryPlan("unavailable", (), verification.record_count)
+                    return AuditRecoveryPlan("not_required", (), verification.record_count)
+                return self._create_recovery_plan(
+                    reason=reason.strip(),
+                    issue_codes=tuple(sorted({issue.code for issue in verification.issues})),
+                    verification=verification,
+                    expiry_seconds=expiry_seconds,
+                )
+            finally:
+                _funlock(descriptor)
+                os.close(descriptor)
+
+    def approve_recovery(self, *, plan_id: str, plan_digest: str | None = None) -> dict[str, Any]:
+        """Record local-owner consent for exactly one immutable recovery plan."""
+        with self._thread_lock:
+            descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                _flock(descriptor)
+                plan = self._load_recovery_plan(plan_id)
+                if plan is None:
+                    raise AprilError(
+                        "AUDIT_RECOVERY_PLAN_INVALID", "Recovery plan was not found.", 404
+                    )
+                if plan_digest is not None and plan_digest != plan["plan_digest"]:
+                    raise AprilError(
+                        "AUDIT_RECOVERY_PLAN_STALE", "Recovery plan digest changed.", 409
+                    )
+                self._check_plan_snapshot(plan)
+                expires_at = str(plan["expires_at"])
+                if expires_at <= utc_now_iso():
+                    raise AprilError("AUDIT_RECOVERY_EXPIRED", "Recovery plan has expired.", 409)
+                existing = self._recovery_events_for(plan_id)
+                if any(event["event_type"] == "consent" for event in existing):
+                    raise AprilError(
+                        "AUDIT_RECOVERY_REPLAY", "Recovery consent was already recorded.", 409
+                    )
+                approval_id = f"recovery:{plan_id}:{str(plan['plan_digest'])[:16]}"
+                event = self._append_recovery_event(
+                    "consent",
+                    {
+                        "plan_id": plan_id,
+                        "plan_digest": plan["plan_digest"],
+                        "approval_id": approval_id,
+                        "expires_at": expires_at,
+                        "canonical_target": plan["canonical_target"],
+                        "original_log_sha256": plan["original_log_sha256"],
+                        "original_anchor_sha256": plan["original_anchor_sha256"],
+                    },
+                )
+                return {
+                    "status": "approved",
+                    "approval_id": approval_id,
+                    "event_digest": event["record_hash"],
+                    **plan,
+                }
+            finally:
+                _funlock(descriptor)
+                os.close(descriptor)
+
+    def _create_recovery_plan(
+        self,
+        *,
+        reason: str,
+        issue_codes: tuple[str, ...],
+        verification: AuditVerification,
+        expiry_seconds: int = 900,
+    ) -> AuditRecoveryPlan:
+        snapshot = self.path.read_bytes() if self.path.exists() else b""
+        anchor_snapshot = self.anchor.get()
+        self.recovery_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        quarantine = Path(tempfile.mkdtemp(prefix="recovery-", dir=self.recovery_root))
+        os.chmod(quarantine, 0o700)
+        log_copy = quarantine / self.path.name
+        if self.path.exists():
+            shutil.copy2(self.path, log_copy)
+            os.chmod(log_copy, 0o600)
+        if isinstance(self.anchor, FileAuditAnchor) and self.anchor.path.exists():
+            anchor_copy = quarantine / self.anchor.path.name
+            shutil.copy2(self.anchor.path, anchor_copy)
+            os.chmod(anchor_copy, 0o600)
+        if (
+            self.path.read_bytes() if self.path.exists() else b""
+        ) != snapshot or self.anchor.get() != anchor_snapshot:
+            raise AprilError(
+                "AUDIT_RECOVERY_CONCURRENT_CHANGE",
+                "Audit log or protected anchor changed during recovery planning.",
+                409,
+            )
+        log_hash = hashlib.sha256(snapshot).hexdigest()
+        anchor_hash = hashlib.sha256((anchor_snapshot or "").encode("utf-8")).hexdigest()
+        expires_at = (
+            (datetime.now(UTC) + timedelta(seconds=expiry_seconds))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        fields = {
+            "schema_version": AUDIT_SCHEMA_VERSION,
+            "canonical_target": str(self.path),
+            "original_log_sha256": log_hash,
+            "original_anchor_sha256": anchor_hash,
+            "reason": reason[:240],
+            "issue_codes": list(issue_codes),
+            "quarantine_directory": quarantine.name,
+            "expires_at": expires_at,
+        }
+        plan_digest = hashlib.sha256(_canonical_json(fields).encode("utf-8")).hexdigest()
+        plan_id = plan_digest[:32]
+        manifest = {
+            **fields,
+            "plan_id": plan_id,
+            "plan_digest": plan_digest,
+            "original_anchor": anchor_snapshot,
+        }
+        _write_private_json(quarantine / "manifest.json", manifest)
+        self._append_recovery_event("plan_created", manifest)
+        return AuditRecoveryPlan(
+            "dry_run",
+            issue_codes,
+            verification.record_count,
+            quarantine.name,
+            log_hash,
+            plan_id,
+            plan_digest,
+            str(self.path),
+            anchor_hash,
+            expires_at,
+        )
+
+    def _load_recovery_plan(self, plan_id: str | None) -> dict[str, Any] | None:
+        if not plan_id or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
+            return None
+        if not self.recovery_root.exists():
+            return None
+        for directory in sorted(self.recovery_root.glob("recovery-*/manifest.json")):
+            try:
+                manifest = json.loads(directory.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                manifest = None
+            if isinstance(manifest, dict) and manifest.get("plan_id") == plan_id:
+                if manifest.get(
+                    "quarantine_directory"
+                ) != directory.parent.name or not re.fullmatch(
+                    r"recovery-[A-Za-z0-9_-]+", directory.parent.name
+                ):
+                    raise AprilError(
+                        "AUDIT_RECOVERY_PLAN_INVALID",
+                        "Recovery plan directory binding is invalid.",
+                        409,
+                    )
+                fields = {
+                    key: manifest.get(key)
+                    for key in (
+                        "schema_version",
+                        "canonical_target",
+                        "original_log_sha256",
+                        "original_anchor_sha256",
+                        "reason",
+                        "issue_codes",
+                        "quarantine_directory",
+                        "expires_at",
+                    )
+                }
+                digest = hashlib.sha256(_canonical_json(fields).encode("utf-8")).hexdigest()
+                if manifest.get("plan_digest") != digest or manifest.get("plan_id") != digest[:32]:
+                    raise AprilError(
+                        "AUDIT_RECOVERY_PLAN_INVALID", "Recovery plan digest is invalid.", 409
+                    )
+                return manifest
+        return None
+
+    def _check_plan_snapshot(self, plan: dict[str, Any]) -> None:
+        current = self.path.read_bytes() if self.path.exists() else b""
+        if (
+            plan.get("canonical_target") != str(self.path)
+            or hashlib.sha256(current).hexdigest() != plan.get("original_log_sha256")
+            or self.anchor.get() != plan.get("original_anchor")
+        ):
+            raise AprilError(
+                "AUDIT_RECOVERY_PLAN_STALE", "The planned audit log or anchor changed.", 409
+            )
+
+    def _check_plan_snapshot_or_publication(self, plan: dict[str, Any]) -> None:
+        """Accept only the original snapshot or this plan's own candidate."""
+        try:
+            self._check_plan_snapshot(plan)
+            return
+        except AprilError as exc:
+            if exc.code != "AUDIT_RECOVERY_PLAN_STALE":
+                raise
+        current = self.path.read_bytes() if self.path.exists() else b""
+        candidate = self.recovery_root / str(plan["quarantine_directory"]) / "candidate-audit.jsonl"
+        candidate_hash = plan.get("candidate_sha256")
+        if candidate.exists():
+            candidate_bytes = candidate.read_bytes()
+            if candidate_hash is None:
+                candidate_hash = hashlib.sha256(candidate_bytes).hexdigest()
+            matches_candidate = (
+                current == candidate_bytes
+                and hashlib.sha256(candidate_bytes).hexdigest() == candidate_hash
+            )
+        else:
+            matches_candidate = (
+                isinstance(candidate_hash, str)
+                and hashlib.sha256(current).hexdigest() == candidate_hash
+            )
+        if not matches_candidate:
+            raise AprilError(
+                "AUDIT_RECOVERY_CONCURRENT_CHANGE",
+                "Audit log changed during recovery publication.",
+                409,
+            )
+
+    def _recovery_events_for(self, plan_id: str) -> list[dict[str, Any]]:
+        return [
+            event
+            for event in self._read_recovery_journal()
+            if isinstance(event.get("payload"), dict) and event["payload"].get("plan_id") == plan_id
+        ]
+
+    def _read_recovery_journal(self) -> list[dict[str, Any]]:
+        if not self.recovery_journal.exists():
+            return []
+        try:
+            raw = self.recovery_journal.read_bytes()
+            if raw and not raw.endswith(b"\n"):
+                raise AprilError(
+                    "AUDIT_RECOVERY_JOURNAL_CORRUPT",
+                    "Recovery journal has an incomplete final record.",
+                    500,
+                )
+            lines = raw.decode("utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise AprilError(
+                "AUDIT_RECOVERY_JOURNAL_CORRUPT", "Recovery journal is unavailable.", 500
+            ) from exc
+        records: list[dict[str, Any]] = []
+        previous_hash = GENESIS_HASH
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise AprilError(
+                    "AUDIT_RECOVERY_JOURNAL_CORRUPT", "Recovery journal is invalid.", 500
+                ) from exc
+            if (
+                not isinstance(record, dict)
+                or record.get("schema_version") != AUDIT_SCHEMA_VERSION
+                or not isinstance(record.get("event_id"), str)
+                or not isinstance(record.get("timestamp"), str)
+                or not isinstance(record.get("event_type"), str)
+                or not isinstance(record.get("payload"), dict)
+                or record.get("previous_hash") != previous_hash
+            ):
+                raise AprilError(
+                    "AUDIT_RECOVERY_JOURNAL_CORRUPT", "Recovery journal hash chain is invalid.", 500
+                )
+            record_hash = record.get("record_hash")
+            unsigned = {key: value for key, value in record.items() if key != "record_hash"}
+            if not isinstance(record_hash, str) or _record_hash(unsigned) != record_hash:
+                raise AprilError(
+                    "AUDIT_RECOVERY_JOURNAL_CORRUPT",
+                    "Recovery journal record hash is invalid.",
+                    500,
+                )
+            records.append(record)
+            previous_hash = record_hash
+        return records
+
+    def _append_recovery_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.recovery_journal.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        os.chmod(self.recovery_journal.parent, 0o700)
+        previous = GENESIS_HASH
+        if self.recovery_journal.exists():
+            records = self._read_recovery_journal()
+            if records:
+                previous = str(records[-1]["record_hash"])
+        record: dict[str, Any] = {
+            "schema_version": AUDIT_SCHEMA_VERSION,
+            "event_id": str(uuid.uuid4()),
+            "timestamp": utc_now_iso(),
+            "event_type": event_type,
+            "payload": redact(payload),
+            "previous_hash": previous,
+        }
+        record["record_hash"] = _record_hash(record)
+        descriptor = os.open(self.recovery_journal, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            _write_all(descriptor, (_canonical_json(record) + "\n").encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_directory(self.recovery_journal.parent)
+        return record
+
+    def _claim_recovery(self, plan: dict[str, Any], *, approval_id: str) -> None:
+        plan_id = str(plan["plan_id"])
+        expected = f"recovery:{plan_id}:{str(plan['plan_digest'])[:16]}"
+        if approval_id != expected:
+            raise AprilError(
+                "AUDIT_RECOVERY_APPROVAL_INVALID",
+                "Recovery approval is not bound to this plan.",
+                403,
+            )
+        events = self._recovery_events_for(plan_id)
+        consent = next((event for event in events if event["event_type"] == "consent"), None)
+        if consent is None or consent.get("payload", {}).get("approval_id") != approval_id:
+            raise AprilError(
+                "AUDIT_RECOVERY_APPROVAL_REQUIRED", "Owner consent is required for recovery.", 403
+            )
+        if any(event["event_type"] == "completed" for event in events):
+            raise AprilError(
+                "AUDIT_RECOVERY_REPLAY", "Recovery operation was already completed.", 409
+            )
+        claimed = next((event for event in events if event["event_type"] == "claimed"), None)
+        if claimed is not None:
+            if claimed.get("payload", {}).get("approval_id") != approval_id:
+                raise AprilError(
+                    "AUDIT_RECOVERY_REPLAY", "Recovery plan is claimed by another approval.", 409
+                )
+            return
+        if claimed is None:
+            if str(consent["payload"].get("expires_at", "")) <= utc_now_iso():
+                raise AprilError(
+                    "AUDIT_RECOVERY_EXPIRED", "Recovery consent expired before claim.", 409
+                )
+            self._append_recovery_event(
+                "claimed",
+                {
+                    "plan_id": plan_id,
+                    "approval_id": approval_id,
+                    "plan_digest": plan["plan_digest"],
+                },
+            )
+
+    def _publish_recovery(
+        self,
+        plan: dict[str, Any],
+        *,
+        approval_id: str,
+        reason: str,
+        issue_codes: tuple[str, ...],
+        verification: AuditVerification,
+    ) -> AuditRecoveryPlan:
+        quarantine = self.recovery_root / str(plan["quarantine_directory"])
+        candidate = quarantine / "candidate-audit.jsonl"
+        candidate_anchor = quarantine / "candidate-anchor.json"
+        if not candidate.exists() and "candidate_sha256" not in plan:
+            staged_anchor = MemoryAuditAnchor()
+            staged_logger = AuditLogger(candidate, anchor=staged_anchor)
+            staged_logger.write(
+                {
+                    "event_type": "audit_chain_recovery",
+                    "reason": reason[:240],
+                    "issue_codes": list(issue_codes),
+                    "quarantined_artifact_basename": self.path.name,
+                    "quarantined_artifact_sha256": plan["original_log_sha256"],
+                    "previous_terminal_sequence": verification.terminal_sequence,
+                    "previous_terminal_hash": verification.terminal_hash,
+                    "approval_id": approval_id,
+                    "recovery_plan_id": plan["plan_id"],
+                    "recovery_plan_digest": plan["plan_digest"],
+                    "recovery_approval_provenance": {
+                        "journal": str(self.recovery_journal),
+                        "approval_id": approval_id,
+                    },
+                }
+            )
+            _write_private_json(candidate_anchor, {"value": staged_anchor.get()})
+            plan["candidate_sha256"] = _sha256_file(candidate)
+            plan["candidate_anchor"] = staged_anchor.get()
+            _write_private_json(quarantine / "manifest.json", plan)
+        if candidate.exists():
+            candidate_bytes = candidate.read_bytes()
+        else:
+            candidate_bytes = self.path.read_bytes() if self.path.exists() else b""
+            if hashlib.sha256(candidate_bytes).hexdigest() != plan.get("candidate_sha256"):
+                raise AprilError(
+                    "AUDIT_RECOVERY_INCOMPLETE",
+                    "The recovery candidate is missing after publication interruption.",
+                    409,
+                )
+        expected_anchor = str(plan["candidate_anchor"])
+        current = self.path.read_bytes() if self.path.exists() else b""
+        original_bytes = self._original_bytes(plan)
+        if current == original_bytes:
+            staged_path = self.path.with_name(f".{self.path.name}.recovery-{uuid.uuid4().hex}")
+            descriptor = os.open(staged_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                _write_all(descriptor, candidate_bytes)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(staged_path, self.path)
+            os.chmod(self.path, 0o600)
+            _fsync_directory(self.path.parent)
+        elif current != candidate_bytes:
+            raise AprilError(
+                "AUDIT_RECOVERY_CONCURRENT_CHANGE",
+                "Audit log changed during recovery publication.",
+                409,
+            )
+        events = self._recovery_events_for(str(plan["plan_id"]))
+        if not any(event["event_type"] == "log_published" for event in events):
+            self._append_recovery_event(
+                "log_published",
+                {
+                    "plan_id": plan["plan_id"],
+                    "approval_id": approval_id,
+                    "sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+                },
+            )
+        current_anchor = self.anchor.get()
+        if current_anchor != expected_anchor:
+            if current_anchor not in {plan.get("original_anchor"), None}:
+                raise AprilError(
+                    "AUDIT_RECOVERY_CONCURRENT_CHANGE",
+                    "Protected anchor changed during recovery publication.",
+                    409,
+                )
+            self.anchor.set(expected_anchor)
+        events = self._recovery_events_for(str(plan["plan_id"]))
+        if not any(event["event_type"] == "anchor_published" for event in events):
+            self._append_recovery_event(
+                "anchor_published",
+                {
+                    "plan_id": plan["plan_id"],
+                    "approval_id": approval_id,
+                    "anchor_sha256": hashlib.sha256(expected_anchor.encode()).hexdigest(),
+                },
+            )
+        final_result = verify_audit_chain(self.path, anchor=self.anchor)
+        if not final_result.valid:
+            raise AprilError(
+                "AUDIT_RECOVERY_FAILED",
+                "Recovered audit chain did not verify with its protected anchor.",
+                500,
+            )
+        events = self._recovery_events_for(str(plan["plan_id"]))
+        if not any(event["event_type"] == "completed" for event in events):
+            self._append_recovery_event(
+                "completed",
+                {
+                    "plan_id": plan["plan_id"],
+                    "approval_id": approval_id,
+                    "candidate_sha256": plan["candidate_sha256"],
+                },
+            )
+        return AuditRecoveryPlan(
+            "recovered",
+            issue_codes,
+            verification.record_count,
+            str(plan["quarantine_directory"]),
+            plan["original_log_sha256"],
+            plan["plan_id"],
+            plan["plan_digest"],
+            plan["canonical_target"],
+            plan["original_anchor_sha256"],
+            plan["expires_at"],
+            approval_id,
+        )
+
+    def _original_bytes(self, plan: dict[str, Any]) -> bytes:
+        original = self.recovery_root / str(plan["quarantine_directory"]) / self.path.name
+        return original.read_bytes() if original.exists() else b""
 
 
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:

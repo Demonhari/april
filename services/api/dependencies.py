@@ -221,6 +221,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
             finetune_enabled=active_settings.finetune.enabled,
             evolution_enabled=active_settings.evolution.enabled,
         ),
+        audit=audit,
     )
     tool_worker_manager: ToolWorkerProcessManager | None = None
     tool_worker_client: ToolWorkerClient | None

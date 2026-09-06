@@ -27,11 +27,13 @@ from services.permissions.engine import PermissionEngine
 from services.permissions.schemas import ApprovalRequest
 from services.permissions.tool_execution import ToolExecutionService
 from skills.registry import default_registry
-from tests.conftest import FakeRuntimeClient
+from tests.conftest import FakeRuntimeClient, InProcessToolWorker
 
 
 async def make_container(
-    settings_tmp, runtime_client: FakeRuntimeClient | None = None
+    settings_tmp,
+    runtime_client: FakeRuntimeClient | None = None,
+    tool_worker: object | None = None,
 ) -> ApiContainer:
     database = Database(settings_tmp.database_path)
     await database.connect()
@@ -44,6 +46,7 @@ async def make_container(
         memory, vector_memory, audit=AuditLogger(settings_tmp.audit_path)
     )
     runtime_client = runtime_client or FakeRuntimeClient()
+    tool_worker = tool_worker or InProcessToolWorker(settings_tmp)
     approvals = ApprovalStore(
         database,
         AuditLogger(settings_tmp.audit_path),
@@ -56,6 +59,7 @@ async def make_container(
         tool_registry=registry,
         permission_engine=permission_engine,
         approvals=approvals,
+        tool_worker=tool_worker,  # type: ignore[arg-type]
     )
     from services.brain.orchestrator import AprilOrchestrator
     from services.evolution.versions import PromptOverlayManager

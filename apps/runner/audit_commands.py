@@ -1,64 +1,11 @@
 from __future__ import annotations
 
-import anyio
 import typer
 
 from apps.cli.render import console
 from april_common.audit import audit_logger_for_settings
 from april_common.errors import AprilError, ConfigError
-from april_common.settings import AprilSettings, load_settings
-from services.memory.database import Database
-from services.permissions.approvals import ApprovalStore
-
-_RECOVERY_TOOL = "audit_recovery"
-
-
-async def _validate_recovery_approval(
-    settings: AprilSettings, approval_id: str, args: dict[str, object]
-) -> None:
-    database = Database(settings.database_path)
-    await database.connect()
-    try:
-        approvals = ApprovalStore(
-            database,
-            audit_logger_for_settings(settings),
-            expiry_seconds=settings.permissions.approval_expiry_seconds,
-        )
-        await approvals.validate_exact(
-            approval_id=approval_id,
-            tool=_RECOVERY_TOOL,
-            args=args,
-        )
-    finally:
-        await database.close()
-
-
-async def _consume_recovery_approval(
-    settings: AprilSettings,
-    approval_id: str,
-    args: dict[str, object],
-    result: dict[str, object],
-) -> None:
-    database = Database(settings.database_path)
-    await database.connect()
-    try:
-        audit = audit_logger_for_settings(settings)
-        approvals = ApprovalStore(
-            database,
-            audit,
-            expiry_seconds=settings.permissions.approval_expiry_seconds,
-        )
-        await approvals.consume_exact(
-            approval_id=approval_id,
-            tool=_RECOVERY_TOOL,
-            args=args,
-            result=result,
-            actor="local-user",
-            request_id=f"audit-recovery-{approval_id}",
-        )
-    finally:
-        await database.close()
-
+from april_common.settings import load_settings
 
 audit_app = typer.Typer(help="Verify APRIL's local hash-chained audit log.")
 
@@ -93,49 +40,55 @@ def verify_audit(json_output: bool = typer.Option(False, "--json")) -> None:
             console.print(f"  {issue.code}{location}: {issue.detail}")
     if result.corrupt:
         raise typer.Exit(1)
+    if result.status == "unavailable":
+        # Unavailable is distinct from a corrupt chain, but it is still a
+        # failed verification for shell callers and readiness gates.
+        raise typer.Exit(2)
 
 
 @audit_app.command("recover")
 def recover_audit(
     apply: bool = typer.Option(False, "--apply", help="Apply recovery after reviewing the plan."),
+    approve: bool = typer.Option(
+        False, "--approve", help="Record owner consent for a reviewed plan."
+    ),
     reason: str = typer.Option(
         "owner-approved local recovery",
         "--reason",
         help="Bounded reason recorded in the new chain.",
     ),
     approval_id: str | None = typer.Option(None, "--approval-id"),
+    plan_id: str | None = typer.Option(None, "--plan-id"),
+    plan_digest: str | None = typer.Option(None, "--plan-digest"),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Dry-run or explicitly recover a corrupt local audit chain."""
     try:
         settings = load_settings()
-        if apply and settings.environment == "production" and not approval_id:
+        if apply and approve:
+            raise RuntimeError("Use either --approve or --apply, not both.")
+        audit = audit_logger_for_settings(settings)
+        if approve:
+            if not plan_id:
+                raise RuntimeError("--approve requires --plan-id from a prior recovery plan.")
+            approval_result = audit.approve_recovery(plan_id=plan_id, plan_digest=plan_digest)
+            if json_output:
+                console.print_json(data=approval_result)
+            else:
+                console.print(f"Audit recovery consent recorded for plan {plan_id}.")
+                console.print(f"Approval ID: {approval_result['approval_id']}")
+            return
+        if apply and settings.environment == "production" and (not approval_id or not plan_id):
             raise RuntimeError(
-                "production audit recovery requires an exact approved approval ID; "
-                "this command never creates or bypasses approvals"
+                "production audit recovery requires --plan-id and an approved recovery "
+                "approval ID; this command never creates or bypasses approvals"
             )
-        recovery_args = {"apply": True, "reason": reason.strip()}
-        if apply and settings.environment == "production":
-            assert approval_id is not None
-            anyio.run(_validate_recovery_approval, settings, approval_id, recovery_args)
-        result = audit_logger_for_settings(settings).recover(
+        result = audit.recover(
             reason=reason,
             apply=apply,
             approval_id=approval_id,
+            plan_id=plan_id,
         )
-        if (
-            apply
-            and settings.environment == "production"
-            and approval_id is not None
-            and result.status == "recovered"
-        ):
-            anyio.run(
-                _consume_recovery_approval,
-                settings,
-                approval_id,
-                recovery_args,
-                {"ok": True, "status": result.status},
-            )
     except (AprilError, ConfigError, RuntimeError, ValueError) as exc:
         if json_output:
             reason_code = exc.code if isinstance(exc, AprilError) else type(exc).__name__

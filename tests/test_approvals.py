@@ -13,6 +13,14 @@ from services.permissions.approvals import ApprovalStore
 from services.permissions.schemas import ApprovalRequest
 
 
+class FailingAudit:
+    def __init__(self) -> None:
+        self.path = None
+
+    def write(self, entry: dict[str, object]) -> None:
+        raise RuntimeError("audit unavailable")
+
+
 @pytest.fixture
 async def approval_store(settings_tmp):
     database = Database(settings_tmp.database_path)
@@ -246,3 +254,97 @@ async def test_failed_denial_rolls_back_approval_and_agent_state(
     assert run["status"] == "suspended"
     audit_text = approval_store.audit.path.read_text(encoding="utf-8")
     assert json.loads(audit_text.splitlines()[-1])["event_type"] == "approval_created"
+
+
+@pytest.mark.asyncio
+async def test_failed_audit_during_create_is_terminal_and_persisted(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    store = ApprovalStore(database, FailingAudit(), expiry_seconds=60)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        await _create(store)
+
+    row = await database.fetchone(
+        "SELECT status, result_json FROM approvals ORDER BY created_at DESC LIMIT 1"
+    )
+    assert row is not None
+    assert row["status"] == "audit_failed"
+    assert json.loads(row["result_json"])["prior_status"] == "pending"
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_audit_during_approval_cannot_validate(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    audit = AuditLogger(settings_tmp.audit_path)
+    store = ApprovalStore(database, audit, expiry_seconds=60)
+    approval = await _create(store)
+    store.audit = FailingAudit()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        await store.approve_exact(
+            approval_id=approval.approval_id,
+            tool="write_file",
+            args={"path": "a.py", "content": "x"},
+            actor="test",
+            request_id="failed-approval",
+        )
+
+    row = await database.fetchone(
+        "SELECT status, result_json FROM approvals WHERE id = ?", (approval.approval_id,)
+    )
+    assert row is not None
+    assert row["status"] == "audit_failed"
+    assert json.loads(row["result_json"])["prior_status"] == "approved"
+    with pytest.raises(PermissionDeniedError):
+        await store.validate_exact(
+            approval_id=approval.approval_id,
+            tool="write_file",
+            args={"path": "a.py", "content": "x"},
+        )
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_audit_during_consumption_is_terminal_and_replay_denied(settings_tmp) -> None:
+    database = Database(settings_tmp.database_path)
+    await database.connect()
+    await run_migrations(database)
+    audit = AuditLogger(settings_tmp.audit_path)
+    store = ApprovalStore(database, audit, expiry_seconds=60)
+    approval = await _create(store)
+    await store.approve_exact(
+        approval_id=approval.approval_id,
+        tool="write_file",
+        args={"path": "a.py", "content": "x"},
+        actor="test",
+        request_id="approve",
+    )
+    store.audit = FailingAudit()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        await store.consume(
+            approval_id=approval.approval_id,
+            result={"ok": True},
+            actor="test",
+            request_id="failed-consumption",
+        )
+
+    row = await database.fetchone(
+        "SELECT status, result_json FROM approvals WHERE id = ?", (approval.approval_id,)
+    )
+    assert row is not None
+    assert row["status"] == "audit_failed"
+    assert json.loads(row["result_json"])["prior_status"] == "consumed"
+    with pytest.raises(PermissionDeniedError):
+        await store.consume(
+            approval_id=approval.approval_id,
+            result={"ok": True},
+            actor="test",
+            request_id="replay",
+        )
+    await database.close()

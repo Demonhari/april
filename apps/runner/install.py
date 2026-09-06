@@ -30,9 +30,14 @@ def cli_wrapper_content(*, repo_root: Path) -> str:
     return _wrapper_content(repo_root=repo_root, module="apps.cli.main")
 
 
+def shell_literal(value: str) -> str:
+    """Return one shell word with no expansion or command substitution."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
 def _wrapper_content(*, repo_root: Path, module: str) -> str:
     root = repo_root.expanduser().resolve()
-    escaped_root = str(root).replace("\\", "\\\\").replace('"', '\\"')
+    encoded_root = shell_literal(str(root))
     return "\n".join(
         [
             "#!/usr/bin/env bash",
@@ -43,7 +48,7 @@ def _wrapper_content(*, repo_root: Path, module: str) -> str:
                 else APRIL_CLI_COMMAND_MARKER
             ),
             "set -euo pipefail",
-            f'export APRIL_HOME="{escaped_root}"',
+            f"export APRIL_HOME={encoded_root}",
             'export PYTHONPATH="$APRIL_HOME${PYTHONPATH:+:$PYTHONPATH}"',
             'APRIL_PYTHON="${APRIL_PYTHON:-}"',
             'if [[ -z "$APRIL_PYTHON" && -x "$APRIL_HOME/.venv/bin/python" ]]; then',
@@ -101,7 +106,9 @@ def install_wrappers(*, repo_root: Path, bin_dir: Path, force: bool = False) -> 
         if target.exists() and is_april_wrapper(target) and target.read_text() == content:
             skipped.append(target)
             continue
-        target.write_text(content, encoding="utf-8")
+        temporary = target.with_name(f".{target.name}.tmp")
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(target)
         mode = target.stat().st_mode
         target.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         installed.append(target)
@@ -137,7 +144,7 @@ def verify_wrappers(*, repo_root: Path, bin_dir: Path) -> list[str]:
         content = target.read_text(encoding="utf-8", errors="replace")
         required = [
             APRIL_WRAPPER_MARKER,
-            str(root),
+            f"export APRIL_HOME={shell_literal(str(root))}",
             "APRIL_PYTHON",
             f"-m {expected_modules[name]}",
         ]

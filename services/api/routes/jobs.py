@@ -146,7 +146,7 @@ def register_job_routes(
                 )
             except (TypeError, ValueError, JobTransitionError) as exc:
                 raise _approval_conflict(exc) from exc
-            if created:
+            if created and active.job_store.audit is None:
                 active.approvals.audit.write(
                     {
                         "actor": "local-user",

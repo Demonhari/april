@@ -1628,7 +1628,7 @@ def test_model_profile_list_and_apply(tmp_path: Path, monkeypatch) -> None:
     assert applied.exit_code == 0
     text = (tmp_path / "configs" / "models.yaml").read_text(encoding="utf-8")
     assert "context_size: 4096" in text
-    assert list((tmp_path / "configs").glob("models.yaml.bak-*"))
+    assert list((tmp_path / "data" / "backups" / "config").glob("models.yaml.bak-*"))
 
 
 def test_model_doctor_json(tmp_path: Path, monkeypatch) -> None:

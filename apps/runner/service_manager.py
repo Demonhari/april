@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import socket
@@ -47,12 +48,15 @@ class ServiceInfo:
     running: bool
     healthy: bool
     log_path: Path
+    backend: str | None = None
 
 
 @dataclass(frozen=True)
 class ServiceStatus:
     runtime: ServiceInfo
     api: ServiceInfo
+    owner: str = "unknown"
+    backend: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -90,9 +94,13 @@ class AprilServiceManager:
         self.api_pid_path = self.run_dir / "api.pid"
         self.runtime_log_path = self.log_dir / "runtime.log"
         self.api_log_path = self.log_dir / "api.log"
+        self.lifecycle_path = self.run_dir / "lifecycle.json"
 
     def status(self) -> ServiceStatus:
-        return ServiceStatus(
+        lifecycle = self._read_lifecycle()
+        owner = str(lifecycle.get("owner", "unknown")) if lifecycle else "unknown"
+        backend = str(lifecycle.get("backend")) if lifecycle and lifecycle.get("backend") else None
+        status = ServiceStatus(
             runtime=self._service_info(
                 name="runtime",
                 pid_path=self.runtime_pid_path,
@@ -105,11 +113,42 @@ class AprilServiceManager:
                 log_path=self.api_log_path,
                 health_url=f"http://{self.settings.api.host}:{self.settings.api.port}/health",
             ),
+            owner=owner,
+            backend=backend,
         )
+        if not status.runtime.running and not status.api.running and owner == "runner":
+            self.lifecycle_path.unlink(missing_ok=True)
+            status = ServiceStatus(status.runtime, status.api, "unknown", None)
+        if status.owner == "unknown":
+            daemon = self._daemon_children()
+            if daemon is not None:
+                backend, pids = daemon
+                runtime = self._service_info_for_pid(
+                    "runtime",
+                    pids.get("runtime"),
+                    self.runtime_log_path,
+                    f"{self.settings.runtime.url}/runtime/health",
+                )
+                api = self._service_info_for_pid(
+                    "api",
+                    pids.get("api"),
+                    self.api_log_path,
+                    f"http://{self.settings.api.host}:{self.settings.api.port}/health",
+                )
+                return ServiceStatus(runtime, api, "daemon", backend)
+        return status
 
     def start(self, *, fake_backend: bool = False) -> ServiceStatus:
         self._ensure_dirs()
         current = self.status()
+        requested_backend = "fake" if fake_backend else "real"
+        if current.backend is not None and current.backend != requested_backend:
+            raise RuntimeError(
+                f"APRIL services are already owned by {current.owner} in {current.backend} mode; "
+                f"refusing incompatible {requested_backend} reuse."
+            )
+        if current.owner == "daemon" and current.ok:
+            return current
         if not current.runtime.running:
             self._start_service(
                 pid_path=self.runtime_pid_path,
@@ -128,11 +167,21 @@ class AprilServiceManager:
                 fake_backend=fake_backend,
             )
         self._wait_for_health(f"http://{self.settings.api.host}:{self.settings.api.port}/health")
+        result = self.status()
+        self._write_lifecycle(owner="runner", backend=requested_backend, status=result)
         return self.status()
 
     def stop(self) -> ServiceStatus:
+        current = self.status()
+        if current.owner == "daemon":
+            from apps.daemon.apriald import stop_daemon
+
+            stop_daemon(self.settings)
+            self.lifecycle_path.unlink(missing_ok=True)
+            return self.status()
         self._stop_service(self.api_pid_path)
         self._stop_service(self.runtime_pid_path)
+        self.lifecycle_path.unlink(missing_ok=True)
         return self.status()
 
     def stop_started_services(self, before: ServiceStatus) -> ServiceStatus:
@@ -141,11 +190,66 @@ class AprilServiceManager:
             self._stop_service(self.api_pid_path)
         if not before.runtime.running:
             self._stop_service(self.runtime_pid_path)
+        if not self.status().runtime.running and not self.status().api.running:
+            self.lifecycle_path.unlink(missing_ok=True)
         return self.status()
 
     def restart(self, *, fake_backend: bool = False) -> ServiceStatus:
         self.stop()
         return self.start(fake_backend=fake_backend)
+
+    def _read_lifecycle(self) -> dict[str, object] | None:
+        try:
+            payload = json.loads(self.lifecycle_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _daemon_children(self) -> tuple[str, dict[str, int]] | None:
+        try:
+            from apps.daemon.apriald import daemon_pid_path, daemon_status_path
+
+            daemon_pid = int(daemon_pid_path(self.settings).read_text(encoding="utf-8"))
+            if not self.pid_exists(daemon_pid):
+                return None
+            payload = json.loads(daemon_status_path(self.settings).read_text(encoding="utf-8"))
+            children = payload.get("children", [])
+            pids = {
+                str(child["name"]): int(child["pid"])
+                for child in children
+                if isinstance(child, dict) and child.get("pid") is not None
+            }
+            return (str(payload.get("runtime_backend", self.settings.runtime.backend)), pids)
+        except (
+            ImportError,
+            FileNotFoundError,
+            OSError,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+        ):
+            return None
+
+    def _write_lifecycle(self, *, owner: str, backend: str, status: ServiceStatus) -> None:
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        temporary = self.lifecycle_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "owner": owner,
+                    "backend": backend,
+                    "runtime_pid": status.runtime.pid,
+                    "api_pid": status.api.pid,
+                    "updated_at": time.time(),
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(temporary, 0o600)
+        temporary.replace(self.lifecycle_path)
 
     def logs(self, *, lines: int = 80) -> str:
         capped_lines = max(1, min(lines, 1000))
@@ -236,6 +340,13 @@ class AprilServiceManager:
             return ServiceInfo(name=name, pid=None, running=False, healthy=False, log_path=log_path)
         healthy = self.health_getter(health_url, 1.0)
         return ServiceInfo(name=name, pid=pid, running=True, healthy=healthy, log_path=log_path)
+
+    def _service_info_for_pid(
+        self, name: str, pid: int | None, log_path: Path, health_url: str
+    ) -> ServiceInfo:
+        if pid is None or not self.pid_exists(pid):
+            return ServiceInfo(name, None, False, False, log_path)
+        return ServiceInfo(name, pid, True, self.health_getter(health_url, 1.0), log_path)
 
     def _read_pid(self, pid_path: Path) -> int | None:
         try:

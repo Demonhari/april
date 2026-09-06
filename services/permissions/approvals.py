@@ -51,6 +51,7 @@ class ApprovalStore:
             metadata["approval_id"] = approval_id
             metadata["approval_expires_at"] = expires_at
         digest = canonical_hash(request.tool, request.args, metadata)
+        audit_error: Exception | None = None
         async with self.database.transaction() as conn:
             await conn.execute(
                 """
@@ -73,21 +74,29 @@ class ApprovalStore:
                     utc_now_iso(),
                 ),
             )
-        self.audit.write(
-            {
-                "actor": actor,
-                "request_id": request_id,
-                "event_type": "approval_created",
-                "tool": request.tool,
-                "arguments": request.args,
-                "agent": request.agent,
-                "permission_level": request.permission_level,
-                "risk": request.risk_level,
-                "metadata": metadata,
-                "approval_id": approval_id,
-                "outcome": "pending",
-            }
-        )
+            try:
+                self.audit.write(
+                    {
+                        "actor": actor,
+                        "request_id": request_id,
+                        "event_type": "approval_created",
+                        "tool": request.tool,
+                        "arguments": request.args,
+                        "agent": request.agent,
+                        "permission_level": request.permission_level,
+                        "risk": request.risk_level,
+                        "metadata": metadata,
+                        "approval_id": approval_id,
+                        "outcome": "pending",
+                    }
+                )
+            except Exception as exc:
+                audit_error = exc
+                await self._mark_audit_failed(
+                    conn, approval_id=approval_id, error=exc, prior_status="pending"
+                )
+        if audit_error is not None:
+            raise audit_error
         return ApprovalResponse(
             approval_id=approval_id,
             tool=request.tool,
@@ -149,6 +158,7 @@ class ApprovalStore:
         request_id: str,
     ) -> ApprovalRecord:
         expired = False
+        audit_error: Exception | None = None
         async with self.database.transaction() as conn:
             cursor = await conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
             row = await cursor.fetchone()
@@ -194,6 +204,29 @@ class ApprovalStore:
                 )
                 if cursor.rowcount != 1:
                     raise PermissionDeniedError("Approval is not pending.")
+                try:
+                    self.audit.write(
+                        {
+                            "actor": actor,
+                            "request_id": request_id,
+                            "event_type": "approval_approved",
+                            "tool": tool,
+                            "arguments": args,
+                            "agent": record.agent,
+                            "permission_level": record.permission_level,
+                            "risk": record.risk_level,
+                            "metadata": record.metadata,
+                            "approval_id": approval_id,
+                            "outcome": "approved",
+                        }
+                    )
+                except Exception as exc:
+                    audit_error = exc
+                    await self._mark_audit_failed(
+                        conn, approval_id=approval_id, error=exc, prior_status="approved"
+                    )
+        if audit_error is not None:
+            raise audit_error
         if expired:
             self._write_audit_event(
                 record=record,
@@ -203,21 +236,6 @@ class ApprovalStore:
                 outcome="expired",
             )
             raise PermissionDeniedError("Approval has expired.")
-        self.audit.write(
-            {
-                "actor": actor,
-                "request_id": request_id,
-                "event_type": "approval_approved",
-                "tool": tool,
-                "arguments": args,
-                "agent": record.agent,
-                "permission_level": record.permission_level,
-                "risk": record.risk_level,
-                "metadata": record.metadata,
-                "approval_id": approval_id,
-                "outcome": "approved",
-            }
-        )
         return record.model_copy(update={"status": "approved"})
 
     async def consume(
@@ -228,6 +246,7 @@ class ApprovalStore:
         actor: str,
         request_id: str,
     ) -> None:
+        audit_error: Exception | None = None
         async with self.database.transaction() as conn:
             cursor = await conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
             row = await cursor.fetchone()
@@ -245,21 +264,17 @@ class ApprovalStore:
             )
             if not consumed:
                 raise PermissionDeniedError("Approval has not been approved.")
-        self.audit.write(
-            {
-                "actor": actor,
-                "request_id": request_id,
-                "event_type": "approval_consumed",
-                "tool": record.tool,
-                "arguments": record.args,
-                "agent": record.agent,
-                "permission_level": record.permission_level,
-                "risk": record.risk_level,
-                "metadata": record.metadata,
-                "approval_id": approval_id,
-                "outcome": "consumed",
-            }
-        )
+            try:
+                self.audit.write(
+                    self._approval_event(record, actor, request_id, "approval_consumed", "consumed")
+                )
+            except Exception as exc:
+                audit_error = exc
+                await self._mark_audit_failed(
+                    conn, approval_id=approval_id, error=exc, prior_status="consumed"
+                )
+        if audit_error is not None:
+            raise audit_error
 
     async def consume_exact(
         self,
@@ -278,6 +293,7 @@ class ApprovalStore:
         guarantees. The operation binding is checked inside the transaction so
         a caller cannot validate one action and consume another.
         """
+        audit_error: Exception | None = None
         async with self.database.transaction() as conn:
             cursor = await conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
             row = await cursor.fetchone()
@@ -307,21 +323,17 @@ class ApprovalStore:
                 consumed_at=consumed_at,
             ):
                 raise PermissionDeniedError("Approval is no longer approved.")
-        self.audit.write(
-            {
-                "actor": actor,
-                "request_id": request_id,
-                "event_type": "approval_consumed",
-                "tool": record.tool,
-                "arguments": record.args,
-                "agent": record.agent,
-                "permission_level": record.permission_level,
-                "risk": record.risk_level,
-                "metadata": record.metadata,
-                "approval_id": approval_id,
-                "outcome": "consumed",
-            }
-        )
+            try:
+                self.audit.write(
+                    self._approval_event(record, actor, request_id, "approval_consumed", "consumed")
+                )
+            except Exception as exc:
+                audit_error = exc
+                await self._mark_audit_failed(
+                    conn, approval_id=approval_id, error=exc, prior_status="consumed"
+                )
+        if audit_error is not None:
+            raise audit_error
         return record.model_copy(update={"status": "consumed"})
 
     @classmethod
@@ -464,6 +476,78 @@ class ApprovalStore:
                 "outcome": outcome,
             }
         )
+
+    @staticmethod
+    def _audit_failure(error: Exception) -> dict[str, str]:
+        code = getattr(error, "code", None)
+        return {
+            "type": type(error).__name__,
+            "code": str(code) if isinstance(code, str) else "audit_write_failed",
+        }
+
+    @classmethod
+    async def _mark_audit_failed(
+        cls,
+        conn: Any,
+        *,
+        approval_id: str,
+        error: Exception,
+        prior_status: str,
+    ) -> None:
+        """Leave durable, non-authorizing evidence after an audit failure.
+
+        This runs before the surrounding transaction commits.  The row is
+        intentionally terminal, so a failed append can never be mistaken for
+        a pending or approved transition by a later process.
+        """
+        evidence = json.dumps(
+            {"audit_failure": cls._audit_failure(error), "prior_status": prior_status},
+            sort_keys=True,
+        )
+        await conn.execute(
+            "UPDATE approvals SET status = 'audit_failed', result_json = ? WHERE id = ?",
+            (evidence, approval_id),
+        )
+        suspended = await conn.execute(
+            "SELECT agent_run_id, status FROM suspended_agent_runs WHERE approval_id = ?",
+            (approval_id,),
+        )
+        row = await suspended.fetchone()
+        if row is not None and row["status"] in {"suspended", "resumed"}:
+            await conn.execute(
+                """
+                UPDATE suspended_agent_runs
+                SET status = 'failed', completed_at = ?
+                WHERE approval_id = ?
+                """,
+                (utc_now_iso(), approval_id),
+            )
+            await conn.execute(
+                "UPDATE agent_runs SET status = 'failed', completed_at = ? WHERE id = ?",
+                (utc_now_iso(), row["agent_run_id"]),
+            )
+
+    @staticmethod
+    def _approval_event(
+        record: ApprovalRecord,
+        actor: str,
+        request_id: str,
+        event_type: str,
+        outcome: str,
+    ) -> dict[str, Any]:
+        return {
+            "actor": actor,
+            "request_id": request_id,
+            "event_type": event_type,
+            "tool": record.tool,
+            "arguments": record.args,
+            "agent": record.agent,
+            "permission_level": record.permission_level,
+            "risk": record.risk_level,
+            "metadata": record.metadata,
+            "approval_id": record.id,
+            "outcome": outcome,
+        }
 
     @staticmethod
     async def _mark_suspended_terminal(
