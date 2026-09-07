@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,7 +12,11 @@ from services.april_runtime.client import RuntimeClient
 from services.memory.database import Database
 from services.memory.embeddings import embedding_provider_from_config
 from services.memory.migrations import run_migrations
-from services.memory.repository import MemoryRepository
+from services.memory.repository import (
+    MemoryPostCommitError,
+    MemoryRepository,
+    MemoryWriteEvidence,
+)
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
 from services.memory.writer import MemoryWriter
@@ -91,35 +96,99 @@ async def remember_memory(args: dict[str, Any]) -> ToolResult:
                 audit=audit,
             )
             writer = MemoryWriter(repository)
-            record = await writer.write(
-                request.content,
-                reason=request.reason,
-                memory_type=request.memory_type,
-                requested_by_user=True,
-                project_id=request.project_id,
-            )
-            await repository.set_provenance(
-                record.id,
-                source_conversation_id=request.source_conversation_id,
-            )
-            index_health = await repository.health()
-            return ToolResult(
-                ok=True,
-                stdout=f"Stored {record.kind} memory.",
-                data={
-                    "memory_id": record.id,
-                    "memory_type": record.kind,
-                    "project_id": record.project_id,
-                    "content_length": len(record.content),
-                    "index_repair_required": index_health.repair_required,
-                },
-                risk_level="safe_write",
-                permission_level=2,
-            )
+            try:
+                record = await writer.write(
+                    request.content,
+                    reason=request.reason,
+                    memory_type=request.memory_type,
+                    requested_by_user=True,
+                    project_id=request.project_id,
+                    source_conversation_id=request.source_conversation_id,
+                )
+                index_health = await repository.health(memory_id=record.id)
+                provenance_complete = request.source_conversation_id is None or (
+                    await _provenance_exists(memory, record.id)
+                )
+                if not provenance_complete:
+                    evidence = MemoryWriteEvidence(
+                        status="unknown",
+                        durable_commit=None,
+                        provenance_complete=False,
+                        index_state=(
+                            "repair_required" if index_health.repair_required else "unknown"
+                        ),
+                        audit_complete=None,
+                        completion_state="unknown",
+                        user_facing_outcome="unknown",
+                        memory_id=record.id,
+                        content_length=len(record.content),
+                    )
+                    return ToolResult(
+                        ok=False,
+                        stderr="memory_write_completion_unconfirmed",
+                        data=asdict(evidence),
+                        risk_level="safe_write",
+                        permission_level=2,
+                    )
+                evidence = MemoryWriteEvidence(
+                    status="complete",
+                    durable_commit=True,
+                    provenance_complete=True,
+                    index_state=("repair_required" if index_health.repair_required else "indexed"),
+                    audit_complete=True,
+                    completion_state="complete",
+                    user_facing_outcome="success",
+                    memory_id=record.id,
+                    content_length=len(record.content),
+                )
+                return ToolResult(
+                    ok=True,
+                    stdout=f"Stored {record.kind} memory.",
+                    data={
+                        **asdict(evidence),
+                        "memory_type": record.kind,
+                        "project_id": record.project_id,
+                        "index_repair_required": index_health.repair_required,
+                    },
+                    risk_level="safe_write",
+                    permission_level=2,
+                )
+            except MemoryPostCommitError as exc:
+                evidence = MemoryWriteEvidence(
+                    status="committed_incomplete",
+                    durable_commit=True,
+                    provenance_complete=exc.provenance_complete,
+                    index_state=exc.index_state,
+                    audit_complete=False,
+                    completion_state="incomplete",
+                    user_facing_outcome="partial",
+                    memory_id=exc.record.id,
+                    content_length=len(exc.record.content),
+                )
+                return ToolResult(
+                    ok=False,
+                    stderr="memory_write_committed_incomplete",
+                    data=asdict(evidence),
+                    risk_level="safe_write",
+                    permission_level=2,
+                )
+            except Exception:
+                # An exception after ``writer.write`` has a local record only in
+                # the branch above. Pre-commit failures remain fail-closed and
+                # are handled by ToolExecutionService without a success claim.
+                raise
         finally:
             await database.close()
 
     return await timed_tool(run, risk_level="safe_write", permission_level=2)
+
+
+async def _provenance_exists(memory: SqliteMemory, memory_id: str) -> bool:
+    row = await memory.database.fetchone(
+        "SELECT 1 FROM memory_provenance WHERE memory_id = ? LIMIT 1",
+        (memory_id,),
+    )
+    return row is not None
 
 
 def remember_memory_definition() -> ToolDefinition:

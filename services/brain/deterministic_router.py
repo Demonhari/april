@@ -238,7 +238,7 @@ class DeterministicRouter:
                 "read_only",
                 False,
                 "Prepare a read-only patch proposal without applying it.",
-                tools=["git_status"],
+                tools=["git_status", "search_files"],
                 rule="patch.propose",
             )
         return None
@@ -246,12 +246,22 @@ class DeterministicRouter:
     def _explicit_memory_write(self, message: str) -> tuple[str, str] | None:
         """Recognize only an anchored, affirmative durable-memory command."""
         normalized = " ".join(message.strip().split())
-        if not normalized or normalized[0] in {'"', "'", "`"}:
+        if (
+            not normalized
+            or normalized[0] in {'"', "'", "`"}
+            or ord(normalized[0])
+            in {
+                0x2018,
+                0x201C,
+            }
+        ):
             return None
         if re.match(r"^(?:for example|e\.g\.?|example:)\b", normalized, re.I):
             return None
         match = re.match(
-            r"^(?:april[, :]*)?(?:remember|save|store|keep|note)"
+            r"^(?:(?:please|could you|would you|can you)\s+|"
+            r"i(?:'d| would) like you to\s+)?(?:april[, :]*)?"
+            r"(?:remember|save|store|keep|note|make\s+a\s+note)"
             r"(?:\s+(?:that|this|as a memory))?\s+(.+)$",
             normalized,
             re.IGNORECASE,

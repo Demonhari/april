@@ -193,6 +193,56 @@ async def test_hybrid_fusion_project_global_and_tamil(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_projectless_memory_retrieval_is_global_only(tmp_path: Path) -> None:
+    database, memory = await _memory(tmp_path / "scope.db")
+    try:
+        project_a = await memory.add_project("/project-a")
+        project_b = await memory.add_project("/project-b")
+        global_memory = await memory.create_memory(
+            "my test project is Project Bluebird",
+            reason="explicit",
+        )
+        project_a_memory = await memory.create_memory(
+            "my test project is Project Amber",
+            reason="explicit",
+            project_id=project_a.id,
+        )
+        project_b_memory = await memory.create_memory(
+            "my test project is Project Copper",
+            reason="explicit",
+            project_id=project_b.id,
+        )
+        expired = await memory.create_memory(
+            "my test project is Project Expired",
+            reason="expired",
+            expires_at="2000-01-01T00:00:00Z",
+        )
+        vector = VectorMemory(tmp_path / "scope-vectors", embedding=HashedTokenEmbedding(64))
+        retriever = MemoryRetriever(memory, vector)
+
+        global_results = await retriever.hybrid_search(
+            "test project", project_id=None, global_only=True
+        )
+        assert [item.id for item in global_results] == [global_memory.id]
+        assert expired.id not in {item.id for item in global_results}
+        assert [
+            item.id for item in await memory.search_memories("", project_id=None, global_only=True)
+        ] == [global_memory.id]
+
+        project_results = await retriever.hybrid_search(
+            "test project", project_id=project_a.id, global_only=False
+        )
+        project_ids = {item.id for item in project_results}
+        assert {global_memory.id, project_a_memory.id} <= project_ids
+        assert project_b_memory.id not in project_ids
+
+        recent_global = await retriever.recent_memories(global_only=True, limit=10)
+        assert {item.id for item in recent_global} == {global_memory.id}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_lexical_only_vector_only_and_partial_rerank_fill(tmp_path: Path) -> None:
     database, memory = await _memory(tmp_path / "evidence.db")
     try:

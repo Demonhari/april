@@ -17,6 +17,7 @@ CanonicalIntent = Literal[
     "normal_conversation",
     "planning",
     "coding_repo_analysis",
+    "coding_assistance",
     "document_reading",
     "creative_writing",
     "deep_reasoning",
@@ -140,6 +141,11 @@ class BrainDecision(BaseModel):
             raise ValueError("remember_memory is only valid for memory_write")
         if self.intent == "memory_write" and self.agent != "general_agent":
             raise ValueError("interactive memory writes must use general_agent")
+        if self.intent == "coding_assistance":
+            if self.agent != "coding_agent" or tools:
+                raise ValueError("tool-free coding assistance must use coding_agent without tools")
+            if self.permission_level != 0 or self.risk_level != "none":
+                raise ValueError("tool-free coding assistance must be level 0")
         return self
 
 

@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from agents.schemas import LocalCitation
 from april_common.errors import PermissionDeniedError
+from services.brain.capabilities import trusted_capability_summary
 from services.brain.execution import PreparedTurn
 from services.brain.memory_policy import build_agent_memory_context
 from services.brain.planner import task_plan_from_decision
@@ -252,6 +253,12 @@ class ContextFlow:
         )
         run_metadata["context_category_truncated"] = dict(memory_context.category_truncated)
         context_sections, _context_citations = self._memory_context_sections(memory_context)
+        capability_summary = trusted_capability_summary(
+            settings=self.settings,
+            agent_registry=self.agent_registry,
+            tool_registry=self.tool_registry,
+        )
+        context_sections.insert(0, capability_summary)
         if memory_context.conversation_summary:
             context_sections.insert(0, memory_context.conversation_summary)
 
@@ -367,6 +374,7 @@ class ContextFlow:
         memory_write_message: str | None = None
         memory_write_succeeded = False
         memory_write_attempted = False
+        memory_write_partial = False
         for planned in planned_calls[: self.settings.permissions.maximum_agent_tool_iterations]:
             missing = self._missing_required_args(planned)
             if missing:
@@ -420,6 +428,11 @@ class ContextFlow:
                 tool_failures.append(
                     f"{planned.tool}: {tool_result.stderr or 'tool execution failed'}"
                 )
+                if (
+                    planned.tool == "remember_memory"
+                    and tool_result.data.get("status") == "committed_incomplete"
+                ):
+                    memory_write_partial = True
             if tool_result.stdout:
                 tool_outputs.append(f"{planned.tool}:\n{tool_result.stdout}")
             if planned.tool == "remember_memory" and tool_result.ok:
@@ -453,7 +466,12 @@ class ContextFlow:
             else:
                 memory_status = "error"
                 if memory_write_attempted and tool_failures:
-                    final_message = "APRIL could not durably store that memory."
+                    final_message = (
+                        "APRIL durably committed that memory, but completion failed; "
+                        "its provenance or local index may need repair."
+                        if memory_write_partial
+                        else "APRIL could not durably store that memory."
+                    )
                 elif memory_write_attempted:
                     final_message = "APRIL could not confirm a durable memory write."
                 else:
@@ -556,6 +574,7 @@ class ContextFlow:
             tool_outputs=tool_outputs,
             memory_context=memory_context,
         )
+        prompt_parts.insert(0, capability_summary)
         citations.extend(prompt_citations)
         return PreparedTurn(
             request_id=active_request_id,

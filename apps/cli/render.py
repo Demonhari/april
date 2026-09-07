@@ -4,12 +4,19 @@ from typing import Any
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 console = Console()
 
 
 def print_jsonish(data: Any) -> None:
     console.print(data)
+
+
+def print_untrusted_text(value: object) -> None:
+    """Render assistant/API text literally, without Rich markup interpretation."""
+
+    console.print(Text(str(value)), markup=False, emoji=False, soft_wrap=False)
 
 
 def print_models(data: dict[str, Any]) -> None:
@@ -30,7 +37,7 @@ def print_models(data: dict[str, Any]) -> None:
 def print_briefing(data: dict[str, Any]) -> None:
     title = str(data.get("title", "APRIL Daily Briefing"))
     console.print(f"[bold]{title}[/bold]")
-    console.print(str(data.get("body", "")))
+    print_untrusted_text(data.get("body", ""))
 
 
 def print_approvals(data: dict[str, Any]) -> None:

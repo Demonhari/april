@@ -10,13 +10,26 @@ from services.memory.schemas import Message, Project, SearchResult
 
 
 class BudgetRetriever:
-    async def hybrid_search(self, query: str, *, limit: int) -> list[SearchResult]:
+    async def hybrid_search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        project_id: str | None = None,
+        global_only: bool = False,
+    ) -> list[SearchResult]:
         return [
             SearchResult(id="memory-1", score=1.0, content="m" * 30),
             SearchResult(id="memory-2", score=0.9, content="n" * 30),
         ][:limit]
 
-    async def recent_memories(self, *, limit: int) -> list[SearchResult]:
+    async def recent_memories(
+        self,
+        *,
+        limit: int,
+        project_id: str | None = None,
+        global_only: bool = False,
+    ) -> list[SearchResult]:
         return []
 
     def repo_chunks(

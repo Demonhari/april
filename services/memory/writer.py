@@ -38,6 +38,9 @@ class MemoryWriter:
         confidence: float = 0.7,
         source: str = "user",
         sensitive: bool = False,
+        source_session_id: str | None = None,
+        source_conversation_id: str | None = None,
+        source_message_ids: list[str] | None = None,
     ) -> MemoryRecord:
         decision = self.policy.evaluate(
             content,
@@ -54,6 +57,20 @@ class MemoryWriter:
         )
         if duplicate is not None:
             return duplicate
+        if (
+            source_session_id is None
+            and source_conversation_id is None
+            and source_message_ids is None
+        ):
+            return await self.persistence.create_memory(
+                content,
+                kind=memory_type,
+                reason=reason or decision.reason,
+                project_id=project_id,
+                confidence=confidence,
+                source=source,
+                sensitive=sensitive,
+            )
         return await self.persistence.create_memory(
             content,
             kind=memory_type,
@@ -62,4 +79,7 @@ class MemoryWriter:
             confidence=confidence,
             source=source,
             sensitive=sensitive,
+            source_session_id=source_session_id,
+            source_conversation_id=source_conversation_id,
+            source_message_ids=source_message_ids,
         )

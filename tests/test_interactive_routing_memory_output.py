@@ -11,37 +11,43 @@ from services.brain.response_handling import ReasoningStreamFilter, sanitize_mod
 
 
 @pytest.mark.parametrize(
-    "message",
+    ("message", "agent"),
     [
-        "Hello April. Introduce yourself briefly.",
+        ("Hello April. Introduce yourself briefly.", "general_agent"),
         (
             "Write a small Python function that takes a list of numbers and returns only "
-            "the even numbers."
+            "the even numbers.",
+            "coding_agent",
         ),
-        "Explain in simple terms how APRIL's local model architecture works.",
-        "Why is the sky blue?",
+        ("Explain in simple terms how APRIL's local model architecture works.", "general_agent"),
+        ("Why is the sky blue?", "general_agent"),
+        ("Explain this pasted code: return [n for n in numbers if n % 2 == 0]", "coding_agent"),
     ],
 )
-def test_tool_free_interactive_requests_do_not_need_repository(message: str) -> None:
+def test_tool_free_interactive_requests_do_not_need_repository(message: str, agent: str) -> None:
     decision = FallbackRouter().route(message)
-    assert decision.agent == "general_agent"
+    assert decision.agent == agent
     assert decision.tools_needed == []
     assert decision.permission_level == 0
 
 
 def test_explicit_memory_is_anchored_and_keeps_relationship() -> None:
-    route = DeterministicRouter().route("Remember that my test project is called Project Bluebird.")
-    assert route is not None
-    assert route.decision.intent == "memory_write"
-    assert route.decision.agent == "general_agent"
-    assert route.decision.planned_tool_calls[0].args == {
-        "content": "my test project is called Project Bluebird.",
-        "memory_type": "relationship",
-        "reason": "Explicit user-requested durable local memory.",
-    }
+    for message in (
+        "Remember that my test project is called Project Bluebird.",
+        "Please save that my test project is named Project Amber.",
+        "Could you make a note that my test project is known as Project Copper?",
+        "I'd like you to remember that my test project is called Project Jade.",
+    ):
+        route = DeterministicRouter().route(message)
+        assert route is not None
+        assert route.decision.intent == "memory_write"
+        assert route.decision.agent == "general_agent"
+        assert route.decision.planned_tool_calls[0].args["memory_type"] == "relationship"
+        assert "test project" in route.decision.planned_tool_calls[0].args["content"]
     assert DeterministicRouter().route("I remember that VS Code is installed.") is None
     assert DeterministicRouter().route("For example: remember that my editor is vim") is None
     assert DeterministicRouter().route("Do not remember that my password is abc") is None
+    assert DeterministicRouter().route('"Remember that my editor is vim."') is None
 
 
 def test_recall_name_is_a_scoped_memory_lookup() -> None:
@@ -89,6 +95,39 @@ def test_stream_filter_handles_split_and_unclosed_reasoning_tags() -> None:
         "".join(interrupted.feed(chunk) for chunk in ["<think>", "hidden"]) + interrupted.finish()
         == ""
     )
+
+
+def test_stream_filter_keeps_whitespace_and_consecutive_reasoning_hidden() -> None:
+    stream = ReasoningStreamFilter()
+    output = "".join(
+        stream.feed(chunk)
+        for chunk in [
+            " ",
+            "<think>",
+            "hidden",
+            "</think>",
+            "\n",
+            "<think>",
+            "more",
+            "</think>",
+            "Answer",
+        ]
+    )
+    assert output + stream.finish() == "Answer"
+
+
+def test_stream_filter_discards_oversized_and_cancelled_reasoning() -> None:
+    stream = ReasoningStreamFilter()
+    assert stream.feed("<think>") == ""
+    assert stream.feed("x" * 32_769) == ""
+    assert stream.feed("</think>visible") == ""
+    assert stream.finish() == ""
+
+
+def test_non_streaming_reasoning_blocks_are_bounded_and_consecutive() -> None:
+    assert sanitize_model_output(" \ufeff<think>x</think><analysis>y</analysis>Answer") == "Answer"
+    assert sanitize_model_output("<think>" + "x" * 32_769) == ""
+    assert sanitize_model_output("<think>x</think><think>") == ""
 
 
 def test_routing_report_separates_deterministic_from_model_and_true_fallback() -> None:

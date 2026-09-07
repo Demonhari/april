@@ -34,6 +34,7 @@ from apps.cli.render import (
     print_briefing,
     print_jsonish,
     print_models,
+    print_untrusted_text,
 )
 from april_common.audit import AuditStartupBlocked, audit_startup_decision
 from april_common.settings import get_settings
@@ -117,7 +118,7 @@ def _maybe_autostart_daemon() -> None:
 
 
 def _print_chat_result(result: dict[str, Any]) -> None:
-    console.print(result["final_message"])
+    print_untrusted_text(result["final_message"])
     if result.get("pending_approval"):
         console.print("[yellow]Approval required:[/yellow]")
         print_jsonish(result["pending_approval"])
@@ -319,7 +320,7 @@ def ask(
     }
     data = run(client().post("/chat", payload))
     result = data["result"]
-    console.print(result["final_message"])
+    print_untrusted_text(result["final_message"])
     if result.get("pending_approval"):
         console.print("[yellow]Approval required:[/yellow]")
         print_jsonish(result["pending_approval"])
@@ -416,7 +417,7 @@ def agent_run(
     }
     data = run(client().post("/agents/run", payload))
     result = data["result"]
-    console.print(result["final_message"])
+    print_untrusted_text(result["final_message"])
     if result.get("pending_approval"):
         console.print("[yellow]Approval required:[/yellow]")
         print_jsonish(result["pending_approval"])

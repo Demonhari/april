@@ -238,7 +238,11 @@ class RoutingFlow:
         if subject is None:
             return None
         try:
-            candidates = await self.memory.search_memories(subject)
+            candidates = await self.memory.search_memories(
+                subject,
+                project_id=prepared.project_id,
+                global_only=prepared.project_id is None,
+            )
         except Exception:
             return None
         policy = MemoryPolicy()

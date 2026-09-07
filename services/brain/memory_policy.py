@@ -138,15 +138,21 @@ async def _safe_memory_results(
 ) -> list[SearchResult]:
     results: list[SearchResult] = []
     for query in memory_queries[:3]:
-        if project_id is None or not isinstance(memory_retriever, MemoryRetriever):
-            found = await memory_retriever.hybrid_search(query, limit=3)
-        else:
-            found = await memory_retriever.hybrid_search(query, limit=3, project_id=project_id)
+        found = await memory_retriever.hybrid_search(
+            query,
+            limit=3,
+            project_id=project_id,
+            global_only=project_id is None,
+        )
         for result in found:
             if result.id not in {existing.id for existing in results}:
                 results.append(result)
     if not results and intent in {"planning", "normal_conversation", "direct_agent_run"}:
-        results = await memory_retriever.recent_memories(limit=3)
+        results = await memory_retriever.recent_memories(
+            limit=3,
+            global_only=project_id is None,
+            project_id=project_id,
+        )
     return results[:6]
 
 

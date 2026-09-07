@@ -6,7 +6,7 @@ import pytest
 
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
-from services.memory.repository import MemoryRepository
+from services.memory.repository import MemoryPostCommitError, MemoryRepository
 from services.memory.schemas import VectorMetadata
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
@@ -81,5 +81,40 @@ async def test_vector_failure_keeps_sqlite_fact_and_marks_repair(settings_tmp, m
         assert await repository.rebuild() == 1
         assert (await repository.health()).repair_required is False
         assert vector.search("local boundaries", source_type="memory")[0].id == record.id
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_post_commit_audit_failure_reports_partial_and_preserves_provenance(
+    settings_tmp,
+) -> None:
+    class FailingAudit:
+        def write(self, _event: dict[str, object]) -> None:
+            raise OSError("audit unavailable")
+
+    database, memory, vector, _ = await _repository(settings_tmp)
+    repository = MemoryRepository(memory, vector, audit=FailingAudit())  # type: ignore[arg-type]
+    try:
+        conversation_id = await memory.create_conversation()
+        with pytest.raises(MemoryPostCommitError) as raised:
+            await repository.create_memory(
+                "my test project is Project Bluebird",
+                kind="relationship",
+                reason="explicit",
+                source_conversation_id=conversation_id,
+            )
+        error = raised.value
+        assert error.record.id
+        assert error.provenance_complete is True
+        assert error.stage == "index_or_audit"
+        persisted = await memory.get_memory(error.record.id)
+        assert persisted is not None
+        provenance = await database.fetchone(
+            "SELECT source_conversation_id FROM memory_provenance WHERE memory_id = ?",
+            (error.record.id,),
+        )
+        assert provenance is not None
+        assert provenance["source_conversation_id"] == conversation_id
     finally:
         await database.close()

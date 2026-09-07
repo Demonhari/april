@@ -7,6 +7,7 @@ from typing import Any
 from agents.schemas import AgentResult
 from april_common.errors import PermissionDeniedError
 from april_common.time import parse_utc_iso, utc_now
+from services.brain.capabilities import trusted_capability_summary
 from services.brain.memory_policy import build_agent_memory_context
 from services.evolution.feedback_eval import stage_feedback_eval_case
 
@@ -33,11 +34,21 @@ class ApprovalFlow:
         agent = await self.apply_prompt_overlay(agent)
         agent, run_metadata = await self._effective_agent(agent)
         project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
-        if self._agent_requires_project(agent_id) and project is None:
+        if (
+            self._agent_requires_project(agent_id)
+            and project is None
+            and self._coding_request_requires_project(message)
+        ):
             raise PermissionDeniedError(
                 "This agent requires a selected local project.",
                 {"agent": agent_id},
             )
+        if agent_id == "coding_agent" and project is None:
+            # Forge may explain supplied code without a repository, but it must
+            # have no authority-bearing tools in that mode. Any later tool
+            # request is rejected by the structured loop rather than relying on
+            # the prompt to remain obedient.
+            agent = self._tool_free_coding_agent(agent)
         active_conversation_id = conversation_id or await self.memory.create_conversation(
             project_id=project.id if project else None,
             actor=actor,
@@ -72,6 +83,14 @@ class ApprovalFlow:
         )
         run_metadata["context_category_truncated"] = dict(memory_context.category_truncated)
         context_sections, _context_citations = self._memory_context_sections(memory_context)
+        context_sections.insert(
+            0,
+            trusted_capability_summary(
+                settings=self.settings,
+                agent_registry=self.agent_registry,
+                tool_registry=self.tool_registry,
+            ),
+        )
         if memory_context.conversation_summary:
             context_sections.insert(0, memory_context.conversation_summary)
         context = await self.tool_executor.context(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from io import StringIO
 from typing import Any
 
+from rich.console import Console
 from typer.testing import CliRunner
 
 from apps.cli.main import _handle_repl_command, app
@@ -259,6 +261,35 @@ steps:
     assert result.exit_code == 0, result.output
     assert fake.calls[-1][0:2] == ("POST", "/playbooks/adopt")
     assert fake.calls[-1][2]["id"] == "local-playbook"
+
+
+def test_cli_chat_output_preserves_literal_untrusted_text(monkeypatch) -> None:
+    value = (
+        "def evens(numbers):\n"
+        "    return [n for n in numbers if n % 2 == 0]\n"
+        "return []\n"
+        "value = items[0]\\n"
+        "[red][/red]\n"
+        '{"items": [1, 2]}\n'
+        "```python\n    return [n]\n```"
+    )
+    fake = FakeApiClient()
+
+    async def post(path: str, payload: dict[str, Any], *, auth: bool = True) -> dict[str, Any]:
+        fake.calls.append(("POST", path, payload))
+        return {"result": {"final_message": value, "pending_approval": None}}
+
+    fake.post = post  # type: ignore[method-assign]
+    output = StringIO()
+    console = Console(file=output, force_terminal=False, color_system=None, width=240)
+    monkeypatch.setattr("apps.cli.main.client", lambda: fake)
+    monkeypatch.setattr("apps.cli.main.console", console)
+    monkeypatch.setattr("apps.cli.render.console", console)
+
+    result = CliRunner().invoke(app, ["ask", "show the answer"])
+
+    assert result.exit_code == 0, result.output
+    assert output.getvalue() == value + "\n"
 
 
 def test_repl_slash_commands_delegate_to_existing_api(monkeypatch) -> None:

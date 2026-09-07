@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from agents.base import BaseAgent
@@ -208,6 +209,38 @@ class ExecutionFlow:
     def _agent_requires_project(self, agent_name: str) -> bool:
         return agent_name == "coding_agent"
 
+    @staticmethod
+    def _coding_request_requires_project(message: str) -> bool:
+        """Detect authority-bearing coding requests conservatively.
+
+        A pasted snippet or a request to write/explain code is tool-free. Terms
+        that imply access to an actual repository, file, command, test, or
+        patch keep the direct-agent project requirement.
+        """
+
+        lowered = " ".join(message.casefold().split())
+        return bool(
+            re.search(
+                r"\b(repository|repo|codebase|project|file|directory|path|git|inspect|"
+                r"search|run|execute|test|pytest|patch|apply|edit|modify)\b",
+                lowered,
+            )
+            or re.search(r"\bwrite\s+(?:to|into)\b", lowered)
+        )
+
+    @staticmethod
+    def _tool_free_coding_agent(agent: BaseAgent) -> BaseAgent:
+        allowed = set(agent.config.allowed_tools)
+        return BaseAgent(
+            agent.config.model_copy(
+                update={
+                    "allowed_tools": set(),
+                    "blocked_tools": set(agent.config.blocked_tools) | allowed,
+                    "maximum_tool_iterations": 1,
+                }
+            )
+        )
+
     async def _prepare_code_modification(
         self,
         *,
@@ -388,7 +421,10 @@ class ExecutionFlow:
         return None
 
     def _requires_project(self, decision: BrainDecision) -> bool:
-        if decision.intent == "code_modification":
+        # A modification plan is authority-bearing even when the model omitted
+        # its tool list; the trusted patch flow must not be bypassed by a
+        # schema-valid empty-tools decision.
+        if decision.intent in {"code_modification", "patch_proposal"}:
             return True
         repo_tools = {
             "git_status",
@@ -400,7 +436,20 @@ class ExecutionFlow:
             "test_runner",
         }
         requested = {call.tool for call in decision.planned_tool_calls} | set(decision.tools_needed)
-        return bool(requested & repo_tools)
+        # A document summary can use already-indexed, global document context
+        # without selecting a repository. If the model later asks for a real
+        # file, ToolExecutionContext still enforces its project/root policy.
+        if decision.intent == "document_reading" and requested <= {"read_file"}:
+            return False
+        authority_tools = repo_tools | {
+            "read_file",
+            "list_files",
+            "write_file",
+            "patch_generator",
+            "patch_applier",
+            "run_command",
+        }
+        return bool(requested & authority_tools)
 
     def _planned_tool_calls(
         self,

@@ -6,7 +6,7 @@ from typing import Any
 import typer
 
 from apps.cli.groups import evolve_app, playbook_app
-from apps.cli.render import console, print_jsonish
+from apps.cli.render import console, print_jsonish, print_untrusted_text
 
 
 def client() -> Any:
@@ -104,7 +104,7 @@ def evolve_diff(
         params["to_version"] = to_version
     data = run(client().get("/evolution/diff", params=params))
     if data.get("diff"):
-        console.print(data["diff"])
+        print_untrusted_text(data["diff"])
     else:
         print_jsonish(data)
 

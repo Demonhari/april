@@ -192,25 +192,47 @@ def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThres
     if result.role == "brain" and result.routing_evaluation_required:
         if result.routing_error_code:
             failures.append(f"{label}: routing evaluation {result.routing_error_code}")
-        elif result.routing is None:
+        if result.routing is None:
             failures.append(f"{label}: routing report missing")
-        elif result.routing.total == 0:
-            failures.append(f"{label}: routing report has zero cases")
-        elif result.routing.schema_valid_count != result.routing.total:
-            failures.append(f"{label}: routing schema-invalid decisions present")
-        elif result.routing.fallback_count > 0:
-            failures.append(f"{label}: routing fallback decisions present")
-        elif result.routing.unknown_provenance_count > 0:
-            failures.append(f"{label}: routing provenance is incomplete")
-        elif result.model_only_routing is None:
+        else:
+            if result.routing.total == 0:
+                failures.append(f"{label}: routing report has zero cases")
+            if result.routing.schema_valid_count != result.routing.total:
+                failures.append(f"{label}: routing schema-invalid decisions present")
+            if result.routing.fallback_count > 0:
+                failures.append(f"{label}: routing fallback decisions present")
+            if result.routing.unknown_provenance_count > 0:
+                failures.append(f"{label}: routing provenance is incomplete")
+            if result.routing.passed != result.routing.total:
+                failures.append(f"{label}: end-to-end routing decisions failed")
+        if result.model_only_routing is None:
             failures.append(f"{label}: model-only routing report missing")
-        elif result.model_only_routing.passed != result.model_only_routing.total:
-            failures.append(f"{label}: model-only routing decisions failed")
+        else:
+            if result.model_only_routing.total == 0:
+                failures.append(f"{label}: model-only routing report has zero cases")
+            if result.model_only_routing.schema_valid_count != result.model_only_routing.total:
+                failures.append(f"{label}: model-only routing schema-invalid decisions present")
+            if result.model_only_routing.fallback_count > 0:
+                failures.append(f"{label}: model-only routing fallback decisions present")
+            if result.model_only_routing.unknown_provenance_count > 0:
+                failures.append(f"{label}: model-only routing provenance is incomplete")
+            if result.model_only_routing.passed != result.model_only_routing.total:
+                failures.append(f"{label}: model-only routing decisions failed")
     if result.role == "brain" and result.routing is not None and result.routing.total > 0:
         min_accuracy = thresholds.min_routing_accuracy
         if min_accuracy is not None and result.routing.accuracy < min_accuracy:
             failures.append(
                 f"{label}: routing accuracy {result.routing.accuracy:.2f} "
+                f"below minimum {min_accuracy:.2f}"
+            )
+        if (
+            result.model_only_routing is not None
+            and result.model_only_routing.total > 0
+            and min_accuracy is not None
+            and result.model_only_routing.accuracy < min_accuracy
+        ):
+            failures.append(
+                f"{label}: model-only routing accuracy {result.model_only_routing.accuracy:.2f} "
                 f"below minimum {min_accuracy:.2f}"
             )
     tps = result.tokens_per_second
@@ -315,15 +337,23 @@ def _specialist_switch_ok(
 def _routing_required_ok(result: PerModelResult) -> bool:
     if result.role != "brain" or not result.routing_evaluation_required:
         return True
+    if result.routing_error_code is not None:
+        return False
     routing = result.routing
-    return bool(
-        routing is not None
-        and routing.total > 0
-        and routing.passed == routing.total
-        and routing.schema_valid_count == routing.total
-        and routing.fallback_count == 0
-        and result.routing_error_code is None
+    model_only = result.model_only_routing
+    return _routing_axis_ok(routing, allow_deterministic=True) and _routing_axis_ok(
+        model_only, allow_deterministic=False
     )
+
+
+def _routing_axis_ok(report: RoutingReport | None, *, allow_deterministic: bool) -> bool:
+    if report is None or report.total <= 0:
+        return False
+    if report.passed != report.total or report.schema_valid_count != report.total:
+        return False
+    if report.fallback_count or report.unknown_provenance_count:
+        return False
+    return allow_deterministic or report.deterministic_count == 0
 
 
 def _verification_level(

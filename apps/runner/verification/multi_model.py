@@ -477,11 +477,22 @@ class AllConfiguredModelsVerifier(
 
     def _routing_reports(self, model_id: str) -> tuple[RoutingReport, RoutingReport]:
         from apps.runner.evals import load_brain_eval_cases, real_routing_report
+        from services.brain.parser import parse_brain_decision
         from services.brain.router import ROUTER_SYSTEM_PROMPT
         from services.brain.structured_output import BRAIN_DECISION_RESPONSE_FORMAT
 
         cases = load_brain_eval_cases(self.repo_home)
         end_to_end = self._routing_report()
+
+        configured_model = next(
+            (entry.model for entry in self.plan if entry.model.id == model_id), None
+        )
+        if (
+            configured_model is None
+            or configured_model.backend != "llama_cpp"
+            or self._report_backend() != "llama_cpp"
+        ):
+            return end_to_end, real_routing_report(cases, [{} for _ in cases])
 
         # Isolated model-only evaluation deliberately calls Runtime directly.
         # It cannot be made to pass by adding deterministic router shortcuts and
@@ -506,18 +517,84 @@ class AllConfiguredModelsVerifier(
                 },
                 timeout=self.timeout,
             )
-            content = str(payload.get("content", ""))
-            parsed = next(
-                (
-                    candidate
-                    for candidate in verify_coordinator._json_object_candidates(content)
-                    if self._is_valid_brain_decision(candidate)
-                ),
-                {},
+            parsed: dict[str, Any] = {}
+            route_method = "model"
+            diagnostics = payload.get("diagnostics")
+            warnings = payload.get("warnings")
+            error_diagnostics = isinstance(diagnostics, dict) and any(
+                diagnostics.get(key) for key in ("error", "runtime_error", "generation_error")
             )
+            structured_fallback = (
+                isinstance(diagnostics, dict)
+                and diagnostics.get("structured_output_fallback") is True
+            )
+            if not structured_fallback and isinstance(warnings, list):
+                structured_fallback = any(
+                    "structured-output prompt fallback" in str(item).casefold() for item in warnings
+                )
+            if (
+                not error_diagnostics
+                and not structured_fallback
+                and payload.get("finish_reason", "stop") == "stop"
+            ):
+                content = str(payload.get("content", ""))
+                try:
+                    parsed = parse_brain_decision(content).model_dump()
+                except Exception:
+                    repair = self._post_runtime(
+                        "/runtime/chat",
+                        {
+                            "model_id": model_id,
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "Repair the previous response into exactly one valid "
+                                        "APRIL route JSON object. No prose."
+                                    ),
+                                },
+                                {"role": "user", "content": content},
+                            ],
+                            "options": {
+                                "temperature": 0.0,
+                                "max_output_tokens": 192,
+                                "enable_thinking": False,
+                            },
+                            "response_format": BRAIN_DECISION_RESPONSE_FORMAT.model_dump(),
+                            "request_id": f"multi-{model_id}-routing-repair-{index}",
+                        },
+                        timeout=self.timeout,
+                    )
+                    repair_diagnostics = repair.get("diagnostics")
+                    repair_warnings = repair.get("warnings")
+                    repair_fallback = (
+                        isinstance(repair_diagnostics, dict)
+                        and repair_diagnostics.get("structured_output_fallback") is True
+                    )
+                    if not repair_fallback and isinstance(repair_warnings, list):
+                        repair_fallback = any(
+                            "structured-output prompt fallback" in str(item).casefold()
+                            for item in repair_warnings
+                        )
+                    repair_error = isinstance(repair_diagnostics, dict) and any(
+                        repair_diagnostics.get(key)
+                        for key in ("error", "runtime_error", "generation_error")
+                    )
+                    if (
+                        not repair_error
+                        and not repair_fallback
+                        and repair.get("finish_reason", "stop") == "stop"
+                    ):
+                        try:
+                            parsed = parse_brain_decision(
+                                str(repair.get("content", "")),
+                            ).model_dump()
+                            route_method = "model_repair"
+                        except Exception:
+                            parsed = {}
             if parsed:
-                parsed["routing_method"] = "model"
-                parsed["route_source"] = "model"
+                parsed["routing_method"] = route_method
+                parsed["route_source"] = route_method
                 parsed["route_provenance"] = "trusted_model_only_v1"
             model_decisions.append(parsed)
         return end_to_end, real_routing_report(cases, model_decisions)

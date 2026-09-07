@@ -57,6 +57,9 @@ class MemoryRecordRepository(SqliteRepositoryBase):
         expires_at: str | None = None,
         superseded_by: str | None = None,
         sensitive: bool = False,
+        source_session_id: str | None = None,
+        source_conversation_id: str | None = None,
+        source_message_ids: list[str] | None = None,
     ) -> MemoryRecord:
         memory_id = str(uuid.uuid4())
         created_at = utc_now_iso()
@@ -98,6 +101,25 @@ class MemoryRecordRepository(SqliteRepositoryBase):
                 "INSERT INTO memories_fts(id, content, reason) VALUES(?, ?, ?)",
                 (memory_id, indexed_content, stored_reason),
             )
+            if any(
+                value is not None
+                for value in (source_session_id, source_conversation_id, source_message_ids)
+            ):
+                await conn.execute(
+                    """
+                    INSERT INTO memory_provenance(
+                        memory_id, source_session_id, source_conversation_id,
+                        source_message_ids_json, updated_at
+                    ) VALUES(?, ?, ?, ?, ?)
+                    """,
+                    (
+                        memory_id,
+                        source_session_id,
+                        source_conversation_id,
+                        json.dumps(source_message_ids or [], sort_keys=True),
+                        created_at,
+                    ),
+                )
         return MemoryRecord(
             id=memory_id,
             content=content,
@@ -185,11 +207,17 @@ class MemoryRecordRepository(SqliteRepositoryBase):
         return [self._memory_record(row) for row in rows]
 
     async def search_memories(
-        self, query: str, *, project_id: str | None = None
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+        global_only: bool = False,
     ) -> list[MemoryRecord]:
         return [
             hit.memory
-            for hit in await self.search_memory_lexical_hits(query, project_id=project_id)
+            for hit in await self.search_memory_lexical_hits(
+                query, project_id=project_id, global_only=global_only
+            )
         ]
 
     async def search_memory_lexical_hits(
@@ -197,12 +225,21 @@ class MemoryRecordRepository(SqliteRepositoryBase):
         query: str,
         *,
         project_id: str | None = None,
+        global_only: bool = False,
         limit: int = 20,
     ) -> list[LexicalHit]:
         """Return bounded Unicode-safe FTS hits with deterministic rank metadata."""
         capped_limit = max(1, min(limit, 100))
         if query.strip() in {"", "*"}:
-            memories = await self.list_memories(project_id=project_id)
+            memories = await self.list_memories()
+            if project_id is None and global_only:
+                memories = [memory for memory in memories if memory.project_id is None]
+            elif project_id is not None:
+                memories = [
+                    memory
+                    for memory in memories
+                    if memory.project_id is None or memory.project_id == project_id
+                ]
             return [
                 LexicalHit(
                     memory=memory,
@@ -216,13 +253,28 @@ class MemoryRecordRepository(SqliteRepositoryBase):
         now = utc_now_iso()
         rows: list[Any] = []
         if fts_query:
-            if project_id is None:
+            if project_id is None and not global_only:
                 rows = await self.database.fetchall(
                     """
                     SELECT m.*, bm25(memories_fts) AS lexical_bm25
                     FROM memories_fts
                     JOIN memories m ON m.id = memories_fts.id
                     WHERE memories_fts MATCH ?
+                      AND m.superseded_by IS NULL
+                      AND (m.expires_at IS NULL OR m.expires_at > ?)
+                    ORDER BY lexical_bm25 ASC, m.id ASC
+                    LIMIT ?
+                    """,
+                    (fts_query, now, capped_limit),
+                )
+            elif project_id is None:
+                rows = await self.database.fetchall(
+                    """
+                    SELECT m.*, bm25(memories_fts) AS lexical_bm25
+                    FROM memories_fts
+                    JOIN memories m ON m.id = memories_fts.id
+                    WHERE memories_fts MATCH ?
+                      AND m.project_id IS NULL
                       AND m.superseded_by IS NULL
                       AND (m.expires_at IS NULL OR m.expires_at > ?)
                     ORDER BY lexical_bm25 ASC, m.id ASC
@@ -249,12 +301,29 @@ class MemoryRecordRepository(SqliteRepositoryBase):
             like_value = _escaped_like_value(normalize_text(query))
             if not like_value:
                 return []
-            if project_id is None:
+            if project_id is None and not global_only:
                 rows = await self.database.fetchall(
                     """
                     SELECT m.*
                     FROM memories m
                     WHERE m.superseded_by IS NULL
+                      AND (m.expires_at IS NULL OR m.expires_at > ?)
+                      AND (
+                        lower(m.content) LIKE ? ESCAPE '\\'
+                        OR lower(m.reason) LIKE ? ESCAPE '\\'
+                      )
+                    ORDER BY m.created_at DESC, m.id ASC
+                    LIMIT ?
+                    """,
+                    (now, like_value, like_value, capped_limit),
+                )
+            elif project_id is None:
+                rows = await self.database.fetchall(
+                    """
+                    SELECT m.*
+                    FROM memories m
+                    WHERE m.project_id IS NULL
+                      AND m.superseded_by IS NULL
                       AND (m.expires_at IS NULL OR m.expires_at > ?)
                       AND (
                         lower(m.content) LIKE ? ESCAPE '\\'

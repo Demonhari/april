@@ -1068,6 +1068,29 @@ def test_fake_backend_end_to_end_remember_request(settings_tmp) -> None:
     assert rows
     assert "I prefer concise answers" not in rows[0]["args_json"]
 
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "Remember that my test project is called Project Bluebird."},
+        headers=auth(settings_tmp),
+    ) as stream_response:
+        stream_body = stream_response.read().decode()
+    assert stream_response.status_code == 200
+    assert "Stored relationship memory." in stream_body
+    assert "event: done" in stream_body
+
+    anyio.run(container.database.close)
+    fresh_container = anyio.run(make_container, settings_tmp)
+    fresh_client = TestClient(create_app(fresh_container))
+    recall = fresh_client.post(
+        "/chat",
+        json={"message": "What is the name of my test project?"},
+        headers=auth(settings_tmp),
+    )
+    assert recall.status_code == 200
+    assert "Project Bluebird" in recall.json()["result"]["final_message"]
+    anyio.run(fresh_container.database.close)
+
 
 def test_vector_repo_chunks_return_citations(settings_tmp) -> None:
     import anyio
@@ -1532,7 +1555,7 @@ def test_direct_reasoning_agent_runs_on_brain_model(settings_tmp) -> None:
     assert rows[0]["model_id"] == "april-brain"
 
 
-def test_direct_coding_agent_requires_project(settings_tmp) -> None:
+def test_direct_coding_agent_project_gate_and_tool_free_mode(settings_tmp, monkeypatch) -> None:
     import anyio
 
     container = anyio.run(make_container, settings_tmp)
@@ -1543,6 +1566,24 @@ def test_direct_coding_agent_requires_project(settings_tmp) -> None:
         headers=auth(settings_tmp),
     )
     assert response.status_code == 403
+    monkeypatch.setattr(
+        container.runtime_client,
+        "_structured_response",
+        lambda _prompt, _lower: (
+            '{"type":"final_answer","message":"Here is the explanation.",'
+            '"summary":"tool-free coding assistance","citations":[]}'
+        ),
+    )
+    tool_free = client.post(
+        "/agents/run",
+        json={
+            "agent": "coding_agent",
+            "message": "Explain this Python function: return [n for n in numbers if n % 2 == 0]",
+        },
+        headers=auth(settings_tmp),
+    )
+    assert tool_free.status_code == 200
+    assert tool_free.json()["result"]["status"] == "ok"
 
 
 def test_direct_agent_run_suspends_and_resumes_after_approval(settings_tmp) -> None:

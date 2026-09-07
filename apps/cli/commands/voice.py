@@ -7,7 +7,7 @@ from typing import Any
 import typer
 
 from apps.cli.groups import voice_app
-from apps.cli.render import console, print_jsonish
+from apps.cli.render import console, print_jsonish, print_untrusted_text
 from april_common.settings import get_settings
 
 
@@ -73,7 +73,7 @@ def voice_ptt(seconds: float | None = typer.Option(None, "--seconds", min=0.1, m
     except (ValueError, RuntimeUnavailableError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
-    console.print(answer)
+    print_untrusted_text(answer)
 
 
 @voice_app.command("health")

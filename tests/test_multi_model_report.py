@@ -304,6 +304,18 @@ def test_routing_below_threshold_fails_and_is_reported() -> None:
     )
 
 
+def test_required_routing_reports_both_end_to_end_and_model_only_failures() -> None:
+    brain = _brain_pass()
+    brain.routing_evaluation_required = True
+    brain.routing = RoutingReport(total=10, passed=8, accuracy=0.8)
+    brain.model_only_routing = RoutingReport(total=10, passed=7, accuracy=0.7)
+    failures = per_model_threshold_failures(brain, ReportThresholds(min_routing_accuracy=0.9))
+    assert any("end-to-end routing decisions failed" in item for item in failures)
+    assert any("model-only routing decisions failed" in item for item in failures)
+    assert any("routing accuracy 0.80" in item for item in failures)
+    assert any("model-only routing accuracy 0.70" in item for item in failures)
+
+
 def test_brain_without_routing_evals_keeps_lifecycle_verified() -> None:
     brain = _brain_pass()
     brain.routing = RoutingReport(total=0, passed=0, accuracy=0.0)

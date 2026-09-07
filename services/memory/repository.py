@@ -5,7 +5,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from april_common.audit import AuditLogger
 from april_common.time import utc_now_iso
@@ -18,6 +18,45 @@ from services.memory.vector_memory import VectorMemory
 class MemoryIndexHealth:
     repair_required: bool
     pending_repairs: int
+
+
+MemoryWriteStatus = Literal["rejected", "complete", "committed_incomplete", "unknown"]
+MemoryIndexState = Literal["indexed", "repair_required", "not_attempted", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryWriteEvidence:
+    """Typed boundary evidence for a durable memory operation."""
+
+    status: MemoryWriteStatus
+    durable_commit: bool | None
+    provenance_complete: bool | None
+    index_state: MemoryIndexState
+    audit_complete: bool | None
+    completion_state: Literal["complete", "incomplete", "unknown"]
+    user_facing_outcome: Literal["success", "failure", "partial", "unknown"]
+    memory_id: str | None = None
+    content_length: int | None = None
+
+
+class MemoryPostCommitError(RuntimeError):
+    """An operation failed after SQLite committed its authoritative row."""
+
+    def __init__(
+        self,
+        record: MemoryRecord,
+        *,
+        stage: str,
+        index_state: MemoryIndexState = "unknown",
+        provenance_complete: bool = True,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(stage)
+        self.record = record
+        self.stage = stage
+        self.index_state = index_state
+        self.provenance_complete = provenance_complete
+        self.cause = cause
 
 
 class MemoryRepository:
@@ -35,8 +74,21 @@ class MemoryRepository:
         self.audit = audit
 
     async def create_memory(self, content: str, **kwargs: Any) -> MemoryRecord:
-        record = await self.memory.create_memory(content, **kwargs)
-        await self._index_after_commit(record, operation="upsert")
+        provenance = {
+            key: kwargs.pop(key, None)
+            for key in ("source_session_id", "source_conversation_id", "source_message_ids")
+        }
+        record = await self.memory.create_memory(content, **kwargs, **provenance)
+        try:
+            await self._index_after_commit(record, operation="upsert")
+        except Exception as exc:
+            health = await self.health(memory_id=record.id)
+            raise MemoryPostCommitError(
+                record,
+                stage="index_or_audit",
+                index_state="repair_required" if health.repair_required else "unknown",
+                cause=exc,
+            ) from exc
         return record
 
     async def refresh_memory(
@@ -88,10 +140,16 @@ class MemoryRepository:
             ),
         )
 
-    async def health(self) -> MemoryIndexHealth:
-        row = await self.memory.database.fetchone(
-            "SELECT COUNT(*) AS count FROM memory_index_repairs"
-        )
+    async def health(self, *, memory_id: str | None = None) -> MemoryIndexHealth:
+        if memory_id is None:
+            row = await self.memory.database.fetchone(
+                "SELECT COUNT(*) AS count FROM memory_index_repairs"
+            )
+        else:
+            row = await self.memory.database.fetchone(
+                "SELECT COUNT(*) AS count FROM memory_index_repairs WHERE memory_id = ?",
+                (memory_id,),
+            )
         count = int(row["count"]) if row is not None else 0
         return MemoryIndexHealth(repair_required=count > 0, pending_repairs=count)
 

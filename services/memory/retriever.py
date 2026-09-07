@@ -224,9 +224,12 @@ class MemoryRetriever:
         *,
         limit: int = 10,
         project_id: str | None = None,
+        global_only: bool = False,
     ) -> list[SearchResult]:
         capped_limit = max(1, min(limit, CANDIDATE_LIMIT))
-        candidates = await self._collect_candidates(query, project_id=project_id)
+        candidates = await self._collect_candidates(
+            query, project_id=project_id, global_only=global_only
+        )
         selected = candidates[:capped_limit]
         decision = decide_rerank(
             candidates,
@@ -270,10 +273,12 @@ class MemoryRetriever:
         query: str,
         *,
         project_id: str | None,
+        global_only: bool,
     ) -> list[SearchResult]:
         lexical_hits = await self.sqlite_memory.search_memory_lexical_hits(
             query,
             project_id=project_id,
+            global_only=global_only,
             limit=CANDIDATE_LIMIT,
         )
         evidence: dict[str, _CandidateEvidence] = {}
@@ -295,6 +300,8 @@ class MemoryRetriever:
                 continue
             record = await self.sqlite_memory.get_memory(vector_result.id)
             if record is None or self.policy.is_sensitive(record.content):
+                continue
+            if global_only and record.project_id is not None:
                 continue
             if project_id is not None and record.project_id not in {None, project_id}:
                 continue
@@ -409,10 +416,13 @@ class MemoryRetriever:
             }
         )
 
-    async def recent_memories(self, *, limit: int = 5) -> list[SearchResult]:
+    async def recent_memories(
+        self, *, limit: int = 5, global_only: bool = False, project_id: str | None = None
+    ) -> list[SearchResult]:
         memories = [
             memory
-            for memory in await self.sqlite_memory.list_memories()
+            for memory in await self.sqlite_memory.list_memories(project_id=project_id)
+            if (not global_only or memory.project_id is None)
             if not self.policy.is_sensitive(memory.content)
         ][:limit]
         results = [

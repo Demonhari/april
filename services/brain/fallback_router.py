@@ -27,8 +27,8 @@ class FallbackRouter:
                 agent="general_agent",
                 model_id="april-brain",
                 tools=[],
-                level=0,
-                risk="none",
+                level=1,
+                risk="read_only",
                 confirmation=False,
                 summary="Refuse access outside configured local roots.",
             )
@@ -204,6 +204,17 @@ class FallbackRouter:
                 confirmation=False,
                 summary="Explicit durable local memory write.",
             )
+        if self._looks_like_tool_free_coding(normalized):
+            return self._decision(
+                intent="coding_assistance",
+                agent="coding_agent",
+                model_id="april-coding",
+                tools=[],
+                level=0,
+                risk="none",
+                confirmation=False,
+                summary="Answer the supplied code without accessing a repository.",
+            )
         git_tools = self._git_read_tools(normalized)
         if git_tools:
             return self._decision(
@@ -374,6 +385,39 @@ class FallbackRouter:
             or re.search(r"\b(api key|password|private key|token)\b", text)
         )
 
+    def _looks_like_tool_free_coding(self, text: str) -> bool:
+        if self._contains(
+            text,
+            "repository",
+            "repo",
+            "codebase",
+            "project",
+            "file",
+            "directory",
+            "path",
+            "git",
+            "test",
+            "pytest",
+            "patch",
+            "run",
+            "execute",
+            "inspect",
+            "search",
+        ):
+            return False
+        code_terms = (
+            "code",
+            "python",
+            "javascript",
+            "typescript",
+            "snippet",
+            "function",
+            "class",
+        )
+        return self._contains(text, *code_terms) and bool(
+            re.search(r"\b(?:write|create|explain|understand|what does|how does)\b", text)
+        )
+
     def _git_read_tools(self, text: str) -> list[str]:
         tools: list[str] = []
         if self._contains(
@@ -419,12 +463,22 @@ class FallbackRouter:
 
     def _explicit_memory_write(self, message: str) -> tuple[str, str] | None:
         normalized = " ".join(message.strip().split())
-        if not normalized or normalized[0] in {'"', "'", "`"}:
+        if (
+            not normalized
+            or normalized[0] in {'"', "'", "`"}
+            or ord(normalized[0])
+            in {
+                0x2018,
+                0x201C,
+            }
+        ):
             return None
         if re.match(r"^(?:for example|e\.g\.?|example:)\b", normalized, re.I):
             return None
         match = re.match(
-            r"^(?:april[, :]*)?(?:remember|save|store|keep|note)"
+            r"^(?:(?:please|could you|would you|can you)\s+|"
+            r"i(?:'d| would) like you to\s+)?(?:april[, :]*)?"
+            r"(?:remember|save|store|keep|note|make\s+a\s+note)"
             r"(?:\s+(?:that|this|as a memory))?\s+(.+)$",
             normalized,
             re.IGNORECASE,

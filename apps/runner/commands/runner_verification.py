@@ -329,19 +329,59 @@ def _print_routing_summary(report: object) -> None:
         None,
     )
     routing = getattr(brain, "routing", None)
+    model_only = getattr(brain, "model_only_routing", None)
+    end_to_end_categories = _routing_failure_categories(routing)
+    model_only_categories = _routing_failure_categories(model_only)
     rows = {
-        "routing cases total": getattr(routing, "total", 0) if routing else 0,
-        "routing cases passed": getattr(routing, "passed", 0) if routing else 0,
-        "routing accuracy": getattr(routing, "accuracy", 0.0) if routing else 0.0,
-        "schema-valid count": getattr(routing, "schema_valid_count", 0) if routing else 0,
-        "model-repair count": getattr(routing, "model_repair_count", 0) if routing else 0,
-        "fallback count": getattr(routing, "fallback_count", 0) if routing else 0,
+        "end-to-end cases": _routing_counts(routing),
+        "end-to-end schema-valid": getattr(routing, "schema_valid_count", 0) if routing else 0,
+        "end-to-end deterministic/model/repair/fallback": _routing_provenance_counts(routing),
+        "end-to-end failure categories": end_to_end_categories or "none",
+        "model-only cases": _routing_counts(model_only),
+        "model-only schema-valid": getattr(model_only, "schema_valid_count", 0)
+        if model_only
+        else 0,
+        "model-only deterministic/model/repair/fallback": _routing_provenance_counts(model_only),
+        "model-only failure categories": model_only_categories or "none",
         "threshold failures": ", ".join(getattr(report, "threshold_failures", [])) or "none",
         "routing reason": getattr(brain, "routing_error_code", None) or "none",
     }
     for key, value in rows.items():
         table.add_row(key, str(value))
     console.print(table)
+
+
+def _routing_counts(report: object) -> str:
+    if report is None:
+        return "0/0 (0.00)"
+    passed = getattr(report, "passed", 0)
+    total = getattr(report, "total", 0)
+    accuracy = getattr(report, "accuracy", 0.0)
+    return f"{passed}/{total} ({accuracy:.2f})"
+
+
+def _routing_provenance_counts(report: object) -> str:
+    if report is None:
+        return "deterministic=0 model=0 repair=0 fallback=0 unknown=0"
+    return (
+        f"deterministic={getattr(report, 'deterministic_count', 0)} "
+        f"model={getattr(report, 'model_count', 0)} "
+        f"repair={getattr(report, 'model_repair_count', 0)} "
+        f"fallback={getattr(report, 'fallback_count', 0)} "
+        f"unknown={getattr(report, 'unknown_provenance_count', 0)}"
+    )
+
+
+def _routing_failure_categories(report: object) -> str:
+    if report is None:
+        return ""
+    from collections import Counter
+
+    counts: Counter[str] = Counter()
+    for case in getattr(report, "cases", []):
+        for code in getattr(case, "mismatch_codes", []):
+            counts[str(code)] += 1
+    return ", ".join(f"{key}={counts[key]}" for key in sorted(counts))
 
 
 def _voice_live_runner(settings: Any) -> Callable[[], VoiceLiveReport]:
