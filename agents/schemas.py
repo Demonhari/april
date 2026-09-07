@@ -18,7 +18,20 @@ AgentName = Literal[
     "system_action_agent",
 ]
 
-AGENT_NAMES: tuple[AgentName, ...] = get_args(AgentName)
+# Archive is a real registered agent, but it is an internal closed-session
+# extraction worker rather than a conversational route target. Keep both sets
+# explicit so the registry/pool can still address Archive without exposing its
+# extraction contract to the interactive router.
+ALL_AGENT_NAMES: tuple[AgentName, ...] = get_args(AgentName)
+InteractiveAgentName = Literal[
+    "general_agent",
+    "coding_agent",
+    "reading_agent",
+    "creative_agent",
+    "reasoning_agent",
+    "system_action_agent",
+]
+AGENT_NAMES: tuple[InteractiveAgentName, ...] = get_args(InteractiveAgentName)
 
 
 class LocalCitation(BaseModel):

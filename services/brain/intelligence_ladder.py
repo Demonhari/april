@@ -14,6 +14,7 @@ from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
 from services.brain.reasoning_resolver import resolve_reasoning_model
+from services.brain.response_handling import sanitize_model_output
 from services.brain.schemas import BrainDecision
 from services.evolution.versions import active_ladder_thresholds
 from services.memory.schemas import ReminderRecord
@@ -41,6 +42,7 @@ _DEEP_PHRASES = (
 # narrow: only first-person possessive recall ("my X") qualifies.
 _MEMORY_RECALL_PATTERNS = (
     re.compile(r"^(?:what is|what's|whats) my (?P<subject>.+)$"),
+    re.compile(r"^(?:what is|what's|whats) (?:the )?name of my (?P<subject>.+)$"),
     re.compile(r"^(?:do you remember|remind me(?: of| about)?) my (?P<subject>.+)$"),
 )
 
@@ -372,9 +374,20 @@ class IntelligenceLadder:
                 warnings=["Deep mode exceeded its configured local budget."],
                 metadata=metadata,
             )
+        answer = sanitize_model_output(response.content)
+        if not answer:
+            return LadderRun(
+                status="unavailable",
+                final_message="APRIL did not receive a complete user-facing answer.",
+                mode="deep",
+                rung=3,
+                model_id=model_id,
+                warnings=[*response.warnings, "Model returned only control text."],
+                metadata=metadata,
+            )
         return LadderRun(
             status="ok",
-            final_message=f"{_MODE_ANNOUNCEMENTS[3]}\n\n{response.content}",
+            final_message=f"{_MODE_ANNOUNCEMENTS[3]}\n\n{answer}",
             mode="deep",
             rung=3,
             model_id=model_id,
@@ -484,7 +497,23 @@ class IntelligenceLadder:
                 warnings=["Verification was unavailable or invalid; kept the original answer."],
                 metadata=metadata,
             )
-        final_answer = revision.content.strip() or initial_answer
+        final_answer = sanitize_model_output(revision.content) or sanitize_model_output(
+            initial_answer
+        )
+        if not final_answer:
+            return LadderRun(
+                status="unavailable",
+                final_message="APRIL did not receive a complete user-facing answer.",
+                mode="standard",
+                rung=2,
+                model_id=model_id,
+                warnings=[
+                    *critique.warnings,
+                    *revision.warnings,
+                    "Model returned only control text.",
+                ],
+                metadata={**metadata, "verification_reason": critique_text},
+            )
         usage = {
             key: int(critique.usage.model_dump().get(key, 0))
             + int(revision.usage.model_dump().get(key, 0))
@@ -585,7 +614,10 @@ class IntelligenceLadder:
                         )
                         continue
                     raw_candidates.append(
-                        CouncilCandidate(responder_id=member.role, content=response.content)
+                        CouncilCandidate(
+                            responder_id=member.role,
+                            content=sanitize_model_output(response.content),
+                        )
                     )
                     for key, value in response.usage.model_dump().items():
                         if isinstance(value, int):

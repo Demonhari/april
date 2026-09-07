@@ -104,6 +104,7 @@ class RoutingCaseResult(BaseModel):
     routing_ok: bool = True
     ok: bool = False
     routing_method: str | None = None
+    route_source: str | None = None
     expected_intent: str | None = None
     actual_intent: str | None = None
     expected_agent: str | None = None
@@ -133,6 +134,9 @@ class RoutingReport(BaseModel):
     # 0 keeps the report shape backward compatible.
     fallback_count: int = 0
     model_repair_count: int = 0
+    deterministic_count: int = 0
+    model_count: int = 0
+    unknown_provenance_count: int = 0
     # Per-case redacted outcomes (id + structural verdicts + routing method only).
     cases: list[RoutingCaseResult] = Field(default_factory=list)
 
@@ -197,15 +201,34 @@ def _routing_method_of(result: object) -> str | None:
     return None
 
 
+def _route_source_of(result: object) -> str | None:
+    actual = getattr(result, "actual", None)
+    if not isinstance(actual, dict):
+        return None
+    source = actual.get("route_source")
+    if actual.get("route_provenance") in {"trusted_v1", "trusted_model_only_v1"} and source in {
+        "deterministic",
+        "model",
+        "model_repair",
+        "fallback",
+    }:
+        return str(source)
+    if "route_source" in actual:
+        return None
+    return _routing_method_of(result)
+
+
 def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
     total = len(results)
     passed = sum(1 for result in results if getattr(result, "ok", False))
     accuracy = round(passed / total, 4) if total else 0.0
     schema_valid_count = sum(1 for result in results if getattr(result, "schema_valid", True))
-    fallback_count = sum(1 for result in results if _routing_method_of(result) == "fallback")
-    model_repair_count = sum(
-        1 for result in results if _routing_method_of(result) == "model_repair"
-    )
+    sources = [_route_source_of(result) for result in results]
+    fallback_count = sum(1 for source in sources if source == "fallback")
+    model_repair_count = sum(1 for source in sources if source == "model_repair")
+    deterministic_count = sum(1 for source in sources if source == "deterministic")
+    model_count = sum(1 for source in sources if source == "model")
+    unknown_provenance_count = sum(1 for source in sources if source is None)
     cases = [
         RoutingCaseResult(
             id=str(getattr(result, "id", "") or ""),
@@ -213,6 +236,11 @@ def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
             routing_ok=bool(getattr(result, "routing_ok", getattr(result, "ok", False))),
             ok=bool(getattr(result, "ok", False)),
             routing_method=_routing_method_of(result),
+            route_source=(
+                str((getattr(result, "actual", {}) or {}).get("route_source"))
+                if (getattr(result, "actual", {}) or {}).get("route_source") is not None
+                else None
+            ),
             expected_intent=getattr(result, "expected_intent", None),
             actual_intent=(getattr(result, "actual", {}) or {}).get("intent"),
             expected_agent=getattr(result, "expected_agent", None),
@@ -237,6 +265,9 @@ def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
         failures=total - passed,
         fallback_count=fallback_count,
         model_repair_count=model_repair_count,
+        deterministic_count=deterministic_count,
+        model_count=model_count,
+        unknown_provenance_count=unknown_provenance_count,
         cases=cases,
     )
 

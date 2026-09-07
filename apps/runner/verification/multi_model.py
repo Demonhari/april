@@ -247,7 +247,7 @@ class AllConfiguredModelsVerifier(
                     result.failure_detail = structured_detail
                 if self.routing_evaluation:
                     try:
-                        result.routing = self._routing_report()
+                        result.routing, result.model_only_routing = self._routing_reports(model.id)
                     except Exception as exc:
                         result.routing_error_code = _routing_error_code(exc)
         except Exception as exc:
@@ -475,7 +475,55 @@ class AllConfiguredModelsVerifier(
         )
         return ok, False, None if ok else "response did not contain required status key"
 
+    def _routing_reports(self, model_id: str) -> tuple[RoutingReport, RoutingReport]:
+        from apps.runner.evals import load_brain_eval_cases, real_routing_report
+        from services.brain.router import ROUTER_SYSTEM_PROMPT
+        from services.brain.structured_output import BRAIN_DECISION_RESPONSE_FORMAT
+
+        cases = load_brain_eval_cases(self.repo_home)
+        end_to_end = self._routing_report()
+
+        # Isolated model-only evaluation deliberately calls Runtime directly.
+        # It cannot be made to pass by adding deterministic router shortcuts and
+        # it never enters the orchestrator/tool execution path.
+        model_decisions: list[dict[str, Any]] = []
+        for index, case in enumerate(cases):
+            payload = self._post_runtime(
+                "/runtime/chat",
+                {
+                    "model_id": model_id,
+                    "messages": [
+                        {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+                        {"role": "user", "content": case.message},
+                    ],
+                    "options": {
+                        "temperature": 0.0,
+                        "max_output_tokens": 192,
+                        "enable_thinking": False,
+                    },
+                    "response_format": BRAIN_DECISION_RESPONSE_FORMAT.model_dump(),
+                    "request_id": f"multi-{model_id}-routing-only-{index}",
+                },
+                timeout=self.timeout,
+            )
+            content = str(payload.get("content", ""))
+            parsed = next(
+                (
+                    candidate
+                    for candidate in verify_coordinator._json_object_candidates(content)
+                    if self._is_valid_brain_decision(candidate)
+                ),
+                {},
+            )
+            if parsed:
+                parsed["routing_method"] = "model"
+                parsed["route_source"] = "model"
+                parsed["route_provenance"] = "trusted_model_only_v1"
+            model_decisions.append(parsed)
+        return end_to_end, real_routing_report(cases, model_decisions)
+
     def _routing_report(self) -> RoutingReport:
+        """Backward-compatible end-to-end routing report reader."""
         from apps.runner.evals import load_brain_eval_cases, real_routing_report
 
         cases = load_brain_eval_cases(self.repo_home)
@@ -489,7 +537,6 @@ class AllConfiguredModelsVerifier(
                 decisions.append(
                     self._brain_decision_after(marker) if response.status_code < 400 else {}
                 )
-        # Real-mode routing report: a schema-valid fallback decision is a failure.
         return real_routing_report(cases, decisions)
 
     def _latest_decision(self) -> dict[str, Any]:

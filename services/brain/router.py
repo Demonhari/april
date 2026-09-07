@@ -48,6 +48,18 @@ _ROUTER_EXAMPLES = "\n".join(
         '"confidence":0.9,'
         '"permission_level":5,"risk_level":"external_action","needs_confirmation":true,'
         '"decision_summary":"External actions are disabled by policy."}',
+        # 6. Tool-free code answer (no repository access)
+        '{"intent":"normal_conversation","agent":"general_agent","model_id":"april-brain",'
+        '"confidence":0.88,"tools_needed":[],"permission_level":0,'
+        '"risk_level":"none","needs_confirmation":false,'
+        '"decision_summary":"Answer the code question without accessing a repository."}',
+        # 7. Explicit durable memory
+        '{"intent":"memory_write","agent":"general_agent","model_id":"april-brain",'
+        '"confidence":0.96,"tools_needed":["remember_memory"],'
+        '"planned_tool_calls":[{"tool":"remember_memory","args":{"content":"...",'
+        '"memory_type":"fact","reason":"Explicit user request"}}],"permission_level":2,'
+        '"risk_level":"safe_write","needs_confirmation":false,'
+        '"decision_summary":"Store the explicitly requested local memory."}',
     ]
 )
 
@@ -61,6 +73,19 @@ ROUTER_SYSTEM_PROMPT = (
     "Allowed agents (use exactly one): " + _ALLOWED_AGENTS + ".\n"
     "Allowed risk_level: none, read_only, safe_write, code_write, system_action, "
     "external_action.\n"
+    "\n"
+    "Canonical intent mappings:\n"
+    "- Conversation, pasted-code explanation, general concepts, APRIL architecture explanation, "
+    "and tool-free Python snippets -> normal_conversation/general_agent, no tools, level 0.\n"
+    "- Recall a user fact -> memory_lookup/general_agent with memory_queries, no Archive agent.\n"
+    "- Explicit remember/save/store command -> memory_write/general_agent with exactly the "
+    "remember_memory tool and its complete arguments.\n"
+    "- Actual repository inspection or local-file access -> coding_agent or reading_agent with "
+    "the appropriate read-only tool; this requires a selected project at execution time.\n"
+    "- Actual patch/file write/test/command request -> the configured action route with its "
+    "existing permission and approval level.\n"
+    "- Archive/memory_agent is an internal closed-session extractor and is never an interactive "
+    "agent choice.\n"
     "\n"
     "Routing rules:\n"
     "- Normal chat and planning -> general_agent (permission_level 0, risk none).\n"
@@ -156,13 +181,14 @@ class BrainRouter:
                 options=GenerationOptions(
                     temperature=0.0,
                     max_output_tokens=192,
+                    enable_thinking=False,
                 ),
                 response_format=BRAIN_DECISION_RESPONSE_FORMAT,
                 request_id=request_id,
             )
             if response.diagnostics.get("structured_output_fallback") is True:
                 return self._fallback_result(
-                    routing_input,
+                    message,
                     reason="structured_output_unavailable",
                 )
 
@@ -181,6 +207,7 @@ class BrainRouter:
                     options=GenerationOptions(
                         temperature=0.0,
                         max_output_tokens=192,
+                        enable_thinking=False,
                     ),
                     response_format=BRAIN_DECISION_RESPONSE_FORMAT,
                     request_id=request_id,
@@ -207,7 +234,7 @@ class BrainRouter:
                 repair_used=source is RouteSource.MODEL_REPAIR,
             )
         except (AprilError, TimeoutError, OSError):
-            return self._fallback_result(routing_input, reason="runtime_or_output_failure")
+            return self._fallback_result(message, reason="runtime_or_output_failure")
 
     def _fallback_result(self, message: str, *, reason: str) -> RouteResult:
         decision = self.fallback.route(message)

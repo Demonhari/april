@@ -28,6 +28,32 @@ class DeterministicRouter:
         if safety is not None:
             return safety
 
+        memory_write = self._explicit_memory_write(text)
+        if memory_write is not None:
+            memory_type, content = memory_write
+            return self._match(
+                "memory_write",
+                "general_agent",
+                "april-brain",
+                2,
+                "safe_write",
+                False,
+                "Store the explicitly requested local durable memory.",
+                tools=["remember_memory"],
+                planned=[
+                    PlannedToolCall(
+                        tool="remember_memory",
+                        args={
+                            "content": content,
+                            "memory_type": memory_type,
+                            "reason": "Explicit user-requested durable local memory.",
+                        },
+                        reason="Store explicit local durable memory.",
+                    )
+                ],
+                rule="memory.write_explicit",
+            )
+
         approval = re.fullmatch(
             rf"(?:approve|approval)\s+(?P<id>{_APPROVAL_ID})", text, re.IGNORECASE
         )
@@ -216,6 +242,39 @@ class DeterministicRouter:
                 rule="patch.propose",
             )
         return None
+
+    def _explicit_memory_write(self, message: str) -> tuple[str, str] | None:
+        """Recognize only an anchored, affirmative durable-memory command."""
+        normalized = " ".join(message.strip().split())
+        if not normalized or normalized[0] in {'"', "'", "`"}:
+            return None
+        if re.match(r"^(?:for example|e\.g\.?|example:)\b", normalized, re.I):
+            return None
+        match = re.match(
+            r"^(?:april[, :]*)?(?:remember|save|store|keep|note)"
+            r"(?:\s+(?:that|this|as a memory))?\s+(.+)$",
+            normalized,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        content = match.group(1).strip().strip("\"'`").strip()
+        if not content or re.match(
+            r"^(?:not|never|don(?:'t|t)|do not|no need to)\b", content, re.I
+        ):
+            return None
+        lowered = content.casefold()
+        if any(
+            term in lowered for term in ("password", "secret", "token", "api key", "private key")
+        ):
+            return None
+        if "prefer" in lowered or "preference" in lowered:
+            return "preference", content
+        if "project" in lowered:
+            if re.search(r"\b(?:called|named|name is|known as)\b", lowered):
+                return "relationship", content
+            return "project_state", content
+        return "fact", content
 
     @staticmethod
     def _looks_like_exact_filename(path: str) -> bool:

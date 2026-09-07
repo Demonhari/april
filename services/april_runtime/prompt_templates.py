@@ -58,10 +58,24 @@ def render_prompt(
     messages: list[ChatMessage],
     *,
     metadata: dict[str, object] | None = None,
+    disable_thinking: bool = False,
 ) -> str:
     env = SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
     template = env.from_string(select_template(model, metadata))
-    return template.render(messages=messages, add_generation_prompt=True)
+    render_messages = messages
+    if disable_thinking and _is_qwen(model, metadata):
+        render_messages = [message.model_copy() for message in messages]
+        for message in reversed(render_messages):
+            if message.role == "user" and "/no_think" not in message.content:
+                message.content = f"{message.content}\n/no_think"
+                break
+    return template.render(messages=render_messages, add_generation_prompt=True)
+
+
+def _is_qwen(model: ModelDefinition, metadata: dict[str, object] | None) -> bool:
+    if model.chat_format == "qwen" or "qwen" in model.name.casefold():
+        return True
+    return _metadata_chat_format(metadata) == "qwen"
 
 
 def _template_for_format(chat_format: str, *, model: ModelDefinition) -> str:

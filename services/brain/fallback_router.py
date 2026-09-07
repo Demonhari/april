@@ -180,6 +180,30 @@ class FallbackRouter:
                 confirmation=True,
                 summary="Code modification requires exact approval.",
             )
+        memory_write = self._explicit_memory_write(message)
+        if memory_write is not None:
+            memory_type, content = memory_write
+            return self._decision(
+                intent="memory_write",
+                agent="general_agent",
+                model_id="april-brain",
+                tools=["remember_memory"],
+                planned_tool_calls=[
+                    PlannedToolCall(
+                        tool="remember_memory",
+                        args={
+                            "content": content,
+                            "memory_type": memory_type,
+                            "reason": "Explicit user-requested durable local memory.",
+                        },
+                        reason="Store explicit local durable memory.",
+                    )
+                ],
+                level=2,
+                risk="safe_write",
+                confirmation=False,
+                summary="Explicit durable local memory write.",
+            )
         git_tools = self._git_read_tools(normalized)
         if git_tools:
             return self._decision(
@@ -192,7 +216,9 @@ class FallbackRouter:
                 confirmation=False,
                 summary="Read-only Git repository request.",
             )
-        if self._contains(normalized, "repo", "repository", "animation", "bug", "code", "why"):
+        if self._contains(
+            normalized, "repo", "repository", "animation", "bug", "inspect", "search files"
+        ):
             return self._decision(
                 intent="coding_repo_analysis",
                 agent="coding_agent",
@@ -240,30 +266,6 @@ class FallbackRouter:
                 confirmation=False,
                 summary="Document reading request.",
             )
-        memory_write = self._explicit_memory_write(message)
-        if memory_write is not None:
-            memory_type, content = memory_write
-            return self._decision(
-                intent="memory_write",
-                agent="general_agent",
-                model_id="april-brain",
-                tools=["remember_memory"],
-                planned_tool_calls=[
-                    PlannedToolCall(
-                        tool="remember_memory",
-                        args={
-                            "content": content,
-                            "memory_type": memory_type,
-                            "reason": "Explicit user-requested durable local memory.",
-                        },
-                        reason="Store explicit local durable memory.",
-                    )
-                ],
-                level=2,
-                risk="safe_write",
-                confirmation=False,
-                summary="Explicit durable local memory write.",
-            )
         if self._looks_like_secret(normalized):
             return self._decision(
                 intent="sensitive_content",
@@ -275,12 +277,14 @@ class FallbackRouter:
                 confirmation=False,
                 summary="Avoid storing or exposing secret-like content.",
             )
-        if self._contains(normalized, "memory", "recall"):
+        recall = self._recall_subject(message)
+        if recall is not None or self._contains(normalized, "memory", "recall"):
             return self._decision(
                 intent="memory_lookup",
                 agent="general_agent",
                 model_id="april-brain",
                 tools=[],
+                memory_queries=[recall] if recall is not None else [],
                 level=0,
                 risk="none",
                 confirmation=False,
@@ -414,26 +418,44 @@ class FallbackRouter:
         return tools
 
     def _explicit_memory_write(self, message: str) -> tuple[str, str] | None:
-        normalized = message.strip()
-        patterns = (
-            r"^(?:april,\s*)?remember(?: that)?\s+(.+)$",
-            r"^(?:april,\s*)?save this preference\s*:?\s+(.+)$",
-            r"^(?:april,\s*)?save my preference\s*:?\s+(.+)$",
+        normalized = " ".join(message.strip().split())
+        if not normalized or normalized[0] in {'"', "'", "`"}:
+            return None
+        if re.match(r"^(?:for example|e\.g\.?|example:)\b", normalized, re.I):
+            return None
+        match = re.match(
+            r"^(?:april[, :]*)?(?:remember|save|store|keep|note)"
+            r"(?:\s+(?:that|this|as a memory))?\s+(.+)$",
+            normalized,
+            re.IGNORECASE,
         )
-        for pattern in patterns:
-            match = re.match(pattern, normalized, flags=re.IGNORECASE | re.DOTALL)
-            if not match:
-                continue
-            content = " ".join(match.group(1).split())
-            if not content:
-                return None
-            lowered = content.lower()
-            if "project" in lowered:
-                return "project", content
-            if "prefer" in lowered or "preference" in lowered:
-                return "preference", content
-            return "fact", content
-        return None
+        if match is None:
+            return None
+        content = match.group(1).strip().strip("\"'`").strip()
+        if not content or re.match(
+            r"^(?:not|never|don(?:'t|t)|do not|no need to)\b", content, re.I
+        ):
+            return None
+        lowered = content.casefold()
+        if any(
+            term in lowered for term in ("password", "secret", "token", "api key", "private key")
+        ):
+            return None
+        if "prefer" in lowered or "preference" in lowered:
+            return "preference", content
+        if "project" in lowered:
+            if re.search(r"\b(?:called|named|name is|known as)\b", lowered):
+                return "relationship", content
+            return "project_state", content
+        return "fact", content
+
+    def _recall_subject(self, message: str) -> str | None:
+        match = re.match(
+            r"^(?:what is|what's|whats)\s+(?:(?:the )?name of\s+)?my\s+(.+?)\??$",
+            " ".join(message.strip().split()),
+            re.IGNORECASE,
+        )
+        return match.group(1).strip() if match is not None else None
 
     def _decision(
         self,
@@ -443,6 +465,7 @@ class FallbackRouter:
         model_id: str,
         tools: list[str],
         planned_tool_calls: list[PlannedToolCall] | None = None,
+        memory_queries: list[str] | None = None,
         level: int,
         risk: RiskLevel,
         confirmation: bool,
@@ -455,7 +478,7 @@ class FallbackRouter:
             confidence=0.45,
             tools_needed=tools,
             planned_tool_calls=planned_tool_calls or [],
-            memory_queries=[],
+            memory_queries=memory_queries or [],
             permission_level=level,
             risk_level=risk,
             needs_confirmation=confirmation,

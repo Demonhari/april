@@ -13,6 +13,7 @@ from services.brain.intelligence_ladder import (
     ChatMode,
 )
 from services.brain.orchestration.models import StreamEventName
+from services.brain.response_handling import ReasoningStreamFilter, sanitize_model_output
 from services.evolution.feedback_eval import stage_feedback_eval_case
 from skills.playbooks.runner import PlaybookRunResult
 
@@ -178,12 +179,41 @@ class InteractionFlow:
         response = await self.runtime_client.chat(
             model_id=prepared.model_id,
             messages=prepared.messages,
+            options=GenerationOptions(enable_thinking=False),
             request_id=prepared.request_id,
         )
-        await self.memory.add_message(prepared.conversation_id, "assistant", response.content)
+        final_message = sanitize_model_output(response.content)
+        if not final_message:
+            result = AgentResult(
+                status="error",
+                final_message="APRIL did not receive a complete user-facing answer.",
+                conversation_id=prepared.conversation_id,
+                local_citations=prepared.citations,
+                warnings=[
+                    *prepared.warnings,
+                    *response.warnings,
+                    "Model returned only control text.",
+                ],
+                usage=response.usage.model_dump(),
+                metadata=dict(prepared.run_metadata),
+            )
+            agent_run_id = await self.memory.record_agent_run(
+                conversation_id=prepared.conversation_id,
+                agent=prepared.agent_name,
+                status=result.status,
+                model_id=prepared.model_id,
+                summary=prepared.decision.decision_summary,
+                metadata=prepared.run_metadata,
+            )
+            await self._record_routing_outcome(
+                prepared, agent_run_id=agent_run_id, final_status=result.status
+            )
+            await self._update_task_status(prepared, "error")
+            return result
+        await self.memory.add_message(prepared.conversation_id, "assistant", final_message)
         result = AgentResult(
             status="ok",
-            final_message=response.content,
+            final_message=final_message,
             conversation_id=prepared.conversation_id,
             local_citations=prepared.citations,
             warnings=[*prepared.warnings, *response.warnings],
@@ -216,21 +246,28 @@ class InteractionFlow:
             model_id=prepared.model_id,
             messages=prepared.messages,
             options=GenerationOptions(
-                max_output_tokens=self.settings.deep_mode.verified_draft_tokens
+                max_output_tokens=self.settings.deep_mode.verified_draft_tokens,
+                enable_thinking=False,
             ),
             request_id=prepared.request_id,
         )
+        draft = sanitize_model_output(response.content)
         verified = await self.intelligence_ladder.verify_and_revise(
             message=message,
-            initial_answer=response.content,
+            initial_answer=draft,
             model_id=prepared.model_id,
             request_id=prepared.request_id,
         )
-        final_message = verified.final_message
-        await self.memory.add_message(prepared.conversation_id, "assistant", final_message)
+        final_message = sanitize_model_output(verified.final_message)
+        answer_available = bool(final_message)
+        if not answer_available:
+            final_message = "APRIL did not receive a complete user-facing answer."
+            verified.status = "unavailable"
+        if answer_available:
+            await self.memory.add_message(prepared.conversation_id, "assistant", final_message)
         prepared.run_metadata.update(verified.metadata)
         result = AgentResult(
-            status="ok",
+            status="ok" if answer_available else "error",
             final_message=final_message,
             conversation_id=prepared.conversation_id,
             local_citations=prepared.citations,
@@ -252,7 +289,7 @@ class InteractionFlow:
             final_status=result.status,
             regeneration_or_retry=True,
         )
-        await self._update_task_status(prepared, "completed")
+        await self._update_task_status(prepared, "completed" if answer_available else "error")
         return result
 
     async def stream_chat(
@@ -327,7 +364,8 @@ class InteractionFlow:
                 "conversation_id": prepared.conversation_id,
                 "agent": prepared.agent_name,
                 "model_id": prepared.model_id,
-                "routing_method": prepared.decision.routing_method,
+                "routing_method": prepared.route_result.route_source.value,
+                "route_source": prepared.route_result.route_source.value,
                 "citations": [citation.model_dump() for citation in prepared.citations],
                 "run_metadata": prepared.run_metadata,
                 "chat_mode": selection.mode,
@@ -340,7 +378,8 @@ class InteractionFlow:
                 "intent": prepared.decision.intent,
                 "agent": prepared.agent_name,
                 "model_id": prepared.model_id,
-                "routing_method": prepared.decision.routing_method,
+                "routing_method": prepared.route_result.route_source.value,
+                "route_source": prepared.route_result.route_source.value,
                 "decision_summary": prepared.decision.decision_summary,
                 "run_metadata": prepared.run_metadata,
                 "confidence": prepared.decision.confidence,
@@ -427,18 +466,21 @@ class InteractionFlow:
             return
 
         chunks: list[str] = []
+        output_filter = ReasoningStreamFilter()
         finish_reason = "stop"
         try:
             async for raw_event in self.runtime_client.stream(
                 model_id=prepared.model_id,
                 messages=prepared.messages,
+                options=GenerationOptions(enable_thinking=False),
                 request_id=prepared.request_id,
             ):
                 event_name, payload = self._parse_runtime_stream_event(raw_event)
                 if event_name == "token":
-                    text = str(payload.get("text", ""))
-                    chunks.append(text)
-                    yield ("token", {"text": text})
+                    text = output_filter.feed(str(payload.get("text", "")))
+                    if text:
+                        chunks.append(text)
+                        yield ("token", {"text": text})
                 elif event_name == "usage":
                     yield ("usage", payload)
                 elif event_name == "error":
@@ -454,13 +496,18 @@ class InteractionFlow:
             yield ("error", {"message": str(exc)})
             finish_reason = "error"
 
-        content = "".join(chunks)
-        if content:
+        tail = output_filter.finish()
+        if tail:
+            chunks.append(tail)
+            yield ("token", {"text": tail})
+        content = sanitize_model_output("".join(chunks))
+        successful = finish_reason not in {"error", "cancelled"} and bool(content)
+        if successful:
             await self.memory.add_message(prepared.conversation_id, "assistant", content)
         agent_run_id = await self.memory.record_agent_run(
             conversation_id=prepared.conversation_id,
             agent=prepared.agent_name,
-            status="ok" if finish_reason != "error" else "error",
+            status="ok" if successful else "error",
             model_id=prepared.model_id,
             summary=prepared.decision.decision_summary,
             metadata=prepared.run_metadata,
@@ -468,10 +515,12 @@ class InteractionFlow:
         await self._record_routing_outcome(
             prepared,
             agent_run_id=agent_run_id,
-            final_status="ok" if finish_reason != "error" else "error",
+            final_status="ok" if successful else "error",
         )
         await self._update_task_status(
             prepared,
-            "completed" if finish_reason != "error" else "error",
+            "completed" if successful else "error",
         )
+        if not successful and finish_reason not in {"error", "cancelled"}:
+            yield ("error", {"message": "APRIL did not receive a complete user-facing answer."})
         yield ("done", {"finish_reason": finish_reason})

@@ -95,6 +95,7 @@ class FakeBackend(RuntimeBackend):
         stop: list[str] | None = None,
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
+        disable_thinking: bool = False,
     ) -> GenerationResult:
         self.last_response_format = response_format
         if messages and messages[-1].role == "tool":
@@ -119,6 +120,7 @@ class FakeBackend(RuntimeBackend):
         stop: list[str] | None = None,
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
         self.last_response_format = response_format
         async for token in self.stream(

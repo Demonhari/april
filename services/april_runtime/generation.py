@@ -13,6 +13,7 @@ class EffectiveGenerationOptions:
     top_p: float | None
     stop: list[str]
     seed: int | None
+    enable_thinking: bool | None
 
 
 def effective_generation_options(
@@ -31,4 +32,5 @@ def effective_generation_options(
         top_p=overrides.top_p,
         stop=list(overrides.stop),
         seed=overrides.seed,
+        enable_thinking=overrides.enable_thinking,
     )

@@ -388,10 +388,7 @@ class ExecutionFlow:
         return None
 
     def _requires_project(self, decision: BrainDecision) -> bool:
-        if decision.agent == "coding_agent" and decision.intent in {
-            "coding_repo_analysis",
-            "code_modification",
-        }:
+        if decision.intent == "code_modification":
             return True
         repo_tools = {
             "git_status",
@@ -481,6 +478,7 @@ class ExecutionFlow:
             "run_command": ["argv"],
             "repo_indexer": ["repo_path"],
             "test_runner": ["repo_path"],
+            "remember_memory": ["content", "reason"],
             "create_reminder": ["content"],
             "cancel_reminder": ["reminder_id"],
         }

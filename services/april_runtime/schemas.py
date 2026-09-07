@@ -85,6 +85,9 @@ class GenerationOptions(BaseModel):
     top_p: float | None = None
     stop: list[str] = Field(default_factory=list)
     seed: int | None = None
+    # Request-scoped Qwen3 control. It is rendered as ``/no_think`` for Qwen
+    # handlers; it is never passed as an unsupported llama-cpp keyword.
+    enable_thinking: bool | None = None
 
     @field_validator("temperature")
     @classmethod

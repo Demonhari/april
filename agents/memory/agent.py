@@ -83,6 +83,7 @@ class ArchiveAgent:
                 ChatMessage(role="system", content=self.prompt_path.read_text(encoding="utf-8")),
                 ChatMessage(role="user", content=transcript),
             ],
+            options=GenerationOptions(enable_thinking=False),
             response_format=ARCHIVE_CANDIDATE_RESPONSE_FORMAT,
             request_id=request_id,
         )

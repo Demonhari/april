@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from agents.schemas import LocalCitation
 from april_common.errors import PermissionDeniedError
@@ -77,6 +77,11 @@ class ContextFlow:
             )
             decision = route_result.decision
         route_result = await self.routing_reliability.calibrate(route_result)
+        if decision.intent == "memory_lookup" and not decision.memory_queries:
+            subject = self.intelligence_ladder.memory_recall_subject(message, decision)
+            if subject is not None:
+                decision = decision.model_copy(update={"memory_queries": [subject]})
+                route_result = route_result.model_copy(update={"decision": decision})
         agent = self.agent_registry.get(decision.agent)
         if agent is None:
             raise PermissionDeniedError(
@@ -113,6 +118,7 @@ class ContextFlow:
                 if route_result.route_source.value in {"model", "model_repair", "fallback"}
                 else "fallback",
                 "route_source": route_result.route_source.value,
+                "route_provenance": "trusted_v1",
                 "matched_rule": route_result.matched_rule,
                 "fallback_reason": route_result.fallback_reason,
                 "raw_model_confidence": route_result.raw_model_confidence,
@@ -359,14 +365,33 @@ class ContextFlow:
         pending_approval: dict[str, Any] | None = None
         warnings: list[str] = list(prepared_context.warnings)
         memory_write_message: str | None = None
+        memory_write_succeeded = False
+        memory_write_attempted = False
         for planned in planned_calls[: self.settings.permissions.maximum_agent_tool_iterations]:
             missing = self._missing_required_args(planned)
             if missing:
+                if planned.tool == "remember_memory":
+                    memory_write_attempted = True
                 warnings.append(
                     f"Tool {planned.tool} was not run because required arguments are missing: "
                     + ", ".join(missing)
                 )
                 continue
+            if planned.tool == "remember_memory":
+                memory_write_attempted = True
+                planned = planned.model_copy(
+                    update={
+                        "args": {
+                            **planned.args,
+                            "source_conversation_id": active_conversation_id,
+                            **(
+                                {"project_id": project.id}
+                                if project is not None and planned.args.get("project_id") is None
+                                else {}
+                            ),
+                        }
+                    }
+                )
             context = await self.tool_executor.context(
                 request_id=active_request_id,
                 conversation_id=active_conversation_id,
@@ -398,7 +423,20 @@ class ContextFlow:
             if tool_result.stdout:
                 tool_outputs.append(f"{planned.tool}:\n{tool_result.stdout}")
             if planned.tool == "remember_memory" and tool_result.ok:
-                memory_write_message = tool_result.stdout
+                memory_id = tool_result.data.get("memory_id")
+                content_length = tool_result.data.get("content_length")
+                if (
+                    isinstance(memory_id, str)
+                    and memory_id.strip()
+                    and isinstance(content_length, int)
+                    and content_length > 0
+                ):
+                    memory_write_succeeded = True
+                    memory_write_message = tool_result.stdout or "Memory stored successfully."
+                else:
+                    tool_failures.append(
+                        "remember_memory: durable write returned incomplete record evidence"
+                    )
             if planned.tool == "read_file" and tool_result.ok:
                 citations.append(
                     LocalCitation(
@@ -409,6 +447,17 @@ class ContextFlow:
                 )
 
         if decision.intent == "memory_write" and pending_approval is None:
+            if memory_write_succeeded and not tool_failures:
+                memory_status: Literal["ok", "error"] = "ok"
+                final_message = memory_write_message or "Memory stored successfully."
+            else:
+                memory_status = "error"
+                if memory_write_attempted and tool_failures:
+                    final_message = "APRIL could not durably store that memory."
+                elif memory_write_attempted:
+                    final_message = "APRIL could not confirm a durable memory write."
+                else:
+                    final_message = "APRIL did not run the memory write, so nothing was stored."
             return PreparedTurn(
                 request_id=active_request_id,
                 conversation_id=active_conversation_id,
@@ -418,8 +467,8 @@ class ContextFlow:
                 model_id=model_id,
                 messages=[],
                 citations=citations,
-                final_message=memory_write_message or "Stored memory.",
-                final_status="ok",
+                final_message=final_message,
+                final_status=memory_status,
                 warnings=warnings,
                 project_id=project.id if project else None,
                 actor=actor,

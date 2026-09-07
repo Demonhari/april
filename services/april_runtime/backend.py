@@ -76,6 +76,7 @@ class RuntimeBackend(ABC):
         stop: list[str] | None = None,
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
+        disable_thinking: bool = False,
     ) -> GenerationResult:
         # Backends that only implement prompt completion ignore response_format and
         # rely on prompt-plus-validation; chat-capable backends override this.
@@ -99,6 +100,7 @@ class RuntimeBackend(ABC):
         stop: list[str] | None = None,
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
         return self.stream(
             prompt,

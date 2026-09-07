@@ -10,7 +10,8 @@ from agents.base import BaseAgent
 from agents.schemas import AgentResult, LocalCitation, ProposedChange
 from april_common.settings import ConversationContextSettings
 from services.april_runtime.client import RuntimeClient
-from services.april_runtime.schemas import ChatMessage, ResponseFormat
+from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
+from services.brain.response_handling import sanitize_model_output
 from services.memory.schemas import Message, SuspendedAgentRun
 from services.memory.sqlite_memory import SqliteMemory
 from services.permissions.tool_execution import ToolExecutionContext, ToolExecutionService
@@ -197,23 +198,35 @@ class StructuredAgentLoop:
                 messages=loop_messages,
                 request_id=request_id,
             )
+            persisted_output = output.model_dump()
+            if isinstance(output, AgentFinalAnswer):
+                persisted_output["message"] = sanitize_model_output(output.message)
             await self.memory.record_agent_iteration(
                 run_id=run_id,
                 iteration=iteration,
                 model_id=agent.model_id,
                 state=output.type,
-                model_output=output.model_dump(),
+                model_output=persisted_output,
             )
             if isinstance(output, AgentFinalAnswer):
+                final_message = sanitize_model_output(output.message)
+                if not final_message:
+                    await self.memory.mark_agent_run_completed(agent_run_id=run_id, status="error")
+                    return AgentResult(
+                        status="error",
+                        final_message="APRIL did not receive a complete user-facing answer.",
+                        conversation_id=context.conversation_id,
+                        warnings=["Model returned only control text."],
+                    )
                 await self.memory.mark_agent_run_completed(agent_run_id=run_id, status="ok")
                 await self.memory.record_conversation_event(
                     conversation_id=context.conversation_id,
                     event_type="agent_final_answer",
-                    payload={"run_id": run_id, "message": output.message},
+                    payload={"run_id": run_id, "message": final_message},
                 )
                 return AgentResult(
                     status="ok",
-                    final_message=output.message,
+                    final_message=final_message,
                     conversation_id=context.conversation_id,
                     local_citations=output.citations,
                 )
@@ -328,6 +341,7 @@ class StructuredAgentLoop:
         response = await self.runtime_client.chat(
             model_id=agent.model_id,
             messages=messages,
+            options=GenerationOptions(enable_thinking=False),
             response_format=AGENT_OUTPUT_RESPONSE_FORMAT,
             request_id=request_id,
         )
@@ -346,6 +360,7 @@ class StructuredAgentLoop:
                     ),
                     ChatMessage(role="user", content=response.content),
                 ],
+                options=GenerationOptions(enable_thinking=False),
                 response_format=AGENT_OUTPUT_RESPONSE_FORMAT,
                 request_id=request_id,
             )

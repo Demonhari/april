@@ -186,6 +186,7 @@ class LlamaCppBackend(RuntimeBackend):
         stop: list[str] | None = None,
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
+        disable_thinking: bool = False,
     ) -> GenerationResult:
         self._reset_generation_diagnostics()
         if self._llm is None:
@@ -212,7 +213,7 @@ class LlamaCppBackend(RuntimeBackend):
             if format_kwarg is not None:
                 extra["response_format"] = format_kwarg
             return chat_completion(
-                messages=self._message_dicts(messages),
+                messages=self._message_dicts(messages, disable_thinking=disable_thinking),
                 **self._completion_kwargs(
                     max_output_tokens=max_output_tokens,
                     temperature=temperature,
@@ -315,6 +316,7 @@ class LlamaCppBackend(RuntimeBackend):
         stop: list[str] | None = None,
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
         self._reset_generation_diagnostics()
         if self._llm is None:
@@ -354,7 +356,7 @@ class LlamaCppBackend(RuntimeBackend):
             emitted = False
             try:
                 for chunk in chat_completion(
-                    messages=self._message_dicts(messages),
+                    messages=self._message_dicts(messages, disable_thinking=disable_thinking),
                     **chat_kwargs,
                 ):
                     if is_cancelled():
@@ -493,8 +495,17 @@ class LlamaCppBackend(RuntimeBackend):
             kwargs["seed"] = seed
         return kwargs
 
-    def _message_dicts(self, messages: list[ChatMessage]) -> list[dict[str, str]]:
-        return [{"role": message.role, "content": message.content} for message in messages]
+    def _message_dicts(
+        self, messages: list[ChatMessage], *, disable_thinking: bool = False
+    ) -> list[dict[str, str]]:
+        result = [{"role": message.role, "content": message.content} for message in messages]
+        if disable_thinking and self._model is not None and self._model.chat_format == "qwen":
+            for item in reversed(result):
+                if item["role"] == "user":
+                    if "/no_think" not in item["content"]:
+                        item["content"] = f"{item['content']}\n/no_think"
+                    break
+        return result
 
     async def _chat_generation_result(self, output: Any, prompt: str) -> GenerationResult:
         choice = output["choices"][0]

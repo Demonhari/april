@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from agents.schemas import AgentName
+from agents.schemas import InteractiveAgentName
 
 RiskLevel = Literal[
     "none", "read_only", "safe_write", "code_write", "system_action", "external_action"
@@ -74,7 +74,7 @@ class PlannedToolCall(BaseModel):
 
 class BrainDecision(BaseModel):
     intent: CanonicalIntent
-    agent: AgentName
+    agent: InteractiveAgentName
     model_id: str
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     high_stakes: bool = False
@@ -95,6 +95,52 @@ class BrainDecision(BaseModel):
             value = dict(value)
             value["intent"] = _LEGACY_INTENT_ALIASES.get(value["intent"], value["intent"])
         return value
+
+    @model_validator(mode="after")
+    def validate_routing_semantics(self) -> BrainDecision:
+        """Reject schema-valid routes that cannot be valid interactive plans."""
+        tools = {call.tool for call in self.planned_tool_calls} | set(self.tools_needed)
+        known_tools = {
+            "approve_action",
+            "reject_action",
+            "apply_log_cleanup",
+            "cancel_reminder",
+            "create_note",
+            "create_reminder",
+            "document_indexer",
+            "document_search",
+            "git_branch",
+            "git_commit",
+            "git_diff",
+            "git_log",
+            "git_push",
+            "git_status",
+            "list_files",
+            "list_reminders",
+            "open_app",
+            "open_url",
+            "patch_applier",
+            "patch_generator",
+            "plan_log_cleanup",
+            "read_file",
+            "remember_memory",
+            "repo_indexer",
+            "run_command",
+            "search_files",
+            "search_notes",
+            "test_runner",
+            "write_file",
+        }
+        unknown = sorted(tools - known_tools)
+        if unknown:
+            raise ValueError(f"Unknown routing tool(s): {', '.join(unknown)}")
+        if self.intent == "memory_write" and "remember_memory" not in tools:
+            raise ValueError("memory_write routes must request remember_memory")
+        if "remember_memory" in tools and self.intent != "memory_write":
+            raise ValueError("remember_memory is only valid for memory_write")
+        if self.intent == "memory_write" and self.agent != "general_agent":
+            raise ValueError("interactive memory writes must use general_agent")
+        return self
 
 
 class RouteSource(StrEnum):

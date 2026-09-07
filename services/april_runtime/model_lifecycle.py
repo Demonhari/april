@@ -620,7 +620,13 @@ class ModelLifecycle:
         except BaseException:
             state.active_requests = max(0, state.active_requests - 1)
             raise
-        prompt = render_prompt(state.model, context.messages, metadata=metadata)
+        disable_thinking = options.enable_thinking is False
+        prompt = render_prompt(
+            state.model,
+            context.messages,
+            metadata=metadata,
+            disable_thinking=disable_thinking,
+        )
         lock = (
             state.generation_lock
             if not state.backend.supports_concurrent_generation
@@ -629,16 +635,29 @@ class ModelLifecycle:
         async with lock:
             start = time.monotonic()
             try:
-                result = await state.backend.generate_messages(
-                    prompt,
-                    messages=context.messages,
-                    temperature=options.temperature,
-                    max_output_tokens=options.max_output_tokens,
-                    top_p=options.top_p,
-                    stop=options.stop,
-                    seed=options.seed,
-                    response_format=request.response_format,
-                )
+                if request.options.enable_thinking is not None:
+                    result = await state.backend.generate_messages(
+                        prompt,
+                        messages=context.messages,
+                        temperature=options.temperature,
+                        max_output_tokens=options.max_output_tokens,
+                        top_p=options.top_p,
+                        stop=options.stop,
+                        seed=options.seed,
+                        response_format=request.response_format,
+                        disable_thinking=disable_thinking,
+                    )
+                else:
+                    result = await state.backend.generate_messages(
+                        prompt,
+                        messages=context.messages,
+                        temperature=options.temperature,
+                        max_output_tokens=options.max_output_tokens,
+                        top_p=options.top_p,
+                        stop=options.stop,
+                        seed=options.seed,
+                        response_format=request.response_format,
+                    )
             except Exception as exc:
                 state.state = "error"
                 state.load_error = str(exc)
@@ -769,7 +788,13 @@ class ModelLifecycle:
         except BaseException:
             state.active_requests = max(0, state.active_requests - 1)
             raise
-        prompt = render_prompt(state.model, context.messages, metadata=metadata)
+        disable_thinking = options.enable_thinking is False
+        prompt = render_prompt(
+            state.model,
+            context.messages,
+            metadata=metadata,
+            disable_thinking=disable_thinking,
+        )
         input_tokens = context.input_tokens
         output_tokens = 0
         start = time.monotonic()
@@ -784,16 +809,30 @@ class ModelLifecycle:
                 {"context_truncated": context.truncated, "context_budget": context.metadata()},
             )
             try:
-                async for token in state.backend.stream_messages(
-                    prompt,
-                    messages=context.messages,
-                    temperature=options.temperature,
-                    max_output_tokens=options.max_output_tokens,
-                    top_p=options.top_p,
-                    stop=options.stop,
-                    seed=options.seed,
-                    response_format=request.response_format,
-                ):
+                if request.options.enable_thinking is not None:
+                    token_stream = state.backend.stream_messages(
+                        prompt,
+                        messages=context.messages,
+                        temperature=options.temperature,
+                        max_output_tokens=options.max_output_tokens,
+                        top_p=options.top_p,
+                        stop=options.stop,
+                        seed=options.seed,
+                        response_format=request.response_format,
+                        disable_thinking=disable_thinking,
+                    )
+                else:
+                    token_stream = state.backend.stream_messages(
+                        prompt,
+                        messages=context.messages,
+                        temperature=options.temperature,
+                        max_output_tokens=options.max_output_tokens,
+                        top_p=options.top_p,
+                        stop=options.stop,
+                        seed=options.seed,
+                        response_format=request.response_format,
+                    )
+                async for token in token_stream:
                     output_tokens += len(await state.backend.tokenize(token))
                     yield "token", {"text": token}
             except asyncio.CancelledError:

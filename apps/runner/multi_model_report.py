@@ -61,6 +61,10 @@ class PerModelResult(BaseModel):
     structured_brain_json_success: bool | None = None
     structured_brain_json_fallback: bool | None = None
     routing: RoutingReport | None = None
+    # A separate direct Runtime call that bypasses deterministic shortcuts and
+    # executes no tools. This is the genuine model-only routing axis; ``routing``
+    # remains the end-to-end API result.
+    model_only_routing: RoutingReport | None = None
     routing_evaluation_required: bool = False
     routing_error_code: str | None = None
     # Specialist-only role-appropriate smoke prompt (None for the brain).
@@ -196,6 +200,12 @@ def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThres
             failures.append(f"{label}: routing schema-invalid decisions present")
         elif result.routing.fallback_count > 0:
             failures.append(f"{label}: routing fallback decisions present")
+        elif result.routing.unknown_provenance_count > 0:
+            failures.append(f"{label}: routing provenance is incomplete")
+        elif result.model_only_routing is None:
+            failures.append(f"{label}: model-only routing report missing")
+        elif result.model_only_routing.passed != result.model_only_routing.total:
+            failures.append(f"{label}: model-only routing decisions failed")
     if result.role == "brain" and result.routing is not None and result.routing.total > 0:
         min_accuracy = thresholds.min_routing_accuracy
         if min_accuracy is not None and result.routing.accuracy < min_accuracy:

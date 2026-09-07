@@ -43,6 +43,7 @@ class BrainEvalResult(BaseModel):
     expected_risk_level: str | None = None
     expected_needs_confirmation: bool | None = None
     actual: dict[str, Any] = Field(default_factory=dict)
+    route_source: str | None = None
     detail: str = ""
     mismatch_codes: list[str] = Field(default_factory=list)
 
@@ -94,7 +95,7 @@ def _evaluate_case(
         case.expected_needs_confirmation,
         actual.get("needs_confirmation"),
     )
-    actual_method = actual.get("routing_method")
+    actual_method = _evaluation_route_source(actual)
     if allow_fallback:
         # Fake/fallback eval: the fixture's expected routing_method (e.g. fallback)
         # is authoritative.
@@ -105,8 +106,8 @@ def _evaluate_case(
         # failure. Only a real model/model-repair route is acceptable.
         if actual_method == "fallback":
             mismatches.append("routing_method was fallback (model JSON unusable or runtime failed)")
-        elif actual_method not in {"model", "model_repair"}:
-            mismatches.append(f"routing_method expected model/model_repair, got {actual_method!r}")
+        elif actual_method not in {"deterministic", "model", "model_repair"}:
+            mismatches.append(f"trusted routing provenance is unknown: {actual_method!r}")
     routing_ok = not mismatches
     mismatch_codes = _mismatch_codes(
         case,
@@ -127,6 +128,9 @@ def _evaluate_case(
         expected_risk_level=case.expected_risk_level,
         expected_needs_confirmation=case.expected_needs_confirmation,
         actual=actual,
+        route_source=(
+            actual.get("route_source") if isinstance(actual.get("route_source"), str) else None
+        ),
         detail="" if schema_valid and routing_ok else "; ".join(mismatches or ["schema invalid"]),
         mismatch_codes=mismatch_codes,
     )
@@ -158,11 +162,11 @@ def _mismatch_codes(
         case.expected_tools
     ):
         codes.append("tool_set_mismatch")
-    method = actual.get("routing_method")
+    method = _evaluation_route_source(actual)
     if allow_fallback:
         if case.expected_routing_method is not None and method != case.expected_routing_method:
             codes.append("routing_method_mismatch")
-    elif method not in {"model", "model_repair"}:
+    elif method not in {"deterministic", "model", "model_repair"}:
         codes.append("fallback_route" if method == "fallback" else "routing_provenance_invalid")
     return codes
 
@@ -196,7 +200,34 @@ def _validated_decision(value: Any) -> tuple[dict[str, Any], bool]:
         decision = BrainDecision.model_validate(value)
     except ValueError:
         return value if isinstance(value, dict) else {}, False
-    return decision.model_dump(), True
+    normalized = decision.model_dump()
+    # route_source is trusted only when it came from the redacted, persisted
+    # orchestrator event. A model cannot manufacture this marker in its own JSON.
+    if isinstance(value, dict) and value.get("route_provenance") in {
+        "trusted_v1",
+        "trusted_model_only_v1",
+    }:
+        source = value.get("route_source")
+        if source in {"deterministic", "model", "model_repair", "fallback"}:
+            normalized["route_source"] = source
+            normalized["route_provenance"] = "trusted_v1"
+    return normalized, True
+
+
+def _evaluation_route_source(actual: dict[str, Any]) -> str | None:
+    source = actual.get("route_source")
+    if actual.get("route_provenance") in {"trusted_v1", "trusted_model_only_v1"} and source in {
+        "deterministic",
+        "model",
+        "model_repair",
+        "fallback",
+    }:
+        return str(source)
+    # Compatibility for in-memory/unit callers and pre-provenance decisions.
+    # Persisted reports without the trusted marker are handled as unknown by the
+    # report reader rather than being upgraded to a real-model claim.
+    method = actual.get("routing_method")
+    return str(method) if method in {"model", "model_repair", "fallback"} else None
 
 
 def _expect(mismatches: list[str], key: str, expected: object, actual: object) -> None:
