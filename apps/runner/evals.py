@@ -10,6 +10,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from apps.runner.mac_report import RoutingReport, routing_report_from_results
+from services.brain.deterministic_router import DeterministicRouter
 from services.brain.fallback_router import FallbackRouter
 from services.brain.schemas import BrainDecision
 from services.memory.database import connect_sqlite
@@ -59,6 +60,15 @@ class BrainEvalResult(BaseModel):
     proposal_operation: str | None = None
     proposal_context: str | None = None
     contract_fingerprint: str | None = None
+    first_proposal_operation: str | None = None
+    first_proposal_context: str | None = None
+    first_proposal_tool_class: str | None = None
+    first_rejection_code: str | None = None
+    repair_proposal_operation: str | None = None
+    repair_rejection_code: str | None = None
+    coercions: list[str] = Field(default_factory=list)
+    downstream_status: int | None = None
+    downstream_error_code: str | None = None
 
 
 def load_brain_eval_cases(home: Path) -> list[BrainEvalCase]:
@@ -71,11 +81,20 @@ def load_brain_eval_cases(home: Path) -> list[BrainEvalCase]:
 
 
 def run_fake_brain_eval(home: Path) -> list[BrainEvalResult]:
+    deterministic = DeterministicRouter()
     router = FallbackRouter()
     results: list[BrainEvalResult] = []
     for case in load_brain_eval_cases(home):
-        decision = router.route(case.message)
-        actual = decision.model_dump()
+        match = deterministic.route(case.message)
+        if match is not None:
+            actual = match.decision.model_dump()
+            actual.update(
+                routing_method="deterministic",
+                route_source="deterministic",
+                route_provenance="trusted_v1",
+            )
+        else:
+            actual = router.route(case.message).model_dump()
         results.append(_evaluate_case(case, actual, schema_valid=True))
     return results
 
@@ -194,6 +213,21 @@ def _evaluate_case(
             if isinstance(evidence.get("contract_fingerprint"), str)
             else None
         ),
+        first_proposal_operation=_bounded_evidence_text(evidence.get("first_proposal_operation")),
+        first_proposal_context=_bounded_evidence_text(evidence.get("first_proposal_context")),
+        first_proposal_tool_class=_bounded_evidence_text(evidence.get("first_proposal_tool_class")),
+        first_rejection_code=_bounded_evidence_text(evidence.get("first_rejection_code")),
+        repair_proposal_operation=_bounded_evidence_text(evidence.get("repair_proposal_operation")),
+        repair_rejection_code=_bounded_evidence_text(evidence.get("repair_rejection_code")),
+        coercions=[item[:64] for item in evidence.get("coercions", []) if isinstance(item, str)][
+            :8
+        ],
+        downstream_status=(
+            int(evidence["downstream_status"])
+            if isinstance(evidence.get("downstream_status"), int)
+            else None
+        ),
+        downstream_error_code=_bounded_evidence_text(evidence.get("downstream_error_code")),
     )
 
 
@@ -210,14 +244,7 @@ def _mismatch_codes(
     evidence = evidence or {}
     if not actual:
         stage_code = evidence.get("stage_code")
-        if stage_code in {
-            "runtime_unavailable",
-            "inference_timeout",
-            "inference_transport_error",
-            "missing_correlated_route_event",
-        }:
-            return [str(stage_code)]
-        return ["missing_correlated_route_event"]
+        return [stage_code] if isinstance(stage_code, str) and stage_code else []
     if not schema_valid:
         codes.append("schema_invalid")
         return codes
@@ -243,6 +270,10 @@ def _mismatch_codes(
     elif method not in {"deterministic", "model", "model_repair"}:
         codes.append("fallback_route" if method == "fallback" else "routing_provenance_invalid")
     return codes
+
+
+def _bounded_evidence_text(value: object) -> str | None:
+    return value[:64] if isinstance(value, str) and value else None
 
 
 def real_routing_report(

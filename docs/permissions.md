@@ -17,6 +17,14 @@ APRIL requires explicit approval for Level 3 and above. The model cannot lower p
 
 Unknown tools are denied. Tools not allowed for the selected agent are denied.
 
+Before model routing, APRIL's deterministic safety layer recognizes bounded
+sentences for prompt injection, secrets, path escapes, package installation,
+external actions, log cleanup, command execution, and unsupported tools. These
+routes derive their intent and risk from application policy; educational
+questions beginning with forms such as “how” or “why” do not become actions.
+The model remains advisory, and the deterministic permission engine and exact
+approval flow remain authoritative.
+
 Every tool execution is scoped by `ToolExecutionContext`. For project-scoped
 tools, APRIL overwrites or derives roots, working directories, and repository
 arguments from the selected project. Direct API calls cannot point repository

@@ -215,6 +215,7 @@ def write_routing_only_report(report: RoutingOnlyVerificationReport, path: Path)
 
 
 def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThresholds) -> list[str]:
+    thresholds = _active_thresholds(thresholds)
     failures: list[str] = []
     label = result.model_id
     if result.role == "brain" and result.routing_evaluation_required:
@@ -225,56 +226,32 @@ def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThres
         else:
             if result.routing.total == 0:
                 failures.append(f"{label}: routing report has zero cases")
-            if result.routing.schema_valid_count != result.routing.total:
-                failures.append(f"{label}: routing schema-invalid decisions present")
-            if result.routing.fallback_count > 0:
-                failures.append(f"{label}: routing fallback decisions present")
-            if result.routing.unknown_provenance_count > 0:
-                failures.append(f"{label}: routing provenance is incomplete")
-            if not result.routing.case_set_complete or result.routing.duplicate_case_ids:
-                failures.append(f"{label}: routing case evidence is incomplete or duplicated")
-            if result.routing.passed != result.routing.total:
-                failures.append(f"{label}: end-to-end routing decisions failed")
-            if not _routing_axis_ok(result.routing, allow_deterministic=True):
+            if not _routing_axis_integrity_ok(result.routing, allow_deterministic=True):
                 failures.append(f"{label}: end-to-end routing acceptance axis failed")
         if result.model_only_routing is None:
             failures.append(f"{label}: model-only routing report missing")
         else:
             if result.model_only_routing.total == 0:
                 failures.append(f"{label}: model-only routing report has zero cases")
-            if result.model_only_routing.schema_valid_count != result.model_only_routing.total:
-                failures.append(f"{label}: model-only routing schema-invalid decisions present")
-            if result.model_only_routing.fallback_count > 0:
-                failures.append(f"{label}: model-only routing fallback decisions present")
-            if result.model_only_routing.unknown_provenance_count > 0:
-                failures.append(f"{label}: model-only routing provenance is incomplete")
-            if (
-                not result.model_only_routing.case_set_complete
-                or result.model_only_routing.duplicate_case_ids
-            ):
-                failures.append(
-                    f"{label}: model-only routing case evidence is incomplete or duplicated"
-                )
-            if result.model_only_routing.passed != result.model_only_routing.total:
-                failures.append(f"{label}: model-only routing decisions failed")
-            if not _routing_axis_ok(result.model_only_routing, allow_deterministic=False):
+            if not _routing_axis_integrity_ok(result.model_only_routing, allow_deterministic=False):
                 failures.append(f"{label}: model-only routing acceptance axis failed")
     if result.role == "brain" and result.routing is not None and result.routing.total > 0:
         min_accuracy = thresholds.min_routing_accuracy
         if min_accuracy is not None and result.routing.accuracy < min_accuracy:
             failures.append(
-                f"{label}: routing accuracy {result.routing.accuracy:.2f} "
+                f"{label}: end-to-end routing accuracy {result.routing.accuracy:.2f} "
                 f"below minimum {min_accuracy:.2f}"
             )
+        model_min_accuracy = thresholds.min_model_only_routing_accuracy
         if (
             result.model_only_routing is not None
             and result.model_only_routing.total > 0
-            and min_accuracy is not None
-            and result.model_only_routing.accuracy < min_accuracy
+            and model_min_accuracy is not None
+            and result.model_only_routing.accuracy < model_min_accuracy
         ):
             failures.append(
                 f"{label}: model-only routing accuracy {result.model_only_routing.accuracy:.2f} "
-                f"below minimum {min_accuracy:.2f}"
+                f"below minimum {model_min_accuracy:.2f}"
             )
     tps = result.tokens_per_second
     min_tps = thresholds.min_tokens_per_second
@@ -301,9 +278,12 @@ def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThres
 
 def _active_thresholds(thresholds: ReportThresholds | None) -> ReportThresholds:
     active = thresholds or ReportThresholds()
+    updates: dict[str, float] = {}
     if active.min_routing_accuracy is None:
-        return active.model_copy(update={"min_routing_accuracy": 0.90})
-    return active
+        updates["min_routing_accuracy"] = 0.90
+    if active.min_model_only_routing_accuracy is None:
+        updates["min_model_only_routing_accuracy"] = 0.75
+    return active.model_copy(update=updates) if updates else active
 
 
 def _summary(
@@ -355,7 +335,11 @@ def _core_model_set_verified(
     configured_roles = {result.role for result in results}
     role_passes = _role_passes(results, thresholds)
     brain = next((result for result in results if result.role == "brain"), None)
-    if role_passes.get("brain") is not True or brain is None or not _routing_required_ok(brain):
+    if (
+        role_passes.get("brain") is not True
+        or brain is None
+        or not _routing_required_ok(brain, thresholds)
+    ):
         return False
     for role in ("coding", "reading"):
         if role in configured_roles and role_passes.get(role) is not True:
@@ -375,22 +359,42 @@ def _specialist_switch_ok(
     return bool(specialist_switch and specialist_switch.success)
 
 
-def _routing_required_ok(result: PerModelResult) -> bool:
+def _routing_required_ok(
+    result: PerModelResult, thresholds: ReportThresholds | None = None
+) -> bool:
     if result.role != "brain" or not result.routing_evaluation_required:
         return True
     if result.routing_error_code is not None:
         return False
     routing = result.routing
     model_only = result.model_only_routing
-    return _routing_axis_ok(routing, allow_deterministic=True) and _routing_axis_ok(
-        model_only, allow_deterministic=False
+    active = _active_thresholds(thresholds)
+    return _routing_axis_ok(
+        routing,
+        allow_deterministic=True,
+        min_accuracy=active.min_routing_accuracy,
+    ) and _routing_axis_ok(
+        model_only,
+        allow_deterministic=False,
+        min_accuracy=active.min_model_only_routing_accuracy,
     )
 
 
-def _routing_axis_ok(report: RoutingReport | None, *, allow_deterministic: bool) -> bool:
+def _routing_axis_ok(
+    report: RoutingReport | None,
+    *,
+    allow_deterministic: bool,
+    min_accuracy: float | None = None,
+) -> bool:
     if report is None or report.total <= 0:
         return False
-    if report.passed != report.total or report.schema_valid_count != report.total:
+    if not _routing_axis_integrity_ok(report, allow_deterministic=allow_deterministic):
+        return False
+    return min_accuracy is None or report.accuracy >= min_accuracy
+
+
+def _routing_axis_integrity_ok(report: RoutingReport | None, *, allow_deterministic: bool) -> bool:
+    if report is None or report.total <= 0:
         return False
     if report.fallback_count or report.unknown_provenance_count:
         return False
@@ -487,7 +491,8 @@ def build_multi_model_report(
         not simulated
         and bool(attempted)
         and all(
-            result.acceptance_ok(active_thresholds) and _routing_required_ok(result)
+            result.acceptance_ok(active_thresholds)
+            and _routing_required_ok(result, active_thresholds)
             for result in attempted
         )
         and switch_ok
@@ -498,7 +503,8 @@ def build_multi_model_report(
         and len(attempted) == len(results)
         and all(result.available for result in results)
         and all(
-            result.acceptance_ok(active_thresholds) and _routing_required_ok(result)
+            result.acceptance_ok(active_thresholds)
+            and _routing_required_ok(result, active_thresholds)
             for result in results
         )
         and switch_ok

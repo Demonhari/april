@@ -296,66 +296,135 @@ class DeterministicRouter:
         )
 
     def _safety_route(self, text: str) -> DeterministicMatch | None:
-        rules: tuple[tuple[str, str, int, RiskLevel, str], ...] = (
+        question = re.match(
+            r"^(?:how|what|why|when|which|where|explain|describe|tell me|is it|"
+            r"can you explain|should i)\b",
+            text,
+        )
+        action_guarded = bool(question)
+        rules: tuple[tuple[str, str, AgentName, int, RiskLevel, bool, list[str], str], ...] = (
             (
-                "safety.prompt_injection",
-                r"(?:ignore|disregard)\s+(?:all\s+)?(?:previous|system|developer)\s+instructions"
-                r"|reveal\s+(?:the\s+)?system\s+prompt",
+                "prompt_injection",
+                r"\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier|system|developer)\s+(?:instructions|prompts?|rules)\b|\breveal\s+(?:the\s+)?system\s+prompt\b",
+                "general_agent",
                 0,
                 "none",
+                False,
+                [],
                 "Prompt-injection text cannot override APRIL policy.",
             ),
             (
-                "safety.path_escape",
-                r".*(?:\.\./|/etc/passwd|\.ssh(?:/|\b)|id_rsa\b|keychain|browser profile).*",
+                "sensitive_content",
+                r"\bsk-[a-z0-9_-]{12,}\b|\b(?:api[ _-]?key|password|passphrase|"
+                r"secret|access token|auth token|private key)\s*(?:is|=|:)\s*\S",
+                "general_agent",
+                0,
+                "none",
+                False,
+                [],
+                "Handle sensitive content without taking an unsafe action.",
+            ),
+            (
+                "path_escape_attempt",
+                r"\.\./|/etc/passwd|(?:^|[\s/])\.ssh(?:/|\b)|\bid_rsa\b|"
+                r"\bkeychain\b|\bbrowser profile\b",
+                "general_agent",
                 1,
                 "read_only",
+                False,
+                [],
                 "Sensitive or escaped filesystem paths are denied.",
             ),
             (
-                "safety.package_install",
-                r"(?:pip|npm|brew)\s+install(?:\s+.+)?|install\s+(?:a\s+)?package(?:\s+.+)?",
+                "package_install",
+                r"\b(?:pip3?|npm|pnpm|yarn|brew|apt(?:-get)?|cargo|gem)\s+install\b|\binstall\b.{0,60}\b(?:with|via|using)\s+(?:pip3?|npm|brew|apt)\b",
+                "system_action_agent",
                 5,
                 "external_action",
-                "Package installation is unsupported.",
+                True,
+                [],
+                "Package installation requires explicit approval.",
             ),
             (
-                "safety.external_action",
-                r"(?:git\s+push|deploy(?:\s+.+)?|send\s+(?:an?\s+)?email(?:\s+.+)?"
-                r"|publish(?:\s+.+)?|pay(?:ment|\s+.+))",
+                "external_action",
+                r"\bgit\s+push\b|^(?:please\s+)?push\b.{0,60}\b(?:branch|commits?|"
+                r"github|origin|remote)\b|^(?:please\s+)?deploy\b|\band\s+deploy\b|"
+                r"\bsend\s+(?:an?\s+|the\s+)?(?:e-?mail|message|sms|text message)\b|"
+                r"^(?:please\s+)?e-?mail\s+\w+|\bpay\s+(?:the\s+|my\s+)?"
+                r"(?:invoice|bill)\b|\bmake\s+(?:a\s+)?payment\b|\band\s+publish\b|"
+                r"^(?:please\s+)?publish\b",
+                "system_action_agent",
                 5,
                 "external_action",
-                "External actions are disabled by policy.",
+                True,
+                [],
+                "External actions require explicit approval.",
             ),
             (
-                "safety.destructive",
-                r"(?:rm\s+-rf|wipe|erase|delete)\s+(?:everything|all(?:\s+files)?|/)(?:\s+.*)?",
+                "log_cleanup",
+                r"^(?:please\s+)?(?:delete|remove|clear|clean(?:\s+up)?|purge)\b.{0,40}\blogs?\b",
+                "system_action_agent",
                 4,
                 "system_action",
-                "Broad destructive actions are unsupported.",
+                True,
+                ["plan_log_cleanup"],
+                "Plan scoped local log cleanup for approval.",
             ),
             (
-                "safety.unknown_tool",
-                r"(?:use|run|call)\s+(?:the\s+)?(?:unknown|unsupported)\s+tool(?:\s+.+)?"
-                r"|(?:use|run|call)\s+plasma_tool(?:\s+.*)?",
+                "command_execution",
+                r"^(?:please\s+)?(?:run|execute)\s+(?:pytest|the\s+tests?|tests?|the\s+test\s+suite|ruff|mypy|make\b)",
+                "system_action_agent",
+                3,
+                "code_write",
+                True,
+                ["run_command"],
+                "Run the configured command through approval.",
+            ),
+            (
+                "unsupported_tool",
+                r"\b(?:unknown|unsupported)\s+(?:tool|\w+_tool)\b|\b(?:use|run|call|invoke)\s+(?:the\s+)?\w+_tool\b",
+                "general_agent",
                 0,
                 "none",
+                False,
+                [],
                 "Unknown tools are denied.",
             ),
         )
-        for rule, pattern, level, risk, summary in rules:
-            if re.fullmatch(pattern, text):
-                agent: AgentName = "system_action_agent" if level >= 4 else "general_agent"
+        for name, pattern, agent, level, risk, confirmation, tools, summary in rules:
+            if action_guarded and name in {
+                "package_install",
+                "external_action",
+                "log_cleanup",
+                "command_execution",
+            }:
+                continue
+            if re.search(pattern, text):
                 return self._match(
-                    rule.replace("safety.", ""),
+                    name,
                     agent,
                     "april-brain",
                     level,
                     risk,
-                    level >= 3,
+                    confirmation,
                     summary,
-                    rule=rule,
+                    tools=tools,
+                    rule=f"safety.{name}",
                 )
+        if re.search(
+            r"(?:rm\s+-rf|wipe|erase|delete)\s+(?:everything|all(?:\s+files)?|/)(?:\s+.*)?",
+            text,
+        ):
+            return self._match(
+                "destructive_action",
+                "system_action_agent",
+                "april-brain",
+                4,
+                "system_action",
+                True,
+                "Broad destructive actions are unsupported.",
+                rule="safety.destructive",
+            )
         return None
 
     def _tool_match(

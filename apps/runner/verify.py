@@ -157,12 +157,14 @@ def run_routing_only_verification(
     *,
     max_output_tokens: int = 192,
     timeout: float = 180.0,
+    thresholds: ReportThresholds | None = None,
 ) -> RoutingOnlyVerificationReport:
     verifier = AllConfiguredModelsVerifier(
         home=home,
         require_real_model=True,
         max_output_tokens=max_output_tokens,
         timeout=timeout,
+        thresholds=thresholds,
         routing_evaluation=True,
     )
     return verifier.run_routing_only()

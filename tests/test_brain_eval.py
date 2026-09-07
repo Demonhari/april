@@ -195,6 +195,24 @@ def test_empty_routing_evidence_uses_stage_code_category() -> None:
     assert result.routing_failure_code is None
 
 
+def test_empty_repair_failure_is_inference_failure_not_unknown_provenance() -> None:
+    case = BrainEvalCase(
+        id="c1",
+        message="hello",
+        expected_intent="normal_conversation",
+        expected_agent="general_agent",
+    )
+    report = real_routing_report(
+        [case],
+        [{}],
+        [{"stage_code": "repair_failure", "first_rejection_code": "schema_rejection:tool_class"}],
+    )
+    assert report.cases[0].mismatch_codes == ["repair_failure"]
+    assert report.inference_failed_count == 1
+    assert report.unknown_provenance_count == 0
+    assert report.rejection_count == 1
+
+
 def test_real_routing_report_fails_schema_invalid_matching_strings() -> None:
     case = BrainEvalCase(
         id="c1",

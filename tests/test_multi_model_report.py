@@ -310,8 +310,8 @@ def test_required_routing_reports_both_end_to_end_and_model_only_failures() -> N
     brain.routing = RoutingReport(total=10, passed=8, accuracy=0.8)
     brain.model_only_routing = RoutingReport(total=10, passed=7, accuracy=0.7)
     failures = per_model_threshold_failures(brain, ReportThresholds(min_routing_accuracy=0.9))
-    assert any("end-to-end routing decisions failed" in item for item in failures)
-    assert any("model-only routing decisions failed" in item for item in failures)
+    assert any("end-to-end routing accuracy" in item for item in failures)
+    assert any("model-only routing accuracy" in item for item in failures)
     assert any("routing accuracy 0.80" in item for item in failures)
     assert any("model-only routing accuracy 0.70" in item for item in failures)
 

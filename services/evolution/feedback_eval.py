@@ -72,22 +72,25 @@ async def stage_feedback_eval_case(
     )
     if user_message is None:
         return None
-    if assistant_message is None and kind != "approval_denied":
-        return None
     policy = MemoryPolicy()
     reason = record.reason or ""
-    if any(policy.is_sensitive(text) for text in (user_message, assistant_message or "", reason)):
+    sensitive = any(
+        policy.is_sensitive(text) for text in (user_message, assistant_message or "", reason)
+    )
+    if sensitive and audit is not None:
         # Sensitive content is excluded entirely per the existing memory policy.
-        if audit is not None:
-            audit.write(
-                {
-                    "event_type": "feedback_eval_case_skipped",
-                    "actor": "feedback_eval",
-                    "kind": kind,
-                    "detail": "sensitive content excluded by policy",
-                    "conversation_id": record.conversation_id,
-                }
-            )
+        audit.write(
+            {
+                "event_type": "feedback_eval_case_skipped",
+                "actor": "feedback_eval",
+                "kind": kind,
+                "detail": "sensitive content excluded by policy",
+                "conversation_id": record.conversation_id,
+            }
+        )
+    if sensitive:
+        return None
+    if assistant_message is None and kind != "approval_denied":
         return None
     case = {
         "case_type": "negative_feedback",

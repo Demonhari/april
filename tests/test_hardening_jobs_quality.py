@@ -465,6 +465,8 @@ async def test_quality_worker_populates_real_model_metrics_without_router_shortc
         tool_worker=_FixtureToolWorker(),  # type: ignore[arg-type]
     )
     assert result["routing_accuracy"] == 1.0
+    assert result["routing"]["semantic_passed"] == result["routing"]["fixture_count"]
+    assert result["routing"]["policy_route_accuracy"] < result["routing"]["aggregate_accuracy"]
     assert result["strict_json_first_pass_reliability"] == 1.0
     assert result["structured_json_reliability"] == 1.0
     assert result["coding_fixture_pass_rate"] == 1.0

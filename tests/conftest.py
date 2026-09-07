@@ -269,6 +269,7 @@ class FakeRuntimeClient:
         self.calls.append(snapshot)
         joined = "\n".join(message.content for message in messages)
         lower = joined.lower()
+        request_lower = messages[-1].content.lower() if messages else lower
         if "summarize only the supplied conversation content" in lower:
             content = json.dumps(
                 {
@@ -283,7 +284,7 @@ class FakeRuntimeClient:
         elif "return exactly one json object with type final_answer" in lower:
             content = self._structured_response(joined, lower)
         elif "route this request" in lower or "route the user request" in lower:
-            if "apply the fix" in lower:
+            if "apply the fix" in request_lower:
                 content = (
                     '{"intent":"code_modification","agent":"coding_agent","model_id":"april-coding",'
                     '"tools_needed":["patch_generator","patch_applier"],'
@@ -292,7 +293,7 @@ class FakeRuntimeClient:
                     '"task_steps":["Generate patch","Request exact patch approval"],'
                     '"decision_summary":"Code write request"}'
                 )
-            elif "animation" in lower:
+            elif "animation" in request_lower:
                 content = (
                     '{"intent":"coding_repo_analysis","agent":"coding_agent","model_id":"april-coding",'
                     '"tools_needed":["search_files","read_file"],"memory_queries":[],"permission_level":1,'
@@ -300,7 +301,7 @@ class FakeRuntimeClient:
                     '"task_steps":["Search files","Read relevant file"],'
                     '"decision_summary":"Read-only repo analysis"}'
                 )
-            elif "summarize" in lower or "readme" in lower:
+            elif "summarize" in request_lower or "readme" in request_lower:
                 content = (
                     '{"intent":"document_reading","agent":"reading_agent",'
                     '"model_id":"april-reading","tools_needed":["read_file"],'
@@ -308,7 +309,11 @@ class FakeRuntimeClient:
                     '"needs_confirmation":false,"task_steps":["Read file"],'
                     '"decision_summary":"Read requested local document"}'
                 )
-            elif "reason through" in lower or "trade-off" in lower or "compare approaches" in lower:
+            elif (
+                "reason through" in request_lower
+                or "trade-off" in request_lower
+                or "compare approaches" in request_lower
+            ):
                 content = (
                     '{"intent":"deep_reasoning","agent":"reasoning_agent",'
                     '"model_id":"april-brain","tools_needed":[],'
@@ -316,7 +321,7 @@ class FakeRuntimeClient:
                     '"needs_confirmation":false,"task_steps":["Analyze trade-offs"],'
                     '"decision_summary":"Deep reasoning and architecture analysis"}'
                 )
-            elif "remind me to stand up" in lower or "remind me" in lower:
+            elif "remind me to stand up" in request_lower or "remind me" in request_lower:
                 content = json.dumps(
                     {
                         "intent": "reminders",
@@ -338,7 +343,7 @@ class FakeRuntimeClient:
                         "decision_summary": "Local reminder request.",
                     }
                 )
-            elif "remember i prefer concise answers" in lower:
+            elif "remember i prefer concise answers" in request_lower:
                 content = json.dumps(
                     {
                         "intent": "memory_write",

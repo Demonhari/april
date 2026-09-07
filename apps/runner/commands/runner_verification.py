@@ -93,6 +93,9 @@ def verify(
     ),
     max_rss_mb: float | None = typer.Option(None, "--max-rss-mb", min=0.0),
     min_routing_accuracy: float = typer.Option(0.90, "--min-routing-accuracy", min=0.0, max=1.0),
+    min_model_only_routing_accuracy: float = typer.Option(
+        0.75, "--min-model-only-routing-accuracy", min=0.0, max=1.0
+    ),
     max_output_tokens: int = typer.Option(32, "--max-output-tokens", min=1, max=4096),
     timeout: float = typer.Option(180.0, "--timeout", min=1.0),
     candidate_adapter_model_id: str | None = typer.Option(
@@ -112,6 +115,7 @@ def verify(
         max_first_token_latency_seconds=max_first_token_latency_seconds,
         max_rss_mb=max_rss_mb,
         min_routing_accuracy=min_routing_accuracy,
+        min_model_only_routing_accuracy=min_model_only_routing_accuracy,
     )
     if development_unsandboxed_override:
         manager = _composition_api._manager()
@@ -175,6 +179,7 @@ def verify(
             _composition_api._manager().home,
             max_output_tokens=max(max_output_tokens, 192),
             timeout=timeout,
+            thresholds=thresholds,
         )
         if json_output:
             console.print_json(data=routing_report.model_dump())
@@ -364,6 +369,12 @@ def _print_routing_summary(report: object) -> None:
         "end-to-end deterministic/model/repair/fallback": _routing_provenance_counts(routing),
         "end-to-end failure categories": end_to_end_categories or "none",
         "end-to-end stage codes": _routing_stage_codes(routing),
+        "end-to-end coercions": _routing_counter(routing, "coercions"),
+        "end-to-end contract rejections": _routing_counter(routing, "first_rejection_code"),
+        "end-to-end inference failures": getattr(routing, "inference_failed_count", 0)
+        if routing
+        else 0,
+        "end-to-end downstream errors": _routing_counter(routing, "downstream_error_code"),
         "model-only cases": _routing_counts(model_only),
         "model-only semantic intent": _routing_semantic_counts(model_only),
         "model-only schema-valid": getattr(model_only, "schema_valid_count", 0)
@@ -372,6 +383,12 @@ def _print_routing_summary(report: object) -> None:
         "model-only deterministic/model/repair/fallback": _routing_provenance_counts(model_only),
         "model-only failure categories": model_only_categories or "none",
         "model-only stage codes": _routing_stage_codes(model_only),
+        "model-only coercions": _routing_counter(model_only, "coercions"),
+        "model-only contract rejections": _routing_counter(model_only, "first_rejection_code"),
+        "model-only inference failures": getattr(model_only, "inference_failed_count", 0)
+        if model_only
+        else 0,
+        "model-only downstream errors": _routing_counter(model_only, "downstream_error_code"),
         "runtime process": getattr(report, "runtime_process", None) or "not recorded",
         "preserved logs": getattr(report, "log_directory_basename", None) or "none",
         "threshold failures": ", ".join(getattr(report, "threshold_failures", [])) or "none",
@@ -435,6 +452,24 @@ def _routing_stage_codes(report: object) -> str:
         for case in getattr(report, "cases", [])
         if (stage := getattr(case, "stage_code", None))
     )
+    return ", ".join(f"{key}={counts[key]}" for key in sorted(counts)) or "none"
+
+
+def _routing_counter(report: object, field: str) -> str:
+    if report is None:
+        return "none"
+    from collections import Counter
+
+    counts: Counter[str] = Counter()
+    for case in getattr(report, "cases", []):
+        values = getattr(case, field, None)
+        if field == "coercions":
+            values = values or []
+            for value in values:
+                if isinstance(value, str):
+                    counts[value] += 1
+        elif isinstance(values, str) and values:
+            counts[values] += 1
     return ", ".join(f"{key}={counts[key]}" for key in sorted(counts)) or "none"
 
 

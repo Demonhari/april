@@ -176,6 +176,13 @@ class RouteResult(BaseModel):
     repair_attempted: bool = False
     repair_succeeded: bool = False
     routing_failure_code: str | None = None
+    first_proposal_operation: str | None = None
+    first_proposal_context: str | None = None
+    first_proposal_tool_class: str | None = None
+    first_rejection_code: str | None = None
+    repair_proposal_operation: str | None = None
+    repair_rejection_code: str | None = None
+    coercions: list[str] = Field(default_factory=list, max_length=8)
 
     @property
     def route_key(self) -> str:

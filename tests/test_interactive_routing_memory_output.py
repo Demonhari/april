@@ -46,7 +46,9 @@ def test_explicit_memory_is_anchored_and_keeps_relationship() -> None:
         assert "test project" in route.decision.planned_tool_calls[0].args["content"]
     assert DeterministicRouter().route("I remember that VS Code is installed.") is None
     assert DeterministicRouter().route("For example: remember that my editor is vim") is None
-    assert DeterministicRouter().route("Do not remember that my password is abc") is None
+    sensitive = DeterministicRouter().route("Do not remember that my password is abc")
+    assert sensitive is not None
+    assert sensitive.decision.intent == "sensitive_content"
     assert DeterministicRouter().route('"Remember that my editor is vim."') is None
 
 

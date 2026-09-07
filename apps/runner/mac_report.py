@@ -37,6 +37,7 @@ class ReportThresholds(BaseModel):
     max_first_token_latency_seconds: float | None = None
     max_rss_mb: float | None = None
     min_routing_accuracy: float | None = None
+    min_model_only_routing_accuracy: float | None = None
 
 
 # An absolute (or home-relative) filesystem path with at least two segments, e.g.
@@ -130,6 +131,15 @@ class RoutingCaseResult(BaseModel):
     proposal_operation: str | None = None
     proposal_context: str | None = None
     contract_fingerprint: str | None = None
+    first_proposal_operation: str | None = None
+    first_proposal_context: str | None = None
+    first_proposal_tool_class: str | None = None
+    first_rejection_code: str | None = None
+    repair_proposal_operation: str | None = None
+    repair_rejection_code: str | None = None
+    coercions: list[str] = Field(default_factory=list)
+    downstream_status: int | None = None
+    downstream_error_code: str | None = None
 
 
 class RoutingReport(BaseModel):
@@ -151,6 +161,9 @@ class RoutingReport(BaseModel):
     deterministic_count: int = 0
     model_count: int = 0
     unknown_provenance_count: int = 0
+    inference_failed_count: int = 0
+    coercion_count: int = 0
+    rejection_count: int = 0
     provenance_verified: bool = False
     case_set_complete: bool = False
     duplicate_case_ids: int = 0
@@ -258,7 +271,25 @@ def routing_report_from_results(
     model_repair_count = sum(1 for source in sources if source == "model_repair")
     deterministic_count = sum(1 for source in sources if source == "deterministic")
     model_count = sum(1 for source in sources if source == "model")
-    unknown_provenance_count = sum(1 for source in sources if source is None)
+    inference_failed_count = sum(
+        1
+        for result in results
+        if not getattr(result, "actual", {})
+        and isinstance(getattr(result, "stage_code", None), str)
+    )
+    unknown_provenance_count = sum(
+        1
+        for result, source in zip(results, sources, strict=False)
+        if source is None
+        and not (
+            not getattr(result, "actual", {})
+            and isinstance(getattr(result, "stage_code", None), str)
+        )
+    )
+    coercion_count = sum(len(getattr(result, "coercions", [])) for result in results)
+    rejection_count = sum(
+        1 for result in results if getattr(result, "first_rejection_code", None) is not None
+    )
     ids = [str(getattr(result, "id", "") or "") for result in results]
     unique_ids = len(ids) == len(set(ids)) and all(ids)
     expected_ids = list(expected_case_ids) if expected_case_ids is not None else ids
@@ -314,6 +345,15 @@ def routing_report_from_results(
             proposal_operation=getattr(result, "proposal_operation", None),
             proposal_context=getattr(result, "proposal_context", None),
             contract_fingerprint=getattr(result, "contract_fingerprint", None),
+            first_proposal_operation=getattr(result, "first_proposal_operation", None),
+            first_proposal_context=getattr(result, "first_proposal_context", None),
+            first_proposal_tool_class=getattr(result, "first_proposal_tool_class", None),
+            first_rejection_code=getattr(result, "first_rejection_code", None),
+            repair_proposal_operation=getattr(result, "repair_proposal_operation", None),
+            repair_rejection_code=getattr(result, "repair_rejection_code", None),
+            coercions=list(getattr(result, "coercions", [])),
+            downstream_status=getattr(result, "downstream_status", None),
+            downstream_error_code=getattr(result, "downstream_error_code", None),
         )
         for result in results
     ]
@@ -328,6 +368,9 @@ def routing_report_from_results(
         deterministic_count=deterministic_count,
         model_count=model_count,
         unknown_provenance_count=unknown_provenance_count,
+        inference_failed_count=inference_failed_count,
+        coercion_count=coercion_count,
+        rejection_count=rejection_count,
         provenance_verified=bool(results)
         and all(
             source in {"deterministic", "model", "model_repair", "fallback"}

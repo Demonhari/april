@@ -391,12 +391,18 @@ Use the isolated routing diagnostic when iterating on the Brain route contract:
 
 ```sh
 .venv/bin/python -m apps.runner.main april verify --routing-only \
+  --min-routing-accuracy 0.90 \
+  --min-model-only-routing-accuracy 0.75 \
   --report /tmp/april-routing-only.json
 ```
 
 This starts temporary Runtime and Core API children with the configured Brain
 model, bypasses specialist workflows and tool execution, and writes only the
-requested redacted report. It is diagnostic evidence, not full readiness.
+requested redacted report. The end-to-end axis permits trusted deterministic
+routes and measures the complete workflow; the model-only axis bypasses those
+shortcuts and measures genuine model classification. The two minimum accuracy
+flags apply independently. Coercions and contract rejections are reported as
+separate diagnostic counters. This is diagnostic evidence, not full readiness.
 
 For the complete configured-model check, use a new report path and require the
 real backend:

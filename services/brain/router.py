@@ -98,6 +98,13 @@ class BrainRouter:
                 repair_attempted=outcome.repair_attempted,
                 repair_succeeded=outcome.repair_succeeded,
                 routing_failure_code=outcome.failure_code,
+                first_proposal_operation=outcome.first_proposal_operation,
+                first_proposal_context=outcome.first_proposal_context,
+                first_proposal_tool_class=outcome.first_proposal_tool_class,
+                first_rejection_code=outcome.first_rejection_code,
+                repair_proposal_operation=outcome.repair_proposal_operation,
+                repair_rejection_code=outcome.repair_rejection_code,
+                coercions=outcome.coercions,
             )
         except (RuntimeUnavailableError, OSError, TimeoutError):
             return self._fallback_result(message, reason="runtime_unavailable")
@@ -122,4 +129,11 @@ class BrainRouter:
             repair_succeeded=repair_succeeded,
             routing_failure_code=failure_code or reason,
             contract_fingerprint=routing_contract_fingerprint(self.route_compiler),
+            first_proposal_operation=getattr(outcome, "first_proposal_operation", None),
+            first_proposal_context=getattr(outcome, "first_proposal_context", None),
+            first_proposal_tool_class=getattr(outcome, "first_proposal_tool_class", None),
+            first_rejection_code=getattr(outcome, "first_rejection_code", None),
+            repair_proposal_operation=getattr(outcome, "repair_proposal_operation", None),
+            repair_rejection_code=getattr(outcome, "repair_rejection_code", None),
+            coercions=list(getattr(outcome, "coercions", [])),
         )

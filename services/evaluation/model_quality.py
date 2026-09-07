@@ -101,7 +101,10 @@ async def _routing(
     invalid = 0
     repaired = 0
     wrong = 0
+    semantic_passed = 0
+    policy_passed = 0
     categories: dict[str, list[bool]] = {}
+    policy_categories: dict[str, list[bool]] = {}
     deterministic_matches = 0
     deterministic_count = 0
     deterministic = DeterministicRouter()
@@ -122,18 +125,25 @@ async def _routing(
             )
             repair_used = outcome.repair_attempted
             first_pass = not repair_used and outcome.decision is not None
+            semantic_ok = outcome.proposal is not None and _proposal_permitted(
+                outcome.proposal.operation, outcome.proposal.tool_class, fixture
+            )
             route_ok = outcome.decision is not None and _route_permitted(
                 outcome.decision.model_dump(), fixture
             )
         except Exception:
+            semantic_ok = False
             route_ok = False
             invalid += 1
+        semantic_passed += int(semantic_ok)
+        policy_passed += int(route_ok)
         if repair_used:
             repaired += 1
         if first_pass and not route_ok:
             wrong += 1
-        passed += int(route_ok)
-        categories.setdefault(category, []).append(route_ok)
+        passed += int(semantic_ok)
+        categories.setdefault(category, []).append(semantic_ok)
+        policy_categories.setdefault(category, []).append(route_ok)
         deterministic_result = deterministic.route(str(fixture["request"]))
         if deterministic_result is not None:
             deterministic_count += 1
@@ -144,12 +154,19 @@ async def _routing(
         "fixture_count": len(fixtures),
         "aggregate_accuracy": passed / len(fixtures) if fixtures else 0.0,
         "passed": passed,
+        "semantic_passed": semantic_passed,
+        "policy_route_passed": policy_passed,
+        "policy_route_accuracy": policy_passed / len(fixtures) if fixtures else 0.0,
         "invalid_output_count": invalid,
         "repair_counted_as_failure": repaired,
         "wrong_route_count": wrong,
         "per_category_accuracy": {
             category: sum(outcomes) / len(outcomes)
             for category, outcomes in sorted(categories.items())
+        },
+        "policy_route_per_category_accuracy": {
+            category: sum(outcomes) / len(outcomes)
+            for category, outcomes in sorted(policy_categories.items())
         },
         "model_router_only": True,
         "deterministic_router": {
@@ -423,6 +440,36 @@ def _route_permitted(decision: Mapping[str, Any], fixture: Mapping[str, Any]) ->
         if not isinstance(actual, list) or not set(tools).intersection(actual):
             return False
     return True
+
+
+_LEGACY_CATEGORY_OPERATIONS = {
+    "git_status": "repository_inspection",
+    "git_diff": "repository_inspection",
+    "file_reading": "document_reading",
+    "file_search": "repository_inspection",
+    "reminder_creation": "reminder_create",
+    "reminder_listing": "reminder_list",
+    "patch_preparation": "patch_proposal",
+    "test_execution": "command_execution",
+    "approval": "approval_command",
+    "rejection": "rejection_command",
+    "destructive_external": "external_action",
+    "ambiguous_general": "ambiguous_request",
+}
+
+
+def _proposal_permitted(operation: str, tool_class: str, fixture: Mapping[str, Any]) -> bool:
+    """Score the model's semantic choice before policy compilation.
+
+    The compiled decision remains separately measured because active bindings
+    may deliberately reject an otherwise correct proposal. This is diagnostic
+    scoring only; it never authorizes or executes the proposal.
+    """
+    expected_operation = _LEGACY_CATEGORY_OPERATIONS.get(str(fixture.get("category")))
+    if expected_operation != operation:
+        return False
+    tools = fixture.get("tools_any")
+    return not isinstance(tools, list) or tool_class in {str(item) for item in tools}
 
 
 def _validate_json(

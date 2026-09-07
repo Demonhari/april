@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 
 from apps.runner.mac_report import RoutingReport, routing_report_from_results
 from apps.runner.multi_model_report import _routing_axis_ok
 from services.april_runtime.schemas import ChatResponse, Usage
 from services.brain.model_routing import infer_model_route
+from services.brain.parser import parse_routing_proposal
 from services.brain.route_contract import (
     AgentBinding,
     RouteCompiler,
-    RouteContractError,
+    RouteContext,
+    RouteOperation,
+    RouteToolClass,
     RoutingProposal,
+    build_router_system_prompt,
 )
 from services.brain.structured_output import ROUTING_PROPOSAL_RESPONSE_FORMAT
 
@@ -74,34 +80,38 @@ def test_route_compiler_uses_active_binding_and_derives_policy() -> None:
     assert decision.tools_needed == []
 
 
-def test_route_compiler_rejects_tool_not_allowed_by_active_role() -> None:
+def test_route_compiler_drops_nonessential_tool_not_allowed_by_active_role() -> None:
     compiler = RouteCompiler({"coding_agent": AgentBinding("configured-coding", frozenset())})
-    with pytest.raises(RouteContractError, match="not allowed"):
-        compiler.compile(
-            RoutingProposal(
-                operation="repository_inspection",
-                context="repository",
-                tool_class="git_status",
-            )
+    compiled = compiler.compile_with_diagnostics(
+        RoutingProposal(
+            operation="repository_inspection",
+            context="repository",
+            tool_class="git_status",
         )
+    )
+    assert compiled.decision.tools_needed == []
+    assert "tool_dropped_not_allowed" in compiled.coercions
 
 
-def test_route_compiler_rejects_contradictory_operation_and_tool() -> None:
-    with pytest.raises(RouteContractError, match="semantic operation"):
-        RouteCompiler().compile(
-            RoutingProposal(
-                operation="normal_conversation",
-                context="conversation",
-                tool_class="run_command",
-            )
+def test_route_compiler_coerces_contradictory_nonessential_tool() -> None:
+    compiled = RouteCompiler().compile_with_diagnostics(
+        RoutingProposal(
+            operation="normal_conversation",
+            context="conversation",
+            tool_class="run_command",
         )
+    )
+    assert compiled.decision.tools_needed == []
+    assert "tool_class_coerced:normal_conversation" in compiled.coercions
 
 
-def test_repository_operation_cannot_be_tool_free() -> None:
-    with pytest.raises(RouteContractError, match="repository tool"):
-        RouteCompiler().compile(
-            RoutingProposal(operation="repository_inspection", context="repository")
-        )
+def test_repository_operation_without_tool_uses_canonical_pair() -> None:
+    compiled = RouteCompiler().compile_with_diagnostics(
+        RoutingProposal(operation="repository_inspection", context="conversation")
+    )
+    assert compiled.decision.tools_needed == ["git_status", "search_files"]
+    assert "context_coerced:repository_inspection" in compiled.coercions
+    assert "tool_class_coerced:repository_inspection" in compiled.coercions
 
 
 def test_repository_inspection_uses_canonical_read_only_pair() -> None:
@@ -113,6 +123,118 @@ def test_repository_inspection_uses_canonical_read_only_pair() -> None:
         )
     )
     assert decision.tools_needed == ["git_status", "search_files"]
+
+
+def test_prompt_is_complete_and_compact() -> None:
+    prompt = build_router_system_prompt()
+    assert len(prompt) < 6_000
+    assert "package_install" in prompt
+    assert "external_action" in prompt
+    assert "test_execution" not in prompt
+
+
+def test_routing_parser_reports_bounded_schema_rejection_code() -> None:
+    with pytest.raises(ValueError, match="semantic contract") as exc_info:
+        parse_routing_proposal(
+            '{"operation":"planning","context":"conversation","tool_class":"bad"}'
+        )
+    assert exc_info.value.code == "schema_rejection:tool_class"
+
+
+def test_derivable_context_and_tools_are_coerced_without_policy_change() -> None:
+    compiler = RouteCompiler()
+    compiled = compiler.compile_with_diagnostics(
+        RoutingProposal(
+            operation="reminder_create",
+            context="conversation",
+            tool_class="none",
+            requested_text="stand up",
+        )
+    )
+    assert "context_coerced:reminder_create" in compiled.coercions
+    assert "tool_class_coerced:reminder_create" in compiled.coercions
+    assert compiled.decision.permission_level == 2
+    assert compiled.decision.risk_level == "safe_write"
+
+
+def test_document_and_code_routes_are_tool_free_at_contract_boundary() -> None:
+    compiler = RouteCompiler()
+    document = compiler.compile(
+        RoutingProposal(
+            operation="document_reading",
+            context="local_document",
+            tool_class="read_file",
+        )
+    )
+    code = compiler.compile(
+        RoutingProposal(
+            operation="code_modification",
+            context="repository",
+            tool_class="patch_applier",
+        )
+    )
+    assert document.tools_needed == []
+    assert document.planned_tool_calls == []
+    assert code.tools_needed == []
+    assert code.planned_tool_calls == []
+
+
+def test_every_operation_context_tool_coercion_preserves_policy() -> None:
+    base = RouteCompiler()
+    bindings = dict(base.bindings)
+    bindings["general_agent"] = AgentBinding(
+        "april-brain",
+        bindings["general_agent"].allowed_tools | {"approve_action", "reject_action"},
+    )
+    compiler = RouteCompiler(bindings)
+    for operation in get_args(RouteOperation):
+        baseline = compiler.compile(
+            RoutingProposal(
+                operation=operation,
+                context=_context_for(operation),
+                tool_class="none",
+                requested_text=(
+                    "action-id" if operation in {"approval_command", "rejection_command"} else "x"
+                ),
+                memory_queries=["q"],
+            )
+        )
+        for context in get_args(RouteContext):
+            for tool_class in get_args(RouteToolClass):
+                try:
+                    decision = compiler.compile(
+                        RoutingProposal(
+                            operation=operation,
+                            context=context,
+                            tool_class=tool_class,
+                            requested_text="action-id"
+                            if operation in {"approval_command", "rejection_command"}
+                            else "x",
+                            memory_queries=["q"],
+                        )
+                    )
+                except (ValueError, KeyError):
+                    continue
+                assert (decision.permission_level, decision.risk_level) == (
+                    baseline.permission_level,
+                    baseline.risk_level,
+                )
+
+
+def _context_for(operation: str) -> str:
+    if operation.startswith("reminder_"):
+        return "reminder"
+    if operation in {"approval_command", "rejection_command"}:
+        return "system"
+    if operation in {"memory_lookup", "memory_write"}:
+        return "memory"
+    if operation in {"repository_inspection", "patch_proposal", "code_modification"}:
+        return "repository"
+    if operation == "document_reading":
+        return "local_document"
+    if operation in {"coding_assistance"}:
+        return "pasted_text"
+    return "conversation"
 
 
 @pytest.mark.asyncio
@@ -151,6 +273,30 @@ async def test_repair_receives_request_contract_and_validation_category() -> Non
     assert "Explain the architecture" in client.messages[1]
     assert "semantic routing contract" in client.messages[1]
     assert "schema_rejection" in client.messages[1]
+
+
+@pytest.mark.asyncio
+async def test_repair_cannot_change_a_valid_candidate_operation() -> None:
+    client = ScriptedRoutingClient(
+        [
+            _response(
+                '{"operation":"approval_command","context":"system",'
+                '"tool_class":"approve_action","requested_text":"approval-1234"}'
+            ),
+            _response(_proposal("normal_conversation")),
+        ]
+    )
+    outcome = await infer_model_route(
+        client,
+        model_id="april-brain",
+        message="plan my day",
+        history=None,
+        request_id="r",
+        compiler=RouteCompiler(),
+    )
+    assert outcome.decision is None
+    assert outcome.failure_code == "repair_failure"
+    assert outcome.repair_rejection_code == "operation_changed"
 
 
 @pytest.mark.asyncio

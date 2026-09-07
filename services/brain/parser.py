@@ -7,7 +7,11 @@ from collections.abc import Awaitable, Callable
 from pydantic import ValidationError as PydanticValidationError
 
 from april_common.errors import ValidationError
-from services.brain.route_contract import RoutingProposal, proposal_from_legacy
+from services.brain.route_contract import (
+    RouteContractError,
+    RoutingProposal,
+    proposal_from_legacy,
+)
 from services.brain.schemas import BrainDecision
 
 RepairCallback = Callable[[str], Awaitable[str]]
@@ -93,15 +97,30 @@ def parse_routing_proposal(text: str) -> RoutingProposal:
     ``proposal_from_legacy`` keeps older fake clients and integrations readable;
     it does not preserve generated policy fields or provenance.
     """
-    raw = _remove_trailing_commas(extract_single_json_object(text))
+    try:
+        raw = _remove_trailing_commas(extract_single_json_object(text))
+    except ValidationError as exc:
+        raise RouteContractError(
+            "schema_rejection:no_json_object",
+            "Routing proposal did not contain exactly one JSON object.",
+        ) from exc
     try:
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("routing proposal must be a JSON object")
         proposal = RoutingProposal.model_validate(proposal_from_legacy(data))
-    except (json.JSONDecodeError, PydanticValidationError, ValueError) as exc:
-        raise ValidationError(
-            "Routing proposal did not match the semantic contract.", {"error": str(exc)}
+    except PydanticValidationError as exc:
+        errors = exc.errors()
+        location = errors[0]["loc"] if errors else ("unknown",)
+        location_text = ".".join(str(part) for part in location) or "unknown"
+        raise RouteContractError(
+            f"schema_rejection:{location_text}",
+            "Routing proposal did not match the semantic contract.",
+        ) from exc
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RouteContractError(
+            "schema_rejection:no_json_object",
+            "Routing proposal did not match the semantic contract.",
         ) from exc
     return proposal
 
