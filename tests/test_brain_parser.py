@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from services.brain.fallback_router import FallbackRouter
-from services.brain.parser import parse_brain_decision, parse_with_repair
+from services.brain.parser import (
+    parse_brain_decision,
+    parse_routing_proposal_with_diagnostics,
+    parse_with_repair,
+)
 
 VALID = """
 {"intent":"planning","agent":"general_agent","model_id":"april-brain","tools_needed":[],
@@ -90,3 +94,26 @@ def test_fallback_routing() -> None:
     assert decision.agent == "coding_agent"
     assert decision.permission_level == 1
     assert decision.confidence == 0.45
+
+
+def test_routing_proposal_normalizes_advisory_fields() -> None:
+    proposal, coercions = parse_routing_proposal_with_diagnostics(
+        '{"operation":"normal_conversation","confidence":85}'
+    )
+    assert proposal.confidence == 0.85
+    assert "confidence_normalized" in coercions
+
+    proposal, coercions = parse_routing_proposal_with_diagnostics(
+        '{"operation":"normal_conversation","confidence":"high",'
+        '"memory_queries":"not-a-list","context":null}'
+    )
+    assert proposal.confidence == 0.7
+    assert proposal.memory_queries == []
+    assert proposal.context == "conversation"
+    assert {"confidence_defaulted", "memory_queries_reset", "context_defaulted"} <= set(coercions)
+
+
+def test_routing_proposal_semantic_rejection_has_stable_code() -> None:
+    with pytest.raises(ValueError, match="semantic contract") as exc_info:
+        parse_routing_proposal_with_diagnostics('{"operation":"memory_write"}')
+    assert exc_info.value.code == "semantic_rejection:memory_write_requires_content"

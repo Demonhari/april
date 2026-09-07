@@ -35,6 +35,7 @@ def persisted_route_evidence(event: dict[str, Any], response: httpx.Response) ->
         "downstream_ok": response.status_code < 400,
         "downstream_status": response.status_code,
         "downstream_error_code": _downstream_error_code(response),
+        "downstream_runtime_error_code": _downstream_runtime_error_code(response),
         "routing_failure_code": event.get("routing_failure_code") if event else None,
         "fallback_reason": event.get("fallback_reason") if event else None,
         "proposal_operation": event.get("proposal_operation"),
@@ -72,6 +73,22 @@ def _downstream_error_code(response: httpx.Response) -> str | None:
         return None
     code = payload["error"].get("code")
     return code[:64] if isinstance(code, str) and code else None
+
+
+def _downstream_runtime_error_code(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    details = error.get("details") if isinstance(error, dict) else None
+    nested_error = details.get("error") if isinstance(details, dict) else None
+    code = nested_error.get("code") if isinstance(nested_error, dict) else None
+    if not isinstance(code, str) or not code or len(code) > 64:
+        return None
+    return code if code.isupper() and all(char.isalnum() or char == "_" for char in code) else None
 
 
 def _routing_stage_code(event: dict[str, Any], response: httpx.Response) -> str | None:

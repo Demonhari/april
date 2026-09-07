@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable
+from numbers import Real
+from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -92,6 +94,11 @@ def parse_brain_decision(text: str, *, method: str = "model") -> BrainDecision:
 
 
 def parse_routing_proposal(text: str) -> RoutingProposal:
+    proposal, _ = parse_routing_proposal_with_diagnostics(text)
+    return proposal
+
+
+def parse_routing_proposal_with_diagnostics(text: str) -> tuple[RoutingProposal, list[str]]:
     """Parse the bounded semantic contract used by the live router.
 
     ``proposal_from_legacy`` keeps older fake clients and integrations readable;
@@ -108,13 +115,22 @@ def parse_routing_proposal(text: str) -> RoutingProposal:
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("routing proposal must be a JSON object")
-        proposal = RoutingProposal.model_validate(proposal_from_legacy(data))
+        normalized, coercions = _normalize_routing_proposal(data)
+        proposal = RoutingProposal.model_validate(proposal_from_legacy(normalized))
     except PydanticValidationError as exc:
         errors = exc.errors()
-        location = errors[0]["loc"] if errors else ("unknown",)
-        location_text = ".".join(str(part) for part in location) or "unknown"
+        error: dict[str, Any] = dict(errors[0]) if errors else {}
+        location = error.get("loc", ())
+        location_text = ".".join(str(part) for part in location)
+        if location_text:
+            code = f"schema_rejection:{location_text}"
+        else:
+            message = str(error.get("msg", "semantic_rejection"))
+            if message.startswith("Value error, "):
+                message = message.removeprefix("Value error, ")
+            code = f"semantic_rejection:{message[:64]}"
         raise RouteContractError(
-            f"schema_rejection:{location_text}",
+            code,
             "Routing proposal did not match the semantic contract.",
         ) from exc
     except (json.JSONDecodeError, ValueError) as exc:
@@ -122,7 +138,49 @@ def parse_routing_proposal(text: str) -> RoutingProposal:
             "schema_rejection:no_json_object",
             "Routing proposal did not match the semantic contract.",
         ) from exc
-    return proposal
+    return proposal, coercions
+
+
+def _normalize_routing_proposal(data: dict[str, object]) -> tuple[dict[str, object], list[str]]:
+    normalized = dict(data)
+    coercions: list[str] = []
+    confidence = normalized.get("confidence")
+    if isinstance(confidence, Real) and not isinstance(confidence, bool):
+        numeric_confidence = float(confidence)
+        if 1 < numeric_confidence <= 100:
+            normalized["confidence"] = numeric_confidence / 100
+            coercions.append("confidence_normalized")
+        elif not 0 <= numeric_confidence <= 1:
+            normalized["confidence"] = 0.7
+            coercions.append("confidence_defaulted")
+    elif "confidence" in normalized:
+        normalized["confidence"] = 0.7
+        coercions.append("confidence_defaulted")
+
+    memory_queries = normalized.get("memory_queries")
+    if "memory_queries" in normalized and (
+        not isinstance(memory_queries, list)
+        or not all(isinstance(item, str) for item in memory_queries)
+    ):
+        normalized["memory_queries"] = []
+        coercions.append("memory_queries_reset")
+
+    context = normalized.get("context")
+    valid_contexts = {
+        "conversation",
+        "pasted_text",
+        "repository",
+        "local_document",
+        "memory",
+        "reminder",
+        "system",
+        "external",
+        "unknown",
+    }
+    if not isinstance(context, str) or context not in valid_contexts:
+        normalized["context"] = "conversation"
+        coercions.append("context_defaulted")
+    return normalized, coercions
 
 
 async def parse_with_repair(text: str, repair: RepairCallback) -> BrainDecision:

@@ -69,6 +69,7 @@ class BrainEvalResult(BaseModel):
     coercions: list[str] = Field(default_factory=list)
     downstream_status: int | None = None
     downstream_error_code: str | None = None
+    downstream_runtime_error_code: str | None = None
 
 
 def load_brain_eval_cases(home: Path) -> list[BrainEvalCase]:
@@ -228,6 +229,9 @@ def _evaluate_case(
             else None
         ),
         downstream_error_code=_bounded_evidence_text(evidence.get("downstream_error_code")),
+        downstream_runtime_error_code=_bounded_evidence_text(
+            evidence.get("downstream_runtime_error_code")
+        ),
     )
 
 

@@ -9,7 +9,7 @@ from services.april_runtime.schemas import (
     GenerationOptions,
     ResponseFormat,
 )
-from services.brain.parser import parse_routing_proposal
+from services.brain.parser import parse_routing_proposal_with_diagnostics
 from services.brain.route_contract import (
     ROUTE_CONTRACT_FINGERPRINT,
     RouteCompiler,
@@ -128,11 +128,12 @@ async def infer_model_route(
     if not _response_is_complete(response, outcome):
         return outcome
     try:
-        proposal = parse_routing_proposal(response.content)
+        proposal, parse_coercions = parse_routing_proposal_with_diagnostics(response.content)
         _record_first_proposal(outcome, proposal)
+        outcome.coercions = _merge_codes(outcome.coercions, parse_coercions)
         compiled = compiler.compile_with_diagnostics(proposal, method="model")
         decision = compiled.decision
-        outcome.coercions = _bounded_codes(compiled.coercions)
+        outcome.coercions = _merge_codes(outcome.coercions, compiled.coercions)
     except Exception as exc:
         rejection = _rejection_code(exc)
         if outcome.first_rejection_code is None:
@@ -164,8 +165,9 @@ async def infer_model_route(
             outcome.failure_code = outcome.failure_code or "repair_failure"
             return outcome
         try:
-            proposal = parse_routing_proposal(repair.content)
+            proposal, parse_coercions = parse_routing_proposal_with_diagnostics(repair.content)
             outcome.repair_proposal_operation = proposal.operation
+            outcome.coercions = _merge_codes(outcome.coercions, parse_coercions)
             if (
                 outcome.first_proposal_operation is not None
                 and proposal.operation != outcome.first_proposal_operation
@@ -175,7 +177,7 @@ async def infer_model_route(
                 return outcome
             compiled = compiler.compile_with_diagnostics(proposal, method="model_repair")
             decision = compiled.decision
-            outcome.coercions = _bounded_codes(compiled.coercions)
+            outcome.coercions = _merge_codes(outcome.coercions, compiled.coercions)
             outcome.proposal = proposal
             outcome.decision = decision
             outcome.route_source = RouteSource.MODEL_REPAIR
@@ -203,6 +205,15 @@ def _bounded_codes(values: object) -> list[str]:
     if not isinstance(values, list):
         return []
     return [value[:64] for value in values if isinstance(value, str)][:8]
+
+
+def _merge_codes(existing: object, additions: object) -> list[str]:
+    return _bounded_codes(
+        [
+            *(_bounded_codes(existing)),
+            *(_bounded_codes(additions)),
+        ]
+    )
 
 
 def _rejection_code(exc: BaseException) -> str:

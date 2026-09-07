@@ -63,6 +63,7 @@ def test_routing_schema_contains_semantics_not_policy() -> None:
     assert "agent" not in schema["properties"]
     assert "permission_level" not in schema["properties"]
     assert "route_source" not in schema["properties"]
+    assert "context" not in schema.get("required", [])
 
 
 def test_route_compiler_uses_active_binding_and_derives_policy() -> None:
@@ -125,12 +126,20 @@ def test_repository_inspection_uses_canonical_read_only_pair() -> None:
     assert decision.tools_needed == ["git_status", "search_files"]
 
 
+def test_memory_lookup_without_queries_is_compilable_and_diagnostic() -> None:
+    compiled = RouteCompiler().compile_with_diagnostics(RoutingProposal(operation="memory_lookup"))
+    assert compiled.decision.memory_queries == []
+    assert "memory_queries_defaulted" in compiled.coercions
+
+
 def test_prompt_is_complete_and_compact() -> None:
     prompt = build_router_system_prompt()
     assert len(prompt) < 6_000
     assert "package_install" in prompt
     assert "external_action" in prompt
     assert "test_execution" not in prompt
+    assert '"read the README" => repository_inspection' not in prompt
+    assert '"read the README and summarize it" => document_reading' in prompt
 
 
 def test_routing_parser_reports_bounded_schema_rejection_code() -> None:
@@ -251,6 +260,22 @@ async def test_valid_json_with_length_finish_is_not_model_success() -> None:
     assert outcome.decision is None
     assert outcome.failure_code == "generation_length"
     assert outcome.repair_attempted is False
+
+
+@pytest.mark.asyncio
+async def test_model_route_preserves_parser_and_compiler_coercions() -> None:
+    client = ScriptedRoutingClient([_response('{"operation":"planning","confidence":85}')])
+    outcome = await infer_model_route(
+        client,
+        model_id="april-brain",
+        message="plan my day",
+        history=None,
+        request_id="r",
+        compiler=RouteCompiler(),
+    )
+    assert outcome.decision is not None
+    assert "confidence_normalized" in outcome.coercions
+    assert "context_defaulted" in outcome.coercions
 
 
 @pytest.mark.asyncio

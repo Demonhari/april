@@ -140,6 +140,7 @@ class RoutingCaseResult(BaseModel):
     coercions: list[str] = Field(default_factory=list)
     downstream_status: int | None = None
     downstream_error_code: str | None = None
+    downstream_runtime_error_code: str | None = None
 
 
 class RoutingReport(BaseModel):
@@ -290,6 +291,14 @@ def routing_report_from_results(
     rejection_count = sum(
         1 for result in results if getattr(result, "first_rejection_code", None) is not None
     )
+    decided_sources = [
+        source
+        for result, source in zip(results, trusted_sources, strict=False)
+        if not (
+            not getattr(result, "actual", {})
+            and isinstance(getattr(result, "stage_code", None), str)
+        )
+    ]
     ids = [str(getattr(result, "id", "") or "") for result in results]
     unique_ids = len(ids) == len(set(ids)) and all(ids)
     expected_ids = list(expected_case_ids) if expected_case_ids is not None else ids
@@ -354,6 +363,7 @@ def routing_report_from_results(
             coercions=list(getattr(result, "coercions", [])),
             downstream_status=getattr(result, "downstream_status", None),
             downstream_error_code=getattr(result, "downstream_error_code", None),
+            downstream_runtime_error_code=getattr(result, "downstream_runtime_error_code", None),
         )
         for result in results
     ]
@@ -371,10 +381,10 @@ def routing_report_from_results(
         inference_failed_count=inference_failed_count,
         coercion_count=coercion_count,
         rejection_count=rejection_count,
-        provenance_verified=bool(results)
+        provenance_verified=bool(decided_sources)
         and all(
             source in {"deterministic", "model", "model_repair", "fallback"}
-            for source in trusted_sources
+            for source in decided_sources
         ),
         case_set_complete=case_set_complete,
         duplicate_case_ids=len(ids) - len(set(ids)),

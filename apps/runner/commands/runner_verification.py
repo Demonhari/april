@@ -375,6 +375,9 @@ def _print_routing_summary(report: object) -> None:
         if routing
         else 0,
         "end-to-end downstream errors": _routing_counter(routing, "downstream_error_code"),
+        "end-to-end downstream runtime errors": _routing_counter(
+            routing, "downstream_runtime_error_code"
+        ),
         "model-only cases": _routing_counts(model_only),
         "model-only semantic intent": _routing_semantic_counts(model_only),
         "model-only schema-valid": getattr(model_only, "schema_valid_count", 0)
@@ -389,6 +392,9 @@ def _print_routing_summary(report: object) -> None:
         if model_only
         else 0,
         "model-only downstream errors": _routing_counter(model_only, "downstream_error_code"),
+        "model-only downstream runtime errors": _routing_counter(
+            model_only, "downstream_runtime_error_code"
+        ),
         "runtime process": getattr(report, "runtime_process", None) or "not recorded",
         "preserved logs": getattr(report, "log_directory_basename", None) or "none",
         "threshold failures": ", ".join(getattr(report, "threshold_failures", [])) or "none",

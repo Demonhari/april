@@ -82,7 +82,9 @@ class RuntimeClient:
                 "April Runtime is offline.", {"url": self.base_url}
             ) from exc
         if response.status_code >= 400:
-            raise RuntimeUnavailableError("April Runtime returned an error.", response.json())
+            raise RuntimeUnavailableError(
+                "April Runtime returned an error.", _response_payload(response)
+            )
         return ChatResponse.model_validate(response.json())
 
     async def embed(self, text: str, *, model_id: str | None = None) -> list[float]:
@@ -99,7 +101,9 @@ class RuntimeClient:
                 "April Runtime is offline.", {"url": self.base_url}
             ) from exc
         if response.status_code >= 400:
-            raise RuntimeUnavailableError("April Runtime returned an error.", response.json())
+            raise RuntimeUnavailableError(
+                "April Runtime returned an error.", _response_payload(response)
+            )
         return EmbedResponse.model_validate(response.json()).embedding
 
     async def embed_many(
@@ -158,7 +162,9 @@ class RuntimeClient:
                 "April Runtime is offline.", {"url": self.base_url}
             ) from exc
         if response.status_code >= 400:
-            raise RuntimeUnavailableError("April Runtime returned an error.", response.json())
+            raise RuntimeUnavailableError(
+                "April Runtime returned an error.", _response_payload(response)
+            )
         return response.json()
 
     async def health(self, *, timeout: float | None = None) -> dict[str, Any]:
@@ -170,7 +176,9 @@ class RuntimeClient:
                 "April Runtime is offline.", {"url": self.base_url}
             ) from exc
         if response.status_code >= 400:
-            raise RuntimeUnavailableError("April Runtime returned an error.", response.json())
+            raise RuntimeUnavailableError(
+                "April Runtime returned an error.", _response_payload(response)
+            )
         return response.json()
 
     async def load(
@@ -292,7 +300,9 @@ class RuntimeClient:
                 "April Runtime is offline.", {"url": self.base_url}
             ) from exc
         if response.status_code >= 400:
-            raise RuntimeUnavailableError("April Runtime returned an error.", response.json())
+            raise RuntimeUnavailableError(
+                "April Runtime returned an error.", _response_payload(response)
+            )
         return ModelOperationResponse.model_validate(response.json())
 
     async def stream(
@@ -325,7 +335,7 @@ class RuntimeClient:
                 if response.status_code >= 400:
                     raise RuntimeUnavailableError(
                         "April Runtime returned an error.",
-                        {"status_code": response.status_code},
+                        _response_payload(response),
                     )
                 async for line in response.aiter_lines():
                     if line.startswith("data: "):

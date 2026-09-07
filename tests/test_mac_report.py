@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from apps.runner.mac_report import (
     EnvironmentSnapshot,
@@ -15,6 +16,7 @@ from apps.runner.mac_report import (
     routing_report_from_results,
     write_report,
 )
+from apps.runner.multi_model_report import _routing_axis_ok
 from apps.runner.verify import TargetMacValidator
 
 ENV = EnvironmentSnapshot(
@@ -66,6 +68,44 @@ def test_routing_report_from_results() -> None:
     assert report.total == 3
     assert report.passed == 2
     assert report.accuracy == round(2 / 3, 4)
+
+
+def test_inference_failure_does_not_invalidate_decided_provenance() -> None:
+    results = []
+    for index in range(37):
+        results.append(
+            SimpleNamespace(
+                id=f"case-{index}",
+                ok=index < 32,
+                schema_valid=True,
+                routing_ok=index < 32,
+                actual={
+                    "routing_method": "model",
+                    "route_source": "model",
+                    "route_provenance": "trusted_model_only_v1",
+                },
+                stage_code=None,
+            )
+        )
+    results.append(
+        SimpleNamespace(
+            id="case-37",
+            ok=False,
+            schema_valid=False,
+            routing_ok=False,
+            actual={},
+            stage_code="inference_transport_error",
+        )
+    )
+    report = routing_report_from_results(
+        results,
+        expected_case_ids=[f"case-{index}" for index in range(38)],
+    )
+    assert report.accuracy == 0.8421
+    assert report.provenance_verified is True
+    assert report.unknown_provenance_count == 0
+    assert report.inference_failed_count == 1
+    assert _routing_axis_ok(report, allow_deterministic=False, min_accuracy=0.75) is True
 
 
 class _EvalLike:

@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from apps.runner.evals import BrainEvalCase
+from apps.runner.verification.routing_evidence import _downstream_runtime_error_code
 from apps.runner.verify import (
     AllConfiguredModelsVerifier,
     LauncherVerifier,
@@ -41,6 +42,20 @@ def verifier_with_ports(monkeypatch) -> LauncherVerifier:
     ports = iter([18001, 18002])
     monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
     return LauncherVerifier(home=Path.cwd())
+
+
+def test_nested_runtime_error_code_is_extracted_from_503_body() -> None:
+    response = httpx.Response(
+        503,
+        request=httpx.Request("POST", "http://127.0.0.1/runtime/chat"),
+        json={
+            "error": {
+                "code": "RUNTIME_UNAVAILABLE",
+                "details": {"error": {"code": "CONTEXT_BUDGET_EXCEEDED"}},
+            }
+        },
+    )
+    assert _downstream_runtime_error_code(response) == "CONTEXT_BUDGET_EXCEEDED"
 
 
 @pytest.mark.parametrize(
