@@ -16,6 +16,7 @@ class CountingBackend(RuntimeBackend):
     def __init__(self) -> None:
         self.loads = 0
         self.unloads = 0
+        self.last_max_output_tokens: int | None = None
         self.active_generations = 0
         self.max_active = 0
 
@@ -36,6 +37,7 @@ class CountingBackend(RuntimeBackend):
         stop: list[str] | None = None,
         seed: int | None = None,
     ) -> GenerationResult:
+        self.last_max_output_tokens = max_output_tokens
         self.active_generations += 1
         self.max_active = max(self.max_active, self.active_generations)
         await asyncio.sleep(0.01)
@@ -64,6 +66,25 @@ class CountingBackend(RuntimeBackend):
 class FailingBackend(CountingBackend):
     async def load(self, model: ModelDefinition) -> None:
         raise RuntimeError("load failed")
+
+
+class ReservationBackend(CountingBackend):
+    async def count_tokens(self, prompt: str) -> int:
+        del prompt
+        return 160
+
+    async def stream(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ):
+        self.last_max_output_tokens = max_output_tokens
+        yield "ok"
 
 
 class GenerateFailBackend(CountingBackend):
@@ -174,6 +195,29 @@ def registry(tmp_path: Path) -> ModelRegistry:
                     "context_size": 1024,
                     "temperature": 0.2,
                     "max_output_tokens": 64,
+                    "keep_loaded": False,
+                }
+            }
+        },
+        root=tmp_path,
+    )
+
+
+def small_context_registry(tmp_path: Path) -> ModelRegistry:
+    return ModelRegistry.from_dict(
+        {
+            "models": {
+                "april-brain": {
+                    "id": "april-brain",
+                    "name": "fake",
+                    "path": "missing.gguf",
+                    "backend": "fake",
+                    "role": "brain",
+                    "chat_format": "generic",
+                    "threads": 1,
+                    "context_size": 256,
+                    "temperature": 0.0,
+                    "max_output_tokens": 128,
                     "keep_loaded": False,
                 }
             }
@@ -498,6 +542,56 @@ async def test_context_budgeting_uses_same_metadata_as_generation(tmp_path: Path
         metadata=backend.prompt_metadata(),
     )
     assert result.input_tokens > 0
+
+
+@pytest.mark.asyncio
+async def test_generation_uses_adaptive_output_reservation(tmp_path: Path) -> None:
+    backend = ReservationBackend()
+    lifecycle = ModelLifecycle(
+        small_context_registry(tmp_path),
+        backend_factory=lambda model: backend,
+        root_backend="fake",
+    )
+    response = await lifecycle.generate(
+        ChatRequest(
+            model_id="april-brain",
+            messages=[
+                ChatMessage(role="system", content="system"),
+                ChatMessage(role="user", content="request"),
+                ChatMessage(role="assistant", content='{"type":"tool_request"}'),
+                ChatMessage(role="tool", content="tool result"),
+            ],
+            options={"max_output_tokens": 128},
+        )
+    )
+    assert backend.last_max_output_tokens == 64
+    assert response.diagnostics["reserved_output_tokens"] == 64
+    assert response.diagnostics["output_reservation_reduced"] is True
+    assert any("reduced to 64 tokens" in warning for warning in response.warnings)
+
+
+@pytest.mark.asyncio
+async def test_stream_uses_adaptive_output_reservation(tmp_path: Path) -> None:
+    backend = ReservationBackend()
+    lifecycle = ModelLifecycle(
+        small_context_registry(tmp_path),
+        backend_factory=lambda model: backend,
+        root_backend="fake",
+    )
+    events = [
+        event
+        async for event in lifecycle.stream(
+            ChatRequest(
+                model_id="april-brain",
+                messages=[ChatMessage(role="user", content="request")],
+                options={"max_output_tokens": 128},
+            )
+        )
+    ]
+    assert backend.last_max_output_tokens == 64
+    meta = events[0][1]
+    assert meta["reserved_output_tokens"] == 64
+    assert meta["output_reservation_reduced"] is True
 
 
 @pytest.mark.asyncio

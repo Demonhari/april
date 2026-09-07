@@ -5,7 +5,11 @@ import json
 import pytest
 
 from april_common.errors import AprilError
-from services.april_runtime.context_manager import ContextManager, ContextResult
+from services.april_runtime.context_manager import (
+    MIN_OUTPUT_RESERVATION,
+    ContextManager,
+    ContextResult,
+)
 from services.april_runtime.fake_backend import FakeBackend
 from services.april_runtime.model_registry import ModelDefinition
 from services.april_runtime.schemas import ChatMessage
@@ -58,6 +62,48 @@ async def test_output_token_reserve_and_template_overhead_are_counted() -> None:
     assert result.selected_context_limit == 236
     assert result.reserved_output_tokens == 64
     assert result.input_tokens > 1
+
+
+@pytest.mark.asyncio
+async def test_fit_with_reservation_halves_a_small_requested_ceiling() -> None:
+    class FixedTokenBackend(FakeBackend):
+        async def count_tokens(self, prompt: str) -> int:
+            del prompt
+            return 160
+
+    messages = [
+        ChatMessage(role="system", content="system"),
+        ChatMessage(role="user", content="latest request"),
+        ChatMessage(role="assistant", content='{"type":"tool_request"}'),
+        ChatMessage(role="tool", content="tool result"),
+    ]
+    result, reserved = await ContextManager().fit_with_reservation(
+        model=_model(context_size=256),
+        backend=FixedTokenBackend(),
+        messages=messages,
+        max_output_tokens=128,
+    )
+    assert reserved == 64
+    assert result.reserved_output_tokens == 64
+
+
+@pytest.mark.asyncio
+async def test_fit_with_reservation_reports_floor_when_required_context_cannot_fit() -> None:
+    class FixedTokenBackend(FakeBackend):
+        async def count_tokens(self, prompt: str) -> int:
+            del prompt
+            return 100
+
+    with pytest.raises(AprilError) as raised:
+        await ContextManager().fit_with_reservation(
+            model=_model(context_size=256),
+            backend=FixedTokenBackend(),
+            messages=[ChatMessage(role="user", content="request")],
+            max_output_tokens=256,
+        )
+    assert raised.value.code == "CONTEXT_BUDGET_EXCEEDED"
+    assert raised.value.details["minimum_reservation_tried"] == MIN_OUTPUT_RESERVATION
+    assert "truncated_tool_groups" in raised.value.details
 
 
 @pytest.mark.asyncio

@@ -610,7 +610,7 @@ class ModelLifecycle:
         try:
             options = effective_generation_options(state.model, request.options)
             metadata = state.backend.prompt_metadata()
-            context = await self.context_manager.fit(
+            context, reserved_output_tokens = await self.context_manager.fit_with_reservation(
                 model=state.model,
                 backend=state.backend,
                 messages=request.messages,
@@ -640,7 +640,7 @@ class ModelLifecycle:
                         prompt,
                         messages=context.messages,
                         temperature=options.temperature,
-                        max_output_tokens=options.max_output_tokens,
+                        max_output_tokens=reserved_output_tokens,
                         top_p=options.top_p,
                         stop=options.stop,
                         seed=options.seed,
@@ -652,7 +652,7 @@ class ModelLifecycle:
                         prompt,
                         messages=context.messages,
                         temperature=options.temperature,
-                        max_output_tokens=options.max_output_tokens,
+                        max_output_tokens=reserved_output_tokens,
                         top_p=options.top_p,
                         stop=options.stop,
                         seed=options.seed,
@@ -685,6 +685,11 @@ class ModelLifecycle:
             total_tokens=result.input_tokens + result.output_tokens,
         )
         warnings = ["Context was truncated."] if context.truncated else []
+        reservation_reduced = reserved_output_tokens < options.max_output_tokens
+        if reservation_reduced:
+            warnings.append(
+                f"Output reservation reduced to {reserved_output_tokens} tokens to fit the context."
+            )
         if "context_truncated_without_persisted_summary" in context.context_warning_codes:
             warnings.append(
                 "Older context was omitted and no persisted Core conversation summary was supplied."
@@ -705,6 +710,8 @@ class ModelLifecycle:
             ),
             "context_size_used": state.model.context_size,
             "context_budget": context.metadata(),
+            "reserved_output_tokens": reserved_output_tokens,
+            "output_reservation_reduced": reservation_reduced,
         }
         return ChatResponse(
             request_id=request_id,
@@ -782,7 +789,7 @@ class ModelLifecycle:
         try:
             options = effective_generation_options(state.model, request.options)
             metadata = state.backend.prompt_metadata()
-            context = await self.context_manager.fit(
+            context, reserved_output_tokens = await self.context_manager.fit_with_reservation(
                 model=state.model,
                 backend=state.backend,
                 messages=request.messages,
@@ -808,9 +815,24 @@ class ModelLifecycle:
             else _NoopLock()
         )
         async with lock:
+            reservation_reduced = reserved_output_tokens < options.max_output_tokens
+            reservation_warnings = (
+                [
+                    "Output reservation reduced to "
+                    f"{reserved_output_tokens} tokens to fit the context."
+                ]
+                if reservation_reduced
+                else []
+            )
             yield (
                 "meta",
-                {"context_truncated": context.truncated, "context_budget": context.metadata()},
+                {
+                    "context_truncated": context.truncated,
+                    "context_budget": context.metadata(),
+                    "reserved_output_tokens": reserved_output_tokens,
+                    "output_reservation_reduced": reservation_reduced,
+                    "warnings": reservation_warnings,
+                },
             )
             try:
                 if request.options.enable_thinking is not None:
@@ -818,7 +840,7 @@ class ModelLifecycle:
                         prompt,
                         messages=context.messages,
                         temperature=options.temperature,
-                        max_output_tokens=options.max_output_tokens,
+                        max_output_tokens=reserved_output_tokens,
                         top_p=options.top_p,
                         stop=options.stop,
                         seed=options.seed,
@@ -830,7 +852,7 @@ class ModelLifecycle:
                         prompt,
                         messages=context.messages,
                         temperature=options.temperature,
-                        max_output_tokens=options.max_output_tokens,
+                        max_output_tokens=reserved_output_tokens,
                         top_p=options.top_p,
                         stop=options.stop,
                         seed=options.seed,
@@ -880,6 +902,16 @@ class ModelLifecycle:
                 ),
                 "context_size_used": state.model.context_size,
                 "context_budget": context.metadata(),
+                "reserved_output_tokens": reserved_output_tokens,
+                "output_reservation_reduced": reserved_output_tokens < options.max_output_tokens,
+                "warnings": (
+                    [
+                        "Output reservation reduced to "
+                        f"{reserved_output_tokens} tokens to fit the context."
+                    ]
+                    if reserved_output_tokens < options.max_output_tokens
+                    else []
+                ),
             },
         )
         yield "done", {"finish_reason": "stop"}

@@ -90,6 +90,40 @@ def runtime_lifecycle(tmp_path: Path, *, keep_loaded: bool = False) -> ModelLife
     return ModelLifecycle(registry, root_backend="fake")
 
 
+class FixedContextFakeBackend(FakeBackend):
+    async def count_tokens(self, prompt: str) -> int:
+        del prompt
+        return 160
+
+
+def adaptive_runtime_lifecycle(tmp_path: Path) -> ModelLifecycle:
+    registry = ModelRegistry.from_dict(
+        {
+            "models": {
+                "april-brain": {
+                    "id": "april-brain",
+                    "name": "fake",
+                    "path": "missing.gguf",
+                    "backend": "fake",
+                    "role": "brain",
+                    "chat_format": "generic",
+                    "threads": 1,
+                    "context_size": 256,
+                    "temperature": 0.0,
+                    "max_output_tokens": 128,
+                    "keep_loaded": False,
+                }
+            }
+        },
+        root=tmp_path,
+    )
+    return ModelLifecycle(
+        registry,
+        backend_factory=lambda model: FixedContextFakeBackend(),
+        root_backend="fake",
+    )
+
+
 def test_runtime_normal_generation(tmp_path: Path) -> None:
     with runtime_client(tmp_path) as client:
         response = client.post(
@@ -98,6 +132,24 @@ def test_runtime_normal_generation(tmp_path: Path) -> None:
         )
     assert response.status_code == 200
     assert response.json()["model_id"] == "april-brain"
+
+
+def test_runtime_api_reports_adaptive_output_reservation(tmp_path: Path) -> None:
+    lifecycle = adaptive_runtime_lifecycle(tmp_path)
+    with _isolated_home(tmp_path), TestClient(create_app(lifecycle)) as client:
+        response = client.post(
+            "/runtime/chat",
+            json={
+                "model_id": "april-brain",
+                "messages": [{"role": "user", "content": "hello"}],
+                "options": {"max_output_tokens": 128},
+            },
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["diagnostics"]["reserved_output_tokens"] == 64
+    assert payload["diagnostics"]["output_reservation_reduced"] is True
+    assert any("reduced to 64 tokens" in item for item in payload["warnings"])
 
 
 def test_runtime_load_transports_generation_threads_to_fake_backend(tmp_path: Path) -> None:

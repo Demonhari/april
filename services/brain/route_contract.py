@@ -104,16 +104,6 @@ class RoutingProposal(BaseModel):
             not self.requested_text or not self.requested_text.strip()
         ):
             raise ValueError("memory_write_requires_content")
-        if self.operation == "coding_assistance" and self.context not in {
-            "conversation",
-            "pasted_text",
-        }:
-            raise ValueError("coding_assistance_context_invalid")
-        if self.operation == "document_reading" and self.context not in {
-            "local_document",
-            "pasted_text",
-        }:
-            raise ValueError("document_reading_context_invalid")
         if self.operation in {"approval_command", "rejection_command"} and (
             not self.requested_text or not self.requested_text.strip()
         ):
@@ -322,9 +312,15 @@ _CANONICAL_TOOL_CLASS.update(
 
 
 class RouteContractError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        proposal_fields: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.proposal_fields = proposal_fields
 
 
 class RouteCompiler:
@@ -420,6 +416,18 @@ class RouteCompiler:
         if forced is not None and context != forced:
             context = forced  # type: ignore[assignment]
             coercions.append(f"context_coerced:{proposal.operation}")
+        elif proposal.operation == "document_reading" and context not in {
+            "local_document",
+            "pasted_text",
+        }:
+            context = "local_document"
+            coercions.append("context_coerced:document_reading")
+        elif proposal.operation == "coding_assistance" and context not in {
+            "conversation",
+            "pasted_text",
+        }:
+            context = "pasted_text"
+            coercions.append("context_coerced:coding_assistance")
 
         allowed = _OPERATION_TOOL_CLASSES[proposal.operation]
         tool_class = proposal.tool_class

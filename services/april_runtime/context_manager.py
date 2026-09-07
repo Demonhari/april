@@ -11,6 +11,7 @@ from services.april_runtime.schemas import ChatMessage
 
 SUMMARY_BLOCK_PREFIX = "[MACHINE-GENERATED CONVERSATION CONTEXT"
 TRUNCATION_MARKER = "[TRUNCATED]"
+MIN_OUTPUT_RESERVATION = 192
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +76,11 @@ class ContextManager:
                 "CONTEXT_BUDGET_EXCEEDED",
                 "Model context window is too small after reserving output tokens.",
                 400,
-                {"context_size": model.context_size, "reserved_output_tokens": max_output_tokens},
+                {
+                    "context_size": model.context_size,
+                    "reserved_output_tokens": max_output_tokens,
+                    "truncated_tool_groups": 0,
+                },
             )
 
         groups = build_context_groups(messages)
@@ -123,6 +128,7 @@ class ContextManager:
                     "estimated_input_tokens": total,
                     "selected_context_limit": budget,
                     "reserved_output_tokens": max_output_tokens,
+                    "truncated_tool_groups": truncated_tools,
                 },
             )
 
@@ -202,6 +208,64 @@ class ContextManager:
             context_warning_codes=warning_codes,
             selected_context_limit=budget,
         )
+
+    async def fit_with_reservation(
+        self,
+        *,
+        model: ModelDefinition,
+        backend: RuntimeBackend,
+        messages: list[ChatMessage],
+        max_output_tokens: int,
+        metadata: dict[str, object] | None = None,
+    ) -> tuple[ContextResult, int]:
+        """Fit context while conservatively adapting the output reservation.
+
+        The configured/requested output ceiling is tried first.  A reservation
+        at or above the advisory floor is not reduced below that floor; callers
+        that already request less than the floor may use a smaller reservation
+        when that is the only way to fit the model window.
+        """
+
+        reservation = max(1, max_output_tokens)
+        last_error: AprilError | None = None
+        while True:
+            try:
+                result = await self.fit(
+                    model=model,
+                    backend=backend,
+                    messages=messages,
+                    max_output_tokens=reservation,
+                    metadata=metadata,
+                )
+                return result, reservation
+            except AprilError as exc:
+                if exc.code != "CONTEXT_BUDGET_EXCEEDED":
+                    raise
+                last_error = exc
+                if (
+                    reservation <= MIN_OUTPUT_RESERVATION
+                    and max_output_tokens >= MIN_OUTPUT_RESERVATION
+                ):
+                    break
+                if reservation <= 1:
+                    break
+                next_reservation = reservation // 2
+                if max_output_tokens >= MIN_OUTPUT_RESERVATION:
+                    next_reservation = max(MIN_OUTPUT_RESERVATION, next_reservation)
+                if next_reservation >= reservation:
+                    break
+                reservation = next_reservation
+
+        assert last_error is not None
+        details = dict(last_error.details)
+        details["minimum_reservation_tried"] = reservation
+        details.setdefault("truncated_tool_groups", 0)
+        raise AprilError(
+            last_error.code,
+            last_error.message,
+            last_error.status_code,
+            details,
+        ) from last_error
 
     async def _count_rendered_tokens(
         self,

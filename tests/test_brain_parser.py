@@ -115,5 +115,12 @@ def test_routing_proposal_normalizes_advisory_fields() -> None:
 
 def test_routing_proposal_semantic_rejection_has_stable_code() -> None:
     with pytest.raises(ValueError, match="semantic contract") as exc_info:
-        parse_routing_proposal_with_diagnostics('{"operation":"memory_write"}')
+        parse_routing_proposal_with_diagnostics(
+            '{"operation":"memory_write","context":"memory","tool_class":"not_a_tool"}'
+        )
     assert exc_info.value.code == "semantic_rejection:memory_write_requires_content"
+    assert exc_info.value.proposal_fields == {
+        "operation": "memory_write",
+        "context": "memory",
+        "tool_class": "invalid",
+    }

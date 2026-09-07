@@ -97,6 +97,16 @@ assistant request. Oversized tool results may be truncated with an explicit
 marker inside the intact group; if the minimal group cannot fit, the whole group
 is removed. Runtime makes no summarization model call.
 
+When the requested output reservation leaves too little room for required input,
+Runtime retries context fitting with a bounded, smaller reservation down to its
+adaptive floor (or the smaller requested ceiling when that ceiling is already
+below the floor). The selected reservation is passed to generation and exposed
+in response diagnostics, so a successful response never hides that input/output
+tradeoff. Readiness separately warns when a configured model has fewer than
+1536 estimated input tokens after its configured output ceiling; this is a
+warning rather than a blocker and can be addressed by increasing `context_size`
+or lowering `max_output_tokens`.
+
 Chat/stream responses expose `context_budget` metadata with estimated input
 tokens, reserved output tokens, removed message/group counts, truncated
 tool-result count, orphan tool-message count, complete group count, summary

@@ -13,9 +13,6 @@ from services.brain.parser import parse_routing_proposal_with_diagnostics
 from services.brain.route_contract import (
     ROUTE_CONTRACT_FINGERPRINT,
     RouteCompiler,
-    RouteContext,
-    RouteOperation,
-    RouteToolClass,
     RoutingProposal,
     build_router_system_prompt,
 )
@@ -53,11 +50,11 @@ class ModelRoutingOutcome:
     runtime_backend: str | None = None
     prompt_path: str | None = None
     diagnostics: dict[str, object] = field(default_factory=dict)
-    first_proposal_operation: RouteOperation | None = None
-    first_proposal_context: RouteContext | None = None
-    first_proposal_tool_class: RouteToolClass | None = None
+    first_proposal_operation: str | None = None
+    first_proposal_context: str | None = None
+    first_proposal_tool_class: str | None = None
     first_rejection_code: str | None = None
-    repair_proposal_operation: RouteOperation | None = None
+    repair_proposal_operation: str | None = None
     repair_rejection_code: str | None = None
     coercions: list[str] = field(default_factory=list)
 
@@ -136,6 +133,7 @@ async def infer_model_route(
         outcome.coercions = _merge_codes(outcome.coercions, compiled.coercions)
     except Exception as exc:
         rejection = _rejection_code(exc)
+        _record_rejected_fields(outcome, exc, repair=False)
         if outcome.first_rejection_code is None:
             outcome.first_rejection_code = rejection
         repairable = rejection.startswith("schema_rejection:") or rejection in {"tool_not_allowed"}
@@ -185,6 +183,7 @@ async def infer_model_route(
             outcome.failure_code = None
             return outcome
         except Exception as exc:
+            _record_rejected_fields(outcome, exc, repair=True)
             outcome.repair_rejection_code = _rejection_code(exc)
             outcome.failure_code = "repair_failure"
             return outcome
@@ -199,6 +198,19 @@ def _record_first_proposal(outcome: ModelRoutingOutcome, proposal: RoutingPropos
     outcome.first_proposal_context = proposal.context
     outcome.first_proposal_tool_class = proposal.tool_class
     outcome.proposal = proposal
+
+
+def _record_rejected_fields(
+    outcome: ModelRoutingOutcome, exc: BaseException, *, repair: bool
+) -> None:
+    fields = getattr(exc, "proposal_fields", None)
+    if not isinstance(fields, dict):
+        return
+    prefix = "repair_" if repair else "first_"
+    for field_name in ("operation", "context", "tool_class"):
+        value = fields.get(field_name)
+        if isinstance(value, str):
+            setattr(outcome, f"{prefix}proposal_{field_name}", value)
 
 
 def _bounded_codes(values: object) -> list[str]:

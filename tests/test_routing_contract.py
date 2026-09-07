@@ -279,6 +279,25 @@ async def test_model_route_preserves_parser_and_compiler_coercions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_route_preserves_rejected_proposal_fields() -> None:
+    client = ScriptedRoutingClient(
+        [_response('{"operation":"memory_write","context":"memory","tool_class":"not_a_tool"}')]
+    )
+    outcome = await infer_model_route(
+        client,
+        model_id="april-brain",
+        message="save this",
+        history=None,
+        request_id="r",
+        compiler=RouteCompiler(),
+    )
+    assert outcome.failure_code == "semantic_rejection:memory_write_requires_content"
+    assert outcome.first_proposal_operation == "memory_write"
+    assert outcome.first_proposal_context == "memory"
+    assert outcome.first_proposal_tool_class == "invalid"
+
+
+@pytest.mark.asyncio
 async def test_repair_receives_request_contract_and_validation_category() -> None:
     client = ScriptedRoutingClient(
         [_response("not json"), _response(_proposal("normal_conversation"))]

@@ -404,6 +404,12 @@ shortcuts and measures genuine model classification. The two minimum accuracy
 flags apply independently. Coercions and contract rejections are reported as
 separate diagnostic counters. This is diagnostic evidence, not full readiness.
 
+For downstream Runtime failures, `downstream_runtime_error_code` is the
+authoritative Runtime code extracted from the nested error details. The Core
+API may wrap the same failure as `RUNTIME_UNAVAILABLE`; that outer code records
+the transport boundary, while the nested Runtime code explains the actual
+failure (for example, a context-budget refusal).
+
 For the complete configured-model check, use a new report path and require the
 real backend:
 

@@ -139,6 +139,18 @@ def _build_model_and_registry_checks(
                     artifact_status=artifact_status,
                 )
             )
+            input_budget = model.context_size - model.max_output_tokens
+            if input_budget < 1536:
+                checks.append(
+                    ReadinessCheck(
+                        name=f"model input budget: {model.id}",
+                        status="warning",
+                        detail=(
+                            f"input budget {input_budget} tokens is below 1536; raise "
+                            "context_size or lower max_output_tokens"
+                        ),
+                    )
+                )
             if model.backend == "llama_cpp" and artifact_status != "valid":
                 invalid_models[model.id] = artifact_status
         if invalid_models:

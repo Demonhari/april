@@ -4,13 +4,16 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from numbers import Real
-from typing import Any
+from typing import Any, get_args
 
 from pydantic import ValidationError as PydanticValidationError
 
 from april_common.errors import ValidationError
 from services.brain.route_contract import (
+    RouteContext,
     RouteContractError,
+    RouteOperation,
+    RouteToolClass,
     RoutingProposal,
     proposal_from_legacy,
 )
@@ -116,7 +119,26 @@ def parse_routing_proposal_with_diagnostics(text: str) -> tuple[RoutingProposal,
         if not isinstance(data, dict):
             raise ValueError("routing proposal must be a JSON object")
         normalized, coercions = _normalize_routing_proposal(data)
-        proposal = RoutingProposal.model_validate(proposal_from_legacy(normalized))
+        candidate = proposal_from_legacy(normalized)
+        if (
+            candidate.get("operation") == "memory_write"
+            and not str(candidate.get("requested_text") or "").strip()
+        ):
+            raise RouteContractError(
+                "semantic_rejection:memory_write_requires_content",
+                "Routing proposal did not match the semantic contract.",
+                _proposal_fields(data),
+            )
+        if (
+            candidate.get("operation") in {"approval_command", "rejection_command"}
+            and not str(candidate.get("requested_text") or "").strip()
+        ):
+            raise RouteContractError(
+                "semantic_rejection:approval_requires_action_id",
+                "Routing proposal did not match the semantic contract.",
+                _proposal_fields(data),
+            )
+        proposal = RoutingProposal.model_validate(candidate)
     except PydanticValidationError as exc:
         errors = exc.errors()
         error: dict[str, Any] = dict(errors[0]) if errors else {}
@@ -132,13 +154,33 @@ def parse_routing_proposal_with_diagnostics(text: str) -> tuple[RoutingProposal,
         raise RouteContractError(
             code,
             "Routing proposal did not match the semantic contract.",
+            _proposal_fields(data),
         ) from exc
+    except RouteContractError:
+        raise
     except (json.JSONDecodeError, ValueError) as exc:
         raise RouteContractError(
             "schema_rejection:no_json_object",
             "Routing proposal did not match the semantic contract.",
         ) from exc
     return proposal, coercions
+
+
+def _proposal_fields(data: dict[str, object]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    allowed = {
+        "operation": set(get_args(RouteOperation)),
+        "context": set(get_args(RouteContext)),
+        "tool_class": set(get_args(RouteToolClass)),
+    }
+    for name, values in allowed.items():
+        value = data.get(name)
+        fields[name] = (
+            value
+            if isinstance(value, str) and value in values
+            else ("missing" if name not in data else "invalid")
+        )
+    return fields
 
 
 def _normalize_routing_proposal(data: dict[str, object]) -> tuple[dict[str, object], list[str]]:

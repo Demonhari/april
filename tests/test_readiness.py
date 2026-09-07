@@ -112,6 +112,19 @@ def test_fake_backend_without_models_is_not_ready(tmp_path: Path) -> None:
     assert report.evidence_boundaries["lora_canary"] == "blocked_for_safety"
 
 
+def test_current_model_input_budget_warning_only_targets_reading_model(tmp_path: Path) -> None:
+    shutil.copytree(Path.cwd() / "configs", tmp_path / "configs")
+    report = build_readiness_report(tmp_path)
+    budget_checks = [
+        check for check in report.checks if check.name.startswith("model input budget:")
+    ]
+    assert [check.name for check in budget_checks] == ["model input budget: april-reading"]
+    assert budget_checks[0].status == "warning"
+    assert budget_checks[0].detail == (
+        "input budget 1024 tokens is below 1536; raise context_size or lower max_output_tokens"
+    )
+
+
 def test_invalid_gguf_header_is_a_model_blocker(tmp_path: Path) -> None:
     model_path = tmp_path / "models" / "brain.gguf"
     model_path.parent.mkdir()
