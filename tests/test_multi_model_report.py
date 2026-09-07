@@ -380,6 +380,22 @@ def test_runtime_error_is_fail() -> None:
     assert report.summary == "fail"
 
 
+def test_dead_runtime_process_forces_none_verification() -> None:
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[],
+        specialist_switch=None,
+        require_real_model=False,
+        runtime_process={
+            "runtime": {"alive": False, "returncode": -11, "signal": "SIGSEGV"},
+            "api": {"alive": False, "returncode": 0, "signal": None},
+        },
+    )
+    assert report.summary == "fail"
+    assert report.verification_level == "none"
+
+
 def test_require_real_model_without_any_available_fails() -> None:
     missing = PerModelResult(
         model_id="april-brain",

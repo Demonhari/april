@@ -363,6 +363,7 @@ def _print_routing_summary(report: object) -> None:
         "end-to-end schema-valid": getattr(routing, "schema_valid_count", 0) if routing else 0,
         "end-to-end deterministic/model/repair/fallback": _routing_provenance_counts(routing),
         "end-to-end failure categories": end_to_end_categories or "none",
+        "end-to-end stage codes": _routing_stage_codes(routing),
         "model-only cases": _routing_counts(model_only),
         "model-only semantic intent": _routing_semantic_counts(model_only),
         "model-only schema-valid": getattr(model_only, "schema_valid_count", 0)
@@ -370,6 +371,9 @@ def _print_routing_summary(report: object) -> None:
         else 0,
         "model-only deterministic/model/repair/fallback": _routing_provenance_counts(model_only),
         "model-only failure categories": model_only_categories or "none",
+        "model-only stage codes": _routing_stage_codes(model_only),
+        "runtime process": getattr(report, "runtime_process", None) or "not recorded",
+        "preserved logs": getattr(report, "log_directory_basename", None) or "none",
         "threshold failures": ", ".join(getattr(report, "threshold_failures", [])) or "none",
         "routing reason": getattr(brain, "routing_error_code", None) or "none",
     }
@@ -419,6 +423,19 @@ def _routing_failure_categories(report: object) -> str:
         for code in getattr(case, "mismatch_codes", []):
             counts[str(code)] += 1
     return ", ".join(f"{key}={counts[key]}" for key in sorted(counts))
+
+
+def _routing_stage_codes(report: object) -> str:
+    if report is None:
+        return "none"
+    from collections import Counter
+
+    counts: Counter[str] = Counter(
+        str(stage)
+        for case in getattr(report, "cases", [])
+        if (stage := getattr(case, "stage_code", None))
+    )
+    return ", ".join(f"{key}={counts[key]}" for key in sorted(counts)) or "none"
 
 
 def _voice_live_runner(settings: Any) -> Callable[[], VoiceLiveReport]:

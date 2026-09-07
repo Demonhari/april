@@ -479,6 +479,13 @@ class RouteCompiler:
     def _tools_for(self, proposal: RoutingProposal) -> list[str]:
         if proposal.operation == "patch_proposal":
             return ["git_status", "search_files"]
+        if proposal.operation == "repository_inspection" and proposal.tool_class in {
+            "git_status",
+            "search_files",
+            "list_files",
+            "repo_indexer",
+        }:
+            return ["git_status", "search_files"]
         if proposal.operation == "memory_write":
             return ["remember_memory"]
         if proposal.operation == "reminder_create":
@@ -668,6 +675,9 @@ def build_router_system_prompt(
         "system, external, or unknown. Use repository/local_document only when the user asks "
         "to access actual local resources. A code snippet or architecture explanation is not "
         "repository access.\n"
+        "Repository inspection selected with git_status, search_files, list_files, or "
+        "repo_indexer compiles to the canonical read-only git_status plus search_files pair; "
+        "specific git_diff, git_log, git_branch, and read_file requests stay single-tool.\n"
         "Use tool_class only from none, git_status, git_diff, git_log, git_branch, list_files, "
         "search_files, read_file, repo_indexer, document_search, run_command, remember_memory, "
         "list_reminders, cancel_reminder, test_runner, patch_generator, patch_applier, "

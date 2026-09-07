@@ -106,6 +106,8 @@ class RoutingCaseResult(BaseModel):
     ok: bool = False
     routing_method: str | None = None
     route_source: str | None = None
+    routing_failure_code: str | None = None
+    fallback_reason: str | None = None
     expected_intent: str | None = None
     actual_intent: str | None = None
     expected_agent: str | None = None
@@ -155,6 +157,8 @@ class RoutingReport(BaseModel):
     case_set_fingerprint: str | None = None
     semantic_passed: int = 0
     semantic_accuracy: float = 0.0
+    semantic_passed_including_fallback: int = 0
+    semantic_accuracy_including_fallback: float = 0.0
     # Per-case redacted outcomes (id + structural verdicts + routing method only).
     cases: list[RoutingCaseResult] = Field(default_factory=list)
 
@@ -261,10 +265,18 @@ def routing_report_from_results(
     case_set_complete = (
         bool(ids) and unique_ids and len(ids) == len(expected_ids) and set(ids) == set(expected_ids)
     )
-    semantic_passed = sum(
+    semantic_passed_including_fallback = sum(
         1
         for result in results
         if bool(getattr(result, "schema_valid", False))
+        and (getattr(result, "actual", {}) or {}).get("intent")
+        == getattr(result, "expected_intent", None)
+    )
+    semantic_passed = sum(
+        1
+        for result, source in zip(results, trusted_sources, strict=False)
+        if source in {"deterministic", "model", "model_repair"}
+        and bool(getattr(result, "schema_valid", False))
         and (getattr(result, "actual", {}) or {}).get("intent")
         == getattr(result, "expected_intent", None)
     )
@@ -276,6 +288,8 @@ def routing_report_from_results(
             ok=bool(getattr(result, "ok", False)),
             routing_method=_routing_method_of(result),
             route_source=_route_source_of(result, require_trusted=require_trusted_provenance),
+            routing_failure_code=getattr(result, "routing_failure_code", None),
+            fallback_reason=getattr(result, "fallback_reason", None),
             expected_intent=getattr(result, "expected_intent", None),
             actual_intent=(getattr(result, "actual", {}) or {}).get("intent"),
             expected_agent=getattr(result, "expected_agent", None),
@@ -328,6 +342,10 @@ def routing_report_from_results(
         ),
         semantic_passed=semantic_passed,
         semantic_accuracy=round(semantic_passed / total, 4) if total else 0.0,
+        semantic_passed_including_fallback=semantic_passed_including_fallback,
+        semantic_accuracy_including_fallback=(
+            round(semantic_passed_including_fallback / total, 4) if total else 0.0
+        ),
         cases=cases,
     )
 

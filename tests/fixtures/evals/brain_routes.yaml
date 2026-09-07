@@ -122,7 +122,9 @@ cases:
     expected_intent: coding_repo_analysis
     expected_agent: coding_agent
     expected_model_id: april-coding
-    expected_tools: [git_status]
+    # Repository inspection always uses the canonical bounded read-only pair:
+    # status identifies the repository and search_files grounds the explanation.
+    expected_tools: [git_status, search_files]
     expected_permission_level: 1
     expected_risk_level: read_only
     expected_needs_confirmation: false

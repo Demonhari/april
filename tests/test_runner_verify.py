@@ -474,6 +474,26 @@ def test_real_model_verifier_prepare_and_env(tmp_path: Path, monkeypatch) -> Non
         shutil.rmtree(verifier.temp, ignore_errors=True)
 
 
+def test_real_model_verifier_preserves_redacted_log_tails(tmp_path: Path, monkeypatch) -> None:
+    ports = iter([19011, 19012])
+    monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
+    verifier = RealModelVerifier(home=tmp_path, model_path=tmp_path / "model.gguf")
+    verifier.runtime_log.write_text(
+        f"safe failure at {tmp_path / 'private.txt'}\nBearer secret-value\nlast line\n",
+        encoding="utf-8",
+    )
+    verifier.api_log.write_text("api failure\n", encoding="utf-8")
+    basenames = verifier._preserve_logs_on_failure(reason="runtime_exit")
+    assert basenames == ["runtime.log", "api.log"]
+    assert verifier.preserved_log_directory_basename is not None
+    assert all(Path(name).name == name for name in basenames)
+    tail = "\n".join(verifier.preserved_log_tails["runtime.log"])
+    assert "Bearer" not in tail
+    assert str(tmp_path) not in tail
+    assert (tmp_path / "logs" / "verification" / verifier.preserved_log_directory_basename).is_dir()
+    shutil.rmtree(verifier.temp, ignore_errors=True)
+
+
 def test_run_real_model_verification_uses_real_verifier(tmp_path: Path, monkeypatch) -> None:
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"fake")

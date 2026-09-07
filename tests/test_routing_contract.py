@@ -104,6 +104,17 @@ def test_repository_operation_cannot_be_tool_free() -> None:
         )
 
 
+def test_repository_inspection_uses_canonical_read_only_pair() -> None:
+    decision = RouteCompiler().compile(
+        RoutingProposal(
+            operation="repository_inspection",
+            context="repository",
+            tool_class="git_status",
+        )
+    )
+    assert decision.tools_needed == ["git_status", "search_files"]
+
+
 @pytest.mark.asyncio
 async def test_valid_json_with_length_finish_is_not_model_success() -> None:
     client = ScriptedRoutingClient([_response(_proposal(), finish_reason="length")])

@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from agents.base import BaseAgent
+from agents.memory.agent import ARCHIVE_CANDIDATE_RESPONSE_FORMAT
 from agents.schemas import AGENT_NAMES, AgentConfig
 from april_common.errors import ValidationError as AprilValidationError
 from services.april_runtime.fake_backend import FakeBackend
@@ -23,12 +24,16 @@ from services.brain.agent_loop import (
     AgentFinalAnswer,
     StructuredAgentLoop,
 )
+from services.brain.conversation_context import SUMMARY_RESPONSE_FORMAT
 from services.brain.parser import parse_brain_decision, parse_with_repair
+from services.brain.route_contract import RoutingProposal
 from services.brain.router import BrainRouter
 from services.brain.schemas import RouteSource
 from services.brain.structured_output import (
     ROUTING_PROPOSAL_RESPONSE_FORMAT,
+    grammar_safe_json_schema,
 )
+from tests.helpers.schema_nesting import max_repetition_nesting
 from tests.test_runtime_api import runtime_lifecycle
 
 VALID_DECISION = (
@@ -85,6 +90,57 @@ def test_modest_schema_accepted() -> None:
         type="json_object", json_schema={"type": "object", "properties": {"a": {"type": "string"}}}
     )
     assert response_format.json_schema is not None
+
+
+def test_response_format_repetition_bound_is_grammar_safe() -> None:
+    with pytest.raises(PydanticValidationError, match="repetition bound 2000"):
+        ResponseFormat(type="json_object", json_schema={"type": "string", "maxLength": 2000})
+    accepted = ResponseFormat(type="json_object", json_schema={"type": "string", "maxLength": 16})
+    assert accepted.json_schema == {"type": "string", "maxLength": 16}
+
+
+def test_grammar_safe_schema_preserves_contract_keys() -> None:
+    schema = {
+        "type": "object",
+        "required": ["value"],
+        "additionalProperties": False,
+        "properties": {
+            "value": {
+                "type": "string",
+                "enum": ["a"],
+                "maxLength": 2000,
+                "description": "ignored by grammar",
+            }
+        },
+    }
+    safe = grammar_safe_json_schema(schema)
+    assert safe["required"] == ["value"]
+    assert safe["additionalProperties"] is False
+    assert safe["properties"]["value"]["enum"] == ["a"]
+    assert "maxLength" not in safe["properties"]["value"]
+
+
+def test_all_model_response_formats_have_no_unbounded_repetition() -> None:
+    formats = [
+        ROUTING_PROPOSAL_RESPONSE_FORMAT,
+        AGENT_OUTPUT_RESPONSE_FORMAT,
+        SUMMARY_RESPONSE_FORMAT,
+        ARCHIVE_CANDIDATE_RESPONSE_FORMAT,
+    ]
+    for response_format in formats:
+        assert response_format.json_schema is not None
+        assert max_repetition_nesting(response_format.json_schema) <= 16
+
+
+def test_routing_proposal_still_enforces_requested_text_after_parsing() -> None:
+    proposal = {
+        "operation": "conversation",
+        "context": "general",
+        "tool_class": "none",
+        "requested_text": "x" * 2001,
+    }
+    with pytest.raises(PydanticValidationError):
+        RoutingProposal.model_validate(proposal)
 
 
 # --- strict validation, repair, fallback ------------------------------------

@@ -384,3 +384,32 @@ reading, creative, reasoning, memory search/write, Git reads, patch proposals,
 code edits, command execution, destructive/external requests, prompt injection,
 path escape, secrets, unsupported tools, and malformed-routing recovery
 coverage. Real-model evals run only with an explicit local GGUF path.
+
+## Isolated routing diagnostics
+
+Use the isolated routing diagnostic when iterating on the Brain route contract:
+
+```sh
+.venv/bin/python -m apps.runner.main april verify --routing-only \
+  --report /tmp/april-routing-only.json
+```
+
+This starts temporary Runtime and Core API children with the configured Brain
+model, bypasses specialist workflows and tool execution, and writes only the
+requested redacted report. It is diagnostic evidence, not full readiness.
+
+For the complete configured-model check, use a new report path and require the
+real backend:
+
+```sh
+.venv/bin/python -m apps.runner.main april verify \
+  --all-configured-models --require-real-model \
+  --report /tmp/april-all-configured-$(date -u +%Y%m%dT%H%M%SZ).json
+```
+
+If `runtime process exited` appears, Runtime died before the verifier completed.
+The report keeps the process return code/signal, stage codes, and the basename of
+the owner-only preserved log directory. Read `runtime.log` and `api.log` there;
+their bounded report tails are redacted and omit bearer credentials, tokens, and
+prompts. A healthy startup or specialist smoke check does not establish routing
+or conversational readiness.

@@ -16,6 +16,7 @@ from services.april_runtime.schemas import ChatMessage, GenerationOptions, Respo
 from services.brain.reasoning_resolver import resolve_reasoning_model
 from services.brain.response_handling import sanitize_model_output
 from services.brain.schemas import BrainDecision
+from services.brain.structured_output import grammar_safe_json_schema
 from services.evolution.versions import active_ladder_thresholds
 from services.memory.schemas import ReminderRecord
 
@@ -437,14 +438,16 @@ class IntelligenceLadder:
                     request_id=f"{request_id}-critique",
                     response_format=ResponseFormat(
                         type="json_object",
-                        json_schema={
-                            "type": "object",
-                            "properties": {
-                                "needs_revision": {"type": "boolean"},
-                                "critique": {"type": "string"},
-                            },
-                            "required": ["needs_revision", "critique"],
-                        },
+                        json_schema=grammar_safe_json_schema(
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "needs_revision": {"type": "boolean"},
+                                    "critique": {"type": "string"},
+                                },
+                                "required": ["needs_revision", "critique"],
+                            }
+                        ),
                     ),
                     max_output_tokens=self.settings.deep_mode.verified_critique_tokens,
                 )
@@ -716,24 +719,26 @@ class IntelligenceLadder:
             request_id=f"{request_id}-judge",
             response_format=ResponseFormat(
                 type="json_object",
-                json_schema={
-                    "type": "object",
-                    "properties": {
-                        "scores": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "responder_id": {"type": "string"},
-                                    "score": {"type": "number"},
-                                    "rationale": {"type": "string"},
+                json_schema=grammar_safe_json_schema(
+                    {
+                        "type": "object",
+                        "properties": {
+                            "scores": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "responder_id": {"type": "string"},
+                                        "score": {"type": "number"},
+                                        "rationale": {"type": "string"},
+                                    },
+                                    "required": ["responder_id", "score"],
                                 },
-                                "required": ["responder_id", "score"],
-                            },
-                        }
-                    },
-                    "required": ["scores"],
-                },
+                            }
+                        },
+                        "required": ["scores"],
+                    }
+                ),
             ),
             max_output_tokens=self.settings.deep_mode.council_judge_tokens,
         )

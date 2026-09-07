@@ -183,6 +183,10 @@ class MultiModelVerificationReport(BaseModel):
     models_passed: int = 0
     checks_failed: int = 0
     check_failures: list[str] = Field(default_factory=list)
+    runtime_process: dict[str, object] | None = None
+    log_basenames: list[str] = Field(default_factory=list)
+    log_directory_basename: str | None = None
+    runtime_log_tail: list[str] = Field(default_factory=list)
     summary: ReportSummary = "degraded"
 
 
@@ -199,6 +203,7 @@ class RoutingOnlyVerificationReport(BaseModel):
     routing: RoutingReport | None = None
     model_only_routing: RoutingReport | None = None
     threshold_failures: list[str] = Field(default_factory=list)
+    error_code: str | None = None
     summary: ReportSummary = "fail"
 
 
@@ -422,6 +427,10 @@ def build_multi_model_report(
     require_real_model: bool = False,
     runtime_error: bool = False,
     config_fingerprint: str | None = None,
+    runtime_process: dict[str, object] | None = None,
+    log_basenames: list[str] | None = None,
+    runtime_log_tail: list[str] | None = None,
+    log_directory_basename: str | None = None,
 ) -> MultiModelVerificationReport:
     """Assemble a redacted multi-model acceptance report from per-model results.
 
@@ -431,6 +440,11 @@ def build_multi_model_report(
     """
     active_thresholds = _active_thresholds(thresholds)
     simulated = runtime_backend == "fake"
+    runtime_entry = runtime_process.get("runtime") if isinstance(runtime_process, dict) else None
+    runtime_process_dead = bool(
+        isinstance(runtime_entry, dict) and runtime_entry.get("alive") is False
+    )
+    runtime_error = runtime_error or runtime_process_dead
 
     # Redact any path-looking skip reason in-place (basename only).
     for result in results:
@@ -494,6 +508,12 @@ def build_multi_model_report(
         core_model_set_verified=core_model_set_verified,
         all_configured_models_verified=all_configured_models_verified,
     )
+    if runtime_error:
+        real_model_verified = False
+        core_model_set_verified = False
+        all_available_models_verified = False
+        all_configured_models_verified = False
+        verification_level = "none"
 
     skipped = list(extra_skipped or [])
     skipped.extend(
@@ -540,6 +560,10 @@ def build_multi_model_report(
         models_passed=models_passed,
         checks_failed=checks_failed,
         check_failures=check_failures,
+        runtime_process=runtime_process,
+        log_basenames=list(log_basenames or []),
+        log_directory_basename=log_directory_basename,
+        runtime_log_tail=[redact_reason(line) for line in (runtime_log_tail or [])],
         summary=summary,
     )
 

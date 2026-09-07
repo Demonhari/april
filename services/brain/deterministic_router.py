@@ -380,7 +380,7 @@ class DeterministicRouter:
             risk,
             confirmation,
             summary,
-            tools=[tool],
+            tools=["git_status", "search_files"] if tool == "git_status" else [tool],
             planned=[
                 PlannedToolCall(
                     tool=tool,

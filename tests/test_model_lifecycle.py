@@ -66,6 +66,21 @@ class FailingBackend(CountingBackend):
         raise RuntimeError("load failed")
 
 
+class GenerateFailBackend(CountingBackend):
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_output_tokens: int,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        seed: int | None = None,
+    ) -> GenerationResult:
+        del prompt, temperature, max_output_tokens, top_p, stop, seed
+        raise RuntimeError("generation failed")
+
+
 class OptionCaptureBackend(CountingBackend):
     def __init__(self) -> None:
         super().__init__()
@@ -247,6 +262,31 @@ async def test_backend_error_state(tmp_path: Path) -> None:
     with pytest.raises(ModelUnavailableError):
         await lifecycle.load_model("april-brain")
     assert lifecycle.list_models()[0].state == "error"
+
+
+@pytest.mark.asyncio
+async def test_failed_generation_closes_backend_before_next_load(tmp_path: Path) -> None:
+    created: list[GenerateFailBackend] = []
+
+    def factory(_model: ModelDefinition) -> GenerateFailBackend:
+        backend = GenerateFailBackend()
+        created.append(backend)
+        return backend
+
+    lifecycle = ModelLifecycle(registry(tmp_path), backend_factory=factory, root_backend="fake")
+    request = ChatRequest(
+        model_id="april-brain",
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+    with pytest.raises(ModelUnavailableError):
+        await lifecycle.generate(request)
+    assert len(created) == 1
+    assert created[0].unloads == 1
+    assert lifecycle.get_state("april-brain").backend is None
+
+    with pytest.raises(ModelUnavailableError):
+        await lifecycle.generate(request)
+    assert len(created) == 2
 
 
 @pytest.mark.asyncio

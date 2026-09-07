@@ -3,8 +3,14 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from services.april_runtime.schemas import ResponseFormat
+from services.brain.grammar_schema import grammar_safe_json_schema as _grammar_safe_json_schema
 from services.brain.route_contract import RoutingProposal
 from services.brain.schemas import BrainDecision
+
+
+def grammar_safe_json_schema(schema: dict) -> dict:
+    """Build the model-facing grammar copy while retaining parser validation."""
+    return _grammar_safe_json_schema(schema)
 
 
 def response_format_for_model(model: type[BaseModel]) -> ResponseFormat:
@@ -13,7 +19,9 @@ def response_format_for_model(model: type[BaseModel]) -> ResponseFormat:
     Deriving the schema from the model avoids maintaining a duplicated, drifting
     copy: the structured-output constraint always tracks the validated type.
     """
-    return ResponseFormat(type="json_object", json_schema=model.model_json_schema())
+    return ResponseFormat(
+        type="json_object", json_schema=grammar_safe_json_schema(model.model_json_schema())
+    )
 
 
 # Computed once at import; the brain asks the runtime to constrain output to the

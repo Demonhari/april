@@ -459,6 +459,8 @@ class FallbackRouter:
             "repository status",
         ):
             tools.append("git_status")
+        if tools == ["git_status"]:
+            return ["git_status", "search_files"]
         return tools
 
     def _explicit_memory_write(self, message: str) -> tuple[str, str] | None:

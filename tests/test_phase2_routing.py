@@ -121,7 +121,7 @@ async def test_fallback_remains_available_after_runtime_failure() -> None:
     result = await BrainRouter(runtime).route_result("Help me plan tomorrow.")  # type: ignore[arg-type]
     assert len(runtime.model_ids) == 1
     assert result.route_source is RouteSource.FALLBACK
-    assert result.fallback_reason == "runtime_or_output_failure"
+    assert result.fallback_reason == "runtime_unavailable"
 
 
 @pytest.mark.asyncio

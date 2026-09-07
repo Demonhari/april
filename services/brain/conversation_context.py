@@ -12,6 +12,7 @@ from april_common.audit import AuditLogger
 from april_common.settings import ConversationContextSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
+from services.brain.structured_output import grammar_safe_json_schema
 from services.memory.policy import MemoryPolicy
 from services.memory.schemas import (
     ConversationSummary,
@@ -22,7 +23,7 @@ from services.memory.sqlite_memory import SqliteMemory
 
 SUMMARY_RESPONSE_FORMAT = ResponseFormat(
     type="json_object",
-    json_schema=ConversationSummaryContent.model_json_schema(),
+    json_schema=grammar_safe_json_schema(ConversationSummaryContent.model_json_schema()),
 )
 SUMMARY_SYSTEM_PROMPT = """\
 Summarize only the supplied conversation content into the required JSON object.

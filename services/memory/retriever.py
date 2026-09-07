@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from april_common.audit import AuditLogger
+from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
+from services.brain.grammar_schema import grammar_safe_json_schema
 from services.memory.policy import MemoryPolicy
 from services.memory.schemas import LexicalHit, MemoryRecord, SearchResult
 from services.memory.sqlite_memory import SqliteMemory
@@ -84,8 +86,6 @@ class RuntimeMemoryReranker:
     async def rerank(
         self, query: str, candidates: list[SearchResult], *, limit: int
     ) -> list[str] | None:
-        from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
-
         listing_parts: list[str] = []
         used = 0
         for index, candidate in enumerate(candidates[:RERANK_MAX_CANDIDATES], start=1):
@@ -120,16 +120,18 @@ class RuntimeMemoryReranker:
                     options=GenerationOptions(max_output_tokens=256),
                     response_format=ResponseFormat(
                         type="json_object",
-                        json_schema={
-                            "type": "object",
-                            "properties": {
-                                "memory_ids": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                }
-                            },
-                            "required": ["memory_ids"],
-                        },
+                        json_schema=grammar_safe_json_schema(
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "memory_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    }
+                                },
+                                "required": ["memory_ids"],
+                            }
+                        ),
                     ),
                     request_id="memory-rerank",
                 ),

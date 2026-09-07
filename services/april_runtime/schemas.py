@@ -24,6 +24,10 @@ FinishReason = Literal["stop", "length", "error", "cancelled"]
 # unbounded or pathologically nested document.
 MAX_RESPONSE_FORMAT_SCHEMA_BYTES = 16_384
 MAX_RESPONSE_FORMAT_SCHEMA_DEPTH = 24
+# Keep repetition constraints bounded before a schema reaches a grammar
+# compiler.  The grammar-safe application helper strips these constraints from
+# model-facing schemas; this boundary also fails closed for untrusted callers.
+MAX_RESPONSE_FORMAT_REPETITION = 16
 MAX_EMBED_BATCH_ITEMS = 64
 MAX_EMBED_ITEM_CHARACTERS = 8_192
 MAX_EMBED_BATCH_CHARACTERS = 65_536
@@ -39,6 +43,24 @@ def _json_schema_depth(value: Any, depth: int = 0) -> int:
     else:
         return depth
     return max((_json_schema_depth(child, depth + 1) for child in children), default=depth)
+
+
+def _json_schema_repetition_bound(value: Any) -> int | None:
+    repetition_keys = {"maxLength", "minLength", "maxItems", "minItems"}
+    if isinstance(value, dict):
+        bounds = [
+            child
+            for key, child in value.items()
+            if key in repetition_keys and isinstance(child, int) and not isinstance(child, bool)
+        ]
+        nested = [_json_schema_repetition_bound(child) for child in value.values()]
+    elif isinstance(value, list):
+        bounds = []
+        nested = [_json_schema_repetition_bound(child) for child in value]
+    else:
+        return None
+    values = [bound for bound in [*bounds, *nested] if bound is not None]
+    return max(values, default=None)
 
 
 class ResponseFormat(BaseModel):
@@ -71,6 +93,11 @@ class ResponseFormat(BaseModel):
             )
         if _json_schema_depth(value) > MAX_RESPONSE_FORMAT_SCHEMA_DEPTH:
             raise ValueError("json_schema nesting is too deep")
+        repetition_bound = _json_schema_repetition_bound(value)
+        if repetition_bound is not None and repetition_bound > MAX_RESPONSE_FORMAT_REPETITION:
+            raise ValueError(
+                f"json_schema repetition bound {repetition_bound} exceeds the grammar-safe limit"
+            )
         return value
 
 

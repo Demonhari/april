@@ -177,6 +177,24 @@ def test_real_routing_report_missing_decision_counts_as_failure() -> None:
     assert report.accuracy == 0.5
 
 
+def test_empty_routing_evidence_uses_stage_code_category() -> None:
+    case = BrainEvalCase(
+        id="c1",
+        message="hello",
+        expected_intent="normal_conversation",
+        expected_agent="general_agent",
+    )
+    result = _evaluate_case(
+        case,
+        {},
+        schema_valid=False,
+        allow_fallback=False,
+        evidence={"stage_code": "runtime_unavailable"},
+    )
+    assert result.mismatch_codes == ["runtime_unavailable"]
+    assert result.routing_failure_code is None
+
+
 def test_real_routing_report_fails_schema_invalid_matching_strings() -> None:
     case = BrainEvalCase(
         id="c1",

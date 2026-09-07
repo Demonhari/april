@@ -662,6 +662,10 @@ class ModelLifecycle:
                 state.state = "error"
                 state.load_error = str(exc)
                 state.generation_errors += 1
+                # A failed generation may have left the backend in an unknown
+                # native state. Close it before exposing the error so a later
+                # load cannot retain a live, poisoned instance.
+                await self._close_failed_state(state)
                 raise ModelUnavailableError(
                     request.model_id, "Generation failed.", {"cause": str(exc)}
                 ) from exc
@@ -842,6 +846,7 @@ class ModelLifecycle:
                 state.state = "error"
                 state.load_error = str(exc)
                 state.generation_errors += 1
+                await self._close_failed_state(state)
                 yield "error", {"code": "GENERATION_FAILED", "message": "Generation failed."}
                 return
             finally:

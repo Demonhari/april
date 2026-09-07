@@ -85,6 +85,7 @@ class AllConfiguredModelsVerifier(
         self.results: list[PerModelResult] = []
         self.specialist_switch: SpecialistSwitchReport | None = None
         self.runtime_error = False
+        self.runtime_exit: dict[str, Any] | None = None
         self.candidate_adapter_model_id = candidate_adapter_model_id
         self.candidate_adapter_path = (
             candidate_adapter_path.expanduser().resolve(strict=False)
@@ -192,22 +193,83 @@ class AllConfiguredModelsVerifier(
                         ),
                     )
                 )
-            self.specialist_switch = self._verify_switching(available)
-            self.checks.append(
-                VerifyCheck(
-                    name="specialist switching (brain resident)",
-                    ok=self.specialist_switch.success,
-                    detail="brain stays usable across specialist load/unload",
+                if self._record_runtime_exit(during=entry.model.id):
+                    remaining = available[available.index(entry) + 1 :]
+                    self._skip_after_runtime_exit(remaining)
+                    break
+            if self.runtime_error:
+                self.checks.append(
+                    VerifyCheck(
+                        name="specialist switching (brain resident)",
+                        ok=False,
+                        status="skip",
+                        detail="runtime process exited earlier",
+                    )
                 )
-            )
+            else:
+                self.specialist_switch = self._verify_switching(available)
+                self.checks.append(
+                    VerifyCheck(
+                        name="specialist switching (brain resident)",
+                        ok=self.specialist_switch.success,
+                        detail="brain stays usable across specialist load/unload",
+                    )
+                )
         except Exception as exc:
             self.runtime_error = True
             self.checks.append(VerifyCheck(name="multi-model runtime", ok=False, detail=str(exc)))
         finally:
             self._stop()
             self._check("services stopped", self._services_stopped)
+            if self.runtime_error or any(not check.ok for check in self.checks):
+                self.preserved_log_basenames = self._preserve_logs_on_failure(
+                    reason="multi_model_verification_failed"
+                )
             shutil.rmtree(self.temp, ignore_errors=True)
         return self.checks
+
+    def _record_runtime_exit(self, *, during: str) -> bool:
+        if getattr(self, "runtime", None) is None:
+            return False
+        status = self._child_exit_status().get("runtime", {})
+        if not isinstance(status, dict) or status.get("alive") is not False:
+            return False
+        if not self.runtime_error:
+            self.runtime_error = True
+            self.runtime_exit = status
+            self.checks.append(
+                VerifyCheck(
+                    name="runtime process exited",
+                    ok=False,
+                    detail=(
+                        f"returncode={status.get('returncode')}, "
+                        f"signal={status.get('signal')}, during={during}"
+                    ),
+                )
+            )
+        return True
+
+    def _skip_after_runtime_exit(self, entries: list[ModelPlanEntry]) -> None:
+        for entry in entries:
+            self.results.append(
+                PerModelResult(
+                    model_id=entry.model.id,
+                    role=entry.model.role,
+                    backend=entry.model.backend,
+                    path_basename=entry.path_basename,
+                    available=True,
+                    skipped_reason="runtime_exited_earlier",
+                    unload_success=False,
+                )
+            )
+            self.checks.append(
+                VerifyCheck(
+                    name=f"model {entry.model.id} acceptance gates",
+                    ok=False,
+                    status="skip",
+                    detail="runtime process exited earlier",
+                )
+            )
 
     def _verify_one(self, entry: ModelPlanEntry) -> PerModelResult:
         model = entry.model
@@ -277,6 +339,8 @@ class AllConfiguredModelsVerifier(
                 result.unload_success = unloaded.get("state") in {"unloaded", "unavailable"}
             except Exception:
                 result.unload_success = False
+                if not self._child_exit_status().get("runtime", {}).get("alive", True):
+                    result.failure_detail = "runtime process exited"
         return result
 
     def _effective_adapter_path_for_report(self, model: ModelDefinition) -> Path | None:
@@ -502,9 +566,6 @@ class AllConfiguredModelsVerifier(
         ):
             return end_to_end, real_routing_report(cases, [{} for _ in cases])
 
-        # Isolated model-only evaluation deliberately calls Runtime directly.
-        # It cannot be made to pass by adding deterministic router shortcuts and
-        # it never enters the orchestrator/tool execution path.
         model_decisions: list[dict[str, Any]] = []
         model_evidence: list[dict[str, Any]] = []
         compiler = RouteCompiler.from_home(self.repo_home)
@@ -545,14 +606,34 @@ class AllConfiguredModelsVerifier(
                         "contract_fingerprint": routing_contract_fingerprint(compiler),
                     }
                 )
-            except Exception:
+                if self._record_runtime_exit(during="brain routing evaluation"):
+                    for _remaining in cases[index + 1 :]:
+                        model_decisions.append({})
+                        model_evidence.append(
+                            {
+                                "stage_code": "runtime_unavailable",
+                                "contract_fingerprint": routing_contract_fingerprint(compiler),
+                            }
+                        )
+                    break
+            except Exception as exc:
                 model_decisions.append({})
                 model_evidence.append(
                     {
-                        "stage_code": "inference_transport_error",
+                        "stage_code": _routing_error_code(exc),
                         "contract_fingerprint": routing_contract_fingerprint(compiler),
                     }
                 )
+                if self._record_runtime_exit(during="brain routing evaluation"):
+                    for _remaining in cases[index + 1 :]:
+                        model_decisions.append({})
+                        model_evidence.append(
+                            {
+                                "stage_code": "runtime_unavailable",
+                                "contract_fingerprint": routing_contract_fingerprint(compiler),
+                            }
+                        )
+                    break
         return end_to_end, real_routing_report(cases, model_decisions, model_evidence)
 
     def _routing_report(self) -> RoutingReport:
@@ -589,14 +670,12 @@ class AllConfiguredModelsVerifier(
                 decisions.append(event if event else {})
                 evidence.append(
                     {
-                        "stage_code": (
-                            None
-                            if event and response.status_code < 400
-                            else "downstream_chat_failure"
-                            if event
-                            else "missing_correlated_route_event"
-                        ),
+                        "stage_code": _routing_stage_code(event, response),
                         "downstream_ok": response.status_code < 400,
+                        "routing_failure_code": event.get("routing_failure_code")
+                        if event
+                        else None,
+                        "fallback_reason": event.get("fallback_reason") if event else None,
                         "proposal_operation": event.get("proposal_operation"),
                         "proposal_context": event.get("proposal_context"),
                         "repair_attempted": event.get("repair_attempted", False),
@@ -604,6 +683,8 @@ class AllConfiguredModelsVerifier(
                         "contract_fingerprint": event.get("contract_fingerprint"),
                     }
                 )
+                if self._record_runtime_exit(during="brain routing evaluation"):
+                    break
         return real_routing_report(cases, decisions, evidence)
 
     def _latest_decision(self) -> dict[str, Any]:
@@ -673,6 +754,10 @@ class AllConfiguredModelsVerifier(
             require_real_model=self.require_real_model,
             runtime_error=self.runtime_error,
             config_fingerprint=config_fingerprint,
+            runtime_process=self._child_exit_status(),
+            log_basenames=getattr(self, "preserved_log_basenames", []),
+            log_directory_basename=getattr(self, "preserved_log_directory_basename", None),
+            runtime_log_tail=getattr(self, "preserved_log_tails", {}).get("runtime.log", []),
         )
 
     def run_routing_only(self) -> RoutingOnlyVerificationReport:
@@ -730,12 +815,19 @@ class AllConfiguredModelsVerifier(
                 threshold_failures=thresholds,
                 summary="pass" if not thresholds else "fail",
             )
-        except Exception:
+        except Exception as exc:
+            error_code = _routing_error_code(exc)
+            if self._record_runtime_exit(during="brain routing evaluation"):
+                error_code = "runtime_unavailable"
+            self.preserved_log_basenames = self._preserve_logs_on_failure(
+                reason="routing_only_failed"
+            )
             return RoutingOnlyVerificationReport(
                 generated_at=environment_snapshot().generated_at,
                 model_id=brain.model.id,
                 backend="llama_cpp",
-                threshold_failures=["routing_only_verification_failed"],
+                threshold_failures=[error_code],
+                error_code=error_code,
             )
         finally:
             with contextlib.suppress(Exception):
@@ -787,8 +879,22 @@ def _routing_error_code(exc: BaseException) -> str:
     """Return a bounded, non-secret diagnostic for a failed routing eval."""
     if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return "routing_timeout"
-    if isinstance(exc, httpx.HTTPError):
-        return "routing_http_error"
-    if isinstance(exc, (OSError, ConnectionError)):
+    if isinstance(exc, (httpx.ConnectError, OSError, ConnectionError)):
         return "routing_connection_error"
-    return "routing_evaluation_failed"
+    return "inference_transport_error"
+
+
+def _routing_stage_code(event: dict[str, Any], response: httpx.Response) -> str | None:
+    if event and response.status_code < 400:
+        return None
+    failure_code = event.get("routing_failure_code") if event else None
+    route_source = (event.get("route_source") or event.get("routing_method")) if event else None
+    if route_source == "fallback" and failure_code in {
+        "runtime_unavailable",
+        "inference_transport_error",
+    }:
+        return "runtime_unavailable"
+    body = response.text[:500].lower()
+    if response.status_code in {502, 503} and "runtime" in body:
+        return "runtime_unavailable"
+    return "downstream_chat_failure" if event else "missing_correlated_route_event"

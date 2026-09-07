@@ -14,6 +14,7 @@ from services.april_runtime.schemas import (
     GenerationOptions,
     ResponseFormat,
 )
+from services.brain.grammar_schema import grammar_safe_json_schema
 
 ArchiveMemoryKind = Literal[
     "fact",
@@ -43,7 +44,7 @@ class ArchiveCandidateEnvelope(BaseModel):
 
 ARCHIVE_CANDIDATE_RESPONSE_FORMAT = ResponseFormat(
     type="json_object",
-    json_schema=ArchiveCandidateEnvelope.model_json_schema(),
+    json_schema=grammar_safe_json_schema(ArchiveCandidateEnvelope.model_json_schema()),
 )
 
 

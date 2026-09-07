@@ -113,6 +113,13 @@ async def test_router_treats_strict_structured_prompt_fallback_as_fallback() -> 
 
 
 @pytest.mark.asyncio
+async def test_router_preserves_runtime_unavailable_fallback_reason() -> None:
+    result = await BrainRouter(OfflineRuntimeClient()).route_result("plan my day")
+    assert result.route_source.value == "fallback"
+    assert result.fallback_reason == "runtime_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_router_treats_repair_structured_prompt_fallback_as_fallback() -> None:
     client = RepairStructuredFallbackRuntimeClient()
     decision = await BrainRouter(client).route("April, plan my work today.")  # type: ignore[arg-type]

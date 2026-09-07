@@ -22,6 +22,7 @@ data/apriald.lock
 data/apriald.pid
 data/apriald.status.json
 logs/*.log
+logs/verification/
 logs/*.jsonl
 logs/*.anchor
 logs/*.lock

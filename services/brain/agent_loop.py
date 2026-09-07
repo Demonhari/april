@@ -12,6 +12,7 @@ from april_common.settings import ConversationContextSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
 from services.brain.response_handling import sanitize_model_output
+from services.brain.structured_output import grammar_safe_json_schema
 from services.memory.schemas import Message, SuspendedAgentRun
 from services.memory.sqlite_memory import SqliteMemory
 from services.permissions.tool_execution import ToolExecutionContext, ToolExecutionService
@@ -59,7 +60,8 @@ AGENT_OUTPUT_ADAPTER: TypeAdapter[AgentIterationOutput] = TypeAdapter(AgentItera
 # Structured agents request their exact output union, derived from the adapter so
 # the schema cannot drift from the type the loop validates against.
 AGENT_OUTPUT_RESPONSE_FORMAT = ResponseFormat(
-    type="json_object", json_schema=AGENT_OUTPUT_ADAPTER.json_schema()
+    type="json_object",
+    json_schema=grammar_safe_json_schema(AGENT_OUTPUT_ADAPTER.json_schema()),
 )
 
 

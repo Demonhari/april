@@ -44,6 +44,8 @@ class BrainEvalResult(BaseModel):
     expected_needs_confirmation: bool | None = None
     actual: dict[str, Any] = Field(default_factory=dict)
     route_source: str | None = None
+    routing_failure_code: str | None = None
+    fallback_reason: str | None = None
     detail: str = ""
     mismatch_codes: list[str] = Field(default_factory=list)
     stage_code: str | None = None
@@ -131,6 +133,7 @@ def _evaluate_case(
         schema_valid=schema_valid,
         allow_fallback=allow_fallback,
         trusted_only=not allow_fallback,
+        evidence=evidence,
     )
     if downstream_ok is False and "downstream_chat_failure" not in mismatch_codes:
         mismatch_codes.append("downstream_chat_failure")
@@ -148,6 +151,16 @@ def _evaluate_case(
         expected_needs_confirmation=case.expected_needs_confirmation,
         actual=actual,
         route_source=(actual_method),
+        routing_failure_code=(
+            str(evidence["routing_failure_code"])
+            if isinstance(evidence.get("routing_failure_code"), str)
+            else None
+        ),
+        fallback_reason=(
+            str(evidence["fallback_reason"])
+            if isinstance(evidence.get("fallback_reason"), str)
+            else None
+        ),
         detail=(
             ""
             if schema_valid and routing_ok and downstream_ok is not False
@@ -191,8 +204,20 @@ def _mismatch_codes(
     schema_valid: bool,
     allow_fallback: bool,
     trusted_only: bool = False,
+    evidence: dict[str, Any] | None = None,
 ) -> list[str]:
     codes: list[str] = []
+    evidence = evidence or {}
+    if not actual:
+        stage_code = evidence.get("stage_code")
+        if stage_code in {
+            "runtime_unavailable",
+            "inference_timeout",
+            "inference_transport_error",
+            "missing_correlated_route_event",
+        }:
+            return [str(stage_code)]
+        return ["missing_correlated_route_event"]
     if not schema_valid:
         codes.append("schema_invalid")
         return codes
@@ -257,7 +282,10 @@ def _validated_decision(value: Any) -> tuple[dict[str, Any], bool]:
     try:
         decision = BrainDecision.model_validate(value)
     except ValueError:
-        return value if isinstance(value, dict) else {}, False
+        # Preserve the fact that a non-empty response existed without retaining
+        # generated text in the report.  Empty actual evidence is reserved for
+        # transport/runtime failures and missing correlated events.
+        return value if isinstance(value, dict) else {"_invalid_response": True}, False
     normalized = decision.model_dump()
     # route_source is trusted only when it came from the redacted, persisted
     # orchestrator event. A model cannot manufacture this marker in its own JSON.

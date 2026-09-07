@@ -16,12 +16,14 @@ import httpx
 import yaml
 
 from apps.runner import verify as verify_coordinator
+from apps.runner.mac_report import redact_reason
 from apps.runner.verification.types import (
     BenchmarkResult,
     VerifyCheck,
 )
 from april_common.process_environment import ProcessCategory, build_process_environment
 from april_common.service_health import ServiceHealthResult, probe_service_health
+from april_common.settings import load_settings
 from april_common.thermal_state import ThermalStateResult, collect_thermal_state
 from april_common.time import utc_now_iso
 
@@ -60,6 +62,10 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         self.tokens_per_second: float | None = None
         self.prompt_path: str = "unknown"
         self.runtime_rss_bytes: int | None = None
+        self.preserved_log_tails: dict[str, list[str]] = {}
+        self.preserved_log_basenames: list[str] = []
+        self.preserved_log_directory_basename: str | None = None
+        self._exited_before_shutdown: dict[str, dict[str, Any]] = {}
 
     @property
     def runtime_url(self) -> str:
@@ -93,6 +99,10 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         finally:
             self._stop()
             self._check("services stopped", self._services_stopped)
+            if any(not check.ok for check in self.checks):
+                self.preserved_log_basenames = self._preserve_logs_on_failure(
+                    reason="verification_check_failed"
+                )
             shutil.rmtree(self.temp, ignore_errors=True)
         return self.checks
 
@@ -385,6 +395,17 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         )
 
     def _services_stopped(self) -> str:
+        if self._exited_before_shutdown:
+            name, status = next(iter(self._exited_before_shutdown.items()))
+            if name == "runtime":
+                raise RuntimeError(
+                    "runtime exited before shutdown: "
+                    f"returncode={status['returncode']}, signal={status['signal']}"
+                )
+            raise RuntimeError(
+                f"{name} exited before shutdown: "
+                f"returncode={status['returncode']}, signal={status['signal']}"
+            )
         alive = []
         for name, proc in (("runtime", self.runtime), ("api", self.api)):
             if proc is not None and proc.poll() is None:
@@ -392,6 +413,63 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         if alive:
             raise RuntimeError(f"still running: {', '.join(alive)}")
         return "stopped"
+
+    @staticmethod
+    def _status_for_process(proc: subprocess.Popen[bytes] | None) -> dict[str, Any]:
+        if proc is None:
+            return {"alive": False, "returncode": None, "signal": None}
+        returncode = proc.poll()
+        signal_name: str | None = None
+        if isinstance(returncode, int) and returncode < 0:
+            with suppress(ValueError):
+                signal_name = signal.Signals(-returncode).name
+        return {
+            "alive": returncode is None,
+            "returncode": returncode,
+            "signal": signal_name,
+        }
+
+    def _child_exit_status(self) -> dict[str, Any]:
+        """Return redacted lifecycle state for the owned child processes."""
+        return {
+            "runtime": self._status_for_process(getattr(self, "runtime", None)),
+            "api": self._status_for_process(getattr(self, "api", None)),
+        }
+
+    def _preserve_logs_on_failure(self, *, reason: str) -> list[str]:
+        """Copy bounded, redacted child logs before the temporary home is removed."""
+        del reason  # the directory name is intentionally stable and non-sensitive
+        try:
+            logs_root = load_settings(root=self.repo_home).logs_path
+        except Exception:
+            logs_root = self.repo_home / "logs"
+        verifier_kind = self.__class__.__name__.removesuffix("Verifier").lower() or "verification"
+        timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        destination = logs_root / "verification" / f"{timestamp}-{verifier_kind}"
+        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.preserved_log_directory_basename = destination.name
+        with suppress(OSError):
+            destination.chmod(0o700)
+        preserved: list[str] = []
+        for source in (self.runtime_log, self.api_log):
+            if not source.exists():
+                continue
+            basename = source.name
+            target = destination / basename
+            try:
+                shutil.copyfile(source, target)
+                target.chmod(0o600)
+                preserved.append(basename)
+                tail: list[str] = []
+                for line in source.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]:
+                    lowered = line.lower()
+                    if any(secret in lowered for secret in ("bearer", "token", "prompt")):
+                        continue
+                    tail.append(redact_reason(line))
+                self.preserved_log_tails[basename] = tail
+            except OSError:
+                continue
+        return preserved
 
     def _check(self, name: str, action: Callable[[], Any]) -> Any:
         try:
@@ -403,8 +481,15 @@ class RealModelVerifier:  # pragma: no cover - requires optional real GGUF runti
         return detail
 
     def _stop(self) -> None:
-        for proc in (self.api, self.runtime):
-            if proc is not None and proc.poll() is None:
+        for name, proc in (("api", self.api), ("runtime", self.runtime)):
+            if proc is None:
+                continue
+            status = self._status_for_process(proc)
+            # A short-lived test stub may have exited cleanly before teardown;
+            # only an unexpected non-zero exit is a failed service lifecycle.
+            if not status["alive"] and status["returncode"] not in {None, 0}:
+                self._exited_before_shutdown.setdefault(name, status)
+            else:
                 with suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGTERM)
         for proc in (self.api, self.runtime):

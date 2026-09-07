@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from april_common.errors import AprilError
+from april_common.errors import AprilError, RuntimeUnavailableError
 from services.april_runtime.client import RuntimeClient
 from services.brain.deterministic_router import DeterministicRouter
 from services.brain.fallback_router import FallbackRouter
@@ -99,7 +99,9 @@ class BrainRouter:
                 repair_succeeded=outcome.repair_succeeded,
                 routing_failure_code=outcome.failure_code,
             )
-        except (AprilError, TimeoutError, OSError):
+        except (RuntimeUnavailableError, OSError, TimeoutError):
+            return self._fallback_result(message, reason="runtime_unavailable")
+        except AprilError:
             return self._fallback_result(message, reason="runtime_or_output_failure")
 
     def _fallback_result(

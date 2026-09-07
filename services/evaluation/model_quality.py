@@ -14,6 +14,7 @@ from services.april_runtime.schemas import ChatMessage, GenerationOptions, Respo
 from services.brain.deterministic_router import DeterministicRouter
 from services.brain.model_routing import infer_model_route
 from services.brain.route_contract import RouteCompiler
+from services.brain.structured_output import grammar_safe_json_schema
 from services.tool_worker.client import ToolWorkerClient
 
 FIXTURE_SET_VERSION = "model-quality-v1"
@@ -181,7 +182,9 @@ async def _strict_json(
                 ChatMessage(role="user", content=str(fixture["prompt"])),
             ],
             options=GenerationOptions(temperature=0.0, max_output_tokens=256, seed=11),
-            response_format=ResponseFormat(type="json_object", json_schema=dict(schema)),
+            response_format=ResponseFormat(
+                type="json_object", json_schema=grammar_safe_json_schema(dict(schema))
+            ),
             request_id=f"benchmark-json-{fixture['id']}",
         )
         parsed, errors = _validate_json(response.content, schema)
@@ -205,7 +208,9 @@ async def _strict_json(
                 ChatMessage(role="user", content=response.content),
             ],
             options=GenerationOptions(temperature=0.0, max_output_tokens=256, seed=11),
-            response_format=ResponseFormat(type="json_object", json_schema=dict(schema)),
+            response_format=ResponseFormat(
+                type="json_object", json_schema=grammar_safe_json_schema(dict(schema))
+            ),
             request_id=f"benchmark-json-repair-{fixture['id']}",
         )
         repaired, repair_errors = _validate_json(repair.content, schema)
@@ -265,15 +270,17 @@ async def _coding(
             options=GenerationOptions(temperature=0.0, max_output_tokens=768, seed=13),
             response_format=ResponseFormat(
                 type="json_object",
-                json_schema={
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["filename", "content"],
-                    "properties": {
-                        "filename": {"type": "string"},
-                        "content": {"type": "string"},
-                    },
-                },
+                json_schema=grammar_safe_json_schema(
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["filename", "content"],
+                        "properties": {
+                            "filename": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    }
+                ),
             ),
             request_id=f"benchmark-code-{fixture['id']}",
         )
