@@ -12,9 +12,8 @@ from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
 from services.brain.deterministic_router import DeterministicRouter
-from services.brain.parser import parse_brain_decision
-from services.brain.router import ROUTER_SYSTEM_PROMPT
-from services.brain.structured_output import BRAIN_DECISION_RESPONSE_FORMAT
+from services.brain.model_routing import infer_model_route
+from services.brain.route_contract import RouteCompiler
 from services.tool_worker.client import ToolWorkerClient
 
 FIXTURE_SET_VERSION = "model-quality-v1"
@@ -65,7 +64,7 @@ async def evaluate_model_quality(
         raise RuntimeError("model_quality_fixtures_unavailable")
     client = RuntimeClient(runtime_url, token=runtime_token, timeout=180.0)
     root = fixture_directory(settings.home)
-    routing = await _routing(client, model_id, _load(root / "routing.json"))
+    routing = await _routing(client, model_id, _load(root / "routing.json"), home=settings.home)
     strict_json = await _strict_json(client, model_id, _load(root / "strict_json.json"))
     coding = await _coding(
         client,
@@ -93,6 +92,8 @@ async def _routing(
     client: RuntimeClient,
     model_id: str,
     data: Mapping[str, Any],
+    *,
+    home: Path,
 ) -> dict[str, Any]:
     fixtures = _fixtures(data)
     passed = 0
@@ -103,48 +104,32 @@ async def _routing(
     deterministic_matches = 0
     deterministic_count = 0
     deterministic = DeterministicRouter()
+    compiler = RouteCompiler.from_home(home)
     for fixture in fixtures:
         category = str(fixture["category"])
         first_pass = False
         repair_used = False
         try:
-            response = await client.chat(
+            outcome = await infer_model_route(
+                client,
                 model_id=model_id,
-                messages=[
-                    ChatMessage(role="system", content=ROUTER_SYSTEM_PROMPT),
-                    ChatMessage(role="user", content=str(fixture["request"])),
-                ],
-                options=GenerationOptions(temperature=0.0, max_output_tokens=512, seed=7),
-                response_format=BRAIN_DECISION_RESPONSE_FORMAT,
+                message=str(fixture["request"]),
+                history=None,
                 request_id=f"benchmark-route-{fixture['id']}",
+                compiler=compiler,
+                max_output_tokens=192,
             )
-            try:
-                decision = parse_brain_decision(response.content)
-                first_pass = True
-            except Exception:
-                repair_used = True
-                repair = await client.chat(
-                    model_id=model_id,
-                    messages=[
-                        ChatMessage(
-                            role="system",
-                            content="Repair into exactly one schema-valid routing JSON object.",
-                        ),
-                        ChatMessage(role="user", content=response.content),
-                    ],
-                    options=GenerationOptions(temperature=0.0, max_output_tokens=512, seed=7),
-                    response_format=BRAIN_DECISION_RESPONSE_FORMAT,
-                    request_id=f"benchmark-route-repair-{fixture['id']}",
-                )
-                decision = parse_brain_decision(repair.content, method="model_repair")
-            route_ok = first_pass and _route_permitted(decision.model_dump(), fixture)
+            repair_used = outcome.repair_attempted
+            first_pass = not repair_used and outcome.decision is not None
+            route_ok = outcome.decision is not None and _route_permitted(
+                outcome.decision.model_dump(), fixture
+            )
         except Exception:
-            decision = None
             route_ok = False
             invalid += 1
         if repair_used:
             repaired += 1
-        elif first_pass and not route_ok:
+        if first_pass and not route_ok:
             wrong += 1
         passed += int(route_ok)
         categories.setdefault(category, []).append(route_ok)

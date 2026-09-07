@@ -98,6 +98,8 @@ class ContextFlow:
             conversation_id=active_conversation_id,
             event_type="brain_decision",
             payload={
+                "request_id": active_request_id,
+                "conversation_id": active_conversation_id,
                 "intent": decision.intent[:64],
                 "agent": decision.agent,
                 # The verification reader consumes this durable, redacted
@@ -120,6 +122,12 @@ class ContextFlow:
                 else "fallback",
                 "route_source": route_result.route_source.value,
                 "route_provenance": "trusted_v1",
+                "proposal_operation": route_result.proposal_operation,
+                "proposal_context": route_result.proposal_context,
+                "contract_fingerprint": route_result.contract_fingerprint,
+                "repair_attempted": route_result.repair_attempted,
+                "repair_succeeded": route_result.repair_succeeded,
+                "routing_failure_code": route_result.routing_failure_code,
                 "matched_rule": route_result.matched_rule,
                 "fallback_reason": route_result.fallback_reason,
                 "raw_model_confidence": route_result.raw_model_confidence,

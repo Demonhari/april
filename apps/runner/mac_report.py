@@ -13,6 +13,7 @@ invariant.
 
 from __future__ import annotations
 
+import hashlib
 import platform
 import re
 from collections.abc import Sequence
@@ -116,6 +117,17 @@ class RoutingCaseResult(BaseModel):
     risk_match: bool | None = None
     confirmation_match: bool | None = None
     mismatch_codes: list[str] = Field(default_factory=list)
+    stage_code: str | None = None
+    downstream_ok: bool | None = None
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    finish_reason: str | None = None
+    context_truncated: bool = False
+    input_tokens: int = 0
+    output_tokens: int = 0
+    proposal_operation: str | None = None
+    proposal_context: str | None = None
+    contract_fingerprint: str | None = None
 
 
 class RoutingReport(BaseModel):
@@ -137,6 +149,12 @@ class RoutingReport(BaseModel):
     deterministic_count: int = 0
     model_count: int = 0
     unknown_provenance_count: int = 0
+    provenance_verified: bool = False
+    case_set_complete: bool = False
+    duplicate_case_ids: int = 0
+    case_set_fingerprint: str | None = None
+    semantic_passed: int = 0
+    semantic_accuracy: float = 0.0
     # Per-case redacted outcomes (id + structural verdicts + routing method only).
     cases: list[RoutingCaseResult] = Field(default_factory=list)
 
@@ -201,7 +219,7 @@ def _routing_method_of(result: object) -> str | None:
     return None
 
 
-def _route_source_of(result: object) -> str | None:
+def _route_source_of(result: object, *, require_trusted: bool = False) -> str | None:
     actual = getattr(result, "actual", None)
     if not isinstance(actual, dict):
         return None
@@ -215,20 +233,41 @@ def _route_source_of(result: object) -> str | None:
         return str(source)
     if "route_source" in actual:
         return None
-    return _routing_method_of(result)
+    return None if require_trusted else _routing_method_of(result)
 
 
-def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
+def routing_report_from_results(
+    results: Sequence[object],
+    *,
+    require_trusted_provenance: bool = True,
+    expected_case_ids: Sequence[str] | None = None,
+) -> RoutingReport:
     total = len(results)
     passed = sum(1 for result in results if getattr(result, "ok", False))
     accuracy = round(passed / total, 4) if total else 0.0
     schema_valid_count = sum(1 for result in results if getattr(result, "schema_valid", True))
-    sources = [_route_source_of(result) for result in results]
+    sources = [
+        _route_source_of(result, require_trusted=require_trusted_provenance) for result in results
+    ]
+    trusted_sources = [_route_source_of(result, require_trusted=True) for result in results]
     fallback_count = sum(1 for source in sources if source == "fallback")
     model_repair_count = sum(1 for source in sources if source == "model_repair")
     deterministic_count = sum(1 for source in sources if source == "deterministic")
     model_count = sum(1 for source in sources if source == "model")
     unknown_provenance_count = sum(1 for source in sources if source is None)
+    ids = [str(getattr(result, "id", "") or "") for result in results]
+    unique_ids = len(ids) == len(set(ids)) and all(ids)
+    expected_ids = list(expected_case_ids) if expected_case_ids is not None else ids
+    case_set_complete = (
+        bool(ids) and unique_ids and len(ids) == len(expected_ids) and set(ids) == set(expected_ids)
+    )
+    semantic_passed = sum(
+        1
+        for result in results
+        if bool(getattr(result, "schema_valid", False))
+        and (getattr(result, "actual", {}) or {}).get("intent")
+        == getattr(result, "expected_intent", None)
+    )
     cases = [
         RoutingCaseResult(
             id=str(getattr(result, "id", "") or ""),
@@ -236,11 +275,7 @@ def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
             routing_ok=bool(getattr(result, "routing_ok", getattr(result, "ok", False))),
             ok=bool(getattr(result, "ok", False)),
             routing_method=_routing_method_of(result),
-            route_source=(
-                str((getattr(result, "actual", {}) or {}).get("route_source"))
-                if (getattr(result, "actual", {}) or {}).get("route_source") is not None
-                else None
-            ),
+            route_source=_route_source_of(result, require_trusted=require_trusted_provenance),
             expected_intent=getattr(result, "expected_intent", None),
             actual_intent=(getattr(result, "actual", {}) or {}).get("intent"),
             expected_agent=getattr(result, "expected_agent", None),
@@ -254,6 +289,17 @@ def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
                 result, "needs_confirmation", "expected_needs_confirmation"
             ),
             mismatch_codes=list(getattr(result, "mismatch_codes", [])),
+            stage_code=getattr(result, "stage_code", None),
+            downstream_ok=getattr(result, "downstream_ok", None),
+            repair_attempted=bool(getattr(result, "repair_attempted", False)),
+            repair_succeeded=bool(getattr(result, "repair_succeeded", False)),
+            finish_reason=getattr(result, "finish_reason", None),
+            context_truncated=bool(getattr(result, "context_truncated", False)),
+            input_tokens=int(getattr(result, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(result, "output_tokens", 0) or 0),
+            proposal_operation=getattr(result, "proposal_operation", None),
+            proposal_context=getattr(result, "proposal_context", None),
+            contract_fingerprint=getattr(result, "contract_fingerprint", None),
         )
         for result in results
     ]
@@ -268,6 +314,20 @@ def routing_report_from_results(results: Sequence[object]) -> RoutingReport:
         deterministic_count=deterministic_count,
         model_count=model_count,
         unknown_provenance_count=unknown_provenance_count,
+        provenance_verified=bool(results)
+        and all(
+            source in {"deterministic", "model", "model_repair", "fallback"}
+            for source in trusted_sources
+        ),
+        case_set_complete=case_set_complete,
+        duplicate_case_ids=len(ids) - len(set(ids)),
+        case_set_fingerprint=(
+            hashlib.sha256("\n".join(sorted(ids)).encode("utf-8")).hexdigest()[:16]
+            if unique_ids and ids
+            else None
+        ),
+        semantic_passed=semantic_passed,
+        semantic_accuracy=round(semantic_passed / total, 4) if total else 0.0,
         cases=cases,
     )
 

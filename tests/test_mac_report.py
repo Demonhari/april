@@ -84,7 +84,11 @@ class _EvalLike:
         self.ok = ok
         self.schema_valid = schema_valid
         self.routing_ok = routing_ok
-        self.actual = {"routing_method": routing_method}
+        self.actual = {
+            "routing_method": routing_method,
+            "route_source": routing_method,
+            "route_provenance": "trusted_v1" if routing_method is not None else None,
+        }
 
 
 def test_routing_report_tracks_valid_failures_and_per_case() -> None:

@@ -4,6 +4,7 @@ import uuid
 
 from agents.registry import AgentRegistry
 from agents.schemas import AgentResult
+from april_common.effective_config import load_permissions_file
 from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
 from services.brain.agent_loop import StructuredAgentLoop
@@ -18,6 +19,7 @@ from services.brain.orchestration.execution_flow import ExecutionFlow
 from services.brain.orchestration.finalization_flow import FinalizationFlow
 from services.brain.orchestration.interaction_flow import InteractionFlow
 from services.brain.orchestration.routing_flow import RoutingFlow
+from services.brain.route_contract import RouteCompiler
 from services.brain.router import BrainRouter
 from services.brain.routing_reliability import RoutingReliabilityService
 from services.evolution.versions import PromptOverlayManager
@@ -75,6 +77,10 @@ class AprilOrchestrator(
             runtime_client,
             brain_model_id=settings.brain.model_id,
             router_model_id=settings.brain.router_model_id,
+            route_compiler=RouteCompiler.from_agent_registry(
+                agent_registry,
+                permission_levels=load_permissions_file(settings.home).levels,
+            ),
         )
         self.routing_reliability = RoutingReliabilityService(
             memory.database,

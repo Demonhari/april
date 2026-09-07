@@ -19,6 +19,7 @@ from apps.runner.commands.composition import composition as _composition_api
 from apps.runner.mac_report import ReportThresholds, write_report
 from apps.runner.multi_model_report import (
     write_multi_model_report,
+    write_routing_only_report,
 )
 from apps.runner.soak import write_soak_report
 from apps.runner.verify import (
@@ -64,6 +65,11 @@ def verify(
         "--all-configured-models",
         "--mac-readiness",
         help="Verify every configured real GGUF model (load/chat/stream/unload + switching).",
+    ),
+    routing_only: bool = typer.Option(
+        False,
+        "--routing-only",
+        help="Run isolated real Brain routing diagnostics without specialist or tool workflows.",
     ),
     soak: bool = typer.Option(False, "--soak", help="Run a bounded fake-backend soak check."),
     minutes: float = typer.Option(10.0, "--minutes", min=0.01, max=240.0),
@@ -162,6 +168,25 @@ def verify(
                 f"(summary: {soak_report.summary}, real_model_verified: false)"
             )
         if soak_report.summary != "pass":
+            raise typer.Exit(1)
+        raise typer.Exit(0)
+    if routing_only:
+        routing_report = _composition_api.run_routing_only_verification(
+            _composition_api._manager().home,
+            max_output_tokens=max(max_output_tokens, 192),
+            timeout=timeout,
+        )
+        if json_output:
+            console.print_json(data=routing_report.model_dump())
+        else:
+            console.print(
+                "Isolated routing-only validation is diagnostic evidence, not full readiness."
+            )
+            console.print_json(data=routing_report.model_dump())
+        if report is not None:
+            written = write_routing_only_report(routing_report, report)
+            console.print(f"[green]Wrote routing-only report to {written}[/green]")
+        if routing_report.summary != "pass":
             raise typer.Exit(1)
         raise typer.Exit(0)
     if all_configured_models:
@@ -334,10 +359,12 @@ def _print_routing_summary(report: object) -> None:
     model_only_categories = _routing_failure_categories(model_only)
     rows = {
         "end-to-end cases": _routing_counts(routing),
+        "end-to-end semantic intent": _routing_semantic_counts(routing),
         "end-to-end schema-valid": getattr(routing, "schema_valid_count", 0) if routing else 0,
         "end-to-end deterministic/model/repair/fallback": _routing_provenance_counts(routing),
         "end-to-end failure categories": end_to_end_categories or "none",
         "model-only cases": _routing_counts(model_only),
+        "model-only semantic intent": _routing_semantic_counts(model_only),
         "model-only schema-valid": getattr(model_only, "schema_valid_count", 0)
         if model_only
         else 0,
@@ -369,6 +396,16 @@ def _routing_provenance_counts(report: object) -> str:
         f"repair={getattr(report, 'model_repair_count', 0)} "
         f"fallback={getattr(report, 'fallback_count', 0)} "
         f"unknown={getattr(report, 'unknown_provenance_count', 0)}"
+    )
+
+
+def _routing_semantic_counts(report: object) -> str:
+    if report is None:
+        return "0/0 (0.00)"
+    return (
+        f"{getattr(report, 'semantic_passed', 0)}/{getattr(report, 'total', 0)} "
+        f"({getattr(report, 'semantic_accuracy', 0.0):.2f}); "
+        f"normalized={getattr(report, 'passed', 0)}/{getattr(report, 'total', 0)}"
     )
 
 

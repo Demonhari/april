@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from services.april_runtime.schemas import ResponseFormat
+from services.brain.route_contract import RoutingProposal
 from services.brain.schemas import BrainDecision
 
 
@@ -18,3 +19,8 @@ def response_format_for_model(model: type[BaseModel]) -> ResponseFormat:
 # Computed once at import; the brain asks the runtime to constrain output to the
 # exact routing schema it will then validate against.
 BRAIN_DECISION_RESPONSE_FORMAT = response_format_for_model(BrainDecision)
+
+# Compatibility name retained for callers that import the old constant. New
+# routing calls use the bounded proposal schema, not BrainDecision's policy
+# fields. The old BrainDecision parser remains available for persisted readers.
+ROUTING_PROPOSAL_RESPONSE_FORMAT = response_format_for_model(RoutingProposal)

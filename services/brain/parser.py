@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from pydantic import ValidationError as PydanticValidationError
 
 from april_common.errors import ValidationError
+from services.brain.route_contract import RoutingProposal, proposal_from_legacy
 from services.brain.schemas import BrainDecision
 
 RepairCallback = Callable[[str], Awaitable[str]]
@@ -84,6 +85,25 @@ def parse_brain_decision(text: str, *, method: str = "model") -> BrainDecision:
             "Brain JSON did not match the routing schema.", {"error": str(exc)}
         ) from exc
     return decision.model_copy(update={"routing_method": method})
+
+
+def parse_routing_proposal(text: str) -> RoutingProposal:
+    """Parse the bounded semantic contract used by the live router.
+
+    ``proposal_from_legacy`` keeps older fake clients and integrations readable;
+    it does not preserve generated policy fields or provenance.
+    """
+    raw = _remove_trailing_commas(extract_single_json_object(text))
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("routing proposal must be a JSON object")
+        proposal = RoutingProposal.model_validate(proposal_from_legacy(data))
+    except (json.JSONDecodeError, PydanticValidationError, ValueError) as exc:
+        raise ValidationError(
+            "Routing proposal did not match the semantic contract.", {"error": str(exc)}
+        ) from exc
+    return proposal
 
 
 async def parse_with_repair(text: str, repair: RepairCallback) -> BrainDecision:

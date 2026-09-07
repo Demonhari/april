@@ -214,6 +214,14 @@ run april verify --all-configured-models --require-real-model \
   --report data/verification/mac-readiness.json
 ```
 
+For routing iteration without specialist switching or tool workflows, use the
+isolated diagnostic path. It starts temporary verifier services, never executes
+tools, and is not a readiness gate:
+
+```bash
+run april verify --routing-only --report data/verification/routing-only.json
+```
+
 Live microphone/wake-word and Apple signing/notarization remain separate
 target-Mac checks.
 

@@ -99,6 +99,7 @@ from apps.runner.verify import (
 )
 from apps.runner.verify import run_fake_verification as run_fake_verification
 from apps.runner.verify import run_real_model_verification as run_real_model_verification
+from apps.runner.verify import run_routing_only_verification as run_routing_only_verification
 from apps.runner.verify import run_workflow_verification as run_workflow_verification
 from apps.runner.voice_conversation_live import (
     run_voice_conversation_live_verification as run_voice_conversation_live_verification,

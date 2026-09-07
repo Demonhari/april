@@ -16,7 +16,10 @@ from apps.runner.verification.local_checks import (
     run_local_security_integrity_verification,
 )
 from apps.runner.verification.models import ModelBenchmark, RealModelVerifier
-from apps.runner.verification.multi_model import AllConfiguredModelsVerifier
+from apps.runner.verification.multi_model import (
+    AllConfiguredModelsVerifier,
+    RoutingOnlyVerificationReport,
+)
 from apps.runner.verification.planning import (
     plan_multi_model_verification as _plan_multi_model_verification,
 )
@@ -147,6 +150,22 @@ def run_target_mac_validation(
         timeout=timeout,
     )
     return validator.run()
+
+
+def run_routing_only_verification(
+    home: Path,
+    *,
+    max_output_tokens: int = 192,
+    timeout: float = 180.0,
+) -> RoutingOnlyVerificationReport:
+    verifier = AllConfiguredModelsVerifier(
+        home=home,
+        require_real_model=True,
+        max_output_tokens=max_output_tokens,
+        timeout=timeout,
+        routing_evaluation=True,
+    )
+    return verifier.run_routing_only()
 
 
 def _infer_chat_format_from_basename(basename: str) -> str:

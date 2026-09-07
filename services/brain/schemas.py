@@ -170,6 +170,12 @@ class RouteResult(BaseModel):
     fallback_reason: str | None = None
     structured_output_valid: bool = True
     repair_used: bool = False
+    proposal_operation: str | None = None
+    proposal_context: str | None = None
+    contract_fingerprint: str | None = None
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    routing_failure_code: str | None = None
 
     @property
     def route_key(self) -> str:

@@ -186,6 +186,29 @@ class MultiModelVerificationReport(BaseModel):
     summary: ReportSummary = "degraded"
 
 
+class RoutingOnlyVerificationReport(BaseModel):
+    """Brain-only routing evidence; never a full readiness report."""
+
+    schema_version: int = 1
+    report_type: Literal["routing_only"] = "routing_only"
+    generated_at: str
+    model_id: str
+    backend: str
+    real_model_exercised: bool = False
+    contract_fingerprint: str | None = None
+    routing: RoutingReport | None = None
+    model_only_routing: RoutingReport | None = None
+    threshold_failures: list[str] = Field(default_factory=list)
+    summary: ReportSummary = "fail"
+
+
+def write_routing_only_report(report: RoutingOnlyVerificationReport, path: Path) -> Path:
+    resolved = path.expanduser()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    return resolved
+
+
 def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThresholds) -> list[str]:
     failures: list[str] = []
     label = result.model_id
@@ -203,8 +226,12 @@ def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThres
                 failures.append(f"{label}: routing fallback decisions present")
             if result.routing.unknown_provenance_count > 0:
                 failures.append(f"{label}: routing provenance is incomplete")
+            if not result.routing.case_set_complete or result.routing.duplicate_case_ids:
+                failures.append(f"{label}: routing case evidence is incomplete or duplicated")
             if result.routing.passed != result.routing.total:
                 failures.append(f"{label}: end-to-end routing decisions failed")
+            if not _routing_axis_ok(result.routing, allow_deterministic=True):
+                failures.append(f"{label}: end-to-end routing acceptance axis failed")
         if result.model_only_routing is None:
             failures.append(f"{label}: model-only routing report missing")
         else:
@@ -216,8 +243,17 @@ def per_model_threshold_failures(result: PerModelResult, thresholds: ReportThres
                 failures.append(f"{label}: model-only routing fallback decisions present")
             if result.model_only_routing.unknown_provenance_count > 0:
                 failures.append(f"{label}: model-only routing provenance is incomplete")
+            if (
+                not result.model_only_routing.case_set_complete
+                or result.model_only_routing.duplicate_case_ids
+            ):
+                failures.append(
+                    f"{label}: model-only routing case evidence is incomplete or duplicated"
+                )
             if result.model_only_routing.passed != result.model_only_routing.total:
                 failures.append(f"{label}: model-only routing decisions failed")
+            if not _routing_axis_ok(result.model_only_routing, allow_deterministic=False):
+                failures.append(f"{label}: model-only routing acceptance axis failed")
     if result.role == "brain" and result.routing is not None and result.routing.total > 0:
         min_accuracy = thresholds.min_routing_accuracy
         if min_accuracy is not None and result.routing.accuracy < min_accuracy:
@@ -352,6 +388,10 @@ def _routing_axis_ok(report: RoutingReport | None, *, allow_deterministic: bool)
     if report.passed != report.total or report.schema_valid_count != report.total:
         return False
     if report.fallback_count or report.unknown_provenance_count:
+        return False
+    if not report.case_set_complete or report.duplicate_case_ids:
+        return False
+    if not report.provenance_verified:
         return False
     return allow_deterministic or report.deterministic_count == 0
 

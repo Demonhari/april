@@ -26,7 +26,9 @@ from services.brain.agent_loop import (
 from services.brain.parser import parse_brain_decision, parse_with_repair
 from services.brain.router import BrainRouter
 from services.brain.schemas import RouteSource
-from services.brain.structured_output import BRAIN_DECISION_RESPONSE_FORMAT
+from services.brain.structured_output import (
+    ROUTING_PROPOSAL_RESPONSE_FORMAT,
+)
 from tests.test_runtime_api import runtime_lifecycle
 
 VALID_DECISION = (
@@ -115,13 +117,13 @@ def test_invalid_agent_value_rejected() -> None:
         parse_brain_decision(text)
 
 
-def test_agent_field_exposes_enum_in_schema() -> None:
-    # The structured-output constraint must advertise the exact agent enum so the
-    # runtime can steer the model toward a valid value.
-    schema = BRAIN_DECISION_RESPONSE_FORMAT.json_schema
+def test_operation_field_exposes_bounded_contract_in_schema() -> None:
+    # The model receives semantic operations; policy fields are application-owned.
+    schema = ROUTING_PROPOSAL_RESPONSE_FORMAT.json_schema
     assert schema is not None
-    agent_schema = schema["properties"]["agent"]
-    assert set(agent_schema["enum"]) == set(AGENT_NAMES)
+    operation_schema = schema["properties"]["operation"]
+    assert "coding_assistance" in operation_schema["enum"]
+    assert "permission_level" not in schema["properties"]
 
 
 async def test_invalid_agent_repairs_then_falls_back() -> None:
@@ -173,8 +175,8 @@ async def test_brain_requests_its_exact_schema() -> None:
     client = ScriptedRuntimeClient([VALID_DECISION])
     decision = await BrainRouter(client).route("plan my day")  # type: ignore[arg-type]
     assert decision.intent == "planning"
-    assert client.response_formats == [BRAIN_DECISION_RESPONSE_FORMAT]
-    assert BRAIN_DECISION_RESPONSE_FORMAT.json_schema is not None
+    assert client.response_formats == [ROUTING_PROPOSAL_RESPONSE_FORMAT]
+    assert ROUTING_PROPOSAL_RESPONSE_FORMAT.json_schema is not None
 
 
 async def test_structured_agent_requests_its_output_schema() -> None:

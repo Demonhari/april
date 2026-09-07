@@ -32,6 +32,8 @@ def _matching_decision(case: BrainEvalCase, *, routing_method: str) -> dict[str,
         "task_steps": ["Route request"],
         "decision_summary": "Route request.",
         "routing_method": routing_method,
+        "route_source": routing_method,
+        "route_provenance": "trusted_model_only_v1",
     }
 
 

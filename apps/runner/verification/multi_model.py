@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import shutil
 import time
 from collections.abc import Callable
@@ -20,6 +22,7 @@ from apps.runner.mac_report import (
 from apps.runner.multi_model_report import (
     MultiModelVerificationReport,
     PerModelResult,
+    RoutingOnlyVerificationReport,
     SpecialistSwitchReport,
     build_multi_model_report,
 )
@@ -32,6 +35,14 @@ from apps.runner.verification.types import (
 from april_common.errors import ConfigError
 from april_common.settings import load_settings
 from services.april_runtime.model_registry import ModelDefinition
+from services.april_runtime.schemas import (
+    ChatMessage,
+    ChatResponse,
+    GenerationOptions,
+    ResponseFormat,
+)
+from services.brain.model_routing import infer_model_route, routing_contract_fingerprint
+from services.brain.route_contract import RouteCompiler
 from services.brain.schemas import BrainDecision
 from services.evolution.adapters import sha256_file
 
@@ -477,9 +488,6 @@ class AllConfiguredModelsVerifier(
 
     def _routing_reports(self, model_id: str) -> tuple[RoutingReport, RoutingReport]:
         from apps.runner.evals import load_brain_eval_cases, real_routing_report
-        from services.brain.parser import parse_brain_decision
-        from services.brain.router import ROUTER_SYSTEM_PROMPT
-        from services.brain.structured_output import BRAIN_DECISION_RESPONSE_FORMAT
 
         cases = load_brain_eval_cases(self.repo_home)
         end_to_end = self._routing_report()
@@ -498,106 +506,54 @@ class AllConfiguredModelsVerifier(
         # It cannot be made to pass by adding deterministic router shortcuts and
         # it never enters the orchestrator/tool execution path.
         model_decisions: list[dict[str, Any]] = []
+        model_evidence: list[dict[str, Any]] = []
+        compiler = RouteCompiler.from_home(self.repo_home)
+        routing_client = _VerifierRoutingClient(self)
         for index, case in enumerate(cases):
-            payload = self._post_runtime(
-                "/runtime/chat",
-                {
-                    "model_id": model_id,
-                    "messages": [
-                        {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
-                        {"role": "user", "content": case.message},
-                    ],
-                    "options": {
-                        "temperature": 0.0,
-                        "max_output_tokens": 192,
-                        "enable_thinking": False,
-                    },
-                    "response_format": BRAIN_DECISION_RESPONSE_FORMAT.model_dump(),
-                    "request_id": f"multi-{model_id}-routing-only-{index}",
-                },
-                timeout=self.timeout,
-            )
-            parsed: dict[str, Any] = {}
-            route_method = "model"
-            diagnostics = payload.get("diagnostics")
-            warnings = payload.get("warnings")
-            error_diagnostics = isinstance(diagnostics, dict) and any(
-                diagnostics.get(key) for key in ("error", "runtime_error", "generation_error")
-            )
-            structured_fallback = (
-                isinstance(diagnostics, dict)
-                and diagnostics.get("structured_output_fallback") is True
-            )
-            if not structured_fallback and isinstance(warnings, list):
-                structured_fallback = any(
-                    "structured-output prompt fallback" in str(item).casefold() for item in warnings
+            try:
+                outcome = asyncio.run(
+                    infer_model_route(
+                        routing_client,
+                        model_id=model_id,
+                        message=case.message,
+                        history=None,
+                        request_id=f"multi-{model_id}-routing-only-{index}",
+                        compiler=compiler,
+                        max_output_tokens=192,
+                    )
                 )
-            if (
-                not error_diagnostics
-                and not structured_fallback
-                and payload.get("finish_reason", "stop") == "stop"
-            ):
-                content = str(payload.get("content", ""))
-                try:
-                    parsed = parse_brain_decision(content).model_dump()
-                except Exception:
-                    repair = self._post_runtime(
-                        "/runtime/chat",
-                        {
-                            "model_id": model_id,
-                            "messages": [
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "Repair the previous response into exactly one valid "
-                                        "APRIL route JSON object. No prose."
-                                    ),
-                                },
-                                {"role": "user", "content": content},
-                            ],
-                            "options": {
-                                "temperature": 0.0,
-                                "max_output_tokens": 192,
-                                "enable_thinking": False,
-                            },
-                            "response_format": BRAIN_DECISION_RESPONSE_FORMAT.model_dump(),
-                            "request_id": f"multi-{model_id}-routing-repair-{index}",
-                        },
-                        timeout=self.timeout,
-                    )
-                    repair_diagnostics = repair.get("diagnostics")
-                    repair_warnings = repair.get("warnings")
-                    repair_fallback = (
-                        isinstance(repair_diagnostics, dict)
-                        and repair_diagnostics.get("structured_output_fallback") is True
-                    )
-                    if not repair_fallback and isinstance(repair_warnings, list):
-                        repair_fallback = any(
-                            "structured-output prompt fallback" in str(item).casefold()
-                            for item in repair_warnings
-                        )
-                    repair_error = isinstance(repair_diagnostics, dict) and any(
-                        repair_diagnostics.get(key)
-                        for key in ("error", "runtime_error", "generation_error")
-                    )
-                    if (
-                        not repair_error
-                        and not repair_fallback
-                        and repair.get("finish_reason", "stop") == "stop"
-                    ):
-                        try:
-                            parsed = parse_brain_decision(
-                                str(repair.get("content", "")),
-                            ).model_dump()
-                            route_method = "model_repair"
-                        except Exception:
-                            parsed = {}
-            if parsed:
-                parsed["routing_method"] = route_method
-                parsed["route_source"] = route_method
-                parsed["route_provenance"] = "trusted_model_only_v1"
-            model_decisions.append(parsed)
-        return end_to_end, real_routing_report(cases, model_decisions)
+                parsed = outcome.decision.model_dump() if outcome.decision is not None else {}
+                if parsed and outcome.route_source is not None:
+                    parsed["route_source"] = outcome.route_source.value
+                    parsed["route_provenance"] = "trusted_model_only_v1"
+                model_decisions.append(parsed)
+                model_evidence.append(
+                    {
+                        "stage_code": outcome.failure_code,
+                        "repair_attempted": outcome.repair_attempted,
+                        "repair_succeeded": outcome.repair_succeeded,
+                        "finish_reason": outcome.finish_reason,
+                        "context_truncated": outcome.context_truncated,
+                        "input_tokens": outcome.input_tokens,
+                        "output_tokens": outcome.output_tokens,
+                        "proposal_operation": (
+                            outcome.proposal.operation if outcome.proposal else None
+                        ),
+                        "proposal_context": (
+                            outcome.proposal.context if outcome.proposal else None
+                        ),
+                        "contract_fingerprint": routing_contract_fingerprint(compiler),
+                    }
+                )
+            except Exception:
+                model_decisions.append({})
+                model_evidence.append(
+                    {
+                        "stage_code": "inference_transport_error",
+                        "contract_fingerprint": routing_contract_fingerprint(compiler),
+                    }
+                )
+        return end_to_end, real_routing_report(cases, model_decisions, model_evidence)
 
     def _routing_report(self) -> RoutingReport:
         """Backward-compatible end-to-end routing report reader."""
@@ -605,16 +561,50 @@ class AllConfiguredModelsVerifier(
 
         cases = load_brain_eval_cases(self.repo_home)
         decisions: list[dict[str, Any]] = []
+        evidence: list[dict[str, Any]] = []
         with httpx.Client(
             base_url=self.api_url, headers=self.api_headers, timeout=self.timeout
         ) as client:
             for case in cases:
                 marker = self._brain_decision_marker()
-                response = client.post("/chat", json={"message": case.message})
-                decisions.append(
-                    self._brain_decision_after(marker) if response.status_code < 400 else {}
+                plan = getattr(self, "plan", [])
+                model_id = plan[0].model.id if plan else "routing"
+                request_id = f"multi-{model_id}-routing-{case.id}"
+                try:
+                    response = client.post(
+                        "/chat",
+                        json={"message": case.message},
+                        headers={"X-Request-ID": request_id},
+                    )
+                except TypeError as exc:
+                    # Keep compatibility with the tiny injected HTTP clients
+                    # used by older offline verification tests. Real httpx
+                    # clients always receive the correlation header.
+                    if "headers" not in str(exc):
+                        raise
+                    response = client.post("/chat", json={"message": case.message})
+                event = verify_coordinator.brain_decision_after_marker(
+                    self._brain_decision_database(), marker, request_id=request_id
                 )
-        return real_routing_report(cases, decisions)
+                decisions.append(event if event else {})
+                evidence.append(
+                    {
+                        "stage_code": (
+                            None
+                            if event and response.status_code < 400
+                            else "downstream_chat_failure"
+                            if event
+                            else "missing_correlated_route_event"
+                        ),
+                        "downstream_ok": response.status_code < 400,
+                        "proposal_operation": event.get("proposal_operation"),
+                        "proposal_context": event.get("proposal_context"),
+                        "repair_attempted": event.get("repair_attempted", False),
+                        "repair_succeeded": event.get("repair_succeeded", False),
+                        "contract_fingerprint": event.get("contract_fingerprint"),
+                    }
+                )
+        return real_routing_report(cases, decisions, evidence)
 
     def _latest_decision(self) -> dict[str, Any]:
         return verify_coordinator.brain_decision_after_marker(
@@ -684,6 +674,113 @@ class AllConfiguredModelsVerifier(
             runtime_error=self.runtime_error,
             config_fingerprint=config_fingerprint,
         )
+
+    def run_routing_only(self) -> RoutingOnlyVerificationReport:
+        """Run only Brain routing in an isolated verifier home.
+
+        The runtime and Core API are temporary processes owned by this verifier;
+        no specialist answer or tool path is exercised. This is intentionally a
+        diagnostic routing report, never a readiness claim.
+        """
+        brain = next(
+            (entry for entry in self.plan if entry.available and entry.model.role == "brain"),
+            None,
+        )
+        if brain is None:
+            return RoutingOnlyVerificationReport(
+                generated_at=environment_snapshot().generated_at,
+                model_id="april-brain",
+                backend="unknown",
+                threshold_failures=["no available configured brain model"],
+            )
+        try:
+            self._prepare()
+            env = self._env()
+            self.runtime = self._start("services.april_runtime.server", env, self.runtime_log)
+            self.api = self._start("services.api.server", env, self.api_log)
+            self._wait_json(self.runtime_url + "/runtime/health", auth_runtime=True)
+            self._wait_json(self.api_url + "/health")
+            loaded = self._post_runtime(
+                "/runtime/models/load",
+                {"model_id": brain.model.id, "request_id": "routing-only-load"},
+                timeout=self.timeout,
+            )
+            if loaded.get("state") != "loaded":
+                raise RuntimeError("brain model did not load")
+            routing, model_only = self._routing_reports(brain.model.id)
+            from apps.runner.multi_model_report import _routing_axis_ok
+
+            thresholds: list[str] = []
+            for label, report, deterministic_allowed in (
+                ("end-to-end", routing, True),
+                ("model-only", model_only, False),
+            ):
+                if not _routing_axis_ok(report, allow_deterministic=deterministic_allowed):
+                    thresholds.append(f"{label} routing axis failed")
+            return RoutingOnlyVerificationReport(
+                generated_at=environment_snapshot().generated_at,
+                model_id=brain.model.id,
+                backend="llama_cpp",
+                real_model_exercised=True,
+                contract_fingerprint=(
+                    model_only.cases[0].contract_fingerprint if model_only.cases else None
+                ),
+                routing=routing,
+                model_only_routing=model_only,
+                threshold_failures=thresholds,
+                summary="pass" if not thresholds else "fail",
+            )
+        except Exception:
+            return RoutingOnlyVerificationReport(
+                generated_at=environment_snapshot().generated_at,
+                model_id=brain.model.id,
+                backend="llama_cpp",
+                threshold_failures=["routing_only_verification_failed"],
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                self._post_runtime(
+                    "/runtime/models/unload",
+                    {"model_id": brain.model.id, "request_id": "routing-only-unload"},
+                    timeout=self.timeout,
+                )
+            self._stop()
+            shutil.rmtree(self.temp, ignore_errors=True)
+
+
+class _VerifierRoutingClient:
+    """Typed adapter for the isolated verifier's already-running Runtime."""
+
+    def __init__(self, verifier: AllConfiguredModelsVerifier) -> None:
+        self.verifier = verifier
+
+    async def chat(
+        self,
+        *,
+        model_id: str,
+        messages: list[ChatMessage],
+        options: GenerationOptions,
+        response_format: ResponseFormat,
+        request_id: str | None = None,
+    ) -> ChatResponse:
+        payload = self.verifier._post_runtime(
+            "/runtime/chat",
+            {
+                "model_id": model_id,
+                "messages": [message.model_dump() for message in messages],
+                "options": options.model_dump(exclude_none=True),
+                "response_format": response_format.model_dump(exclude_none=True),
+                "request_id": request_id,
+            },
+            timeout=self.verifier.timeout,
+        )
+        diagnostics = payload.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        if "finish_reason" not in payload:
+            diagnostics = {**diagnostics, "finish_reason_present": False}
+        payload["diagnostics"] = diagnostics
+        return ChatResponse.model_validate(payload)
 
 
 def _routing_error_code(exc: BaseException) -> str:

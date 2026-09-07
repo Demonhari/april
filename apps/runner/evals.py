@@ -46,6 +46,17 @@ class BrainEvalResult(BaseModel):
     route_source: str | None = None
     detail: str = ""
     mismatch_codes: list[str] = Field(default_factory=list)
+    stage_code: str | None = None
+    downstream_ok: bool | None = None
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    finish_reason: str | None = None
+    context_truncated: bool = False
+    input_tokens: int = 0
+    output_tokens: int = 0
+    proposal_operation: str | None = None
+    proposal_context: str | None = None
+    contract_fingerprint: str | None = None
 
 
 def load_brain_eval_cases(home: Path) -> list[BrainEvalCase]:
@@ -73,6 +84,7 @@ def _evaluate_case(
     *,
     schema_valid: bool,
     allow_fallback: bool = True,
+    evidence: dict[str, Any] | None = None,
 ) -> BrainEvalResult:
     mismatches: list[str] = []
     _expect(mismatches, "intent", case.expected_intent, actual.get("intent"))
@@ -95,7 +107,7 @@ def _evaluate_case(
         case.expected_needs_confirmation,
         actual.get("needs_confirmation"),
     )
-    actual_method = _evaluation_route_source(actual)
+    actual_method = _evaluation_route_source(actual, trusted_only=not allow_fallback)
     if allow_fallback:
         # Fake/fallback eval: the fixture's expected routing_method (e.g. fallback)
         # is authoritative.
@@ -108,16 +120,23 @@ def _evaluate_case(
             mismatches.append("routing_method was fallback (model JSON unusable or runtime failed)")
         elif actual_method not in {"deterministic", "model", "model_repair"}:
             mismatches.append(f"trusted routing provenance is unknown: {actual_method!r}")
-    routing_ok = not mismatches
+    evidence = evidence or {}
+    downstream_ok = evidence.get("downstream_ok")
+    if downstream_ok is False:
+        mismatches.append("downstream_chat_failure")
+    routing_ok = not mismatches or mismatches == ["downstream_chat_failure"]
     mismatch_codes = _mismatch_codes(
         case,
         actual,
         schema_valid=schema_valid,
         allow_fallback=allow_fallback,
+        trusted_only=not allow_fallback,
     )
+    if downstream_ok is False and "downstream_chat_failure" not in mismatch_codes:
+        mismatch_codes.append("downstream_chat_failure")
     return BrainEvalResult(
         id=case.id,
-        ok=schema_valid and routing_ok,
+        ok=schema_valid and routing_ok and downstream_ok is not False,
         schema_valid=schema_valid,
         routing_ok=routing_ok,
         expected_intent=case.expected_intent,
@@ -128,11 +147,40 @@ def _evaluate_case(
         expected_risk_level=case.expected_risk_level,
         expected_needs_confirmation=case.expected_needs_confirmation,
         actual=actual,
-        route_source=(
-            actual.get("route_source") if isinstance(actual.get("route_source"), str) else None
+        route_source=(actual_method),
+        detail=(
+            ""
+            if schema_valid and routing_ok and downstream_ok is not False
+            else "; ".join(mismatches or ["schema invalid"])
         ),
-        detail="" if schema_valid and routing_ok else "; ".join(mismatches or ["schema invalid"]),
         mismatch_codes=mismatch_codes,
+        stage_code=evidence.get("stage_code"),
+        downstream_ok=downstream_ok if isinstance(downstream_ok, bool) else None,
+        repair_attempted=bool(evidence.get("repair_attempted", False)),
+        repair_succeeded=bool(evidence.get("repair_succeeded", False)),
+        finish_reason=(
+            str(evidence["finish_reason"])
+            if isinstance(evidence.get("finish_reason"), str)
+            else None
+        ),
+        context_truncated=bool(evidence.get("context_truncated", False)),
+        input_tokens=int(evidence.get("input_tokens", 0) or 0),
+        output_tokens=int(evidence.get("output_tokens", 0) or 0),
+        proposal_operation=(
+            str(evidence["proposal_operation"])
+            if isinstance(evidence.get("proposal_operation"), str)
+            else None
+        ),
+        proposal_context=(
+            str(evidence["proposal_context"])
+            if isinstance(evidence.get("proposal_context"), str)
+            else None
+        ),
+        contract_fingerprint=(
+            str(evidence["contract_fingerprint"])
+            if isinstance(evidence.get("contract_fingerprint"), str)
+            else None
+        ),
     )
 
 
@@ -142,6 +190,7 @@ def _mismatch_codes(
     *,
     schema_valid: bool,
     allow_fallback: bool,
+    trusted_only: bool = False,
 ) -> list[str]:
     codes: list[str] = []
     if not schema_valid:
@@ -162,7 +211,7 @@ def _mismatch_codes(
         case.expected_tools
     ):
         codes.append("tool_set_mismatch")
-    method = _evaluation_route_source(actual)
+    method = _evaluation_route_source(actual, trusted_only=trusted_only)
     if allow_fallback:
         if case.expected_routing_method is not None and method != case.expected_routing_method:
             codes.append("routing_method_mismatch")
@@ -171,7 +220,11 @@ def _mismatch_codes(
     return codes
 
 
-def real_routing_report(cases: list[BrainEvalCase], decisions: list[Any]) -> RoutingReport:
+def real_routing_report(
+    cases: list[BrainEvalCase],
+    decisions: list[Any],
+    evidence: list[dict[str, Any]] | None = None,
+) -> RoutingReport:
     """Build a real-mode RoutingReport, disallowing fallback for every case.
 
     ``decisions[i]`` is the Brain decision recorded for ``cases[i]`` (or an empty
@@ -188,9 +241,14 @@ def real_routing_report(cases: list[BrainEvalCase], decisions: list[Any]) -> Rou
                 actual_dict,
                 schema_valid=schema_valid,
                 allow_fallback=False,
+                evidence=(evidence[index] if evidence and index < len(evidence) else None),
             )
         )
-    return routing_report_from_results(results)
+    return routing_report_from_results(
+        results,
+        require_trusted_provenance=True,
+        expected_case_ids=[case.id for case in cases],
+    )
 
 
 def _validated_decision(value: Any) -> tuple[dict[str, Any], bool]:
@@ -214,7 +272,7 @@ def _validated_decision(value: Any) -> tuple[dict[str, Any], bool]:
     return normalized, True
 
 
-def _evaluation_route_source(actual: dict[str, Any]) -> str | None:
+def _evaluation_route_source(actual: dict[str, Any], *, trusted_only: bool = False) -> str | None:
     source = actual.get("route_source")
     if actual.get("route_provenance") in {"trusted_v1", "trusted_model_only_v1"} and source in {
         "deterministic",
@@ -226,6 +284,8 @@ def _evaluation_route_source(actual: dict[str, Any]) -> str | None:
     # Compatibility for in-memory/unit callers and pre-provenance decisions.
     # Persisted reports without the trusted marker are handled as unknown by the
     # report reader rather than being upgraded to a real-model claim.
+    if trusted_only:
+        return None
     method = actual.get("routing_method")
     return str(method) if method in {"model", "model_repair", "fallback"} else None
 

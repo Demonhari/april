@@ -33,30 +33,41 @@ def latest_brain_decision_marker(database: Path) -> int:
     return int(row[0]) if row is not None and row[0] is not None else 0
 
 
-def brain_decision_after_marker(database: Path, marker: int) -> dict[str, Any]:
+def brain_decision_after_marker(
+    database: Path,
+    marker: int,
+    *,
+    request_id: str | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
     if not database.exists():
         return {}
     try:
         with connect_sqlite(database) as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT payload_json
                 FROM conversation_events
                 WHERE event_type = 'brain_decision' AND rowid > ?
                 ORDER BY rowid DESC
-                LIMIT 1
                 """,
                 (marker,),
-            ).fetchone()
+            ).fetchall()
     except sqlite3.Error:
         return {}
-    if row is None:
-        return {}
-    try:
-        payload = json.loads(str(row[0]))
-    except ValueError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    for row in rows:
+        try:
+            payload = json.loads(str(row[0]))
+        except ValueError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if request_id is not None and payload.get("request_id") != request_id:
+            continue
+        if conversation_id is not None and payload.get("conversation_id") != conversation_id:
+            continue
+        return payload
+    return {}
 
 
 def json_object_candidates(text: str) -> list[dict[str, Any]]:

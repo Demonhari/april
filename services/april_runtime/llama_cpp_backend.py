@@ -173,7 +173,12 @@ class LlamaCppBackend(RuntimeBackend):
         text = str(choice.get("text", ""))
         input_tokens = await self.count_tokens(prompt)
         output_tokens = await self.count_tokens(text)
-        return GenerationResult(text=text, input_tokens=input_tokens, output_tokens=output_tokens)
+        return GenerationResult(
+            text=text,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            finish_reason=self._finish_reason(choice.get("finish_reason")),
+        )
 
     async def generate_messages(
         self,
