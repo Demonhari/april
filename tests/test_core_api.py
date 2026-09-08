@@ -765,7 +765,11 @@ def test_memory_retrieval_in_prompt(settings_tmp) -> None:
     container = anyio.run(make_container, settings_tmp)
 
     async def seed_memory() -> None:
-        await container.memory.create_memory("I prefer deep work before meetings", reason="test")
+        await container.memory.create_memory(
+            "I prefer deep work before meetings",
+            kind="preference",
+            reason="test",
+        )
 
     anyio.run(seed_memory)
     client = TestClient(create_app(container))
@@ -871,7 +875,11 @@ def test_sensitive_memory_is_not_injected(settings_tmp) -> None:
 
     async def seed_memory() -> None:
         await container.memory.create_memory("token should never be injected", reason="test")
-        await container.memory.create_memory("I prefer morning planning", reason="test")
+        await container.memory.create_memory(
+            "I prefer morning planning",
+            kind="preference",
+            reason="test",
+        )
 
     anyio.run(seed_memory)
     client = TestClient(create_app(container))

@@ -7,6 +7,7 @@ from agents.schemas import AgentResult
 from april_common.effective_config import load_permissions_file
 from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
+from services.april_runtime.model_registry import ModelRegistry
 from services.brain.agent_loop import StructuredAgentLoop
 from services.brain.conversation_context import ConversationContextService
 from services.brain.intelligence_ladder import (
@@ -59,6 +60,7 @@ class AprilOrchestrator(
         playbook_loader: PlaybookLoader | None = None,
         playbook_runner: PlaybookRunner | None = None,
         agent_pool: AgentPool | None = None,
+        model_registry: ModelRegistry | None = None,
     ) -> None:
         self.settings = settings
         self.runtime_client = runtime_client
@@ -68,6 +70,7 @@ class AprilOrchestrator(
         self.approvals = approvals
         self.tool_executor = tool_executor
         self.agent_registry = agent_registry
+        self.model_registry = model_registry
         self.memory_retriever = memory_retriever
         self.overlay_manager = overlay_manager
         self.playbook_loader = playbook_loader

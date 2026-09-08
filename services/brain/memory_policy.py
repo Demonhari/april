@@ -147,12 +147,18 @@ async def _safe_memory_results(
         for result in found:
             if result.id not in {existing.id for existing in results}:
                 results.append(result)
-    if not results and intent in {"planning", "normal_conversation", "direct_agent_run"}:
-        results = await memory_retriever.recent_memories(
+    if not results and intent == "planning":
+        # Planning may need a durable user preference even when the router did
+        # not emit a query. Keep this deliberately narrow: recent memory is not
+        # a relevance signal for ordinary chat, and project/fact memories can
+        # be unrelated to a plan. Explicit memory queries use hybrid retrieval
+        # above and remain the path for facts, projects, and lookups.
+        recent = await memory_retriever.recent_memories(
             limit=3,
             global_only=project_id is None,
             project_id=project_id,
         )
+        results = [result for result in recent if result.metadata.get("kind") == "preference"]
     return results[:6]
 
 

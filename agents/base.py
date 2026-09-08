@@ -4,6 +4,14 @@ from pathlib import Path
 
 from agents.schemas import AgentConfig
 
+USER_FACING_ASSISTANT_NAME = "APRIL"
+USER_FACING_IDENTITY_RULE = (
+    "User-facing assistant identity: APRIL. Internal agent names and call signs are "
+    "implementation metadata only. Answer interactive users as APRIL; do not introduce "
+    "yourself as an internal call sign unless the user explicitly asks about APRIL's "
+    "internal agent architecture."
+)
+
 
 def load_prompt(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()

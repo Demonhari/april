@@ -279,6 +279,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         playbook_loader=playbook_loader,
         playbook_runner=playbook_runner,
         agent_pool=agent_pool,
+        model_registry=model_registry,
     )
     archive_model_id = select_archive_model_id(agent_registry, active_settings)
     archive_reflection = ArchiveReflectionService(

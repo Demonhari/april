@@ -1224,7 +1224,7 @@ Level 2 flow, reject sensitive-looking content by policy, and deduplicate exact
 content/type/project repeats. Project-scoped memory search/export can be
 filtered by `project_id` so unrelated projects stay isolated.
 
-When the brain supplies `memory_queries`, APRIL retrieves local memories by policy and includes them in the agent prompt under a clearly marked context section. General planning requests also receive a small set of recent durable memories. Coding requests with a selected indexed project retrieve project-scoped vector chunks with local citations.
+When the brain supplies `memory_queries`, APRIL retrieves local memories by policy and includes them in the agent prompt under a clearly marked context section. Planning may receive only a small set of recent global/project-scoped user preferences when no query is supplied; ordinary conversation and direct specialist runs do not receive arbitrary recent memories. Coding requests with a selected indexed project retrieve project-scoped vector chunks with local citations.
 
 ### Embeddings
 

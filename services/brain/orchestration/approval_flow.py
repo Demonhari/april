@@ -7,7 +7,11 @@ from typing import Any
 from agents.schemas import AgentResult
 from april_common.errors import PermissionDeniedError
 from april_common.time import parse_utc_iso, utc_now
-from services.brain.capabilities import trusted_capability_summary
+from services.brain.capabilities import (
+    collect_runtime_self_evidence,
+    is_self_introspection_request,
+    trusted_capability_summary,
+)
 from services.brain.memory_policy import build_agent_memory_context
 from services.evolution.feedback_eval import stage_feedback_eval_case
 
@@ -83,12 +87,19 @@ class ApprovalFlow:
         )
         run_metadata["context_category_truncated"] = dict(memory_context.category_truncated)
         context_sections, _context_citations = self._memory_context_sections(memory_context)
+        runtime_evidence = (
+            await collect_runtime_self_evidence(self.runtime_client)
+            if is_self_introspection_request(message)
+            else None
+        )
         context_sections.insert(
             0,
             trusted_capability_summary(
                 settings=self.settings,
                 agent_registry=self.agent_registry,
                 tool_registry=self.tool_registry,
+                model_registry=getattr(self, "model_registry", None),
+                runtime_evidence=runtime_evidence,
             ),
         )
         if memory_context.conversation_summary:
