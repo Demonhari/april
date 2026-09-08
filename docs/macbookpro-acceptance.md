@@ -392,7 +392,8 @@ and selection is a separate manual follow-up.
 ### Enabling voice
 
 Voice setup requires the four required voice paths (whisper binary/model, Piper
-binary/model). The wizard configures those paths but, by default, leaves voice
+binary/model). The wizard stores those machine-local paths in `${APRIL_HOME}/.env`
+and, by default, leaves voice
 **OFF** (no surprises). Pass `--enable-voice` to turn voice on — but only after
 every required voice artifact validates. `--enable-voice` requires the complete
 required voice paths and may not be combined with `--skip-voice`. Push-to-talk

@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -74,6 +75,15 @@ _BUNDLED_RUNTIME_DEFAULTS: dict[str, dict[str, Any]] = {
     },
 }
 
+_VOICE_DOTENV_KEYS = (
+    "APRIL_WHISPER_BINARY_PATH",
+    "APRIL_WHISPER_MODEL_PATH",
+    "APRIL_PIPER_BINARY_PATH",
+    "APRIL_PIPER_MODEL_PATH",
+    "APRIL_VOICE_ENABLED",
+    "APRIL_WAKE_WORD_MODEL_PATH",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ModelImportResult:
@@ -128,6 +138,72 @@ def _validate_after_write(home: Path) -> None:
     errors = validate_configuration(home)
     if errors:
         raise ConfigError("Configuration validation failed after edit.", {"errors": errors})
+
+
+def _managed_dotenv_key(line: str) -> str | None:
+    """Return a managed key for an active dotenv assignment, if present."""
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if stripped.startswith("export") and (
+        len(stripped) == len("export") or stripped[len("export")].isspace()
+    ):
+        stripped = stripped[len("export") :].lstrip()
+    key, separator, _value = stripped.partition("=")
+    if separator and key.strip() in _VOICE_DOTENV_KEYS:
+        return key.strip()
+    return None
+
+
+def _atomic_write_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None:
+    """Replace one local file without exposing partial or broadly readable content."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+        with os.fdopen(descriptor, "wb") as handle:
+            with contextlib.suppress(OSError):
+                os.fchmod(handle.fileno(), mode)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+        temporary_name = None
+        with contextlib.suppress(OSError):
+            os.chmod(path, mode)
+    finally:
+        if temporary_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary_name)
+
+
+def _update_voice_dotenv(path: Path, values: dict[str, str]) -> None:
+    """Update only requested voice overrides while preserving the rest of `.env`."""
+    unknown = set(values) - set(_VOICE_DOTENV_KEYS)
+    if unknown:
+        raise ConfigError("Unsupported local voice environment setting.")
+    try:
+        original = path.read_bytes() if path.exists() else b""
+        text = original.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError("Unable to read the local .env file safely.") from exc
+
+    retained: list[str] = []
+    preserved_managed: set[str] = set()
+    for line in text.splitlines(keepends=True):
+        key = _managed_dotenv_key(line)
+        if key in values:
+            continue
+        if key in _VOICE_DOTENV_KEYS:
+            if key in preserved_managed:
+                continue
+            preserved_managed.add(key)
+        retained.append(line)
+    preserved = "".join(retained)
+    if preserved and not preserved.endswith(("\n", "\r")):
+        preserved += "\n"
+    updates = "".join(f"{key}={values[key]}\n" for key in _VOICE_DOTENV_KEYS if key in values)
+    _atomic_write_bytes(path, (preserved + updates).encode("utf-8"))
 
 
 def _role_key(data: dict[str, Any], role: str, model_id: str) -> str:
@@ -457,13 +533,14 @@ def setup_voice_stack(
 ) -> dict[str, Any]:
     """Validate and optionally configure local voice assets without recording.
 
-    Voice stays OFF by default. ``enable`` flips ``voice.enabled`` true, but only
-    when ``apply`` actually writes the config and only after every required path
-    has validated above. A missing wake-word model never blocks enabling: push-to-
-    talk stays available, while wake-word listening remains explicitly unverified.
+    Voice stays OFF by default. ``--apply`` writes machine-local APRIL_* voice
+    overrides to ``.env``; it never rewrites the portable YAML configuration.
+    ``enable`` turns voice on only after every required path has validated above.
+    A missing wake-word model never blocks enabling: push-to-talk stays available,
+    while wake-word listening remains explicitly unverified.
     """
     root = home.expanduser().resolve()
-    config_path = _settings_config_path(root)
+    dotenv_path = root / ".env"
     required = {
         "whisper_binary_path": whisper_binary,
         "whisper_model_path": whisper_model,
@@ -495,25 +572,46 @@ def setup_voice_stack(
         else:
             warnings.append("wake-word model missing; wake-word remains unconfigured")
 
-    backup: Path | None = None
+    previous_dotenv: bytes | None = None
+    previous_dotenv_exists = dotenv_path.exists()
+    previous_dotenv_mode: int | None = None
     if apply:
-        backup = _timestamped_backup(config_path, home=root)
+        if dotenv_path.exists():
+            try:
+                previous_dotenv = dotenv_path.read_bytes()
+                previous_dotenv_mode = stat.S_IMODE(dotenv_path.stat().st_mode)
+            except OSError as exc:
+                raise ConfigError("Unable to read the local .env file safely.") from exc
         try:
-            data = _read_yaml(config_path)
-            voice = data.setdefault("voice", {})
-            if not isinstance(voice, dict):
-                raise ConfigError("configs/april.yaml voice field must be a mapping.")
-            for key, path in resolved_required.items():
-                voice[key] = str(path)
+            dotenv_values = {
+                "APRIL_WHISPER_BINARY_PATH": str(resolved_required["whisper_binary_path"]),
+                "APRIL_WHISPER_MODEL_PATH": str(resolved_required["whisper_model_path"]),
+                "APRIL_PIPER_BINARY_PATH": str(resolved_required["piper_binary_path"]),
+                "APRIL_PIPER_MODEL_PATH": str(resolved_required["piper_model_path"]),
+                # Reached only after every required path validated above. Applying
+                # without --enable is an explicit safe-off write.
+                "APRIL_VOICE_ENABLED": "true" if enable else "false",
+            }
             if resolved_wake is not None:
-                voice["wake_word_model_path"] = str(resolved_wake)
-            # Reached only after every required path validated above. Applying without
-            # --enable is an explicit safe-off write, even if the existing config was on.
-            voice["enabled"] = bool(enable)
-            _write_yaml(config_path, data)
+                dotenv_values["APRIL_WAKE_WORD_MODEL_PATH"] = str(resolved_wake)
+            _update_voice_dotenv(dotenv_path, dotenv_values)
             _validate_after_write(root)
         except Exception:
-            shutil.copy2(backup, config_path)
+            try:
+                if not previous_dotenv_exists:
+                    with contextlib.suppress(FileNotFoundError):
+                        dotenv_path.unlink()
+                else:
+                    assert previous_dotenv is not None
+                    _atomic_write_bytes(
+                        dotenv_path,
+                        previous_dotenv,
+                        mode=previous_dotenv_mode or 0o600,
+                    )
+            except Exception as restore_error:
+                raise ConfigError(
+                    "Unable to restore the previous local .env file."
+                ) from restore_error
             raise
 
     artifacts = [
@@ -539,7 +637,7 @@ def setup_voice_stack(
         # Push-to-talk needs no wake-word model; wake-word listening does.
         "push_to_talk_available": True,
         "wake_word_verified": False,
-        "backup_basename": backup.name if backup is not None else None,
+        "dotenv_basename": dotenv_path.name if apply else None,
         "artifacts": artifacts,
         "warnings": warnings,
         "next_commands": [

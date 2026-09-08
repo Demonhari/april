@@ -320,10 +320,12 @@ because another is.
   `models/` directory ships empty.
 - **Optional voice dependencies.** Voice is **off by default** and entirely
   local; core/fake verification never needs it. Enabling it is a deliberate,
-  two-part step: set `voice.enabled: true` (or `APRIL_VOICE_ENABLED=true`) **and**
-  install the `.[voice]` extra (`sounddevice`, `openwakeword`) plus the
-  whisper.cpp and Piper binaries/models you provide, then run `run april setup
-  voice`. While voice is disabled, missing voice artifacts are *skipped* by
+  two-part step: keep the portable `configs/april.yaml` defaults and use
+  `run april setup voice --apply` to store machine-local paths and enable state
+  in the ignored `${APRIL_HOME}/.env` (add `--enable` only when desired).
+  Install the `.[voice]` extra (`sounddevice`, `openwakeword`) plus the
+  whisper.cpp and Piper binaries/models you provide. While voice is disabled,
+  missing voice artifacts are *skipped* by
   readiness and target-Mac verification — never treated as blockers. Once a
   microphone, whisper.cpp (STT), and Piper (TTS) are configured, **push-to-talk
   (`run april voice ptt`) works without any wake-word model**. Hands-free
@@ -870,7 +872,8 @@ run april verify --real-model /absolute/path/model.gguf
 run april eval brain --real-model /absolute/path/model.gguf
 ```
 
-5. Configure local voice paths in `configs/april.yaml`, then run:
+5. Configure machine-local voice overrides with `run april setup voice --dry-run`,
+   then `--apply` (and optionally `--enable`), and run:
 
 ```bash
 run april voice doctor
@@ -1280,9 +1283,10 @@ extensions.
 
 ## Voice
 
-Voice is optional and disabled by default. Configure local `whisper.cpp`,
-Piper, optional `sounddevice`, and optional openWakeWord model paths in
-`configs/april.yaml` or environment variables. No voice model, speech model,
+Voice is optional and disabled by default. Keep the portable safe defaults in
+`configs/april.yaml`; configure machine-local `whisper.cpp`, Piper, optional
+`sounddevice`, and optional openWakeWord model paths through the ignored
+`${APRIL_HOME}/.env` using `run april setup voice`. No voice model, speech model,
 wake-word model, or binary is downloaded by APRIL.
 
 ```bash
@@ -1373,13 +1377,14 @@ with `--retain-debug-audio` or `retain_debug_audio`.
 
 `run april setup voice` is also dry-run by default. It validates local
 whisper.cpp and Piper paths, treats a missing wake-word model as non-fatal, and
-only writes `configs/april.yaml` with `--apply` after creating a backup. It never
+only writes the machine-local `${APRIL_HOME}/.env` overrides with `--apply`.
+The tracked `configs/april.yaml` remains portable and unchanged. It never
 records, listens, synthesizes, plays audio, downloads assets, or installs
 packages.
 
 Voice is not enabled by setup unless you pass both `--apply --enable`. Running
-`run april setup voice ... --apply` without `--enable` writes validated paths but
-keeps `voice.enabled: false`, even if it was previously true. A missing
+`run april setup voice ... --apply` without `--enable` writes validated paths and
+`APRIL_VOICE_ENABLED=false`, even if a previous local override was true. A missing
 wake-word model does not block push-to-talk, but wake-word listening remains
 unavailable/unverified until a local wake-word model is configured and live
 verification passes.

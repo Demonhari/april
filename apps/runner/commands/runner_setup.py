@@ -288,8 +288,8 @@ def setup_voice(
             "[yellow]Voice remains DISABLED.[/yellow] Paths are validated only; voice stays OFF "
             "unless you re-run with --apply --enable."
         )
-    if result["backup_basename"]:
-        console.print(f"Config backup: {result['backup_basename']}")
+    if result["dotenv_basename"]:
+        console.print(f"Local voice overrides written to {result['dotenv_basename']}.")
     console.print("Next commands:")
     for command in result["next_commands"]:
         console.print(f"  {command}")

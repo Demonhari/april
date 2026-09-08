@@ -1296,6 +1296,11 @@ def test_setup_voice_dry_run_apply_and_missing_wake_word(tmp_path: Path, monkeyp
         path.write_bytes(b"asset")
     piper_model.with_name(f"{piper_model.name}.json").write_bytes(b"{}")
     before = (tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8")
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "APRIL_API_TOKEN=local-dev-token\nAPRIL_VOICE_ENABLED=true\n", encoding="utf-8"
+    )
+    dotenv_before = dotenv.read_bytes()
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     runner = CliRunner()
@@ -1317,22 +1322,24 @@ def test_setup_voice_dry_run_apply_and_missing_wake_word(tmp_path: Path, monkeyp
     dry = runner.invoke(app, base_args)
     assert dry.exit_code == 0, dry.output
     assert (tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8") == before
+    assert dotenv.read_bytes() == dotenv_before
     assert "missing-wake.onnx" not in dry.output
     assert "wake-word model missing" in dry.output
     assert "local-dev-token" not in dry.output
     applied = runner.invoke(app, [*base_args, "--apply"])
     assert applied.exit_code == 0, applied.output
-    data = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
-    assert data["voice"]["whisper_binary_path"] == str(whisper_bin.resolve())
-    assert data["voice"]["piper_model_path"] == str(piper_model.resolve())
-    assert data["voice"]["wake_word_model_path"] is None
-    assert list((tmp_path / "data" / "backups" / "config").glob("april.yaml.bak-*"))
+    assert (tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8") == before
+    dotenv = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert f"APRIL_WHISPER_BINARY_PATH={whisper_bin.resolve()}" in dotenv
+    assert f"APRIL_PIPER_MODEL_PATH={piper_model.resolve()}" in dotenv
+    assert "APRIL_VOICE_ENABLED=false" in dotenv
+    assert "APRIL_WAKE_WORD_MODEL_PATH=" not in dotenv
 
 
 def test_setup_voice_missing_required_path_fails(tmp_path: Path, monkeypatch) -> None:
     _copy_configs(tmp_path)
     config = tmp_path / "configs" / "april.yaml"
-    before = config.read_text(encoding="utf-8")
+    before = config.read_bytes()
     whisper_model = tmp_path / "ggml-base.en.bin"
     piper_bin = tmp_path / "piper"
     piper_model = tmp_path / "voice.onnx"
@@ -1359,7 +1366,24 @@ def test_setup_voice_missing_required_path_fails(tmp_path: Path, monkeypatch) ->
     )
     assert result.exit_code == 1
     assert "missing-whisper" in result.output
-    assert config.read_text(encoding="utf-8") == before
+    assert config.read_bytes() == before
+
+
+def test_setup_voice_rejects_required_directory_as_artifact(tmp_path: Path) -> None:
+    _copy_configs(tmp_path)
+    whisper_directory = tmp_path / "whisper-directory"
+    whisper_directory.mkdir()
+    args = _voice_setup_paths(tmp_path)
+    args["whisper_binary"] = whisper_directory
+
+    with pytest.raises(ConfigError, match="not a file"):
+        setup_voice_stack(
+            home=tmp_path,
+            apply=True,
+            **args,
+        )
+
+    assert not (tmp_path / ".env").exists()
 
 
 def test_setup_voice_missing_piper_companion_config_fails(tmp_path: Path, monkeypatch) -> None:
@@ -1459,6 +1483,9 @@ def test_setup_voice_stack_restores_config_when_post_write_validation_fails(
     _copy_configs(tmp_path)
     config = tmp_path / "configs" / "april.yaml"
     before = config.read_bytes()
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("APRIL_API_TOKEN=do-not-leak\nAPRIL_VOICE_ENABLED=false\n", encoding="utf-8")
+    dotenv_before = dotenv.read_bytes()
     args = _voice_setup_paths(tmp_path)
     monkeypatch.setattr(
         "apps.runner.model_tools.validate_configuration",
@@ -1469,6 +1496,7 @@ def test_setup_voice_stack_restores_config_when_post_write_validation_fails(
         setup_voice_stack(home=tmp_path, apply=True, enable=True, **args)
 
     assert config.read_bytes() == before
+    assert dotenv.read_bytes() == dotenv_before
 
 
 def _voice_setup_args(tmp_path: Path, *, wake_word: Path | None = None) -> list[str]:
@@ -1517,14 +1545,15 @@ def _voice_setup_paths(tmp_path: Path) -> dict[str, Path]:
 
 def test_setup_voice_apply_without_enable_keeps_voice_disabled(tmp_path: Path, monkeypatch) -> None:
     _copy_configs(tmp_path)
+    config = tmp_path / "configs" / "april.yaml"
+    before = config.read_bytes()
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
     result = CliRunner().invoke(app, [*_voice_setup_args(tmp_path), "--apply"])
     assert result.exit_code == 0, result.output
-    data = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
-    # Paths are written, but voice stays OFF: no surprise enablement.
-    assert data["voice"]["whisper_binary_path"] == str((tmp_path / "whisper-main").resolve())
-    assert data["voice"]["enabled"] is False
+    assert config.read_bytes() == before
+    # Paths are written to local overrides, but voice stays OFF.
+    assert "APRIL_VOICE_ENABLED=false" in (tmp_path / ".env").read_text(encoding="utf-8")
     assert "remains DISABLED" in result.output
 
 
@@ -1538,10 +1567,11 @@ def test_setup_voice_apply_without_enable_disables_existing_true(
     config.write_text(yaml.safe_dump(data), encoding="utf-8")
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    before = config.read_bytes()
     result = CliRunner().invoke(app, [*_voice_setup_args(tmp_path), "--apply"])
     assert result.exit_code == 0, result.output
-    written = yaml.safe_load(config.read_text(encoding="utf-8"))
-    assert written["voice"]["enabled"] is False
+    assert config.read_bytes() == before
+    assert "APRIL_VOICE_ENABLED=false" in (tmp_path / ".env").read_text(encoding="utf-8")
     assert "remains DISABLED" in result.output
 
 
@@ -1556,9 +1586,10 @@ def test_setup_voice_dry_run_enable_leaves_existing_true_unchanged(
     before = config.read_text(encoding="utf-8")
     manager = FakeManager(tmp_path)
     monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    before = config.read_bytes()
     result = CliRunner().invoke(app, [*_voice_setup_args(tmp_path), "--dry-run", "--enable"])
     assert result.exit_code == 0, result.output
-    assert config.read_text(encoding="utf-8") == before
+    assert config.read_bytes() == before
     assert "--apply --enable" in result.output
 
 
@@ -1572,9 +1603,12 @@ def test_setup_voice_enable_turns_voice_on_after_validation(tmp_path: Path, monk
         app, [*_voice_setup_args(tmp_path, wake_word=wake), "--apply", "--enable"]
     )
     assert result.exit_code == 0, result.output
-    data = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
-    assert data["voice"]["enabled"] is True
-    assert data["voice"]["wake_word_model_path"] == str(wake.resolve())
+    assert (tmp_path / "configs" / "april.yaml").read_bytes() == (
+        Path.cwd() / "configs" / "april.yaml"
+    ).read_bytes()
+    dotenv = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "APRIL_VOICE_ENABLED=true" in dotenv
+    assert f"APRIL_WAKE_WORD_MODEL_PATH={wake.resolve()}" in dotenv
     assert "ENABLED" in result.output
     # Even with a wake-word model present, wake-word listening stays unverified.
     assert "UNVERIFIED" in result.output
@@ -1597,8 +1631,7 @@ def test_setup_voice_apply_enable_missing_required_path_preserves_config(
     result = CliRunner().invoke(app, [*args, "--apply", "--enable"])
     assert result.exit_code == 1
     assert config.read_bytes() == before
-    written = yaml.safe_load(config.read_text(encoding="utf-8"))
-    assert written["voice"]["enabled"] is True
+    assert not (tmp_path / ".env").exists()
 
 
 def test_setup_voice_enable_without_wake_word_keeps_ptt_and_marks_wake_unavailable(
@@ -1610,14 +1643,71 @@ def test_setup_voice_enable_without_wake_word_keeps_ptt_and_marks_wake_unavailab
     args = _voice_setup_args(tmp_path, wake_word=tmp_path / "missing-wake.onnx")
     result = CliRunner().invoke(app, [*args, "--apply", "--enable"])
     assert result.exit_code == 0, result.output
-    data = yaml.safe_load((tmp_path / "configs" / "april.yaml").read_text(encoding="utf-8"))
-    assert data["voice"]["enabled"] is True
-    assert data["voice"]["wake_word_model_path"] is None
+    dotenv = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "APRIL_VOICE_ENABLED=true" in dotenv
+    assert "APRIL_WAKE_WORD_MODEL_PATH=" not in dotenv
     # Push-to-talk is available; wake-word listening is unavailable, not a blocker.
     assert "Push-to-talk is available" in result.output
     assert "UNAVAILABLE" in result.output
     assert "UNVERIFIED" not in result.output
     assert "wake-word model missing" in result.output
+
+
+def test_setup_voice_preserves_unrelated_dotenv_and_does_not_print_secrets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "APRIL_API_TOKEN=super-secret-token\n"
+        "APRIL_RUNTIME_TOKEN=runtime-secret-token\n"
+        "APRIL_VOICE_ENABLED=true\n"
+        "# keep this comment\n",
+        encoding="utf-8",
+    )
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+
+    result = CliRunner().invoke(app, [*_voice_setup_args(tmp_path), "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert "super-secret-token" not in result.output
+    assert "runtime-secret-token" not in result.output
+    updated = dotenv.read_text(encoding="utf-8")
+    assert "APRIL_API_TOKEN=super-secret-token" in updated
+    assert "APRIL_RUNTIME_TOKEN=runtime-secret-token" in updated
+    assert "# keep this comment" in updated
+    assert updated.count("APRIL_VOICE_ENABLED=") == 1
+    assert "APRIL_VOICE_ENABLED=false" in updated
+
+
+def test_setup_voice_apply_is_idempotent_for_managed_dotenv_keys(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _copy_configs(tmp_path)
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "APRIL_VOICE_ENABLED=true\n"
+        "APRIL_VOICE_ENABLED=false\n"
+        "APRIL_WAKE_WORD_MODEL_PATH=old-wake.onnx\n"
+        "APRIL_WAKE_WORD_MODEL_PATH=duplicate-wake.onnx\n"
+        "APRIL_OTHER=keep\n",
+        encoding="utf-8",
+    )
+    manager = FakeManager(tmp_path)
+    monkeypatch.setattr("apps.runner.main._manager", lambda: manager)
+    args = [*_voice_setup_args(tmp_path), "--apply"]
+
+    first = CliRunner().invoke(app, args)
+    first_bytes = dotenv.read_bytes()
+    second = CliRunner().invoke(app, args)
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert dotenv.read_bytes() == first_bytes
+    assert dotenv.read_text(encoding="utf-8").count("APRIL_VOICE_ENABLED=") == 1
+    assert dotenv.read_text(encoding="utf-8").count("APRIL_WAKE_WORD_MODEL_PATH=") == 1
+    assert "APRIL_OTHER=keep" in dotenv.read_text(encoding="utf-8")
 
 
 def test_setup_app_stub_command_refuses_overwrite_and_force_replaces(

@@ -3,6 +3,7 @@ api:
   port: 8765
   cors_enabled: false
   max_request_bytes: 1048576
+
 runtime:
   host: 127.0.0.1
   port: 8766
@@ -11,6 +12,10 @@ runtime:
   preload_keep_loaded: true
   request_timeout_seconds: 120
   max_loaded_specialist_models: 2
+
+# Secrets are resolved from the credential store. `auto` selects macOS
+# Keychain for production and retains development compatibility until the
+# explicit credential migration command is run.
 security:
   credential_store: auto
   credential_file_path: null
@@ -18,12 +23,26 @@ security:
   runtime_credential_id: runtime-auth-token
   audit_anchor_credential_id: audit-terminal-anchor
   memory_encryption_credential_id: memory-encryption-key
+
 memory:
   database_path: data/april.db
   vector_index_path: data/vector_index
+  # hashed-token is the dev/first-run fallback: deterministic, offline, and
+  # needing no model files (fake-backend tests keep working). runtime-local is
+  # the NORMAL PRODUCTION PATH once a local embedding-role GGUF is registered
+  # in configs/models.yaml: set embedding_provider: runtime-local (or
+  # APRIL_MEMORY_EMBEDDING_PROVIDER) and run `run april memory reindex`.
+  # If runtime-local is requested but the model is unavailable, APRIL keeps an
+  # audited fallback to hashed-token and flags it in `run april memory doctor`.
   embedding_provider: hashed-token
   embedding_model_id: null
+  # Explicit sensitive-memory encryption is opt-in. Enabling it additionally
+  # requires APRIL's security extra and a Keychain-backed encryption key.
   sensitive_encryption_enabled: false
+
+# External local trainers and evaluators are never discovered or installed by
+# APRIL. Configure reviewed absolute executables and fixed argument templates,
+# then explicitly enable this section before submitting an approved job.
 finetune:
   enabled: false
   minimum_samples: 32
@@ -36,34 +55,46 @@ finetune:
   max_output_bytes: 65536
   max_memory_bytes: 8589934592
   max_cpu_seconds: 14400
+
 benchmark:
   runs: 3
   maximum_decline_fraction: 0.15
   minimum_structured_json_reliability: 0.9
   minimum_routing_accuracy: 0.8
   minimum_coding_pass_rate: 0.8
+
 paths:
   logs_path: logs
   audit_path: logs/audit.jsonl
   allowed_filesystem_roots:
-  - .
+    - .
   max_file_read_bytes: 1048576
   max_file_write_bytes: 1048576
+
 permissions:
   approval_expiry_seconds: 900
   maximum_agent_tool_iterations: 5
   external_actions_enabled: false
   tool_timeout_seconds: 15
+
 workers:
   tool_worker_enabled: true
   job_worker_enabled: true
+  # DEVELOPMENT ONLY. When false (the default), risky subprocess operations
+  # fail closed if the host has no supported OS-enforced sandbox.
   development_unsandboxed_override: false
+
 brain:
   model_id: april-brain
+  # Null aliases routing to the Brain without a duplicate registry entry or
+  # a second load of the same GGUF.
   router_model_id: null
   routing_reliability_min_samples: 5
   routing_reliability_prior_successes: 4.0
   routing_reliability_prior_failures: 4.0
+
+# Core-side character pre-bounds for independent context categories. Runtime's
+# tokenizer and model context window remain the final exact budget authority.
 conversation_context:
   summary_enabled: true
   recent_turns_preserved: 4
@@ -76,10 +107,18 @@ conversation_context:
   durable_memory_max_chars: 4000
   file_document_max_chars: 6000
   tool_output_max_chars: 3000
+
+# Voice is OFF by default and entirely local. It stays opt-in: enabling it needs
+# the optional `.[voice]` extra plus whisper.cpp / Piper binaries and models you
+# provide, then `run april setup voice`. While disabled, missing voice artifacts
+# are skipped by readiness/target-Mac verification, never treated as blockers.
 voice:
   enabled: false
   audio_cache_path: data/audio_cache
   retain_debug_audio: false
+  # Calibrated energy confirms onset independently from sustained endpoint
+  # silence. The deprecated vad_required_frames key remains accepted as an
+  # onset alias, but does not control end-of-speech timing.
   vad_energy_threshold: 0.01
   vad_onset_frames: 3
   endpoint_silence_ms: 650
@@ -89,34 +128,56 @@ voice:
   noise_threshold_margin: 0.002
   vad_hangover_ms: 100
   utterance_max_seconds: 15.0
+  # wake_word is safest without acoustic echo cancellation. "speech" is an
+  # explicit energy-based opt-in; action controls stop versus duck separately.
   barge_in_trigger: wake_word
   barge_in_action: stop
   barge_in_speech_onset_frames: 6
   barge_in_playback_grace_ms: 400
-  whisper_binary_path: /usr/local/Cellar/whisper-cpp/1.9.2/bin/whisper-cli
-  whisper_model_path: /Users/hari/Documents/my_git/april/data/voice_artifacts/whisper.cpp/models/ggml-base.en.bin
+  whisper_binary_path: null
+  whisper_model_path: null
+  # Optional two-stage overrides. Null inherits the two legacy paths above.
   wake_confirmation_whisper_binary_path: null
   wake_confirmation_whisper_model_path: null
   transcription_whisper_binary_path: null
   transcription_whisper_model_path: null
-  piper_binary_path: /Users/hari/Documents/my_git/april/.venv/bin/piper
-  piper_model_path: /Users/hari/Documents/my_git/april/data/voice_artifacts/piper/en_US-lessac-medium.onnx
+  piper_binary_path: null
+  piper_model_path: null
   wake_word_model_path: null
+  # v2: the Sentinel can watch several wake models at once. The singular
+  # wake_word_model_path above stays supported; entries here are additive.
   wake_word_model_paths: []
+
+# Always-on wake (Sentinel). OFF by default. Two-stage detection: an
+# openWakeWord score >= candidate_threshold makes a candidate; >= accept_threshold
+# accepts outright, otherwise local STT confirms from the ring buffer. The
+# Sentinel is the only process that opens the microphone.
 wake:
   enabled: false
   candidate_threshold: 0.35
-  accept_threshold: 0.7
+  accept_threshold: 0.70
   confirm_with_stt: true
+  # With STT confirmation enabled, true lets scores >= accept_threshold wake
+  # immediately; false sends every candidate through local STT confirmation.
   instant_accept: true
   ring_buffer_seconds: 10
   follow_up_seconds: 8
   earcon_enabled: true
   strict_address: false
-  speaker_gate: 'off'
+  # Convenience filter only, never authentication. "soft" requires an
+  # operator-provided local raw-waveform speaker-embedding ONNX; absent or
+  # unloadable, Sentinel audits one warning and safely behaves as "off".
+  speaker_gate: "off"
+  # Model binaries are operator-supplied and never downloaded by APRIL. See
+  # scripts/speaker_verifier/README.md for the required ONNX input contract.
   speaker_verifier_model_path: null
+
+# Cross-surface session continuity: a wake (voice/terminal/desktop/hotkey/socket)
+# within continuity_minutes of the last activity joins the existing conversation.
 session:
   continuity_minutes: 10
+
+# apriald supervisor (installed as a user LaunchAgent; never sudo).
 daemon:
   autostart_on_cli: true
   startup_timeout_seconds: 15.0
@@ -125,21 +186,33 @@ daemon:
   child_startup_grace_seconds: 10.0
   child_health_failure_threshold: 3
   child_crash_loop_threshold: 5
+
+# Resource Governor budgets. Consulted by Sentinel/Dreamer/model prewarm.
 governor:
   max_resident_gb: 12
   dreamer_nice: 10
+  # llama.cpp fixes n_threads when a model instance is loaded. The governor's
+  # typed request hint therefore takes effect on the next safe model load/reload.
   generation_threads_active: 6
   generation_threads_idle: 8
+
+# Nightly Dreamer self-evolution. OFF by default. All writes are fenced to
+# data/evolution/, data/playbooks/, and explicitly allowed DB tables; deleting
+# data/evolution restores stock behaviour.
 evolution:
   enabled: false
-  window: 02:30-06:00
+  window: "02:30-06:00"
   require_ac_power: true
   max_minutes: 90
+  # Reassess background-work policy between D1-D5 work phases. A busy machine
+  # pauses remaining work but D6 still writes an honest report.
   recheck_governor_between_phases: true
   daily_memory_cap: 30
   prompt_overlay_max_chars: 1200
   model_drafted_overlays: false
   user_model_autoapply: safe_sections_only
+  # Phase 4B is separately disarmed. All four switches require an explicit
+  # reviewed config change; enabling the Dreamer alone does not start rollouts.
   rollout_enabled: false
   automatic_candidate_creation: false
   canary_enabled: false
@@ -152,8 +225,10 @@ evolution:
   rollout_max_pass_rate_regression: 0.0
   rollout_max_structured_invalid_rate: 0.01
   rollout_max_failure_rate: 0.05
-  rollout_max_latency_regression: 0.2
+  rollout_max_latency_regression: 0.20
   rollout_max_fallback_rate: 0.05
+
+# Budgets for /chat deep and council modes (intelligence ladder R3/R4).
 deep_mode:
   max_seconds: 45
   council_n: 3
@@ -166,10 +241,22 @@ deep_mode:
   deep_tokens: 1536
   council_candidate_tokens: 1024
   council_judge_tokens: 512
+
+# Proactive scheduler. OFF by default: with these safe defaults APRIL never fires
+# reminders or daily briefings on its own. The background loop only starts when
+# enabled is true, and briefings only fire when briefing_enabled is true.
 scheduler:
+  # Master switch for the background poll loop that fires due reminders.
   enabled: false
+  # How often the loop wakes to check for due reminders / briefing time (seconds).
   poll_interval_seconds: 30
+  # Where notifications go: "log" (audit + logs/scheduler.log) or "macos" (native banner).
   notification_sink: log
+  # Daily briefing switch. Independent of `enabled`; the briefing path is gated by this.
   briefing_enabled: false
-  briefing_time: 08:00
+  # Local time of day (HH:MM, 24h) to fire the daily briefing, once per local day.
+  briefing_time: "08:00"
+  # Read-only repo monitoring surfaced inside the daily briefing. OFF by default.
+  # When true, the briefing lists registered projects with new commits or
+  # uncommitted changes since the last briefing. Never accesses the network.
   repo_monitor_enabled: false

@@ -90,6 +90,54 @@ async def test_runtime_self_context_distinguishes_loaded_and_health_evidence(set
     assert "reading: april-reading (configured; loaded=no; healthy=no)" in summary
 
 
+def test_runtime_model_lifecycle_states_do_not_overclaim_loaded_state(settings_tmp) -> None:
+    registry = ModelRegistry.from_file(
+        project_root() / "configs" / "models.yaml", root=project_root()
+    )
+    summary = trusted_capability_summary(
+        settings=settings_tmp,
+        agent_registry=default_agent_registry(),
+        tool_registry=default_registry(),
+        model_registry=registry,
+        runtime_evidence={
+            "models": [
+                {"id": "april-brain", "state": "unavailable"},
+                {"id": "april-coding", "state": "loading"},
+                {"id": "april-reading", "state": "unloading"},
+            ],
+            "health_status": "ok",
+        },
+    )
+    assert "conversation/brain: april-brain (configured; loaded=no; healthy=unknown)" in summary
+    assert "coding: april-coding (configured; loaded=unknown; healthy=unknown)" in summary
+    assert "reading: april-reading (configured; loaded=unknown; healthy=unknown)" in summary
+
+
+@pytest.mark.asyncio
+async def test_runtime_self_evidence_malformed_or_failed_reads_are_non_fatal() -> None:
+    class MalformedRuntime:
+        async def models(self) -> object:
+            return {"unexpected": []}
+
+        async def health(self, *, timeout: float | None = None) -> dict[str, str]:
+            del timeout
+            return {"status": "ok"}
+
+    class FailedRuntime:
+        async def models(self) -> dict[str, list[object]]:
+            raise RuntimeError("runtime offline")
+
+        async def health(self, *, timeout: float | None = None) -> dict[str, str]:
+            del timeout
+            return {"status": "ok"}
+
+    assert await collect_runtime_self_evidence(MalformedRuntime()) == {
+        "models": [],
+        "health_status": "ok",
+    }
+    assert await collect_runtime_self_evidence(FailedRuntime()) is None
+
+
 def test_runtime_evidence_does_not_invent_loaded_model_state(settings_tmp) -> None:
     registry = ModelRegistry.from_file(
         project_root() / "configs" / "models.yaml", root=project_root()

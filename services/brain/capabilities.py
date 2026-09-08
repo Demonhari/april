@@ -48,9 +48,12 @@ async def collect_runtime_self_evidence(
     if not callable(models_method) or not callable(health_method):
         return None
     try:
-        models = await asyncio.wait_for(models_method(), timeout=timeout_seconds)
-        health = await asyncio.wait_for(
-            health_method(timeout=timeout_seconds), timeout=timeout_seconds
+        models, health = await asyncio.wait_for(
+            asyncio.gather(
+                models_method(),
+                health_method(timeout=timeout_seconds),
+            ),
+            timeout=timeout_seconds,
         )
     except Exception:
         return None
@@ -138,7 +141,7 @@ def trusted_capability_summary(
                 "yes"
                 if raw_state == "loaded"
                 else "no"
-                if raw_state in {"unloaded", "error"}
+                if raw_state in {"unavailable", "unloaded", "error"}
                 else "unknown"
             )
             healthy = (

@@ -68,7 +68,8 @@ run april voice verify-conversation-live \
 local whisper.cpp and Piper paths, treats a missing wake-word model as non-fatal,
 does not download assets, does not open the microphone, does not start
 wake-word listening, does not synthesize or play audio, and writes
-`configs/april.yaml` only with `--apply` after creating a backup.
+only the machine-local `${APRIL_HOME}/.env` overrides with `--apply`. The tracked
+`configs/april.yaml` remains a portable safe default.
 
 `voice ptt` keeps a persistent conversation ID for the loop, transcribes with
 the configured local whisper.cpp adapter, passes `conversation_id` through
