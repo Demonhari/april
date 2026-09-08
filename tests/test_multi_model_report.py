@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -177,8 +178,40 @@ def test_runtime_summary_distinguishes_verifier_stop_from_crash() -> None:
         runtime_process={"runtime": {"alive": False, "returncode": -15, "signal": "SIGTERM"}},
     )
     crashed = clean.model_copy(update={"runtime_error": True})
-    assert _runtime_process_summary(clean) == "stopped by verifier (SIGTERM)"
-    assert "SIGTERM" in _runtime_process_summary(crashed)
+    assert _runtime_process_summary(clean) == "stopped after verification (SIGTERM)"
+    assert _runtime_process_summary(crashed) == "exited via SIGTERM before shutdown"
+
+
+def test_runtime_summary_reports_signal_exit_status_without_guessing_cause() -> None:
+    def summary(runtime: dict[str, object], *, runtime_error: bool = False) -> str:
+        return _runtime_process_summary(
+            SimpleNamespace(runtime_process={"runtime": runtime}, runtime_error=runtime_error)
+        )
+
+    assert summary({"alive": False, "returncode": -9, "signal": "SIGKILL"}) == (
+        "stopped after verification (SIGKILL)"
+    )
+    assert summary({"alive": False, "returncode": 0, "signal": None}) == (
+        "clean exit (returncode=0)"
+    )
+    assert summary({"alive": False, "returncode": 3, "signal": None}) == (
+        "exited with returncode=3"
+    )
+    assert summary({"alive": True, "returncode": None, "signal": None}) == "running"
+
+
+def test_runtime_summary_is_conservative_for_missing_or_legacy_metadata() -> None:
+    assert _runtime_process_summary(SimpleNamespace(runtime_process=None)) == "not recorded"
+    assert (
+        _runtime_process_summary(SimpleNamespace(runtime_process={"runtime": {"alive": False}}))
+        == "stopped with unknown exit status"
+    )
+    assert (
+        _runtime_process_summary(
+            SimpleNamespace(runtime_process={"runtime": {"alive": False, "returncode": "-15"}})
+        )
+        == "unknown process evidence"
+    )
 
 
 def test_zero_real_models_is_verification_level_none() -> None:

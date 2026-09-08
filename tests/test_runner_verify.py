@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -118,22 +119,35 @@ def test_clean_shutdown_is_not_recorded_as_an_exit(monkeypatch: pytest.MonkeyPat
     verifier.runtime = _ShutdownProcess()
     verifier.api = _ShutdownProcess()
     verifier._exited_before_shutdown = {}
-    monkeypatch.setattr("apps.runner.verification.models.os.killpg", lambda *_args: None)
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "apps.runner.verification.models.os.killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
 
     verifier._stop()
 
+    assert signals == [(4242, signal.SIGTERM), (4242, signal.SIGTERM)]
     assert verifier._exited_before_shutdown == {}
     assert verifier._services_stopped() == "stopped"
 
 
-def test_crash_before_shutdown_is_preserved_as_runtime_failure() -> None:
+def test_crash_before_shutdown_is_preserved_as_runtime_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     verifier = object.__new__(RealModelVerifier)
     verifier.runtime = _ShutdownProcess(returncode=-11)
     verifier.api = _ShutdownProcess()
     verifier._exited_before_shutdown = {}
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "apps.runner.verification.models.os.killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
 
     verifier._stop()
 
+    assert signals == [(4242, signal.SIGTERM)]
     assert verifier._exited_before_shutdown["runtime"]["signal"] == "SIGSEGV"
     with pytest.raises(RuntimeError, match="runtime exited before shutdown"):
         verifier._services_stopped()

@@ -38,7 +38,8 @@ source-hygiene:
 	$(PYTHON) scripts/check_source_hygiene.py
 
 desktop-js:
-	@if command -v node >/dev/null 2>&1; then \
+	@set -e; \
+	if command -v node >/dev/null 2>&1; then \
 		node tests/js/desktop_token_bridge.test.cjs; \
 		node tests/js/desktop_dashboard.test.cjs; \
 		node tests/js/desktop_adapters.test.cjs; \

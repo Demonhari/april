@@ -120,9 +120,11 @@ jobs:
         run: |
           node tests/js/desktop_token_bridge.test.cjs
           node tests/js/desktop_dashboard.test.cjs
+          node tests/js/desktop_adapters.test.cjs
 
       - name: Desktop JavaScript syntax checks
         run: |
           node --check apps/desktop/web/app.js
           node --check apps/desktop/web/token_bridge.js
           node --check apps/desktop/web/dashboard_helpers.js
+          node --check apps/desktop/web/adapters_helpers.js

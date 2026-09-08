@@ -29,8 +29,8 @@ from apps.runner.verification.routing_evidence import (
     runtime_unavailable_evidence,
 )
 from apps.runner.verification.types import VerifyCheck
-from apps.runner.verify import TargetMacValidator
 from apps.runner.verification.workflow import WorkflowVerifier
+from apps.runner.verify import TargetMacValidator
 from april_common.errors import ConfigError
 from services.april_runtime.model_registry import ModelRegistry
 from services.brain.model_routing import ModelRoutingOutcome

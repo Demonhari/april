@@ -410,11 +410,31 @@ def _runtime_process_summary(report: object) -> str:
     if not isinstance(process, dict):
         return "not recorded"
     runtime = process.get("runtime")
-    if not isinstance(runtime, dict) or runtime.get("alive") is not False:
-        return str(process)
-    if getattr(report, "runtime_error", None) is False:
-        return "stopped by verifier (SIGTERM)"
-    return str(process)
+    if not isinstance(runtime, dict):
+        return "unknown process evidence"
+    alive = runtime.get("alive")
+    if alive is True:
+        return "running"
+    if alive is not False:
+        return "unknown process evidence"
+
+    returncode = runtime.get("returncode")
+    signal_name = runtime.get("signal")
+    if returncode == 0:
+        return "clean exit (returncode=0)"
+    if isinstance(returncode, int) and returncode < 0:
+        if isinstance(signal_name, str) and signal_name:
+            if getattr(report, "runtime_error", None) is False:
+                return f"stopped after verification ({signal_name})"
+            return f"exited via {signal_name} before shutdown"
+        return f"exited by signal (returncode={returncode})"
+    if isinstance(returncode, int):
+        return f"exited with returncode={returncode}"
+    if isinstance(signal_name, str) and signal_name:
+        return f"exited via {signal_name}"
+    if returncode is None:
+        return "stopped with unknown exit status"
+    return "unknown process evidence"
 
 
 def _routing_counts(report: object) -> str:
