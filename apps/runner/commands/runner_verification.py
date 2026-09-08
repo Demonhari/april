@@ -395,7 +395,7 @@ def _print_routing_summary(report: object) -> None:
         "model-only downstream runtime errors": _routing_counter(
             model_only, "downstream_runtime_error_code"
         ),
-        "runtime process": getattr(report, "runtime_process", None) or "not recorded",
+        "runtime process": _runtime_process_summary(report),
         "preserved logs": getattr(report, "log_directory_basename", None) or "none",
         "threshold failures": ", ".join(getattr(report, "threshold_failures", [])) or "none",
         "routing reason": getattr(brain, "routing_error_code", None) or "none",
@@ -403,6 +403,18 @@ def _print_routing_summary(report: object) -> None:
     for key, value in rows.items():
         table.add_row(key, str(value))
     console.print(table)
+
+
+def _runtime_process_summary(report: object) -> str:
+    process = getattr(report, "runtime_process", None)
+    if not isinstance(process, dict):
+        return "not recorded"
+    runtime = process.get("runtime")
+    if not isinstance(runtime, dict) or runtime.get("alive") is not False:
+        return str(process)
+    if getattr(report, "runtime_error", None) is False:
+        return "stopped by verifier (SIGTERM)"
+    return str(process)
 
 
 def _routing_counts(report: object) -> str:

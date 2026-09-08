@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from apps.runner.commands.runner_verification import _runtime_process_summary
 from apps.runner.mac_report import (
     EnvironmentSnapshot,
     ReportThresholds,
@@ -130,6 +131,54 @@ def test_all_models_pass_is_pass() -> None:
     assert report.verification_level == "all"
     assert report.models_passed == 3
     assert report.skipped == []
+
+
+def test_clean_verifier_shutdown_is_not_runtime_failure() -> None:
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[_brain_pass(), _coding_pass(), _reading_pass()],
+        specialist_switch=_all_switch_ok(),
+        runtime_process={
+            "runtime": {"alive": False, "returncode": -15, "signal": "SIGTERM"},
+            "api": {"alive": False, "returncode": -15, "signal": "SIGTERM"},
+        },
+        runtime_exited_before_shutdown=False,
+    )
+    assert report.runtime_error is False
+    assert report.summary == "pass"
+    assert report.verification_level == "all"
+    assert report.all_configured_models_verified is True
+
+
+def test_runtime_exit_before_shutdown_fails_even_after_clean_checks() -> None:
+    report = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[_brain_pass(), _coding_pass(), _reading_pass()],
+        specialist_switch=_all_switch_ok(),
+        runtime_process={
+            "runtime": {"alive": False, "returncode": -15, "signal": "SIGTERM"},
+            "api": {"alive": False, "returncode": -15, "signal": "SIGTERM"},
+        },
+        runtime_exited_before_shutdown=True,
+    )
+    assert report.runtime_error is True
+    assert report.summary == "fail"
+    assert report.verification_level == "none"
+
+
+def test_runtime_summary_distinguishes_verifier_stop_from_crash() -> None:
+    clean = build_multi_model_report(
+        environment=ENV,
+        runtime_backend="llama_cpp",
+        results=[_brain_pass(), _coding_pass(), _reading_pass()],
+        specialist_switch=_all_switch_ok(),
+        runtime_process={"runtime": {"alive": False, "returncode": -15, "signal": "SIGTERM"}},
+    )
+    crashed = clean.model_copy(update={"runtime_error": True})
+    assert _runtime_process_summary(clean) == "stopped by verifier (SIGTERM)"
+    assert "SIGTERM" in _runtime_process_summary(crashed)
 
 
 def test_zero_real_models_is_verification_level_none() -> None:
@@ -391,6 +440,7 @@ def test_dead_runtime_process_forces_none_verification() -> None:
             "runtime": {"alive": False, "returncode": -11, "signal": "SIGSEGV"},
             "api": {"alive": False, "returncode": 0, "signal": None},
         },
+        runtime_exited_before_shutdown=True,
     )
     assert report.summary == "fail"
     assert report.verification_level == "none"

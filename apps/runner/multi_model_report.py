@@ -183,6 +183,7 @@ class MultiModelVerificationReport(BaseModel):
     models_passed: int = 0
     checks_failed: int = 0
     check_failures: list[str] = Field(default_factory=list)
+    runtime_error: bool = False
     runtime_process: dict[str, object] | None = None
     log_basenames: list[str] = Field(default_factory=list)
     log_directory_basename: str | None = None
@@ -430,6 +431,7 @@ def build_multi_model_report(
     thresholds: ReportThresholds | None = None,
     require_real_model: bool = False,
     runtime_error: bool = False,
+    runtime_exited_before_shutdown: bool = False,
     config_fingerprint: str | None = None,
     runtime_process: dict[str, object] | None = None,
     log_basenames: list[str] | None = None,
@@ -444,11 +446,7 @@ def build_multi_model_report(
     """
     active_thresholds = _active_thresholds(thresholds)
     simulated = runtime_backend == "fake"
-    runtime_entry = runtime_process.get("runtime") if isinstance(runtime_process, dict) else None
-    runtime_process_dead = bool(
-        isinstance(runtime_entry, dict) and runtime_entry.get("alive") is False
-    )
-    runtime_error = runtime_error or runtime_process_dead
+    runtime_error = runtime_error or runtime_exited_before_shutdown
 
     # Redact any path-looking skip reason in-place (basename only).
     for result in results:
@@ -566,6 +564,7 @@ def build_multi_model_report(
         models_passed=models_passed,
         checks_failed=checks_failed,
         check_failures=check_failures,
+        runtime_error=runtime_error,
         runtime_process=runtime_process,
         log_basenames=list(log_basenames or []),
         log_directory_basename=log_directory_basename,

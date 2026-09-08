@@ -736,6 +736,7 @@ class AllConfiguredModelsVerifier(
             thresholds=self.thresholds,
             require_real_model=self.require_real_model,
             runtime_error=self.runtime_error,
+            runtime_exited_before_shutdown=bool(self._exited_before_shutdown),
             config_fingerprint=config_fingerprint,
             runtime_process=self._child_exit_status(),
             log_basenames=getattr(self, "preserved_log_basenames", []),

@@ -38,6 +38,22 @@ from apps.runner.verify import (
 from april_common.service_health import ServiceHealthResult
 
 
+class _ShutdownProcess:
+    def __init__(self, *, returncode: int | None = None) -> None:
+        self.pid = 4242
+        self.returncode = returncode
+        self.kill_calls = 0
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        if self.returncode is None:
+            self.returncode = -15
+        return self.returncode
+
+
 def verifier_with_ports(monkeypatch) -> LauncherVerifier:
     ports = iter([18001, 18002])
     monkeypatch.setattr("apps.runner.verify._free_port", lambda: next(ports))
@@ -95,6 +111,32 @@ def test_verification_health_failures_are_distinct(
         result,
     )
     assert expected in detail
+
+
+def test_clean_shutdown_is_not_recorded_as_an_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    verifier = object.__new__(RealModelVerifier)
+    verifier.runtime = _ShutdownProcess()
+    verifier.api = _ShutdownProcess()
+    verifier._exited_before_shutdown = {}
+    monkeypatch.setattr("apps.runner.verification.models.os.killpg", lambda *_args: None)
+
+    verifier._stop()
+
+    assert verifier._exited_before_shutdown == {}
+    assert verifier._services_stopped() == "stopped"
+
+
+def test_crash_before_shutdown_is_preserved_as_runtime_failure() -> None:
+    verifier = object.__new__(RealModelVerifier)
+    verifier.runtime = _ShutdownProcess(returncode=-11)
+    verifier.api = _ShutdownProcess()
+    verifier._exited_before_shutdown = {}
+
+    verifier._stop()
+
+    assert verifier._exited_before_shutdown["runtime"]["signal"] == "SIGSEGV"
+    with pytest.raises(RuntimeError, match="runtime exited before shutdown"):
+        verifier._services_stopped()
 
 
 def test_verification_distinguishes_live_but_not_ready(
