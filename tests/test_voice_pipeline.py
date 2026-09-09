@@ -2,20 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import wave
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+import services.voice.conversation_loop as conversation_loop_module
 from services.voice.audio_player import FakeAudioPlayer
 from services.voice.conversation_loop import (
+    NoSpeechDetected,
     PushToTalkLoop,
     VoiceTimeout,
     VoiceUtteranceRejected,
     WakeWordConversationLoop,
     interactive_capture_strategy,
+    require_usable_transcript,
 )
+from services.voice.endpointing import UtteranceEndpointDetector, capture_streamed_utterance
 from services.voice.microphone import FakeMicrophone, SoundDeviceMicrophone, write_pcm_wav
 from services.voice.push_to_talk import PushToTalkSession
 from services.voice.speech_to_text import FakeSpeechToText
@@ -325,6 +329,153 @@ async def test_interactive_capture_stops_on_second_enter(tmp_path: Path) -> None
     assert mic.closed is True
     assert any("start" in p.lower() for p in prompts)
     assert any("stop" in p.lower() for p in prompts)
+
+
+async def test_interactive_capture_cancels_a_blocked_line_reader(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocked_line() -> str:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    capture = interactive_capture_strategy(
+        InfiniteMicrophone(),
+        max_seconds=30.0,
+        read_line=blocked_line,
+        announce=lambda _message: None,
+    )
+    task = asyncio.create_task(capture(tmp_path / "cancelled.wav"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("line", ["hello\n", ""])
+async def test_terminal_line_reader_owns_and_releases_event_loop_reader(
+    monkeypatch: pytest.MonkeyPatch, line: str
+) -> None:
+    class FakeStdin:
+        def fileno(self) -> int:
+            return 4242
+
+        def readline(self) -> str:
+            return line
+
+    loop = asyncio.get_running_loop()
+    removed: list[int] = []
+
+    def remove_reader(file_descriptor: int) -> bool:
+        removed.append(file_descriptor)
+        return True
+
+    def add_reader(file_descriptor: int, callback: Callable[[], None]) -> None:
+        assert file_descriptor == 4242
+        callback()
+
+    monkeypatch.setattr(conversation_loop_module.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(loop, "add_reader", add_reader)
+    monkeypatch.setattr(loop, "remove_reader", remove_reader)
+    if line:
+        assert await conversation_loop_module.read_stdin_line() == line
+    else:
+        with pytest.raises(EOFError):
+            await conversation_loop_module.read_stdin_line()
+    assert removed
+
+
+@pytest.mark.asyncio
+async def test_terminal_line_reader_reports_input_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    class BrokenStdin:
+        def fileno(self) -> int:
+            return 4242
+
+        def readline(self) -> str:
+            raise OSError("closed terminal")
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(conversation_loop_module.sys, "stdin", BrokenStdin())
+    monkeypatch.setattr(loop, "add_reader", lambda _fd, callback: callback())
+    monkeypatch.setattr(loop, "remove_reader", lambda _fd: True)
+    with pytest.raises(RuntimeError, match="terminal input failed"):
+        await conversation_loop_module.read_stdin_line()
+
+
+class StalledMicrophone:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def frames(self) -> AsyncIterator[bytes]:
+        try:
+            await asyncio.Future()
+            yield b"unreachable"
+        finally:
+            self.closed = True
+
+
+async def test_push_to_talk_capture_deadline_bounds_a_stalled_source(tmp_path: Path) -> None:
+    mic = StalledMicrophone()
+    session = PushToTalkSession(mic, max_seconds=0.01)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="no audio"):
+        await asyncio.wait_for(session.capture(tmp_path / "stalled.wav"), timeout=0.2)
+    assert session.stop_reason == "max_duration"
+    assert mic.closed is True
+
+
+async def test_endpoint_capture_deadline_bounds_a_stalled_source() -> None:
+    mic = StalledMicrophone()
+    detector = UtteranceEndpointDetector(
+        max_duration_seconds=0.01,
+        minimum_utterance_ms=0,
+    )
+    captured = await asyncio.wait_for(
+        capture_streamed_utterance(mic.frames(), endpoint_detector=detector),
+        timeout=0.2,
+    )
+    assert captured.stop_reason == "no_speech"
+    assert mic.closed is True
+
+
+async def test_blank_audio_marker_never_reaches_chat_or_tts(settings_tmp, tmp_path: Path) -> None:
+    recorded = tmp_path / "recorded.wav"
+    write_pcm_wav(recorded, [_chunk(1)])
+    api = _FakeApi()
+
+    class CountingTts(FakeTextToSpeech):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def synthesize(self, text: str, output_path: Path) -> Path:
+            self.calls += 1
+            return await super().synthesize(text, output_path)
+
+    tts = CountingTts()
+    loop = PushToTalkLoop(
+        api_client=api,  # type: ignore[arg-type]
+        microphone=FakeMicrophone(recorded),
+        stt=FakeSpeechToText("[BLANK_AUDIO]"),
+        tts=tts,
+        player=FakeAudioPlayer(),
+    )
+    with pytest.raises(NoSpeechDetected):
+        await loop.run_once()
+    assert api.calls == 0
+    assert tts.calls == 0
+
+
+def test_transcript_validation_only_rejects_the_exact_blank_marker() -> None:
+    assert require_usable_transcript("[BLANK_AUDIO] is a literal example") == (
+        "[BLANK_AUDIO] is a literal example"
+    )
+    with pytest.raises(NoSpeechDetected):
+        require_usable_transcript("  [blank_audio]  ")
 
 
 def _ptt_loop(settings_tmp, *, capture=None, microphone=None) -> PushToTalkLoop:

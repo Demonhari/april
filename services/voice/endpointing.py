@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import math
 import time
@@ -363,26 +364,30 @@ async def capture_streamed_utterance(
     started_at = clock()
     reason: EndpointStopReason | None = None
     try:
-        async for frame in frame_source:
-            if muted is not None and muted():
-                reason = "muted"
-                break
-            if stop_requested is not None and stop_requested():
-                reason = "stopped"
-                break
-            now = clock()
-            result = endpoint_detector.process(frame, now=now)
-            frames.append(frame)
-            total_bytes += len(frame)
-            while total_bytes > max_pcm_bytes and frames:
-                total_bytes -= len(frames.pop(0))
-            elapsed_ms = (now - started_at) * 1_000
-            if result is not None:
-                reason = result
-                break
-            if elapsed_ms >= endpoint_detector.max_duration_ms:
-                reason = "max_duration"
-                break
+        try:
+            async with asyncio.timeout(endpoint_detector.max_duration_ms / 1_000):
+                async for frame in frame_source:
+                    if muted is not None and muted():
+                        reason = "muted"
+                        break
+                    if stop_requested is not None and stop_requested():
+                        reason = "stopped"
+                        break
+                    now = clock()
+                    result = endpoint_detector.process(frame, now=now)
+                    frames.append(frame)
+                    total_bytes += len(frame)
+                    while total_bytes > max_pcm_bytes and frames:
+                        total_bytes -= len(frames.pop(0))
+                    elapsed_ms = (now - started_at) * 1_000
+                    if result is not None:
+                        reason = result
+                        break
+                    if elapsed_ms >= endpoint_detector.max_duration_ms:
+                        reason = "max_duration"
+                        break
+        except TimeoutError:
+            reason = "max_duration"
         if reason is None:
             reason = "source_ended"
         metrics = endpoint_detector.finish(reason)

@@ -194,3 +194,22 @@ async def test_voice_live_interrupt_cleans_up_temp_audio(settings_tmp) -> None:
     assert report.summary == "degraded"
     assert report.skipped[0].reason == "interrupted"
     assert list(settings_tmp.audio_cache_path.glob("voice-live-*")) == []
+
+
+@pytest.mark.anyio
+async def test_voice_live_blank_audio_is_not_a_success(settings_tmp) -> None:
+    report = await run_voice_live_verification(
+        settings=settings_tmp,
+        confirm_recording=lambda _message: True,
+        confirm_transcription=lambda _message: True,
+        confirm_playback=lambda _message: True,
+        microphone=WritingMicrophone(),
+        stt=FakeSpeechToText("[BLANK_AUDIO]"),
+        tts=FakeTextToSpeech(),
+        player=FakeAudioPlayer(),
+    )
+    assert report.stt_success is False
+    assert report.transcription_user_confirmed is False
+    assert report.tts_success is False
+    assert report.voice_live_verified is False
+    assert report.skipped[0].name == "transcription"

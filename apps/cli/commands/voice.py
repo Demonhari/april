@@ -56,7 +56,12 @@ def voice_ptt(
 ) -> None:
     from apps.cli.client import ApiOfflineError
     from april_common.errors import RuntimeUnavailableError
-    from services.voice.conversation_loop import PushToTalkLoop, interactive_capture_strategy
+    from services.voice.conversation_loop import (
+        NoSpeechDetected,
+        PushToTalkLoop,
+        interactive_capture_strategy,
+        read_stdin_line,
+    )
     from services.voice.health import voice_health
     from services.voice.microphone import SoundDeviceMicrophone
 
@@ -75,7 +80,6 @@ def voice_ptt(
     }
     if seconds is not None:
         # Deterministic fixed-duration mode for scripts and smoke tests.
-        console.print(f"Recording for {seconds:.1f}s. Speak now.")
         loop_kwargs["record_seconds"] = seconds
     else:
         # Interactive, stop-controlled push-to-talk (Enter to start, Enter to stop).
@@ -86,15 +90,20 @@ def voice_ptt(
         capture = interactive_capture_strategy(
             microphone,
             max_seconds=settings.voice.max_record_seconds,
-            read_line=input,
+            read_line=read_stdin_line,
             announce=console.print,
         )
         loop_kwargs.update({"microphone": microphone, "capture": capture})
 
     loop = PushToTalkLoop(**loop_kwargs)
+    active_conversation_id = getattr(loop, "conversation_id", conversation_id)
+    if active_conversation_id:
+        console.print(f"Conversation: {active_conversation_id}", markup=False)
 
     try:
         while True:
+            if seconds is not None:
+                console.print(f"Recording for {seconds:.1f}s. Speak now.")
             answer = run(loop.run_once())
             print_untrusted_text(answer)
             if not loop_mode:
@@ -105,6 +114,9 @@ def voice_ptt(
     except KeyboardInterrupt:
         console.print("Push-to-talk cancelled; microphone released.")
         raise typer.Exit(130) from None
+    except NoSpeechDetected as exc:
+        console.print(f"[yellow]{exc} Try again with a clear utterance.[/yellow]")
+        raise typer.Exit(1) from exc
     except (ValueError, RuntimeUnavailableError, ApiOfflineError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc

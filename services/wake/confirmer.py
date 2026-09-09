@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from april_common.text import edit_distance, normalized_edit_distance
+from services.voice.conversation_loop import NoSpeechDetected, require_usable_transcript
 from services.voice.microphone import write_pcm_wav
 from services.voice.speech_to_text import SpeechToText
 
@@ -231,8 +232,10 @@ class SttConfirmer:
             if not self.retain_debug_audio:
                 capture_path.unlink(missing_ok=True)
         transcript = " ".join(transcript.split())
-        if not transcript:
-            return Confirmation(False, "", "", "empty transcript")
+        try:
+            transcript = require_usable_transcript(transcript)
+        except NoSpeechDetected:
+            return Confirmation(False, "", "", "no usable speech")
         if not is_addressed(
             transcript,
             wake_word=self.wake_word,
@@ -243,4 +246,6 @@ class SttConfirmer:
         command = strip_vocative(
             transcript, wake_word=self.wake_word, fuzzy_max_distance=self.fuzzy_max_distance
         )
+        if command.strip().casefold() == "[blank_audio]":
+            return Confirmation(False, transcript, "", "no usable speech")
         return Confirmation(True, transcript, command, "stt confirmed")

@@ -22,6 +22,9 @@ _MODEL_ROLES = (
     ("coding", "coding", "coding_agent"),
     ("reading", "reading", "reading_agent"),
 )
+_MODEL_STATES = frozenset(
+    {"unavailable", "unloaded", "loading", "loaded", "unloading", "error", "unknown"}
+)
 
 
 def _normalized_question(message: str) -> str:
@@ -112,7 +115,7 @@ async def collect_runtime_self_evidence(
         if isinstance(raw_models, list)
         else []
     )
-    return {
+    evidence: dict[str, Any] = {
         "models": [
             {
                 "id": item.get("id"),
@@ -124,6 +127,13 @@ async def collect_runtime_self_evidence(
         ],
         "health_status": (health.get("status") if isinstance(health.get("status"), str) else None),
     }
+    backend = health.get("backend")
+    simulated = health.get("simulated")
+    if isinstance(backend, str):
+        evidence["backend"] = backend
+    if isinstance(simulated, bool):
+        evidence["simulated"] = simulated
+    return evidence
 
 
 def trusted_capability_summary(
@@ -178,29 +188,35 @@ def trusted_capability_summary(
         evidence = runtime_models.get(model_id)
         if evidence is None:
             state = (
-                "loaded=unknown; healthy=unknown (runtime status not queried)"
+                "state=unknown; loaded=unknown; healthy=unknown (runtime evidence unavailable)"
                 if runtime_evidence is None
-                else "loaded=unknown; healthy=unknown (runtime did not report this model)"
+                else "state=unknown; loaded=unknown; healthy=unknown "
+                "(runtime did not report this model)"
             )
         else:
             raw_state = evidence.get("state")
+            lifecycle_state = (
+                raw_state
+                if isinstance(raw_state, str) and raw_state in _MODEL_STATES
+                else "unknown"
+            )
             loaded = (
                 "yes"
-                if raw_state == "loaded"
+                if lifecycle_state == "loaded"
                 else "no"
-                if raw_state in {"unavailable", "unloaded", "error"}
+                if lifecycle_state in {"unavailable", "unloaded", "error"}
                 else "unknown"
             )
             healthy = (
                 "yes"
-                if raw_state == "loaded"
+                if lifecycle_state == "loaded"
                 and runtime_health == "ok"
                 and not evidence.get("load_error")
                 else "no"
-                if raw_state == "error" or evidence.get("load_error")
+                if lifecycle_state == "error" or evidence.get("load_error")
                 else "unknown"
             )
-            state = f"loaded={loaded}; healthy={healthy}"
+            state = f"state={lifecycle_state}; loaded={loaded}; healthy={healthy}"
         return f"- {label}: {model_id} (configured; {state})"
 
     configured_tools = {tool.name for tool in tool_registry.list()}
@@ -226,14 +242,23 @@ def trusted_capability_summary(
             "run_command",
         }
     )
-    runtime_note = (
-        "Runtime evidence was unavailable; loaded and healthy are unknown."
-        if runtime_evidence is None
-        else (
-            "Runtime evidence is limited to the local Runtime snapshot above; "
-            "unknown fields must remain unknown."
+    if runtime_evidence is None:
+        runtime_note = "Runtime evidence is unavailable; current state and health are unknown."
+    elif runtime_evidence.get("simulated") is True:
+        runtime_note = (
+            "Runtime backend evidence is simulated; it does not prove real GGUF "
+            "loading, generation, or quality."
         )
-    )
+    elif isinstance(runtime_evidence.get("backend"), str):
+        runtime_note = (
+            f"Runtime backend evidence: {runtime_evidence['backend']}. "
+            "This snapshot does not prove generation or quality verification."
+        )
+    else:
+        runtime_note = (
+            "Runtime evidence is limited to the local snapshot above; unknown fields "
+            "remain unknown."
+        )
     return "\n".join(
         [
             "[TRUSTED APRIL SELF CONTEXT]",
@@ -287,11 +312,17 @@ def render_self_status(
     start = lines.index("CONFIGURED AI MODELS:") + 1
     end = lines.index("NON-MODEL SUBSYSTEMS:")
     model_lines = lines[start:end]
-    runtime_line = (
-        "Current local runtime evidence is unavailable; loaded and healthy are unknown."
-        if runtime_evidence is None
-        else "Loaded and healthy reflect only the current local runtime snapshot."
-    )
+    if runtime_evidence is None:
+        runtime_line = (
+            "Current local runtime evidence is unavailable; state and health are unknown."
+        )
+    elif runtime_evidence.get("simulated") is True:
+        runtime_line = (
+            "The current runtime evidence is simulated; it does not prove real GGUF "
+            "loading or generation."
+        )
+    else:
+        runtime_line = "Loaded and healthy reflect only the current local runtime snapshot."
     return "\n".join(
         [
             "I'm APRIL, your personal local assistant.",

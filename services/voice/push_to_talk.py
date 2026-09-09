@@ -51,19 +51,22 @@ class PushToTalkSession:
         deadline = self._clock() + self.max_seconds
         frame_source = self.microphone.frames()
         try:
-            async for frame in frame_source:
-                collected.append(frame)
-                if self._stop.is_set():
-                    self.stop_reason = "stopped"
-                    break
-                if max_frames is not None and len(collected) >= max_frames:
-                    self.stop_reason = "max_frames"
-                    break
-                if self._clock() >= deadline:
-                    self.stop_reason = "max_duration"
-                    break
-            else:
-                self.stop_reason = self.stop_reason or "source_ended"
+            async with asyncio.timeout(self.max_seconds):
+                async for frame in frame_source:
+                    collected.append(frame)
+                    if self._stop.is_set():
+                        self.stop_reason = "stopped"
+                        break
+                    if max_frames is not None and len(collected) >= max_frames:
+                        self.stop_reason = "max_frames"
+                        break
+                    if self._clock() >= deadline:
+                        self.stop_reason = "max_duration"
+                        break
+                else:
+                    self.stop_reason = self.stop_reason or "source_ended"
+        except TimeoutError:
+            self.stop_reason = "max_duration"
         finally:
             # Release the microphone stream on every exit path, including
             # cancellation.

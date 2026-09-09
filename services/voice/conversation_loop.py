@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
+import sys
 import time
 import uuid
 from collections import deque
@@ -33,6 +35,7 @@ from services.voice.wake_word import OpenWakeWordDetector
 # for scripts/--seconds) or an interactive stop-controlled session, without the
 # loop duplicating any recording logic.
 CaptureStrategy = Callable[[Path], Awaitable[Path]]
+LineReader = Callable[[], str | Awaitable[str]]
 
 
 async def _prepend_frame(
@@ -55,11 +58,61 @@ class VoiceUtteranceRejected(RuntimeError):
         self.reason = reason
 
 
+async def read_stdin_line() -> str:
+    """Read one terminal line without leaving a cancellable worker thread.
+
+    APRIL supports interactive voice control on macOS terminals. ``add_reader``
+    makes the wait owned by the event loop, so cancellation removes the file
+    descriptor watcher instead of abandoning an ``input()`` call in the default
+    executor.
+    """
+
+    loop = asyncio.get_running_loop()
+    try:
+        file_descriptor = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError) as exc:
+        raise RuntimeError("Interactive terminal input is unavailable.") from exc
+    result: asyncio.Future[str] = loop.create_future()
+
+    def ready() -> None:
+        with contextlib.suppress(Exception):
+            loop.remove_reader(file_descriptor)
+        try:
+            line = sys.stdin.readline()
+        except (OSError, ValueError):
+            if not result.done():
+                result.set_exception(RuntimeError("Interactive terminal input failed."))
+            return
+        if not line:
+            if not result.done():
+                result.set_exception(EOFError)
+            return
+        if not result.done():
+            result.set_result(line)
+
+    try:
+        loop.add_reader(file_descriptor, ready)
+    except (NotImplementedError, OSError, RuntimeError) as exc:
+        raise RuntimeError("Interactive terminal input is unavailable.") from exc
+    try:
+        return await result
+    finally:
+        with contextlib.suppress(Exception):
+            loop.remove_reader(file_descriptor)
+
+
+async def _read_line(reader: LineReader) -> str:
+    value = reader()
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 def interactive_capture_strategy(
     microphone: Microphone,
     *,
     max_seconds: float,
-    read_line: Callable[[], str],
+    read_line: LineReader = read_stdin_line,
     announce: Callable[[str], None],
 ) -> CaptureStrategy:
     """Build an Enter-to-start / Enter-to-stop push-to-talk capture strategy.
@@ -71,13 +124,13 @@ def interactive_capture_strategy(
 
     async def capture(output_path: Path) -> Path:
         announce("Press Enter to start recording...")
-        await asyncio.to_thread(read_line)
+        await _read_line(read_line)
         session = PushToTalkSession(microphone, max_seconds=max_seconds)
         announce("Recording... press Enter to stop.")
 
         async def _watch_stop() -> None:
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(read_line)
+            with contextlib.suppress(EOFError, OSError, RuntimeError):
+                await _read_line(read_line)
             session.request_stop()
 
         stop_task = asyncio.create_task(_watch_stop())
@@ -95,6 +148,21 @@ def normalize_transcript(text: str, *, wake_word: str | None = None) -> str:
     normalized = " ".join(text.split())
     if wake_word and normalized.lower().startswith(wake_word.lower()):
         normalized = normalized[len(wake_word) :].lstrip(" ,.:;")
+    return normalized
+
+
+class NoSpeechDetected(ValueError):
+    """The speech adapter returned no usable user utterance."""
+
+
+def require_usable_transcript(text: str, *, wake_word: str | None = None) -> str:
+    """Normalize STT output and reject the known no-speech placeholder exactly."""
+
+    normalized = normalize_transcript(text, wake_word=wake_word)
+    if not normalized:
+        raise NoSpeechDetected("Voice transcript was empty; no usable speech was detected.")
+    if normalized.casefold() == "[blank_audio]":
+        raise NoSpeechDetected("No usable speech was detected.")
     return normalized
 
 
@@ -147,9 +215,9 @@ class PushToTalkLoop:
         capture = self._capture or self.microphone.record_push_to_talk
         try:
             spoken_path = await capture(audio_path)
-            text = normalize_transcript(await self.stt.transcribe(spoken_path), wake_word="april")
-            if not text:
-                raise ValueError("Voice transcript was empty.")
+            text = require_usable_transcript(
+                await self.stt.transcribe(spoken_path), wake_word="april"
+            )
             if self.transcript_observer is not None:
                 self.transcript_observer(text)
             response = await self.api_client.post(
@@ -207,9 +275,9 @@ class WakeWordConversationLoop(PushToTalkLoop):
                     else "no_speech"
                 )
                 raise VoiceUtteranceRejected(reason)
-            text = normalize_transcript(await self.stt.transcribe(spoken_path), wake_word="april")
-            if not text:
-                raise ValueError("Voice transcript was empty.")
+            text = require_usable_transcript(
+                await self.stt.transcribe(spoken_path), wake_word="april"
+            )
             if self.transcript_observer is not None:
                 self.transcript_observer(text)
             response = await self.api_client.post(

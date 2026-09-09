@@ -13,6 +13,7 @@ from april_common.errors import RuntimeUnavailableError
 from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
 from services.voice.audio_player import AudioPlayer, SoundDeviceAudioPlayer
+from services.voice.conversation_loop import NoSpeechDetected, require_usable_transcript
 from services.voice.health import query_audio_devices, voice_doctor
 from services.voice.microphone import Microphone, SoundDeviceMicrophone
 from services.voice.speech_to_text import SpeechToText, WhisperCppSpeechToText
@@ -196,7 +197,7 @@ async def run_voice_live_verification(
     try:
         recorded_path = await mic.record_push_to_talk(input_path)
         report.recording_success = recorded_path.exists()
-        transcript = await speech.transcribe(recorded_path)
+        transcript = require_usable_transcript(await speech.transcribe(recorded_path))
         report.stt_success = True
         report.transcript_length = len(transcript)
         if transcript_observer is not None:
@@ -212,6 +213,8 @@ async def run_voice_live_verification(
         report.skipped.append(VoiceLiveSkippedCheck(name="voice-live", reason="interrupted"))
     except RuntimeUnavailableError as exc:
         report.skipped.append(VoiceLiveSkippedCheck(name="voice-live", reason=exc.message))
+    except NoSpeechDetected as exc:
+        report.skipped.append(VoiceLiveSkippedCheck(name="transcription", reason=str(exc)))
     finally:
         if not retain_audio:
             for path in created_paths:

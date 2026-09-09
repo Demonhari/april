@@ -958,6 +958,35 @@ async def test_sentinel_full_utterance_capture_preserves_pre_roll(settings_tmp) 
     assert list(Path(tuned.audio_cache_path).glob("wake-utterance-*.wav")) == []
 
 
+async def test_sentinel_blank_audio_transcript_is_rejected(settings_tmp) -> None:
+    tuned = settings_tmp.model_copy(
+        update={
+            "wake": settings_tmp.wake.model_copy(
+                update={"enabled": True, "confirm_with_stt": False}
+            ),
+            "voice": settings_tmp.voice.model_copy(
+                update={"vad_onset_frames": 1, "vad_energy_threshold": 0.01}
+            ),
+        }
+    )
+    delivery = RecordingDelivery()
+    sentinel = Sentinel(
+        settings=tuned,
+        microphone=FakeFrameMicrophone([*([LOUD_FRAME] * 50), *([b"\x00\x00" * 160] * 65)]),
+        scorers=[ScriptedScorer([0.9])],
+        deliver=delivery,
+        transcriber=RecordingSpeechToText("[BLANK_AUDIO]"),
+        player=RecordingAudioPlayer(),
+        mute=MuteSwitch(tuned.mute_flag_path),
+    )
+
+    await sentinel.run_once()
+
+    assert delivery.events == []
+    assert sentinel.rejected_candidates == 1
+    assert sentinel.last_rejection_reason == "no_speech"
+
+
 async def test_sentinel_in_sentence_wake_candidate_preserves_semantic_april(
     settings_tmp,
 ) -> None:

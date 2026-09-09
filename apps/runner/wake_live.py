@@ -41,7 +41,7 @@ from services.voice.audio_player import AudioPlayer
 from services.voice.conversation_loop import (
     VoiceTimeout,
     WakeWordConversationLoop,
-    normalize_transcript,
+    require_usable_transcript,
 )
 from services.voice.health import voice_doctor
 from services.voice.microphone import Microphone, aclose_frame_source
@@ -356,11 +356,9 @@ async def run_wake_word_live_verification(
         report.recording_success = captured.exists()
         transcript = await loop.stt.transcribe(captured)
         report.transcript_length = len(transcript)
-        report.stt_success = bool(transcript.strip())
-        normalized = normalize_transcript(transcript, wake_word="april")
+        normalized = require_usable_transcript(transcript, wake_word="april")
+        report.stt_success = True
         report.normalized_transcript_length = len(normalized)
-        if not normalized:
-            raise ValueError("Normalized transcript was empty.")
         caller = api_caller
         if caller is None:
             answer = await _default_api_caller(settings, loop.conversation_id, normalized)

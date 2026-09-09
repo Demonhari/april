@@ -12,6 +12,7 @@ from typing import Any, Literal, Protocol
 
 from april_common.settings import AprilSettings
 from services.voice.audio_player import AudioPlayer
+from services.voice.conversation_loop import NoSpeechDetected, require_usable_transcript
 from services.voice.endpointing import (
     EndpointMetrics,
     PcmFormat,
@@ -372,6 +373,10 @@ class Sentinel:
                     self._reject(score or 0.0, self.last_endpoint_metrics.stop_reason)
                     self._set_status("muted" if self.mute.is_muted() else "listening")
                     return
+            if text is None:
+                self._reject(score or 0.0, "no_speech")
+                self._set_status("muted" if self.mute.is_muted() else "listening")
+                return
         self._cooldown_until = self.clock() + self.settings.voice.wake_word_cooldown_seconds
         self._reset_detection_state()
         event = WakeEvent(source="voice", score=score, text=text, reason=reason)
@@ -508,7 +513,10 @@ class Sentinel:
             if not self.settings.voice.retain_debug_audio:
                 capture_path.unlink(missing_ok=True)
         cleaned = strip_vocative(transcript, wake_word=self.wake_word)
-        return cleaned or fallback_text
+        try:
+            return require_usable_transcript(cleaned)
+        except NoSpeechDetected:
+            return None
 
     async def _capture_post_wake_frames(
         self,

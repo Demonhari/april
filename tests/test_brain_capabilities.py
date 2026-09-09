@@ -49,7 +49,7 @@ def test_trusted_self_context_uses_registry_roles_and_separates_storage(settings
     assert "- coding: april-coding (configured;" in summary
     assert "- reading: april-reading (configured;" in summary
     assert "SQLite-backed durable memory is local storage, not an AI model." in summary
-    assert "loaded=unknown; healthy=unknown" in summary
+    assert "state=unknown; loaded=unknown; healthy=unknown" in summary
     assert "april-brain (configured; loaded=yes" not in summary
 
 
@@ -57,7 +57,7 @@ def test_trusted_self_context_uses_registry_roles_and_separates_storage(settings
 async def test_runtime_self_context_reports_only_evidenced_state() -> None:
     runtime = FakeRuntimeClient()
     evidence = await collect_runtime_self_evidence(runtime)
-    assert evidence == {"models": [], "health_status": "ok"}
+    assert evidence == {"models": [], "health_status": "ok", "backend": "fake"}
     assert is_self_introspection_request("What models are you using?") is True
     assert is_self_introspection_request("Which model is loaded?") is True
     assert is_self_introspection_request("Are your models loaded?") is True
@@ -152,9 +152,14 @@ async def test_runtime_self_context_distinguishes_loaded_and_health_evidence(set
         model_registry=registry,
         runtime_evidence=evidence,
     )
-    assert "conversation/brain: april-brain (configured; loaded=yes; healthy=yes)" in summary
-    assert "coding: april-coding (configured; loaded=no; healthy=unknown)" in summary
-    assert "reading: april-reading (configured; loaded=no; healthy=no)" in summary
+    assert (
+        "conversation/brain: april-brain (configured; state=loaded; loaded=yes; healthy=yes)"
+        in summary
+    )
+    assert (
+        "coding: april-coding (configured; state=unloaded; loaded=no; healthy=unknown)" in summary
+    )
+    assert "reading: april-reading (configured; state=error; loaded=no; healthy=no)" in summary
 
 
 def test_runtime_model_lifecycle_states_do_not_overclaim_loaded_state(settings_tmp) -> None:
@@ -175,9 +180,18 @@ def test_runtime_model_lifecycle_states_do_not_overclaim_loaded_state(settings_t
             "health_status": "ok",
         },
     )
-    assert "conversation/brain: april-brain (configured; loaded=no; healthy=unknown)" in summary
-    assert "coding: april-coding (configured; loaded=unknown; healthy=unknown)" in summary
-    assert "reading: april-reading (configured; loaded=unknown; healthy=unknown)" in summary
+    assert (
+        "conversation/brain: april-brain (configured; state=unavailable; loaded=no; "
+        "healthy=unknown)" in summary
+    )
+    assert (
+        "coding: april-coding (configured; state=loading; loaded=unknown; healthy=unknown)"
+        in summary
+    )
+    assert (
+        "reading: april-reading (configured; state=unloading; loaded=unknown; "
+        "healthy=unknown)" in summary
+    )
 
 
 @pytest.mark.asyncio
@@ -216,5 +230,50 @@ def test_runtime_evidence_does_not_invent_loaded_model_state(settings_tmp) -> No
         model_registry=registry,
         runtime_evidence={"models": [], "health_status": "ok"},
     )
-    assert "loaded=unknown; healthy=unknown (runtime did not report this model)" in summary
+    assert (
+        "state=unknown; loaded=unknown; healthy=unknown (runtime did not report this model)"
+        in summary
+    )
     assert "loaded=yes" not in summary
+
+
+def test_runtime_status_preserves_simulation_and_unknown_state(settings_tmp) -> None:
+    registry = ModelRegistry.from_file(
+        project_root() / "configs" / "models.yaml", root=project_root()
+    )
+    summary = trusted_capability_summary(
+        settings=settings_tmp,
+        agent_registry=default_agent_registry(),
+        tool_registry=default_registry(),
+        model_registry=registry,
+        runtime_evidence={
+            "models": [
+                {"id": "april-brain", "state": "bogus"},
+                {"id": "april-coding", "state": "unloaded"},
+            ],
+            "health_status": "degraded",
+            "backend": "fake",
+            "simulated": True,
+        },
+    )
+    assert "conversation/brain: april-brain (configured; state=unknown; loaded=unknown" in summary
+    assert "coding: april-coding (configured; state=unloaded; loaded=no" in summary
+    assert "Runtime backend evidence is simulated" in summary
+    assert "bogus" not in summary
+    assert "GGUF loading" in summary
+
+
+def test_runtime_status_labels_failed_evidence_as_unavailable(settings_tmp) -> None:
+    registry = ModelRegistry.from_file(
+        project_root() / "configs" / "models.yaml", root=project_root()
+    )
+    summary = trusted_capability_summary(
+        settings=settings_tmp,
+        agent_registry=default_agent_registry(),
+        tool_registry=default_registry(),
+        model_registry=registry,
+        runtime_evidence=None,
+    )
+    assert "Runtime evidence is unavailable" in summary
+    assert "runtime status not queried" not in summary
+    assert "state=unknown; loaded=unknown; healthy=unknown" in summary
