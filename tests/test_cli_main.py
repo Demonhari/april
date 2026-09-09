@@ -458,3 +458,74 @@ def test_voice_ptt_modes_use_capture_strategy(monkeypatch) -> None:
     assert interactive.exit_code == 0, interactive.output
     assert constructed.get("capture") is not None
     assert constructed.get("microphone") is not None
+
+
+def test_voice_ptt_loop_recovers_from_no_speech_and_keeps_conversation(
+    monkeypatch,
+) -> None:
+    import services.voice.conversation_loop as conversation_loop
+    from services.voice.conversation_loop import NoSpeechDetected
+
+    calls: list[int] = []
+    constructed: dict[str, Any] = {}
+
+    class StubLoop:
+        conversation_id = "conversation-stable"
+
+        def __init__(self, **kwargs: Any) -> None:
+            constructed.update(kwargs)
+
+        async def run_once(self) -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise NoSpeechDetected("No usable speech was detected.")
+            if len(calls) == 2:
+                return "valid answer"
+            raise EOFError
+
+    monkeypatch.setattr(conversation_loop, "PushToTalkLoop", StubLoop)
+    monkeypatch.setattr("apps.cli.main.client", lambda: object())
+
+    result = CliRunner().invoke(app, ["voice", "ptt", "--loop", "--show-transcript"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [1, 1, 1]
+    assert constructed["conversation_id"] is None
+    assert result.output.count("Conversation: conversation-stable") == 1
+    assert "Try again with a clear utterance" in result.output
+    assert "valid answer" in result.output
+
+
+def test_voice_ptt_timed_loop_requires_explicit_retry_start(monkeypatch) -> None:
+    import services.voice.conversation_loop as conversation_loop
+    from services.voice.conversation_loop import NoSpeechDetected
+
+    calls = 0
+    retry_starts = 0
+
+    class StubLoop:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_once(self) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise NoSpeechDetected("No usable speech was detected.")
+            raise EOFError
+
+    async def fake_read_line() -> str:
+        nonlocal retry_starts
+        retry_starts += 1
+        return ""
+
+    monkeypatch.setattr(conversation_loop, "PushToTalkLoop", StubLoop)
+    monkeypatch.setattr(conversation_loop, "read_stdin_line", fake_read_line)
+    monkeypatch.setattr("apps.cli.main.client", lambda: object())
+
+    result = CliRunner().invoke(app, ["voice", "ptt", "--seconds", "0.1", "--loop"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == 2
+    assert retry_starts == 1
+    assert result.output.count("Recording for 0.1s") == 2

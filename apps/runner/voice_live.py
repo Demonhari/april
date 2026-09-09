@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from apps.runner.mac_report import redact_reason
 from april_common.errors import RuntimeUnavailableError
 from april_common.settings import AprilSettings
 from april_common.time import utc_now_iso
@@ -132,6 +133,30 @@ def _finalize_summary(report: VoiceLiveReport) -> None:
     )
 
 
+def voice_live_failure_reasons(report: VoiceLiveReport) -> list[str]:
+    """Return safe, typed explanations for a non-passing voice-live report.
+
+    These messages are derived from report booleans and the already-redacted
+    skipped-check reasons. They intentionally do not include transcripts,
+    paths, device names, or raw adapter errors.
+    """
+
+    reasons: list[str] = []
+    if not report.recording_success:
+        reasons.append("Recording was not successful.")
+    if not report.stt_success:
+        reasons.append("Speech-to-text was not successful.")
+    if not report.transcription_user_confirmed:
+        reasons.append("Transcription was not confirmed.")
+    if not report.tts_success:
+        reasons.append("Text-to-speech was not successful.")
+    if not report.playback_user_confirmed:
+        reasons.append("Playback was not confirmed.")
+    for skipped in report.skipped:
+        reasons.append(f"{skipped.name}: {redact_reason(skipped.reason)}")
+    return reasons
+
+
 def write_voice_live_report(report: VoiceLiveReport, path: Path) -> Path:
     resolved = path.expanduser()
     resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -212,7 +237,9 @@ async def run_voice_live_verification(
     except KeyboardInterrupt:
         report.skipped.append(VoiceLiveSkippedCheck(name="voice-live", reason="interrupted"))
     except RuntimeUnavailableError as exc:
-        report.skipped.append(VoiceLiveSkippedCheck(name="voice-live", reason=exc.message))
+        report.skipped.append(
+            VoiceLiveSkippedCheck(name="voice-live", reason=redact_reason(exc.message))
+        )
     except NoSpeechDetected as exc:
         report.skipped.append(VoiceLiveSkippedCheck(name="transcription", reason=str(exc)))
     finally:

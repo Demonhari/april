@@ -9,6 +9,7 @@ import typer
 from apps.cli.render import console
 from apps.runner.commands import registry as _registry
 from apps.runner.commands.composition import composition as _composition_api
+from apps.runner.voice_live import voice_live_failure_reasons
 from apps.runner.wake_live import run_sentinel_live_verification
 
 _T = TypeVar("_T")
@@ -55,6 +56,14 @@ def voice_verify_live(
     settings = _composition_api._manager().settings
     doctor = _composition_api.collect_voice_doctor(settings)
     console.print(f"Voice doctor status: {doctor['status']}")
+    if doctor.get("push_to_talk_ready") is True:
+        console.print("Push-to-talk prerequisites ready.")
+    elif doctor.get("push_to_talk_ready") is False:
+        blocked_by = doctor.get("voice_readiness", {}).get("push_to_talk_blocked_by", [])
+        detail = ", ".join(str(item) for item in blocked_by) or "required components"
+        console.print(f"Push-to-talk prerequisites unavailable: {detail}.")
+    if doctor.get("wake_word_model_configured") is False:
+        console.print("Wake listening unavailable: no local wake-word model is configured.")
     guidance = doctor.get("macos_microphone_permission_guidance")
     if guidance:
         console.print(str(guidance))
@@ -83,8 +92,13 @@ def voice_verify_live(
         "Voice live verification: "
         f"{result.summary} (recording={result.recording_success}, "
         f"stt={result.stt_success}, transcript_length={result.transcript_length}, "
-        f"tts={result.tts_success}, playback_confirmed={result.playback_user_confirmed})"
+        f"transcription_confirmed={result.transcription_user_confirmed}, "
+        f"tts={result.tts_success}, playback_confirmed={result.playback_user_confirmed}, "
+        f"evidence_mode={result.evidence_mode}, voice_live_verified={result.voice_live_verified})"
     )
+    if result.summary != "pass":
+        for reason in voice_live_failure_reasons(result):
+            console.print(f"[yellow]{reason}[/yellow]")
     if report is not None:
         console.print(f"[green]Wrote voice verification report to {report.expanduser()}[/green]")
     if result.summary != "pass":

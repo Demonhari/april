@@ -104,7 +104,23 @@ def voice_ptt(
         while True:
             if seconds is not None:
                 console.print(f"Recording for {seconds:.1f}s. Speak now.")
-            answer = run(loop.run_once())
+            try:
+                answer = run(loop.run_once())
+            except NoSpeechDetected as exc:
+                console.print(f"[yellow]{exc} Try again with a clear utterance.[/yellow]")
+                if not loop_mode:
+                    raise typer.Exit(1) from exc
+                if seconds is not None:
+                    # Fixed-duration loop retries are deliberately gated by a
+                    # fresh explicit Enter. This prevents silence from turning
+                    # into a hot recording/retry loop in scripts or terminals.
+                    console.print("Press Enter to try again, or Ctrl-D to exit.")
+                    try:
+                        run(read_stdin_line())
+                    except RuntimeError as input_error:
+                        console.print(f"[red]{input_error}[/red]")
+                        raise typer.Exit(1) from input_error
+                continue
             print_untrusted_text(answer)
             if not loop_mode:
                 break
@@ -114,9 +130,6 @@ def voice_ptt(
     except KeyboardInterrupt:
         console.print("Push-to-talk cancelled; microphone released.")
         raise typer.Exit(130) from None
-    except NoSpeechDetected as exc:
-        console.print(f"[yellow]{exc} Try again with a clear utterance.[/yellow]")
-        raise typer.Exit(1) from exc
     except (ValueError, RuntimeUnavailableError, ApiOfflineError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
