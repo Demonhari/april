@@ -1420,6 +1420,122 @@ def test_voice_capability_reply_is_application_owned_and_transport_honest(settin
     assert "physical capture" not in text_answer
 
 
+def test_voice_receipt_check_acknowledges_without_hardware_diagnostic(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/voice/input",
+        json={"message": "This is a microphone test. Did you receive my message?"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    answer = response.json()["result"]["final_message"]
+    assert "Yes, I received your message through APRIL's voice interface" in answer
+    assert "I work from the transcript" in answer
+    assert "diagnostic" not in answer.lower()
+
+
+def test_general_voice_support_query_separates_support_from_current_channel(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    typed = client.post(
+        "/chat",
+        json={"message": "Does APRIL support voice input and spoken replies?"},
+        headers=auth(settings_tmp),
+    )
+    voice = client.post(
+        "/voice/input",
+        json={"message": "Does APRIL support voice input and spoken replies?"},
+        headers=auth(settings_tmp),
+    )
+    assert typed.status_code == voice.status_code == 200
+    typed_answer = typed.json()["result"]["final_message"]
+    voice_answer = voice.json()["result"]["final_message"]
+    assert "supports an optional local voice interface" in typed_answer
+    assert "arrived as text" in typed_answer
+    assert "supports local voice input and spoken replies" in voice_answer
+    assert "arrived through the voice interface" in voice_answer
+
+
+def test_conversation_recall_uses_prior_voice_user_turn_and_not_durable_memory(
+    settings_tmp,
+) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    first = client.post(
+        "/voice/input",
+        json={"message": "This is a microphone test. Did you receive my message?"},
+        headers=auth(settings_tmp),
+    )
+    conversation_id = first.json()["result"]["conversation_id"]
+    second = client.post(
+        "/voice/input",
+        json={
+            "message": "What did I just ask you to confirm?",
+            "conversation_id": conversation_id,
+        },
+        headers=auth(settings_tmp),
+    )
+    assert second.status_code == 200
+    answer = second.json()["result"]["final_message"]
+    assert "This is a microphone test. Did you receive my message?" in answer
+    assert "What did I just ask you to confirm?" not in answer
+    assert "durable memory" not in answer.lower()
+
+
+def test_new_conversation_recall_does_not_invent_prior_question(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/voice/input",
+        json={"message": "What did I just ask you to confirm?"},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    answer = response.json()["result"]["final_message"]
+    assert "don't have an earlier user question available" in answer
+    assert "infer one from durable memory" in answer
+
+
+def test_explicit_conversation_resumption_retains_recall_evidence(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    first = client.post(
+        "/voice/input",
+        json={"message": "The earlier question was about local transcripts."},
+        headers=auth(settings_tmp),
+    )
+    original_id = first.json()["result"]["conversation_id"]
+    fresh = client.post(
+        "/voice/input",
+        json={"message": "What did I just ask?"},
+        headers=auth(settings_tmp),
+    )
+    assert (
+        "don't have an earlier user question available" in fresh.json()["result"]["final_message"]
+    )
+    resumed = client.post(
+        "/chat",
+        json={"message": "What did I just ask?", "conversation_id": original_id},
+        headers=auth(settings_tmp),
+    )
+    assert resumed.status_code == 200
+    assert (
+        "The earlier question was about local transcripts."
+        in resumed.json()["result"]["final_message"]
+    )
+
+
 def test_natural_voice_greeting_reaches_generation_with_voice_context(settings_tmp) -> None:
     import anyio
 

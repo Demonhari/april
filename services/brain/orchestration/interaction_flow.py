@@ -9,11 +9,14 @@ from agents.schemas import AgentResult
 from services.april_runtime.schemas import GenerationOptions
 from services.brain.capabilities import (
     collect_runtime_self_evidence,
+    is_conversation_recall_request,
     is_identity_request,
     is_self_introspection_request,
     is_voice_capability_request,
+    render_conversation_recall_response,
     render_self_status,
     render_voice_capability_response,
+    voice_capability_intent,
 )
 from services.brain.execution import PreparedTurn
 from services.brain.feedback_classifier import classify_implicit_correction
@@ -45,9 +48,12 @@ class InteractionFlow:
             is_identity_request(message)
             or is_self_introspection_request(message)
             or is_voice_capability_request(message)
+            or is_conversation_recall_request(message)
         ):
             return None
         active_request_context = request_context or RequestContext.unknown()
+        recall_request = is_conversation_recall_request(message)
+        voice_intent = voice_capability_intent(message)
         project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
         active_conversation_id = conversation_id or await self.memory.create_conversation(
             project_id=project.id if project else None,
@@ -59,18 +65,36 @@ class InteractionFlow:
                 project_id=project.id if project else None,
                 actor=actor,
             )
+        prepared_context = (
+            await self.conversation_context.prepare(
+                conversation_id=active_conversation_id,
+                request_id=request_id,
+            )
+            if recall_request
+            else None
+        )
         await self.memory.add_message(active_conversation_id, "user", message)
         identity = is_identity_request(message)
         voice_capability = is_voice_capability_request(message)
         runtime_evidence = (
             await collect_runtime_self_evidence(self.runtime_client)
-            if not identity and not voice_capability
+            if not identity and not voice_capability and not recall_request
             else None
         )
         final_message = (
             "I'm APRIL, your personal local assistant."
             if identity
-            else render_voice_capability_response(active_request_context)
+            else render_conversation_recall_response(
+                prepared_context.recent_messages if prepared_context is not None else [],
+                history_complete=(
+                    prepared_context.history_complete if prepared_context is not None else False
+                ),
+            )
+            if recall_request
+            else render_voice_capability_response(
+                active_request_context,
+                intent=voice_intent or "support",
+            )
             if voice_capability
             else render_self_status(
                 settings=self.settings,
@@ -83,7 +107,13 @@ class InteractionFlow:
         )
         await self.memory.add_message(active_conversation_id, "assistant", final_message)
         response_kind = (
-            "identity" if identity else "voice_capability" if voice_capability else "self_status"
+            "identity"
+            if identity
+            else "conversation_recall"
+            if recall_request
+            else "voice_capability"
+            if voice_capability
+            else "self_status"
         )
         metadata = {
             "application_owned": True,

@@ -10,11 +10,15 @@ from april_common.settings import project_root
 from services.april_runtime.model_registry import ModelRegistry
 from services.brain.capabilities import (
     collect_runtime_self_evidence,
+    is_conversation_recall_request,
     is_self_introspection_request,
     is_voice_capability_request,
+    render_conversation_recall_response,
     trusted_capability_summary,
+    voice_capability_intent,
 )
 from services.brain.request_context import RequestContext, render_request_context
+from services.memory.schemas import Message
 from services.pool.agent_pool import CALL_SIGNS
 from skills.registry import default_registry
 from tests.conftest import FakeRuntimeClient
@@ -300,5 +304,34 @@ def test_voice_request_context_is_transport_only_and_origin_scoped(settings_tmp)
 def test_voice_capability_matcher_is_narrow_and_does_not_swallow_quoted_or_mixed_text() -> None:
     assert is_voice_capability_request("Can you hear me?") is True
     assert is_voice_capability_request("Do you have audio capabilities?") is True
+    assert (
+        voice_capability_intent("Does APRIL support voice input and spoken replies?") == "support"
+    )
+    assert (
+        voice_capability_intent("This is a microphone test. Did you receive my message?")
+        == "receipt"
+    )
+    assert is_conversation_recall_request("What did I just ask you to confirm?") is True
+    assert is_conversation_recall_request("What did I ask you to confirm?") is True
     assert is_voice_capability_request('The quote says "Can you hear me?"') is False
     assert is_voice_capability_request("Can you hear me? Also delete a file.") is False
+    assert is_conversation_recall_request('The document says "What did I just ask?"') is False
+
+
+def test_conversation_recall_reports_only_available_history() -> None:
+    earlier = Message(
+        id="message-1",
+        conversation_id="conversation-1",
+        role="user",
+        content="The earlier question was about local transcripts.",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert "local transcripts" in render_conversation_recall_response(
+        [earlier], history_complete=True
+    )
+    assert "unavailable or truncated" in render_conversation_recall_response(
+        [], history_complete=False
+    )
+    assert "won't infer one from durable memory" in render_conversation_recall_response(
+        [], history_complete=True
+    )

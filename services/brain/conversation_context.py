@@ -69,6 +69,7 @@ class PreparedConversationContext:
     summary_advanced: bool
     warnings: list[str] = field(default_factory=list)
     summary_model_id: str | None = None
+    history_complete: bool = True
 
     def diagnostics(self) -> dict[str, object]:
         return {
@@ -79,6 +80,7 @@ class PreparedConversationContext:
             "recent_turn_count": self.recent_turn_count,
             "summary_model_id": self.summary_model_id,
             "context_warning_codes": list(self.warnings),
+            "history_complete": self.history_complete,
         }
 
 
@@ -345,6 +347,9 @@ class ConversationContextService:
     ) -> PreparedConversationContext:
         recent_messages = _bound_recent_groups(groups, self.settings.conversation_history_max_chars)
         bounded_groups, _ = group_persisted_conversation_turns(recent_messages)
+        history_complete = summary is None and len(recent_messages) == sum(
+            len(group.messages) for group in groups
+        )
         return PreparedConversationContext(
             summary=(
                 render_conversation_summary(
@@ -361,6 +366,7 @@ class ConversationContextService:
             summary_advanced=advanced,
             warnings=list(dict.fromkeys(warnings)),
             summary_model_id=summary.model_id if summary else None,
+            history_complete=history_complete,
         )
 
     def _audit_advance(self, summary: ConversationSummary, turn_count: int) -> None:

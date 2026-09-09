@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from agents.base import USER_FACING_ASSISTANT_NAME, USER_FACING_IDENTITY_RULE
 from agents.registry import AgentRegistry
 from april_common.settings import AprilSettings
 from services.april_runtime.model_registry import ModelRegistry
 from services.brain.request_context import RequestContext, render_request_context
+from services.memory.schemas import Message
 from skills.registry import ToolRegistry
 
 _IDENTITY_REQUESTS = {
@@ -19,11 +20,39 @@ _IDENTITY_REQUESTS = {
     "tell me your name",
 }
 _VOICE_CAPABILITY_REQUESTS = {
-    "can you hear me",
-    "did you receive my voice message",
     "do you have audio capabilities",
     "do you have voice capabilities",
 }
+_VOICE_SUPPORT_PATTERNS = (
+    re.compile(
+        r"(?:does|do) (?:april|you) support (?:local )?(?:voice|audio) input "
+        r"and (?:local )?(?:spoken|voice|audio) repl(?:y|ies)"
+    ),
+    re.compile(
+        r"(?:can|does) (?:april|you) (?:receive|accept) (?:local )?(?:voice|audio) input "
+        r"and (?:provide|give|send) (?:local )?(?:spoken|voice|audio) repl(?:y|ies)"
+    ),
+    re.compile(r"what (?:voice|audio) capabilities (?:do you|does april) have"),
+)
+_VOICE_RECEIPT_REQUESTS = {
+    "can you hear me",
+    "did you receive my message",
+    "did you receive my voice message",
+    "did you get my message",
+    "did you get this",
+    "did you receive this",
+}
+_VOICE_RECEIPT_PREFIXES = {
+    "this is a microphone test",
+    "this is a voice test",
+    "microphone test",
+}
+_CONVERSATION_RECALL_PATTERNS = (
+    re.compile(r"what did i (?:just )?ask(?: you)?(?: to confirm)?"),
+    re.compile(r"what did i ask you to confirm"),
+    re.compile(r"what was my last question"),
+    re.compile(r"what was the last question i asked"),
+)
 _MODEL_ROLES = (
     ("conversation/brain", "brain", "general_agent"),
     ("coding", "coding", "coding_agent"),
@@ -44,10 +73,61 @@ def is_identity_request(message: str) -> bool:
     return _normalized_question(message) in _IDENTITY_REQUESTS
 
 
+VoiceCapabilityIntent = Literal["support", "receipt"]
+
+
+def voice_capability_intent(message: str) -> VoiceCapabilityIntent | None:
+    """Classify narrowly scoped questions about APRIL's own voice interface."""
+
+    normalized = _normalized_question(message)
+    if normalized in _VOICE_RECEIPT_REQUESTS:
+        return "receipt"
+    if any(pattern.fullmatch(normalized) is not None for pattern in _VOICE_SUPPORT_PATTERNS):
+        return "support"
+    if normalized in _VOICE_CAPABILITY_REQUESTS:
+        return "support"
+    if any(
+        normalized == f"{prefix} {suffix}"
+        for prefix in _VOICE_RECEIPT_PREFIXES
+        for suffix in _VOICE_RECEIPT_REQUESTS
+    ):
+        return "receipt"
+    return None
+
+
 def is_voice_capability_request(message: str) -> bool:
     """Recognize only direct questions about APRIL's own voice interface."""
 
-    return _normalized_question(message) in _VOICE_CAPABILITY_REQUESTS
+    return voice_capability_intent(message) is not None
+
+
+def is_conversation_recall_request(message: str) -> bool:
+    """Recognize narrow requests for a prior user turn in this conversation."""
+
+    normalized = _normalized_question(message)
+    return any(
+        pattern.fullmatch(normalized) is not None for pattern in _CONVERSATION_RECALL_PATTERNS
+    )
+
+
+def render_conversation_recall_response(history: list[Message], *, history_complete: bool) -> str:
+    """Answer from persisted prior user turns, never from durable-memory recency."""
+
+    prior_user_turns = [item.content for item in history if item.role == "user"]
+    if prior_user_turns:
+        previous = prior_user_turns[-1].strip()
+        if len(previous) > 1_000:
+            previous = previous[:997].rstrip() + "..."
+        return f"Your most recent earlier message in this conversation was: “{previous}”"
+    if not history_complete:
+        return (
+            "I can't reliably identify an earlier question because the relevant "
+            "conversation history is unavailable or truncated."
+        )
+    return (
+        "I don't have an earlier user question available in this conversation, "
+        "so I won't infer one from durable memory."
+    )
 
 
 def is_self_introspection_request(message: str) -> bool:
@@ -352,8 +432,26 @@ def render_self_status(
     )
 
 
-def render_voice_capability_response(request_context: RequestContext) -> str:
+def render_voice_capability_response(
+    request_context: RequestContext,
+    *,
+    intent: VoiceCapabilityIntent = "support",
+) -> str:
     """Answer a narrowly scoped voice self-capability question from app facts."""
+
+    if intent == "receipt":
+        if request_context.origin == "voice":
+            return (
+                "Yes, I received your message through APRIL's voice interface. "
+                "I work from the transcript; this confirms text transport only, "
+                "not original-audio perception or playback."
+            )
+        if request_context.origin == "wake":
+            return (
+                "Yes, APRIL received this text through its wake/session path. "
+                "That confirms the text event only, not wake detection or playback."
+            )
+        return "This request arrived as text, not through APRIL's voice interface."
 
     if request_context.origin == "voice":
         configuration = (
@@ -364,11 +462,10 @@ def render_voice_capability_response(request_context: RequestContext) -> str:
             else "The voice interface's configured state is unknown."
         )
         return (
-            "I received your message through APRIL's voice interface. APRIL supports "
-            f"local speech recognition and speech output; {configuration} I work from "
-            "the transcript. "
-            "This confirms message transport only, not microphone capture quality, "
-            "speaker identity, or playback."
+            "Yes. APRIL supports local voice input and spoken replies through its "
+            f"optional voice interface. {configuration} This request arrived through "
+            "the voice interface, and I work from the transcript; that confirms text "
+            "transport only, not microphone capture quality, speaker identity, or playback."
         )
     if request_context.origin == "wake":
         return (
@@ -378,11 +475,12 @@ def render_voice_capability_response(request_context: RequestContext) -> str:
         )
     if request_context.voice_enabled is False:
         return (
-            "APRIL supports an optional local voice interface, but it is disabled "
-            "in the current local configuration. This request arrived as text."
+            "Yes. APRIL supports an optional local voice interface for voice input "
+            "and spoken replies, but it is disabled in the current local configuration. "
+            "This request arrived as text."
         )
     return (
-        "APRIL supports an optional local voice interface using local speech "
-        "recognition and speech output. This request arrived as text, so no audio "
-        "was supplied for this turn."
+        "Yes. APRIL supports an optional local voice interface for voice input and "
+        "spoken replies. This request arrived as text, so no audio was supplied for "
+        "this turn."
     )
