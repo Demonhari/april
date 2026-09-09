@@ -11,8 +11,10 @@ from services.april_runtime.model_registry import ModelRegistry
 from services.brain.capabilities import (
     collect_runtime_self_evidence,
     is_self_introspection_request,
+    is_voice_capability_request,
     trusted_capability_summary,
 )
+from services.brain.request_context import RequestContext, render_request_context
 from services.pool.agent_pool import CALL_SIGNS
 from skills.registry import default_registry
 from tests.conftest import FakeRuntimeClient
@@ -277,3 +279,26 @@ def test_runtime_status_labels_failed_evidence_as_unavailable(settings_tmp) -> N
     assert "Runtime evidence is unavailable" in summary
     assert "runtime status not queried" not in summary
     assert "state=unknown; loaded=unknown; healthy=unknown" in summary
+
+
+def test_voice_request_context_is_transport_only_and_origin_scoped(settings_tmp) -> None:
+    voice = RequestContext.from_origin("voice", settings_tmp)
+    text = RequestContext.from_origin("text", settings_tmp)
+
+    voice_lines = "\n".join(render_request_context(voice))
+    text_lines = "\n".join(render_request_context(text))
+    assert "Request origin: voice" in voice_lines
+    assert "text transcript received at APRIL's voice endpoint" in voice_lines
+    assert "does not prove physical capture" in voice_lines
+    assert "Request origin: text" in text_lines
+    assert "This request arrived as text" in text_lines
+    assert voice.voice_enabled is False
+    assert voice.voice_configured is False
+    assert text.origin != voice.origin
+
+
+def test_voice_capability_matcher_is_narrow_and_does_not_swallow_quoted_or_mixed_text() -> None:
+    assert is_voice_capability_request("Can you hear me?") is True
+    assert is_voice_capability_request("Do you have audio capabilities?") is True
+    assert is_voice_capability_request('The quote says "Can you hear me?"') is False
+    assert is_voice_capability_request("Can you hear me? Also delete a file.") is False

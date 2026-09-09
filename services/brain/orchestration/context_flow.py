@@ -15,6 +15,7 @@ from services.brain.execution import PreparedTurn
 from services.brain.memory_policy import build_agent_memory_context
 from services.brain.planner import task_plan_from_decision
 from services.brain.reasoning_resolver import resolve_reasoning_model
+from services.brain.request_context import RequestContext
 from services.brain.schemas import (
     RouteResult,
     RouteSource,
@@ -33,8 +34,10 @@ class ContextFlow:
         repo_path: str | None,
         structured_specialists: bool = False,
         mode: str = "standard",
+        request_context: RequestContext | None = None,
     ) -> PreparedTurn:
         active_request_id = request_id or str(uuid.uuid4())
+        active_request_context = request_context or RequestContext.unknown()
         project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
         active_conversation_id = conversation_id or await self.memory.create_conversation(
             project_id=project.id if project else None,
@@ -283,6 +286,7 @@ class ContextFlow:
             tool_registry=self.tool_registry,
             model_registry=getattr(self, "model_registry", None),
             runtime_evidence=runtime_evidence,
+            request_context=active_request_context,
         )
         context_sections.insert(0, capability_summary)
         if memory_context.conversation_summary:
@@ -309,6 +313,8 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                request_context=active_request_context,
+                trusted_context=capability_summary,
                 task_plan_id=task_plan.id,
                 run_metadata=run_metadata,
             )
@@ -330,6 +336,8 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                request_context=active_request_context,
+                trusted_context=capability_summary,
                 structured_agent=True,
                 warnings=list(prepared_context.warnings),
                 task_plan_id=task_plan.id,
@@ -350,6 +358,8 @@ class ContextFlow:
                 actor=actor,
                 memory_context=memory_context,
                 task_plan_id=task_plan.id,
+                request_context=active_request_context,
+                trusted_context=capability_summary,
             )
 
         planned_calls = self._planned_tool_calls(decision, message=message, project=project)
@@ -389,6 +399,8 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                request_context=active_request_context,
+                trusted_context=capability_summary,
                 task_plan_id=task_plan.id,
                 run_metadata=run_metadata,
             )
@@ -518,6 +530,8 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                request_context=active_request_context,
+                trusted_context=capability_summary,
                 task_plan_id=task_plan.id,
                 run_metadata=run_metadata,
             )
@@ -543,6 +557,8 @@ class ContextFlow:
                     actor=actor,
                     history=memory_context.history,
                     context_sections=context_sections,
+                    request_context=active_request_context,
+                    trusted_context=capability_summary,
                     task_plan_id=task_plan.id,
                     run_metadata=run_metadata,
                 )
@@ -566,6 +582,8 @@ class ContextFlow:
                     actor=actor,
                     history=memory_context.history,
                     context_sections=context_sections,
+                    request_context=active_request_context,
+                    trusted_context=capability_summary,
                     task_plan_id=task_plan.id,
                     run_metadata=run_metadata,
                 )
@@ -584,6 +602,8 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                request_context=active_request_context,
+                trusted_context=capability_summary,
                 task_plan_id=task_plan.id,
                 run_metadata=run_metadata,
             )
@@ -621,6 +641,8 @@ class ContextFlow:
             actor=actor,
             history=memory_context.history,
             context_sections=context_sections,
+            request_context=active_request_context,
+            trusted_context=capability_summary,
             task_plan_id=task_plan.id,
             run_metadata=run_metadata,
         )

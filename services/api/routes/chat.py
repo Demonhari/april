@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from services.api.dependencies import ApiContainer
 from services.api.schemas import ChatRequest, ChatResponse
+from services.brain.request_context import RequestContext
 
 
 def register_chat_routes(
@@ -32,6 +33,7 @@ def register_chat_routes(
                 project_id=request.project_id,
                 repo_path=request.repo_path,
                 mode=request.mode,
+                request_context=RequestContext.from_origin("text", active.settings),
             )
         return ChatResponse(request_id=request_id, result=result)
 
@@ -54,6 +56,7 @@ def register_chat_routes(
                     project_id=request.project_id,
                     repo_path=request.repo_path,
                     mode=request.mode,
+                    request_context=RequestContext.from_origin("text", active.settings),
                 ):
                     yield sse_event(event_name, request_id, payload)
             finally:

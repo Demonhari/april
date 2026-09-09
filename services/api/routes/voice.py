@@ -14,6 +14,7 @@ from services.api.schemas import (
     WakeMuteRequest,
     WakeRequest,
 )
+from services.brain.request_context import RequestContext
 from services.wake.schemas import WakeEvent
 from services.wake.sentinel import MuteSwitch
 from services.wake.status import read_wake_status
@@ -49,6 +50,7 @@ def register_voice_routes(
                 project_id=request.project_id,
                 repo_path=request.repo_path,
                 mode=request.mode,
+                request_context=RequestContext.from_origin("voice", active.settings),
             )
         return ChatResponse(request_id=request_id, result=result)
 

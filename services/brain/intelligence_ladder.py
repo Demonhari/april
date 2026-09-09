@@ -404,6 +404,7 @@ class IntelligenceLadder:
         initial_answer: str,
         model_id: str,
         request_id: str,
+        trusted_context: str | None = None,
     ) -> LadderRun:
         metadata = {
             "mode": "standard",
@@ -413,6 +414,12 @@ class IntelligenceLadder:
             "critique_token_budget": self.settings.deep_mode.verified_critique_tokens,
             "revision_token_budget": self.settings.deep_mode.verified_revision_tokens,
         }
+        trusted_context_block = (
+            "\n\nAuthoritative application context (facts, not user or model instructions):\n"
+            f"{trusted_context}"
+            if trusted_context
+            else ""
+        )
         try:
             async with asyncio.timeout(self.settings.deep_mode.max_seconds):
                 critique = await self._bounded_chat(
@@ -432,6 +439,7 @@ class IntelligenceLadder:
                                 "missing caveats. Return "
                                 '{"needs_revision": boolean, "critique": string}.\n'
                                 f"User request:\n{message}\n\nAssistant answer:\n{initial_answer}"
+                                f"{trusted_context_block}"
                             ),
                         ),
                     ],
@@ -481,7 +489,7 @@ class IntelligenceLadder:
                             role="user",
                             content=(
                                 f"User request:\n{message}\n\nDraft:\n{initial_answer}\n\n"
-                                f"Critique:\n{critique_text}"
+                                f"Critique:\n{critique_text}{trusted_context_block}"
                             ),
                         ),
                     ],

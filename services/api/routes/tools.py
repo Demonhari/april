@@ -15,6 +15,7 @@ from services.api.schemas import (
     ToolApprovalAction,
     ToolRequestEnvelope,
 )
+from services.brain.request_context import RequestContext
 from skills.playbooks import PlaybookRunner
 
 
@@ -39,6 +40,7 @@ def register_tool_routes(app: FastAPI, authorized: Callable[..., Any]) -> None:
                 request_id=request_id,
                 project_id=request.project_id,
                 repo_path=request.repo_path,
+                request_context=RequestContext.from_origin("agent", active.settings),
             )
         return ChatResponse(request_id=request_id, result=result)
 

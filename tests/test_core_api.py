@@ -1368,6 +1368,81 @@ def test_voice_input_preserves_conversation_id(settings_tmp) -> None:
     assert voice.json()["result"]["conversation_id"] == conversation_id
 
 
+def test_voice_and_text_routes_supply_distinct_request_provenance(
+    settings_tmp, monkeypatch
+) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    seen: list[object] = []
+    original_chat = container.orchestrator.chat
+
+    async def spy_chat(*args, **kwargs):
+        seen.append(kwargs["request_context"])
+        return await original_chat(*args, **kwargs)
+
+    monkeypatch.setattr(container.orchestrator, "chat", spy_chat)
+    client = TestClient(create_app(container))
+    assert (
+        client.post("/chat", json={"message": "hello"}, headers=auth(settings_tmp)).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/voice/input", json={"message": "hello"}, headers=auth(settings_tmp)
+        ).status_code
+        == 200
+    )
+    assert [context.origin for context in seen] == ["text", "voice"]
+
+
+def test_voice_capability_reply_is_application_owned_and_transport_honest(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    voice = client.post(
+        "/voice/input",
+        json={"message": "Can you hear me?"},
+        headers=auth(settings_tmp),
+    )
+    text = client.post(
+        "/chat",
+        json={"message": "Can you hear me?"},
+        headers=auth(settings_tmp),
+    )
+    assert voice.status_code == text.status_code == 200
+    voice_answer = voice.json()["result"]["final_message"]
+    text_answer = text.json()["result"]["final_message"]
+    assert "received your message through APRIL's voice interface" in voice_answer
+    assert "transport only" in voice_answer
+    assert "arrived as text" in text_answer
+    assert "physical capture" not in text_answer
+
+
+def test_natural_voice_greeting_reaches_generation_with_voice_context(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    response = client.post(
+        "/voice/input",
+        json={"message": "April, this is a microphone test."},
+        headers=auth(settings_tmp),
+    )
+    assert response.status_code == 200
+    prompt = "\n".join(
+        message.content
+        for message in container.runtime_client.last_messages  # type: ignore[attr-defined]
+    )
+    assert "Request origin: voice" in prompt
+    assert "The language model receives text" in prompt
+    assert (
+        "received your message through APRIL's voice interface"
+        not in response.json()["result"]["final_message"]
+    )
+
+
 def test_wake_endpoint_voice_and_terminal_join_same_session(settings_tmp) -> None:
     import anyio
 

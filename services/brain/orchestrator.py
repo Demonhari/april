@@ -20,6 +20,7 @@ from services.brain.orchestration.execution_flow import ExecutionFlow
 from services.brain.orchestration.finalization_flow import FinalizationFlow
 from services.brain.orchestration.interaction_flow import InteractionFlow
 from services.brain.orchestration.routing_flow import RoutingFlow
+from services.brain.request_context import RequestContext
 from services.brain.route_contract import RouteCompiler
 from services.brain.router import BrainRouter
 from services.brain.routing_reliability import RoutingReliabilityService
@@ -118,6 +119,7 @@ class AprilOrchestrator(
         project_id: str | None = None,
         repo_path: str | None = None,
         mode: ChatMode = "standard",
+        request_context: RequestContext | None = None,
     ) -> AgentResult:
         active_request_id = request_id or str(uuid.uuid4())
         await self._maybe_record_implicit_correction(message, conversation_id)
@@ -130,6 +132,7 @@ class AprilOrchestrator(
             repo_path=repo_path,
             agent_name="general_agent",
             mode=mode,
+            request_context=request_context,
         )
         if application_result is not None:
             return application_result
@@ -161,6 +164,7 @@ class AprilOrchestrator(
             repo_path=repo_path,
             structured_specialists=True,
             mode=mode,
+            request_context=request_context,
         )
         selection = self._select_intelligence_rung(prepared, message=message, mode=mode)
         self._schedule_agent_prewarm(prepared)

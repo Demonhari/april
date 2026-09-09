@@ -13,6 +13,7 @@ from services.brain.capabilities import (
     trusted_capability_summary,
 )
 from services.brain.memory_policy import build_agent_memory_context
+from services.brain.request_context import RequestContext
 from services.evolution.feedback_eval import stage_feedback_eval_case
 
 
@@ -27,6 +28,7 @@ class ApprovalFlow:
         actor: str = "local-user",
         project_id: str | None = None,
         repo_path: str | None = None,
+        request_context: RequestContext | None = None,
     ) -> AgentResult:
         active_request_id = request_id or str(uuid.uuid4())
         agent = self.agent_registry.get(agent_id)
@@ -62,6 +64,7 @@ class ApprovalFlow:
             repo_path=None,
             agent_name=agent.name,
             mode="standard",
+            request_context=request_context,
         )
         if application_result is not None:
             return application_result
@@ -112,6 +115,7 @@ class ApprovalFlow:
                 tool_registry=self.tool_registry,
                 model_registry=getattr(self, "model_registry", None),
                 runtime_evidence=runtime_evidence,
+                request_context=request_context,
             ),
         )
         if memory_context.conversation_summary:

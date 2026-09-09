@@ -11,7 +11,9 @@ from services.brain.capabilities import (
     collect_runtime_self_evidence,
     is_identity_request,
     is_self_introspection_request,
+    is_voice_capability_request,
     render_self_status,
+    render_voice_capability_response,
 )
 from services.brain.execution import PreparedTurn
 from services.brain.feedback_classifier import classify_implicit_correction
@@ -19,6 +21,7 @@ from services.brain.intelligence_ladder import (
     ChatMode,
 )
 from services.brain.orchestration.models import StreamEventName
+from services.brain.request_context import RequestContext
 from services.brain.response_handling import ReasoningStreamFilter, sanitize_model_output
 from services.evolution.feedback_eval import stage_feedback_eval_case
 from skills.playbooks.runner import PlaybookRunResult
@@ -36,9 +39,15 @@ class InteractionFlow:
         repo_path: str | None,
         agent_name: str,
         mode: ChatMode,
+        request_context: RequestContext | None = None,
     ) -> AgentResult | None:
-        if not (is_identity_request(message) or is_self_introspection_request(message)):
+        if not (
+            is_identity_request(message)
+            or is_self_introspection_request(message)
+            or is_voice_capability_request(message)
+        ):
             return None
+        active_request_context = request_context or RequestContext.unknown()
         project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
         active_conversation_id = conversation_id or await self.memory.create_conversation(
             project_id=project.id if project else None,
@@ -52,22 +61,30 @@ class InteractionFlow:
             )
         await self.memory.add_message(active_conversation_id, "user", message)
         identity = is_identity_request(message)
+        voice_capability = is_voice_capability_request(message)
         runtime_evidence = (
-            await collect_runtime_self_evidence(self.runtime_client) if not identity else None
+            await collect_runtime_self_evidence(self.runtime_client)
+            if not identity and not voice_capability
+            else None
         )
         final_message = (
             "I'm APRIL, your personal local assistant."
             if identity
+            else render_voice_capability_response(active_request_context)
+            if voice_capability
             else render_self_status(
                 settings=self.settings,
                 agent_registry=self.agent_registry,
                 tool_registry=self.tool_registry,
                 model_registry=getattr(self, "model_registry", None),
                 runtime_evidence=runtime_evidence,
+                request_context=active_request_context,
             )
         )
         await self.memory.add_message(active_conversation_id, "assistant", final_message)
-        response_kind = "identity" if identity else "self_status"
+        response_kind = (
+            "identity" if identity else "voice_capability" if voice_capability else "self_status"
+        )
         metadata = {
             "application_owned": True,
             "response_kind": response_kind,
@@ -329,6 +346,7 @@ class InteractionFlow:
             initial_answer=draft,
             model_id=prepared.model_id,
             request_id=prepared.request_id,
+            trusted_context=prepared.trusted_context,
         )
         final_message = sanitize_model_output(verified.final_message)
         answer_available = bool(final_message)
@@ -374,6 +392,7 @@ class InteractionFlow:
         project_id: str | None = None,
         repo_path: str | None = None,
         mode: ChatMode = "standard",
+        request_context: RequestContext | None = None,
     ) -> AsyncIterator[tuple[StreamEventName, dict[str, Any]]]:
         active_request_id = request_id or str(uuid.uuid4())
         application_result = await self._application_owned_response(
@@ -385,6 +404,7 @@ class InteractionFlow:
             repo_path=repo_path,
             agent_name="general_agent",
             mode=mode,
+            request_context=request_context,
         )
         if application_result is not None:
             yield (
@@ -451,6 +471,7 @@ class InteractionFlow:
             repo_path=repo_path,
             structured_specialists=True,
             mode=mode,
+            request_context=request_context,
         )
         selection = self._select_intelligence_rung(prepared, message=message, mode=mode)
         self._schedule_agent_prewarm(prepared)

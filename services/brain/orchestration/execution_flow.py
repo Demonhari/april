@@ -13,6 +13,7 @@ from april_common.project_scope import normalize_project_child, validate_patch_t
 from services.brain.execution import PreparedTurn
 from services.brain.memory_policy import AgentMemoryContext
 from services.brain.reasoning_resolver import resolve_reasoning_model
+from services.brain.request_context import RequestContext
 from services.brain.schemas import (
     BrainDecision,
     PlannedToolCall,
@@ -256,6 +257,8 @@ class ExecutionFlow:
         actor: str,
         memory_context: AgentMemoryContext,
         task_plan_id: str,
+        request_context: RequestContext,
+        trusted_context: str,
     ) -> PreparedTurn:
         prompt_parts, citations = await self._prompt_parts(
             message=message,
@@ -264,6 +267,7 @@ class ExecutionFlow:
             tool_outputs=[],
             memory_context=memory_context,
         )
+        prompt_parts.insert(0, trusted_context)
         patch_instruction = (
             "Prepare a safe local code modification. Return a unified diff patch only.\n"
             "Do not include prose, markdown fences, shell commands, or instructions.\n"
@@ -294,6 +298,8 @@ class ExecutionFlow:
                 final_message=f"APRIL could not create a safe patch proposal: {exc}",
                 warnings=["Patch proposal was rejected by local validation."],
                 task_plan_id=task_plan_id,
+                request_context=request_context,
+                trusted_context=trusted_context,
             )
 
         generator_args = {"patch": response.content}
@@ -333,6 +339,8 @@ class ExecutionFlow:
                 final_message="APRIL could not save the patch proposal.",
                 warnings=[generator_result.stderr or "patch_generator failed"],
                 task_plan_id=task_plan_id,
+                request_context=request_context,
+                trusted_context=trusted_context,
             )
 
         patch_path = str(generator_result.data["patch_path"])
@@ -368,6 +376,8 @@ class ExecutionFlow:
                 final_message="APRIL could not create the required patch approval.",
                 warnings=["patch_applier did not produce a pending approval."],
                 task_plan_id=task_plan_id,
+                request_context=request_context,
+                trusted_context=trusted_context,
             )
         affected_text = "\n".join(f"- {path}" for path in affected_files)
         final_message = (
@@ -392,6 +402,8 @@ class ExecutionFlow:
                 for path in affected_files
             ],
             task_plan_id=task_plan_id,
+            request_context=request_context,
+            trusted_context=trusted_context,
         )
 
     async def _resolve_project(

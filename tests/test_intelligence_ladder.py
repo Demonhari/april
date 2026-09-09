@@ -677,6 +677,40 @@ async def test_verified_rung_enforces_draft_critique_and_revision_budgets(settin
     ]
 
 
+@pytest.mark.asyncio
+async def test_verified_critique_and_revision_keep_trusted_context(settings_tmp) -> None:
+    class ContextRuntime(LadderRuntime):
+        async def chat(self, **kwargs: Any) -> ChatResponse:
+            self.calls.append(kwargs)
+            joined = "\n".join(message.content for message in kwargs["messages"])
+            content = (
+                '{"needs_revision":true,"critique":"Keep application facts."}'
+                if "Check the answer" in joined
+                else "Revised with trusted facts."
+            )
+            return ChatResponse(
+                request_id=kwargs.get("request_id") or "r",
+                model_id=kwargs["model_id"],
+                content=content,
+                usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+
+    runtime = ContextRuntime()
+    ladder = _ladder(settings_tmp, runtime)
+    trusted = "REQUEST PROVENANCE AND VOICE INTERFACE:\n- Request origin: voice."
+    result = await ladder.verify_and_revise(
+        message="April, this is a microphone test.",
+        initial_answer="I do not have audio capabilities.",
+        model_id="april-brain",
+        request_id="trusted-context",
+        trusted_context=trusted,
+    )
+    assert result.final_message.endswith("Revised with trusted facts.")
+    assert len(runtime.calls) == 2
+    for call in runtime.calls:
+        assert trusted in "\n".join(message.content for message in call["messages"])
+
+
 def test_council_rubric_scores_and_selects_candidate() -> None:
     weak = score_council_candidate(CouncilCandidate("weak", "Short."), question="local tests")
     strong = score_council_candidate(

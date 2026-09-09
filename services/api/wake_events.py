@@ -4,6 +4,7 @@ import contextlib
 from typing import Any
 
 from services.api.dependencies import ApiContainer
+from services.brain.request_context import RequestContext
 from services.evolution.feedback_eval import stage_feedback_eval_case
 from services.wake.feedback import WakeFeedback, classify_wake_feedback
 from services.wake.schemas import WakeEvent
@@ -54,6 +55,7 @@ async def _handle_wake_event(
                 event.text,
                 conversation_id=resolution.conversation_id,
                 request_id=request_id,
+                request_context=RequestContext.from_origin("wake", active.settings),
             )
         payload["result"] = result.model_dump()
     return payload

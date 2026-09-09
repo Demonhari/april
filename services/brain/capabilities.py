@@ -9,6 +9,7 @@ from agents.base import USER_FACING_ASSISTANT_NAME, USER_FACING_IDENTITY_RULE
 from agents.registry import AgentRegistry
 from april_common.settings import AprilSettings
 from services.april_runtime.model_registry import ModelRegistry
+from services.brain.request_context import RequestContext, render_request_context
 from skills.registry import ToolRegistry
 
 _IDENTITY_REQUESTS = {
@@ -16,6 +17,12 @@ _IDENTITY_REQUESTS = {
     "what's your name",
     "who are you",
     "tell me your name",
+}
+_VOICE_CAPABILITY_REQUESTS = {
+    "can you hear me",
+    "did you receive my voice message",
+    "do you have audio capabilities",
+    "do you have voice capabilities",
 }
 _MODEL_ROLES = (
     ("conversation/brain", "brain", "general_agent"),
@@ -35,6 +42,12 @@ def is_identity_request(message: str) -> bool:
     """Recognize only narrow, direct requests for APRIL's own name."""
 
     return _normalized_question(message) in _IDENTITY_REQUESTS
+
+
+def is_voice_capability_request(message: str) -> bool:
+    """Recognize only direct questions about APRIL's own voice interface."""
+
+    return _normalized_question(message) in _VOICE_CAPABILITY_REQUESTS
 
 
 def is_self_introspection_request(message: str) -> bool:
@@ -143,6 +156,7 @@ def trusted_capability_summary(
     tool_registry: ToolRegistry,
     model_registry: ModelRegistry | None = None,
     runtime_evidence: Mapping[str, Any] | None = None,
+    request_context: RequestContext | None = None,
 ) -> str:
     """Return allow-listed, application-owned APRIL self/context facts.
 
@@ -178,6 +192,7 @@ def trusted_capability_summary(
         if isinstance(item, Mapping) and isinstance(item.get("id"), str)
     }
     runtime_health = (runtime_evidence or {}).get("health_status")
+    active_request_context = request_context or RequestContext.unknown()
 
     def configured_model_line(label: str, role: str, agent_name: str) -> str:
         definition = models_by_role.get(role)
@@ -267,6 +282,7 @@ def trusted_capability_summary(
             f"- {USER_FACING_IDENTITY_RULE}",
             "- Internal pool call signs are implementation metadata, not alternate "
             "user identities.",
+            *render_request_context(active_request_context),
             "CONFIGURED AI MODELS:",
             *[
                 configured_model_line(label, role, agent_name)
@@ -298,6 +314,7 @@ def render_self_status(
     tool_registry: ToolRegistry,
     model_registry: ModelRegistry | None = None,
     runtime_evidence: Mapping[str, Any] | None = None,
+    request_context: RequestContext | None = None,
 ) -> str:
     """Render concise, application-owned status for a direct self-status query."""
 
@@ -307,6 +324,7 @@ def render_self_status(
         tool_registry=tool_registry,
         model_registry=model_registry,
         runtime_evidence=runtime_evidence,
+        request_context=request_context,
     )
     lines = summary.splitlines()
     start = lines.index("CONFIGURED AI MODELS:") + 1
@@ -331,4 +349,40 @@ def render_self_status(
             "SQLite-backed durable memory is storage, not an AI model.",
             runtime_line,
         ]
+    )
+
+
+def render_voice_capability_response(request_context: RequestContext) -> str:
+    """Answer a narrowly scoped voice self-capability question from app facts."""
+
+    if request_context.origin == "voice":
+        configuration = (
+            "The voice interface is enabled in local configuration."
+            if request_context.voice_enabled is True
+            else "The voice interface is disabled in local configuration."
+            if request_context.voice_enabled is False
+            else "The voice interface's configured state is unknown."
+        )
+        return (
+            "I received your message through APRIL's voice interface. APRIL supports "
+            f"local speech recognition and speech output; {configuration} I work from "
+            "the transcript. "
+            "This confirms message transport only, not microphone capture quality, "
+            "speaker identity, or playback."
+        )
+    if request_context.origin == "wake":
+        return (
+            "APRIL received this text through its wake/session path. APRIL supports "
+            "local speech recognition and speech output, but this event does not "
+            "prove wake detection, microphone capture, or playback."
+        )
+    if request_context.voice_enabled is False:
+        return (
+            "APRIL supports an optional local voice interface, but it is disabled "
+            "in the current local configuration. This request arrived as text."
+        )
+    return (
+        "APRIL supports an optional local voice interface using local speech "
+        "recognition and speech output. This request arrived as text, so no audio "
+        "was supplied for this turn."
     )

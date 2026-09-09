@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from agents.schemas import LocalCitation, ProposedChange
 from services.april_runtime.schemas import ChatMessage
+from services.brain.request_context import RequestContext
 from services.brain.schemas import BrainDecision, RouteResult
 from services.memory.schemas import Message
 
@@ -30,6 +31,8 @@ class PreparedTurn:
     actor: str = "local-user"
     history: list[Message] = field(default_factory=list)
     context_sections: list[str] = field(default_factory=list)
+    request_context: RequestContext = field(default_factory=RequestContext.unknown)
+    trusted_context: str | None = None
     structured_agent: bool = False
     task_plan_id: str | None = None
     run_metadata: dict[str, Any] = field(default_factory=dict)
