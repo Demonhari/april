@@ -6,7 +6,7 @@ from typing import TypeVar
 
 import typer
 
-from apps.cli.render import console
+from apps.cli.render import console, print_untrusted_text
 from apps.runner.commands import registry as _registry
 from apps.runner.commands.composition import composition as _composition_api
 from apps.runner.voice_live import voice_live_failure_reasons
@@ -74,7 +74,10 @@ def voice_verify_live(
 
     def show_transcript(transcript: str) -> None:
         console.print("Local whisper.cpp transcript:")
-        console.print(transcript if transcript else "[yellow]<empty>[/yellow]")
+        if transcript:
+            print_untrusted_text(transcript)
+        else:
+            console.print("[yellow]<empty>[/yellow]")
 
     result = asyncio.run(
         _composition_api.run_voice_live_verification(

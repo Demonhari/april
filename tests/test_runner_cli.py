@@ -391,8 +391,16 @@ def test_run_april_voice_verify_live_uses_local_verifier(tmp_path: Path, monkeyp
     assert "Wake listening unavailable" in result.output
 
 
-def test_run_april_voice_verify_live_explains_unconfirmed_transcription(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "Say [red]hello[/red] literally.",
+        "Example [/red] tag.",
+        "Keep :smile: exactly.",
+    ],
+)
+def test_run_april_voice_verify_live_renders_literal_transcript_and_explains_failure(
+    tmp_path: Path, monkeypatch, transcript: str
 ) -> None:
     manager = FakeManager(tmp_path)
     manager.settings = load_settings(root=tmp_path)  # type: ignore[attr-defined]
@@ -403,6 +411,9 @@ def test_run_april_voice_verify_live_explains_unconfirmed_transcription(
     )
 
     async def _fake_voice_live(**kwargs: object) -> VoiceLiveReport:
+        observer = kwargs["transcript_observer"]
+        assert callable(observer)
+        observer(transcript)
         return VoiceLiveReport(
             timestamp="2026-06-26T00:00:00Z",
             platform="Darwin 24",
@@ -421,7 +432,7 @@ def test_run_april_voice_verify_live_explains_unconfirmed_transcription(
             tts_success=True,
             playback_user_confirmed=True,
             summary="degraded",
-            evidence_mode="real_hardware",
+            evidence_mode="injected_test",
         )
 
     monkeypatch.setattr("apps.runner.main.run_voice_live_verification", _fake_voice_live)
@@ -429,7 +440,8 @@ def test_run_april_voice_verify_live_explains_unconfirmed_transcription(
 
     assert result.exit_code == 1
     assert "transcription_confirmed=False" in result.output
-    assert "evidence_mode=real_hardware" in result.output
+    assert transcript in result.output
+    assert "evidence_mode=injected_test" in result.output
     assert "voice_live_verified=False" in result.output
     assert "Transcription was not confirmed." in result.output
 
