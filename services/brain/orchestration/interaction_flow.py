@@ -377,6 +377,7 @@ class InteractionFlow:
             model_id=prepared.model_id,
             request_id=prepared.request_id,
             trusted_context=prepared.trusted_context,
+            evidence=prepared.verification_evidence,
         )
         final_message = sanitize_model_output(verified.final_message)
         answer_available = bool(final_message)

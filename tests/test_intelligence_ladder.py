@@ -11,6 +11,7 @@ from agents.base import BaseAgent
 from agents.registry import AgentRegistry, default_agent_registry
 from agents.schemas import AgentConfig
 from services.april_runtime.schemas import ChatMessage, ChatResponse, Usage
+from services.brain.execution import VerificationEvidence
 from services.brain.intelligence_ladder import (
     CouncilCandidate,
     IntelligenceLadder,
@@ -18,6 +19,7 @@ from services.brain.intelligence_ladder import (
     select_best_candidate,
 )
 from services.brain.schemas import BrainDecision
+from services.memory.schemas import Message
 
 
 def _decision(**updates: object) -> BrainDecision:
@@ -698,17 +700,68 @@ async def test_verified_critique_and_revision_keep_trusted_context(settings_tmp)
     runtime = ContextRuntime()
     ladder = _ladder(settings_tmp, runtime)
     trusted = "REQUEST PROVENANCE AND VOICE INTERFACE:\n- Request origin: voice."
+    evidence = VerificationEvidence(
+        history=(
+            Message(
+                id="history-1",
+                conversation_id="conversation-1",
+                role="user",
+                content="The Lantern project deadline is Friday.",
+                created_at="2026-01-01T00:00:00Z",
+            ),
+        ),
+        source_sections=("Retrieved document constraint: cite the Lantern deadline.",),
+        source_references=("document:lantern-plan",),
+        tool_outputs=("read_file:\nLantern status is pending.",),
+    )
     result = await ladder.verify_and_revise(
         message="April, this is a microphone test.",
         initial_answer="I do not have audio capabilities.",
         model_id="april-brain",
         request_id="trusted-context",
         trusted_context=trusted,
+        evidence=evidence,
     )
     assert result.final_message.endswith("Revised with trusted facts.")
     assert len(runtime.calls) == 2
     for call in runtime.calls:
-        assert trusted in "\n".join(message.content for message in call["messages"])
+        prompt = "\n".join(message.content for message in call["messages"])
+        assert trusted in prompt
+        assert "The Lantern project deadline is Friday." in prompt
+        assert "Retrieved document constraint" in prompt
+        assert "document:lantern-plan" in prompt
+        assert "read_file:" in prompt
+
+
+@pytest.mark.asyncio
+async def test_verified_evidence_reports_truncation_without_inventing_history(settings_tmp) -> None:
+    class NoRevisionRuntime(LadderRuntime):
+        async def chat(self, **kwargs: Any) -> ChatResponse:
+            self.calls.append(kwargs)
+            return ChatResponse(
+                request_id=kwargs.get("request_id") or "r",
+                model_id=kwargs["model_id"],
+                content='{"needs_revision":false,"critique":"Looks grounded."}',
+                usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+
+    runtime = NoRevisionRuntime()
+    ladder = _ladder(settings_tmp, runtime)
+    result = await ladder.verify_and_revise(
+        message="Write the update.",
+        initial_answer="Draft answer.",
+        model_id="april-brain",
+        request_id="truncated-evidence",
+        evidence=VerificationEvidence(
+            source_sections=("X" * 20_000,),
+            truncated_categories=("conversation_history", "file_document"),
+        ),
+    )
+    assert result.status == "ok"
+    prompt = "\n".join(message.content for message in runtime.calls[0]["messages"])
+    assert "Prior conversation turns are unavailable or truncated" in prompt
+    assert "Retrieved and source evidence" in prompt
+    assert "[TRUNCATED FOR VERIFICATION]" in prompt
 
 
 def test_council_rubric_scores_and_selects_candidate() -> None:

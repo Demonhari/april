@@ -10,6 +10,23 @@ from services.brain.schemas import BrainDecision, RouteResult
 from services.memory.schemas import Message
 
 
+@dataclass(frozen=True, slots=True)
+class VerificationEvidence:
+    """Bounded, untrusted context reused by draft verification.
+
+    This is deliberately separate from ``trusted_context``: history, retrieved
+    sources, and tool output are evidence for the answer, never application
+    authority or instructions.
+    """
+
+    history: tuple[Message, ...] = ()
+    conversation_summary: str | None = None
+    source_sections: tuple[str, ...] = ()
+    source_references: tuple[str, ...] = ()
+    tool_outputs: tuple[str, ...] = ()
+    truncated_categories: tuple[str, ...] = ()
+
+
 @dataclass(slots=True)
 class PreparedTurn:
     """State passed between routing, context assembly, execution, and finalization."""
@@ -33,6 +50,7 @@ class PreparedTurn:
     context_sections: list[str] = field(default_factory=list)
     request_context: RequestContext = field(default_factory=RequestContext.unknown)
     trusted_context: str | None = None
+    verification_evidence: VerificationEvidence | None = None
     structured_agent: bool = False
     task_plan_id: str | None = None
     run_metadata: dict[str, Any] = field(default_factory=dict)

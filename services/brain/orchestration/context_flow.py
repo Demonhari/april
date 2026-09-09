@@ -11,7 +11,7 @@ from services.brain.capabilities import (
     is_self_introspection_request,
     trusted_capability_summary,
 )
-from services.brain.execution import PreparedTurn
+from services.brain.execution import PreparedTurn, VerificationEvidence
 from services.brain.memory_policy import build_agent_memory_context
 from services.brain.planner import task_plan_from_decision
 from services.brain.reasoning_resolver import resolve_reasoning_model
@@ -275,6 +275,18 @@ class ContextFlow:
         )
         run_metadata["context_category_truncated"] = dict(memory_context.category_truncated)
         context_sections, _context_citations = self._memory_context_sections(memory_context)
+        verification_source_sections = tuple(context_sections)
+        verification_source_references = tuple(
+            [f"memory:{result.id}" for result in memory_context.durable_memories]
+            + [
+                f"repository:{chunk.metadata.get('source_id', chunk.id)}"
+                for chunk in memory_context.project_chunks
+            ]
+            + [
+                f"document:{chunk.metadata.get('source_id', chunk.id)}"
+                for chunk in memory_context.document_chunks
+            ]
+        )
         runtime_evidence = (
             await collect_runtime_self_evidence(self.runtime_client)
             if is_self_introspection_request(message)
@@ -613,6 +625,20 @@ class ContextFlow:
             len(item) for item in tool_outputs
         )
         run_metadata["context_category_truncated"]["tool_output"] = tool_output_truncated
+        verification_evidence = VerificationEvidence(
+            history=tuple(memory_context.history),
+            conversation_summary=memory_context.conversation_summary,
+            source_sections=verification_source_sections,
+            source_references=verification_source_references,
+            tool_outputs=tuple(tool_outputs),
+            truncated_categories=tuple(
+                sorted(
+                    category
+                    for category, truncated in run_metadata["context_category_truncated"].items()
+                    if truncated
+                )
+            ),
+        )
         prompt_parts, prompt_citations = await self._prompt_parts(
             message=message,
             decision=decision,
@@ -643,6 +669,7 @@ class ContextFlow:
             context_sections=context_sections,
             request_context=active_request_context,
             trusted_context=capability_summary,
+            verification_evidence=verification_evidence,
             task_plan_id=task_plan.id,
             run_metadata=run_metadata,
         )

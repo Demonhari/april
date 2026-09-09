@@ -12,6 +12,7 @@ from april_common.service_health import ServiceHealthResult
 from april_common.token_setup import generate_tokens
 from services.api.dependencies import ApiContainer
 from services.api.server import create_app
+from services.april_runtime.schemas import ChatResponse, Usage
 from services.jobs.registry import default_job_registry
 from services.jobs.store import JobStore
 from services.jobs.worker import JobWorker
@@ -19,7 +20,7 @@ from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.repository import MemoryRepository
 from services.memory.retriever import MemoryRetriever
-from services.memory.schemas import VectorMetadata
+from services.memory.schemas import SearchResult, VectorMetadata
 from services.memory.sqlite_memory import SqliteMemory
 from services.memory.vector_memory import VectorMemory
 from services.permissions.approvals import ApprovalStore
@@ -489,6 +490,89 @@ def test_conversation_id_reuses_recent_history(settings_tmp) -> None:
     )
     assert "Recent conversation history" in prompt
     assert "April, plan my work today." in prompt
+
+
+def test_verified_orchestration_preserves_history_and_source_evidence(settings_tmp) -> None:
+    import anyio
+
+    class EvidenceRuntime(FakeRuntimeClient):
+        async def chat(self, **kwargs):
+            messages = kwargs["messages"]
+            self.response_formats.append(kwargs.get("response_format"))
+            snapshot = [message.model_copy() for message in messages]
+            self.last_messages = snapshot
+            self.calls.append(snapshot)
+            joined = "\n".join(message.content for message in messages)
+            if "Check the answer for correctness" in joined:
+                content = json.dumps(
+                    {"needs_revision": True, "critique": "Keep the historical deadline."}
+                )
+            elif "Revise the answer using the bounded critique" in joined:
+                content = "Lantern is progressing, and Friday remains the deadline."
+            elif "Route the user request" in joined:
+                content = (
+                    '{"intent":"planning","agent":"general_agent",'
+                    '"model_id":"april-brain","tools_needed":[],"memory_queries":["Lantern"],'
+                    '"permission_level":0,"risk_level":"none","needs_confirmation":false,'
+                    '"task_steps":["Write the update"],"decision_summary":"Write update"}'
+                )
+            else:
+                content = "Draft omits the project details."
+            return ChatResponse(
+                request_id=kwargs.get("request_id") or "evidence",
+                model_id=kwargs["model_id"],
+                content=content,
+                usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+
+    class EvidenceRetriever:
+        async def hybrid_search(self, *args, **kwargs):
+            return [
+                SearchResult(
+                    id="lantern-source",
+                    score=1.0,
+                    content="The Lantern progress update must retain Friday as the deadline.",
+                    metadata={"kind": "fact", "source_id": "lantern-plan"},
+                )
+            ]
+
+        async def recent_memories(self, *args, **kwargs):
+            return []
+
+        def repo_chunks(self, *args, **kwargs):
+            return []
+
+        def document_chunks(self, *args, **kwargs):
+            return []
+
+    runtime = EvidenceRuntime()
+    container = anyio.run(make_container, settings_tmp, runtime)
+    container.orchestrator.memory_retriever = EvidenceRetriever()
+    conversation_id = anyio.run(container.memory.create_conversation)
+    anyio.run(
+        container.memory.add_message,
+        conversation_id,
+        "user",
+        "The Lantern project deadline is Friday.",
+    )
+
+    async def run_verified_turn():
+        return await container.orchestrator.chat(
+            "Write a two-sentence progress update, then double check your answer.",
+            conversation_id=conversation_id,
+            request_id="verified-evidence",
+        )
+
+    result = anyio.run(run_verified_turn)
+    assert result.status == "ok"
+    assert result.final_message.endswith("Friday remains the deadline.")
+    assert len(runtime.calls) == 4
+    for call in runtime.calls[2:]:
+        prompt = "\n".join(message.content for message in call)
+        assert "The Lantern project deadline is Friday." in prompt
+        assert "The Lantern progress update must retain Friday as the deadline." in prompt
+        assert "memory:lantern-source" in prompt
+        assert "untrusted" in prompt.lower()
 
 
 def test_standard_chat_advances_and_uses_conversation_summary(settings_tmp) -> None:
