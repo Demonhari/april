@@ -53,6 +53,18 @@ class ApprovalFlow:
             # request is rejected by the structured loop rather than relying on
             # the prompt to remain obedient.
             agent = self._tool_free_coding_agent(agent)
+        application_result = await self._application_owned_response(
+            message,
+            conversation_id=conversation_id,
+            request_id=active_request_id,
+            actor=actor,
+            project_id=project.id if project else None,
+            repo_path=None,
+            agent_name=agent.name,
+            mode="standard",
+        )
+        if application_result is not None:
+            return application_result
         active_conversation_id = conversation_id or await self.memory.create_conversation(
             project_id=project.id if project else None,
             actor=actor,

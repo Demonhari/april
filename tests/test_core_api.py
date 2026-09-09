@@ -424,6 +424,48 @@ def test_normal_chat_with_fake_backend(settings_tmp) -> None:
     assert response.json()["result"]["conversation_id"]
 
 
+def test_identity_and_status_are_application_owned_across_chat_modes(settings_tmp) -> None:
+    import anyio
+
+    container = anyio.run(make_container, settings_tmp)
+    client = TestClient(create_app(container))
+    for mode in ("standard", "deep", "council"):
+        response = client.post(
+            "/chat",
+            json={"message": "What is your name?", "mode": mode},
+            headers=auth(settings_tmp),
+        )
+        assert response.status_code == 200
+        result = response.json()["result"]
+        assert result["final_message"] == "I'm APRIL, your personal local assistant."
+        assert result["metadata"]["application_owned"] is True
+        assert result["metadata"]["response_kind"] == "identity"
+    status = client.post(
+        "/chat",
+        json={"message": "Which model is loaded?", "mode": "deep"},
+        headers=auth(settings_tmp),
+    )
+    assert status.status_code == 200
+    status_text = status.json()["result"]["final_message"]
+    assert "april-brain" in status_text
+    assert "SQLite-backed durable memory is storage, not an AI model." in status_text
+    direct = client.post(
+        "/agents/run",
+        json={"agent": "reasoning_agent", "message": "What is your name?"},
+        headers=auth(settings_tmp),
+    )
+    assert direct.status_code == 200
+    assert direct.json()["result"]["final_message"] == ("I'm APRIL, your personal local assistant.")
+    streamed = client.post(
+        "/chat/stream",
+        json={"message": "What is your name?", "mode": "council"},
+        headers=auth(settings_tmp),
+    )
+    assert streamed.status_code == 200
+    assert "I'm APRIL, your personal local assistant." in streamed.text
+    assert container.runtime_client.calls == []  # type: ignore[attr-defined]
+
+
 def test_conversation_id_reuses_recent_history(settings_tmp) -> None:
     import anyio
 

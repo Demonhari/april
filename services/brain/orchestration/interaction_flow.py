@@ -7,6 +7,12 @@ from typing import Any
 
 from agents.schemas import AgentResult
 from services.april_runtime.schemas import GenerationOptions
+from services.brain.capabilities import (
+    collect_runtime_self_evidence,
+    is_identity_request,
+    is_self_introspection_request,
+    render_self_status,
+)
 from services.brain.execution import PreparedTurn
 from services.brain.feedback_classifier import classify_implicit_correction
 from services.brain.intelligence_ladder import (
@@ -19,6 +25,72 @@ from skills.playbooks.runner import PlaybookRunResult
 
 
 class InteractionFlow:
+    async def _application_owned_response(
+        self,
+        message: str,
+        *,
+        conversation_id: str | None,
+        request_id: str,
+        actor: str,
+        project_id: str | None,
+        repo_path: str | None,
+        agent_name: str,
+        mode: ChatMode,
+    ) -> AgentResult | None:
+        if not (is_identity_request(message) or is_self_introspection_request(message)):
+            return None
+        project = await self._resolve_project(project_id=project_id, repo_path=repo_path)
+        active_conversation_id = conversation_id or await self.memory.create_conversation(
+            project_id=project.id if project else None,
+            actor=actor,
+        )
+        if conversation_id is not None:
+            await self.memory.ensure_conversation(
+                active_conversation_id,
+                project_id=project.id if project else None,
+                actor=actor,
+            )
+        await self.memory.add_message(active_conversation_id, "user", message)
+        identity = is_identity_request(message)
+        runtime_evidence = (
+            await collect_runtime_self_evidence(self.runtime_client) if not identity else None
+        )
+        final_message = (
+            "I'm APRIL, your personal local assistant."
+            if identity
+            else render_self_status(
+                settings=self.settings,
+                agent_registry=self.agent_registry,
+                tool_registry=self.tool_registry,
+                model_registry=getattr(self, "model_registry", None),
+                runtime_evidence=runtime_evidence,
+            )
+        )
+        await self.memory.add_message(active_conversation_id, "assistant", final_message)
+        response_kind = "identity" if identity else "self_status"
+        metadata = {
+            "application_owned": True,
+            "response_kind": response_kind,
+            "request_id": request_id,
+            "chat_mode": mode,
+            "intelligence_rung": 0,
+            "routing_method": "application_owned",
+        }
+        await self.memory.record_agent_run(
+            conversation_id=active_conversation_id,
+            agent=agent_name,
+            status="ok",
+            model_id=None,
+            summary=f"application-owned {response_kind} response",
+            metadata=metadata,
+        )
+        return AgentResult(
+            status="ok",
+            final_message=final_message,
+            conversation_id=active_conversation_id,
+            metadata=metadata,
+        )
+
     async def _maybe_record_implicit_correction(
         self, message: str, conversation_id: str | None
     ) -> None:
@@ -304,6 +376,31 @@ class InteractionFlow:
         mode: ChatMode = "standard",
     ) -> AsyncIterator[tuple[StreamEventName, dict[str, Any]]]:
         active_request_id = request_id or str(uuid.uuid4())
+        application_result = await self._application_owned_response(
+            message,
+            conversation_id=conversation_id,
+            request_id=active_request_id,
+            actor=actor,
+            project_id=project_id,
+            repo_path=repo_path,
+            agent_name="general_agent",
+            mode=mode,
+        )
+        if application_result is not None:
+            yield (
+                "meta",
+                {
+                    **application_result.metadata,
+                    "conversation_id": application_result.conversation_id,
+                    "agent": "general_agent",
+                    "model_id": None,
+                },
+            )
+            yield ("final_answer", {"message": application_result.final_message})
+            yield ("token", {"text": application_result.final_message})
+            yield ("usage", application_result.usage)
+            yield ("done", {"finish_reason": "stop"})
+            return
         reminder_reflex = await self._maybe_direct_reminder_reflex(
             message,
             conversation_id=conversation_id,

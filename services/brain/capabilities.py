@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -10,15 +11,12 @@ from april_common.settings import AprilSettings
 from services.april_runtime.model_registry import ModelRegistry
 from skills.registry import ToolRegistry
 
-_SELF_INTROSPECTION_TERMS = (
-    "what models",
-    "which models",
-    "models are you",
-    "system status",
-    "runtime status",
-    "what are you running",
-    "what is running",
-)
+_IDENTITY_REQUESTS = {
+    "what is your name",
+    "what's your name",
+    "who are you",
+    "tell me your name",
+}
 _MODEL_ROLES = (
     ("conversation/brain", "brain", "general_agent"),
     ("coding", "coding", "coding_agent"),
@@ -26,9 +24,49 @@ _MODEL_ROLES = (
 )
 
 
+def _normalized_question(message: str) -> str:
+    return " ".join(re.sub(r"[?!.,;:]+", " ", message.casefold()).split())
+
+
+def is_identity_request(message: str) -> bool:
+    """Recognize only narrow, direct requests for APRIL's own name."""
+
+    return _normalized_question(message) in _IDENTITY_REQUESTS
+
+
 def is_self_introspection_request(message: str) -> bool:
-    lowered = " ".join(message.casefold().split())
-    return any(term in lowered for term in _SELF_INTROSPECTION_TERMS)
+    """Recognize direct APRIL model/runtime status questions.
+
+    This intentionally avoids broad substring matches so a discussion of a
+    document, quote, or unrelated model is left to normal routing.
+    """
+
+    lowered = _normalized_question(message)
+    if lowered in {
+        "system status",
+        "runtime status",
+        "what are you running",
+        "what is running",
+        "what is your system status",
+        "what is your runtime status",
+        "what is april's system status",
+        "what is aprils system status",
+    }:
+        return True
+    patterns = (
+        r"(what|which) models? (are|is) (you|your|april(?:'s|s)) "
+        r"(using|running|configured|loaded|available)",
+        r"(what|which) models? do you use",
+        r"(what|which) models? (are|is) currently "
+        r"(using|running|configured|loaded|available)",
+        r"(what|which) models? (are|is) "
+        r"(configured|loaded|running|available|healthy)",
+        r"(what|which) model is (currently )?loaded",
+        r"(are|is) (your|april(?:'s|s)) models? "
+        r"(loaded|running|available|healthy)",
+        r"what is (your|april(?:'s|s)) (current|configured|active|loaded|running) model",
+    )
+    return any(re.fullmatch(pattern, lowered) is not None for pattern in patterns)
 
 
 async def collect_runtime_self_evidence(
@@ -47,15 +85,24 @@ async def collect_runtime_self_evidence(
     health_method = getattr(runtime_client, "health", None)
     if not callable(models_method) or not callable(health_method):
         return None
+    tasks = [
+        asyncio.create_task(models_method()),
+        asyncio.create_task(health_method(timeout=timeout_seconds)),
+    ]
     try:
         models, health = await asyncio.wait_for(
-            asyncio.gather(
-                models_method(),
-                health_method(timeout=timeout_seconds),
-            ),
+            asyncio.gather(*tasks),
             timeout=timeout_seconds,
         )
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     except Exception:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         return None
     if not isinstance(models, Mapping) or not isinstance(health, Mapping):
         return None
@@ -215,5 +262,42 @@ def trusted_capability_summary(
             "exact approvals, and audit checks.",
             "- Do not claim source inspection, tool execution, model loading, or "
             "model health unless corresponding evidence is supplied.",
+        ]
+    )
+
+
+def render_self_status(
+    *,
+    settings: AprilSettings,
+    agent_registry: AgentRegistry,
+    tool_registry: ToolRegistry,
+    model_registry: ModelRegistry | None = None,
+    runtime_evidence: Mapping[str, Any] | None = None,
+) -> str:
+    """Render concise, application-owned status for a direct self-status query."""
+
+    summary = trusted_capability_summary(
+        settings=settings,
+        agent_registry=agent_registry,
+        tool_registry=tool_registry,
+        model_registry=model_registry,
+        runtime_evidence=runtime_evidence,
+    )
+    lines = summary.splitlines()
+    start = lines.index("CONFIGURED AI MODELS:") + 1
+    end = lines.index("NON-MODEL SUBSYSTEMS:")
+    model_lines = lines[start:end]
+    runtime_line = (
+        "Current local runtime evidence is unavailable; loaded and healthy are unknown."
+        if runtime_evidence is None
+        else "Loaded and healthy reflect only the current local runtime snapshot."
+    )
+    return "\n".join(
+        [
+            "I'm APRIL, your personal local assistant.",
+            "Configured AI models:",
+            *model_lines,
+            "SQLite-backed durable memory is storage, not an AI model.",
+            runtime_line,
         ]
     )

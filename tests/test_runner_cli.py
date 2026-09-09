@@ -264,7 +264,24 @@ def test_run_april_voice_reminder_and_task_commands_delegate(tmp_path: Path, mon
     runner = CliRunner()
     assert runner.invoke(app, ["april", "voice", "health", "--fake"]).exit_code == 0
     assert runner.invoke(app, ["april", "voice", "doctor", "--fake"]).exit_code == 0
-    assert runner.invoke(app, ["april", "voice", "ptt", "--seconds", "2", "--fake"]).exit_code == 0
+    assert (
+        runner.invoke(
+            app,
+            [
+                "april",
+                "voice",
+                "ptt",
+                "--seconds",
+                "2",
+                "--loop",
+                "--conversation-id",
+                "voice-conversation",
+                "--show-transcript",
+                "--fake",
+            ],
+        ).exit_code
+        == 0
+    )
     assert (
         runner.invoke(app, ["april", "voice", "test-record", "--seconds", "3", "--fake"]).exit_code
         == 0
@@ -299,7 +316,16 @@ def test_run_april_voice_reminder_and_task_commands_delegate(tmp_path: Path, mon
     assert delegated == [
         ["voice", "health"],
         ["voice", "doctor"],
-        ["voice", "ptt", "--seconds", "2.0"],
+        [
+            "voice",
+            "ptt",
+            "--seconds",
+            "2.0",
+            "--loop",
+            "--conversation-id",
+            "voice-conversation",
+            "--show-transcript",
+        ],
         ["voice", "test-record", "--seconds", "3.0"],
         ["voice", "test-stt", str(tmp_path / "a.wav")],
         ["voice", "test-tts", "Hello Hari"],
@@ -1610,8 +1636,10 @@ def test_setup_voice_enable_turns_voice_on_after_validation(tmp_path: Path, monk
     assert "APRIL_VOICE_ENABLED=true" in dotenv
     assert f"APRIL_WAKE_WORD_MODEL_PATH={wake.resolve()}" in dotenv
     assert "ENABLED" in result.output
-    # Even with a wake-word model present, wake-word listening stays unverified.
-    assert "UNVERIFIED" in result.output
+    # Even with a wake-word model present, wake-word listening stays disabled
+    # until its separate local switch and wake verification are enabled.
+    assert "APRIL_WAKE_ENABLED=true" in result.output
+    assert "verify-wake-live" in result.output
 
 
 def test_setup_voice_apply_enable_missing_required_path_preserves_config(

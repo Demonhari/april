@@ -569,9 +569,8 @@ def test_active_overlay_shapes_effective_prompt_and_never_touches_policy(setting
     assert "Prefer bullet lists for multi-step answers." in effective.system_prompt
     assert effective.system_prompt.startswith(stock_prompt)
     assert stock_prompt == stock_prompt_bytes.decode("utf-8").strip()
-    assert effective.system_prompt.index("Call sign: Prime") < effective.system_prompt.index(
-        "Mandate:"
-    )
+    assert "Call sign: Prime" not in effective.system_prompt
+    assert "User-facing identity: APRIL" in effective.system_prompt
     assert effective.system_prompt.index("Mandate:") < effective.system_prompt.index(
         "Learned guidance"
     )

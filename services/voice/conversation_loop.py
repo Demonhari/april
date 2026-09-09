@@ -110,6 +110,7 @@ class PushToTalkLoop:
         conversation_id: str | None = None,
         record_seconds: float | None = None,
         capture: CaptureStrategy | None = None,
+        transcript_observer: Callable[[str], None] | None = None,
     ) -> None:
         settings = get_settings()
         self.settings = settings
@@ -133,6 +134,7 @@ class PushToTalkLoop:
         self.player = player or SoundDeviceAudioPlayer(device=settings.voice.output_device)
         self.conversation_id = conversation_id or str(uuid.uuid4())
         self.record_seconds = max_seconds
+        self.transcript_observer = transcript_observer
         self.vad = VoiceActivityDetector(
             energy_threshold=settings.voice.vad_energy_threshold,
             required_frames=settings.voice.vad_onset_frames,
@@ -148,6 +150,8 @@ class PushToTalkLoop:
             text = normalize_transcript(await self.stt.transcribe(spoken_path), wake_word="april")
             if not text:
                 raise ValueError("Voice transcript was empty.")
+            if self.transcript_observer is not None:
+                self.transcript_observer(text)
             response = await self.api_client.post(
                 "/voice/input",
                 {"message": text, "conversation_id": self.conversation_id},
@@ -206,6 +210,8 @@ class WakeWordConversationLoop(PushToTalkLoop):
             text = normalize_transcript(await self.stt.transcribe(spoken_path), wake_word="april")
             if not text:
                 raise ValueError("Voice transcript was empty.")
+            if self.transcript_observer is not None:
+                self.transcript_observer(text)
             response = await self.api_client.post(
                 "/voice/input",
                 {"message": text, "conversation_id": self.conversation_id},

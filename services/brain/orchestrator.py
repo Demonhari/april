@@ -119,11 +119,24 @@ class AprilOrchestrator(
         repo_path: str | None = None,
         mode: ChatMode = "standard",
     ) -> AgentResult:
+        active_request_id = request_id or str(uuid.uuid4())
         await self._maybe_record_implicit_correction(message, conversation_id)
+        application_result = await self._application_owned_response(
+            message,
+            conversation_id=conversation_id,
+            request_id=active_request_id,
+            actor=actor,
+            project_id=project_id,
+            repo_path=repo_path,
+            agent_name="general_agent",
+            mode=mode,
+        )
+        if application_result is not None:
+            return application_result
         reminder_reflex = await self._maybe_direct_reminder_reflex(
             message,
             conversation_id=conversation_id,
-            request_id=request_id or str(uuid.uuid4()),
+            request_id=active_request_id,
             actor=actor,
             project_id=project_id,
             repo_path=repo_path,
@@ -142,7 +155,7 @@ class AprilOrchestrator(
         prepared = await self._prepare_turn(
             message,
             conversation_id=conversation_id,
-            request_id=request_id,
+            request_id=active_request_id,
             actor=actor,
             project_id=project_id,
             repo_path=repo_path,

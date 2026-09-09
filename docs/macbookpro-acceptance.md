@@ -197,8 +197,10 @@ Shortest real wake-word path:
    openWakeWord tooling outside CI.
 3. Save the exported model as `data/voice_artifacts/wake/april.onnx`.
 4. Re-run `run april setup voice ... --wake-word-model
-   data/voice_artifacts/wake/april.onnx --apply --enable`.
-5. Run `run april voice verify-wake-live --report data/verification/wake-live.json`.
+   data/voice_artifacts/wake/april.onnx --apply --enable`. This enables voice,
+   not wake listening.
+5. Set `APRIL_WAKE_ENABLED=true` in the ignored local `${APRIL_HOME}/.env`, then
+   run `run april voice verify-wake-live --report data/verification/wake-live.json`.
 
 Until that actual ONNX model exists and the live wake-word command passes,
 `wake_word_live_verified=false`.

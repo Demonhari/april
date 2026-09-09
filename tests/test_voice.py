@@ -400,6 +400,33 @@ async def test_fake_voice_conversation_loop(settings_tmp, tmp_path: Path) -> Non
     assert api.payloads == [{"message": "open the project", "conversation_id": "voice-conv-1"}]
 
 
+@pytest.mark.asyncio
+async def test_ptt_reuses_one_conversation_and_observes_transcripts(
+    settings_tmp, tmp_path: Path
+) -> None:
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"fake")
+    api = FakeApi()
+    observed: list[str] = []
+    loop = PushToTalkLoop(
+        api_client=api,  # type: ignore[arg-type]
+        microphone=FakeMicrophone(audio),
+        stt=FakeSpeechToText("April, continue the plan"),
+        tts=FakeTextToSpeech(),
+        player=FakeAudioPlayer(),
+        transcript_observer=observed.append,
+    )
+    conversation_id = loop.conversation_id
+    await loop.run_once()
+    await loop.run_once()
+    assert loop.conversation_id == conversation_id
+    assert observed == ["continue the plan", "continue the plan"]
+    assert [payload["conversation_id"] for payload in api.payloads] == [
+        conversation_id,
+        conversation_id,
+    ]
+
+
 def test_push_to_talk_accepts_explicit_seconds(settings_tmp) -> None:
     loop = PushToTalkLoop(api_client=FakeApi(), record_seconds=1.5)  # type: ignore[arg-type]
     assert loop.record_seconds == 1.5

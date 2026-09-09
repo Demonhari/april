@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from agents.base import USER_FACING_ASSISTANT_NAME, USER_FACING_IDENTITY_RULE
@@ -21,10 +23,13 @@ def test_interactive_prompts_use_april_and_keep_internal_call_signs() -> None:
     for agent_name, call_sign in CALL_SIGNS.items():
         agent = agents.get(agent_name)
         assert agent is not None
-        assert f"Call sign: {call_sign} (internal agent-pool metadata only)" in agent.system_prompt
         if agent_name != "memory_agent":
+            assert call_sign not in agent.system_prompt
             assert "User-facing identity: APRIL" in agent.system_prompt
-            assert f"never introduce yourself as {call_sign}" in agent.system_prompt
+            normalized_prompt = " ".join(agent.system_prompt.lower().split())
+            assert "internal agent names and call signs are implementation metadata only" in (
+                normalized_prompt
+            )
     assert CALL_SIGNS["general_agent"] == "Prime"
 
 
@@ -54,7 +59,69 @@ async def test_runtime_self_context_reports_only_evidenced_state() -> None:
     evidence = await collect_runtime_self_evidence(runtime)
     assert evidence == {"models": [], "health_status": "ok"}
     assert is_self_introspection_request("What models are you using?") is True
+    assert is_self_introspection_request("Which model is loaded?") is True
+    assert is_self_introspection_request("Are your models loaded?") is True
+    assert is_self_introspection_request("Which models are configured?") is True
     assert is_self_introspection_request("What can you do?") is False
+    assert is_self_introspection_request("Which model does the document use?") is False
+    assert is_self_introspection_request("What model is loaded in this quoted text?") is False
+    assert is_self_introspection_request("Which model is loaded, and can you plan my day?") is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_self_evidence_cleans_up_failed_sibling() -> None:
+    cancelled = asyncio.Event()
+
+    class FailingRuntime:
+        async def models(self) -> dict[str, object]:
+            raise RuntimeError("offline")
+
+        async def health(self, *, timeout: float | None = None) -> dict[str, str]:
+            del timeout
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return {"status": "ok"}
+
+    assert await collect_runtime_self_evidence(FailingRuntime(), timeout_seconds=0.2) is None
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_runtime_self_evidence_cleans_up_timeout_and_caller_cancellation() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class HangingRuntime:
+        async def models(self) -> dict[str, object]:
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return {"models": []}
+
+        async def health(self, *, timeout: float | None = None) -> dict[str, str]:
+            del timeout
+            await asyncio.Future()
+            return {"status": "ok"}
+
+    assert await collect_runtime_self_evidence(HangingRuntime(), timeout_seconds=0.01) is None
+    assert cancelled.is_set()
+
+    started.clear()
+    cancelled.clear()
+    pending = asyncio.create_task(
+        collect_runtime_self_evidence(HangingRuntime(), timeout_seconds=1)
+    )
+    await started.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio

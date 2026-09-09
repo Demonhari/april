@@ -226,10 +226,25 @@ def voice_ptt(
     ctx: typer.Context,
     fake: bool = typer.Option(False, "--fake", help="Start missing services with fake runtime."),
     seconds: float | None = typer.Option(None, "--seconds", min=0.1, max=300.0),
+    loop_mode: bool = typer.Option(
+        False, "--loop", help="Keep this invocation open for multiple push-to-talk turns."
+    ),
+    conversation_id: str | None = typer.Option(
+        None, "--conversation-id", help="Explicitly resume this existing conversation."
+    ),
+    show_transcript: bool = typer.Option(
+        False, "--show-transcript", help="Show each recognized transcript before sending it."
+    ),
 ) -> None:
     args = ["voice", "ptt"]
     if seconds is not None:
         args.extend(["--seconds", str(seconds)])
+    if loop_mode:
+        args.append("--loop")
+    if conversation_id is not None:
+        args.extend(["--conversation-id", conversation_id])
+    if show_transcript:
+        args.append("--show-transcript")
     _composition_api._delegate(
         args,
         fake=_composition_api._effective_fake(ctx, fake),

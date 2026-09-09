@@ -1357,9 +1357,12 @@ doctor only tells you which command/path to configure.
 Shortest real wake-word path: collect Hari's positive "April" samples and
 negative/background samples outside Git, train/export an openWakeWord-compatible
 ONNX model with the official openWakeWord tooling, save it as
-`data/voice_artifacts/wake/april.onnx`, then re-run `run april setup voice ... 
---wake-word-model data/voice_artifacts/wake/april.onnx --apply --enable` and
-`run april voice verify-wake-live --report data/verification/wake-live.json`.
+`data/voice_artifacts/wake/april.onnx`, then re-run `run april setup voice ...
+--wake-word-model data/voice_artifacts/wake/april.onnx --apply --enable`.
+Voice enablement does not enable wake listening: set `APRIL_WAKE_ENABLED=true`
+in the ignored local `${APRIL_HOME}/.env` only after the compatible model is
+configured, then run `run april voice verify-wake-live
+--report data/verification/wake-live.json`.
 Until that real ONNX model exists and the live wake check passes,
 `wake_word_live_verified` remains false.
 
@@ -1382,12 +1385,14 @@ The tracked `configs/april.yaml` remains portable and unchanged. It never
 records, listens, synthesizes, plays audio, downloads assets, or installs
 packages.
 
-Voice is not enabled by setup unless you pass both `--apply --enable`. Running
+Voice is not enabled by setup unless you pass both `--apply --enable`; that flag
+does not enable wake listening. Running
 `run april setup voice ... --apply` without `--enable` writes validated paths and
 `APRIL_VOICE_ENABLED=false`, even if a previous local override was true. A missing
 wake-word model does not block push-to-talk, but wake-word listening remains
-unavailable/unverified until a local wake-word model is configured and live
-verification passes.
+unavailable/unverified until a local wake-word model is configured, the separate
+`APRIL_WAKE_ENABLED=true` local override is enabled, and live wake verification
+passes.
 
 ## Proactive Scheduler
 

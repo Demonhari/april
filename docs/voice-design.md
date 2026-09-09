@@ -71,6 +71,12 @@ wake-word listening, does not synthesize or play audio, and writes
 only the machine-local `${APRIL_HOME}/.env` overrides with `--apply`. The tracked
 `configs/april.yaml` remains a portable safe default.
 
+`--apply --enable` enables voice for push-to-talk only; it does not enable wake
+listening. Wake requires a compatible local April model and the separate
+`APRIL_WAKE_ENABLED=true` override in the ignored `${APRIL_HOME}/.env`, followed
+by `run april voice verify-wake-live`. `verify-live` verifies push-to-talk
+audio components and does not verify wake-word behavior.
+
 `voice ptt` keeps a persistent conversation ID for the loop, transcribes with
 the configured local whisper.cpp adapter, passes `conversation_id` through
 `/voice/input`, synthesizes with Piper, plays the response, and removes

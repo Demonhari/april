@@ -235,7 +235,7 @@ def setup_voice(
     enable: bool = typer.Option(
         False,
         "--enable",
-        help="Turn voice ON after required paths validate. Voice stays OFF without this flag.",
+        help=("Turn voice ON after required paths validate; this does not enable wake listening."),
     ),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
@@ -272,13 +272,15 @@ def setup_voice(
         console.print("[green]Voice is now ENABLED.[/green]")
         if result["wake_word_available"]:
             console.print(
-                "Push-to-talk is available. Wake-word listening stays UNVERIFIED until "
-                "`run april voice verify-live` passes on this Mac."
+                "Push-to-talk is available. Wake-word listening remains DISABLED until "
+                "APRIL_WAKE_ENABLED=true is set in the local .env and "
+                "`run april voice verify-wake-live` passes on this Mac."
             )
         else:
             console.print(
                 "Push-to-talk is available. No wake-word model is configured, so wake-word "
-                "listening is UNAVAILABLE; push-to-talk works without one."
+                "listening is UNAVAILABLE; push-to-talk works without one. --enable does not "
+                "enable wake listening."
             )
     elif apply_changes and enable:
         # enable was requested but apply did not run (should not happen, but be honest).

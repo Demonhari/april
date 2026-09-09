@@ -36,7 +36,25 @@ def _close_session(session_id: str | None) -> None:
 
 
 @voice_app.command("ptt")
-def voice_ptt(seconds: float | None = typer.Option(None, "--seconds", min=0.1, max=300.0)) -> None:
+def voice_ptt(
+    seconds: float | None = typer.Option(None, "--seconds", min=0.1, max=300.0),
+    loop_mode: bool = typer.Option(
+        False,
+        "--loop",
+        help="Keep this invocation open for multiple Enter-to-start/Enter-to-stop turns.",
+    ),
+    conversation_id: str | None = typer.Option(
+        None,
+        "--conversation-id",
+        help="Explicitly resume this existing conversation.",
+    ),
+    show_transcript: bool = typer.Option(
+        False,
+        "--show-transcript",
+        help="Show each recognized transcript before sending it to APRIL.",
+    ),
+) -> None:
+    from apps.cli.client import ApiOfflineError
     from april_common.errors import RuntimeUnavailableError
     from services.voice.conversation_loop import PushToTalkLoop, interactive_capture_strategy
     from services.voice.health import voice_health
@@ -47,10 +65,18 @@ def voice_ptt(seconds: float | None = typer.Option(None, "--seconds", min=0.1, m
     if health_report.status == "degraded":
         console.print(health_report.model_dump())
 
+    transcript_observer = (
+        (lambda text: print_untrusted_text(f"You said: {text}")) if show_transcript else None
+    )
+    loop_kwargs: dict[str, Any] = {
+        "api_client": client(),
+        "conversation_id": conversation_id,
+        "transcript_observer": transcript_observer,
+    }
     if seconds is not None:
         # Deterministic fixed-duration mode for scripts and smoke tests.
         console.print(f"Recording for {seconds:.1f}s. Speak now.")
-        loop = PushToTalkLoop(api_client=client(), record_seconds=seconds)
+        loop_kwargs["record_seconds"] = seconds
     else:
         # Interactive, stop-controlled push-to-talk (Enter to start, Enter to stop).
         microphone = SoundDeviceMicrophone(
@@ -63,17 +89,25 @@ def voice_ptt(seconds: float | None = typer.Option(None, "--seconds", min=0.1, m
             read_line=input,
             announce=console.print,
         )
-        loop = PushToTalkLoop(api_client=client(), microphone=microphone, capture=capture)
+        loop_kwargs.update({"microphone": microphone, "capture": capture})
+
+    loop = PushToTalkLoop(**loop_kwargs)
 
     try:
-        answer = run(loop.run_once())
+        while True:
+            answer = run(loop.run_once())
+            print_untrusted_text(answer)
+            if not loop_mode:
+                break
+    except EOFError:
+        console.print("Push-to-talk loop ended; microphone released.")
+        return
     except KeyboardInterrupt:
         console.print("Push-to-talk cancelled; microphone released.")
         raise typer.Exit(130) from None
-    except (ValueError, RuntimeUnavailableError) as exc:
+    except (ValueError, RuntimeUnavailableError, ApiOfflineError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
-    print_untrusted_text(answer)
 
 
 @voice_app.command("health")
