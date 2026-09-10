@@ -74,6 +74,21 @@ class RepairStructuredFallbackRuntimeClient:
         )
 
 
+class AuthorityProposalRuntimeClient:
+    """Return the reproduced model route so the compiler boundary is observable."""
+
+    async def chat(self, **kwargs: object) -> ChatResponse:
+        return ChatResponse(
+            request_id="router-authority-probe",
+            model_id="april-brain",
+            content=(
+                '{"operation":"code_modification","context":"conversation",'
+                '"tool_class":"none","confidence":0.91}'
+            ),
+            usage=Usage(),
+        )
+
+
 def _history(*pairs: tuple[str, str]) -> list[Message]:
     return [
         Message(
@@ -125,6 +140,90 @@ async def test_router_treats_repair_structured_prompt_fallback_as_fallback() -> 
     decision = await BrainRouter(client).route("April, plan my work today.")  # type: ignore[arg-type]
     assert client.calls == 2
     assert decision.routing_method == "fallback"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        (
+            "Make that update one sentence. Keep the project name and deadline and "
+            "double check your answer."
+        ),
+        (
+            "Make that update one sentence. Keep the projecting and deadline and "
+            "double check your answer."
+        ),
+    ],
+)
+async def test_model_authority_route_is_coerced_for_writing_follow_up(message: str) -> None:
+    history = _history(
+        (
+            "user",
+            "In this fictional example, the project is Lantern and its deadline is Friday.",
+        ),
+        ("assistant", "Lantern is progressing, and Friday remains the deadline."),
+        ("user", "Write a two-sentence progress update using those details."),
+        ("assistant", "Lantern is on track. The deadline remains Friday."),
+    )
+
+    result = await BrainRouter(AuthorityProposalRuntimeClient()).route_result(
+        message, history=history
+    )
+
+    # The model proposal is retained in diagnostics, while the compiled route
+    # is prevented from acquiring repository authority for this prose edit.
+    assert result.matched_rule is None
+    assert result.first_proposal_operation == "code_modification"
+    assert result.first_proposal_context == "conversation"
+    assert result.first_proposal_tool_class == "none"
+    assert result.proposal_operation == "creative_writing"
+    assert result.proposal_context == "conversation"
+    assert result.route_source.value == "model"
+    assert result.effective_confidence == 0.91
+    assert result.decision.intent == "creative_writing"
+    assert result.decision.tools_needed == []
+    assert result.decision.permission_level == 0
+    assert result.decision.needs_confirmation is False
+    assert "authority_route_coerced_to_content_edit" in result.coercions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Modify the code and apply the fix.",
+        "Apply that patch to the project.",
+        "Edit README.md.",
+        "Write this into config.py.",
+        "Inspect this repository.",
+    ],
+)
+async def test_model_authority_route_stays_authority_bearing_for_local_actions(
+    message: str,
+) -> None:
+    result = await BrainRouter(AuthorityProposalRuntimeClient()).route_result(message)
+
+    assert result.proposal_operation == "code_modification"
+    assert result.decision.intent == "code_modification"
+    assert result.decision.permission_level == 3
+    assert result.decision.needs_confirmation is True
+    assert "authority_route_coerced_to_content_edit" not in result.coercions
+
+
+@pytest.mark.asyncio
+async def test_anaphoric_patch_application_stays_authority_bearing() -> None:
+    history = _history(
+        ("assistant", "Proposed patch:\n```diff\n--- a/app.py\n+++ b/app.py\n```"),
+    )
+    result = await BrainRouter(AuthorityProposalRuntimeClient()).route_result(
+        "Apply that update to the project.", history=history
+    )
+
+    assert result.proposal_operation == "code_modification"
+    assert result.decision.intent == "code_modification"
+    assert result.decision.permission_level == 3
+    assert result.decision.needs_confirmation is True
 
 
 class UnknownAgentRouter:

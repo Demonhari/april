@@ -575,6 +575,118 @@ def test_verified_orchestration_preserves_history_and_source_evidence(settings_t
         assert "untrusted" in prompt.lower()
 
 
+def test_writing_follow_up_does_not_require_repository_authority(settings_tmp) -> None:
+    import anyio
+
+    class WritingRouteRuntime(FakeRuntimeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.route_requests: list[str] = []
+
+        async def chat(self, **kwargs):
+            messages = kwargs["messages"]
+            snapshot = [message.model_copy() for message in messages]
+            self.last_messages = snapshot
+            self.calls.append(snapshot)
+            joined = "\n".join(message.content for message in messages)
+            lower = joined.lower()
+            if "route the user request" in lower:
+                request = messages[-1].content
+                self.route_requests.append(request)
+                current = request.rsplit("Current request (authoritative):\n", 1)[-1]
+                if "make that update" in current.lower():
+                    content = json.dumps(
+                        {
+                            "operation": "code_modification",
+                            "context": "conversation",
+                            "tool_class": "none",
+                            "confidence": 0.91,
+                        }
+                    )
+                elif "write a two-sentence progress update" in current.lower():
+                    content = json.dumps(
+                        {
+                            "operation": "creative_writing",
+                            "context": "conversation",
+                            "tool_class": "none",
+                            "confidence": 0.91,
+                        }
+                    )
+                else:
+                    content = json.dumps(
+                        {
+                            "operation": "normal_conversation",
+                            "context": "conversation",
+                            "tool_class": "none",
+                            "confidence": 0.91,
+                        }
+                    )
+                return ChatResponse(
+                    request_id=kwargs.get("request_id") or "writing-route",
+                    model_id=kwargs["model_id"],
+                    content=content,
+                    usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+                )
+            if "check the answer for correctness" in lower:
+                content = json.dumps(
+                    {"needs_revision": True, "critique": "Keep Lantern and Friday."}
+                )
+                return ChatResponse(
+                    request_id=kwargs.get("request_id") or "writing-critique",
+                    model_id=kwargs["model_id"],
+                    content=content,
+                    usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+                )
+            if "revise the answer using the bounded critique" in lower:
+                return ChatResponse(
+                    request_id=kwargs.get("request_id") or "writing-revision",
+                    model_id=kwargs["model_id"],
+                    content="Lantern is progressing, and Friday remains the deadline.",
+                    usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+                )
+            return await super().chat(**kwargs)
+
+    runtime = WritingRouteRuntime()
+    container = anyio.run(make_container, settings_tmp, runtime)
+
+    async def run_three_turns():
+        first = await container.orchestrator.chat(
+            "In this fictional example, the project is Lantern and its deadline is Friday."
+        )
+        assert first.conversation_id is not None
+        second = await container.orchestrator.chat(
+            "Write a two-sentence progress update using those details.",
+            conversation_id=first.conversation_id,
+        )
+        third = await container.orchestrator.chat(
+            "Make that update one sentence. Keep the project name and deadline and "
+            "double check your answer.",
+            conversation_id=first.conversation_id,
+        )
+        return first, second, third
+
+    first, second, third = anyio.run(run_three_turns)
+    assert first.conversation_id == second.conversation_id == third.conversation_id
+    assert first.status == second.status == third.status == "ok"
+    assert "selected local project" not in third.final_message.lower()
+    assert "Lantern" in third.final_message
+    assert "Friday" in third.final_message
+    assert len(runtime.route_requests) == 3
+    assert "Lantern" in runtime.route_requests[-1]
+    assert "Friday" in runtime.route_requests[-1]
+
+    verification_prompts = [
+        "\n".join(message.content for message in call)
+        for call in runtime.calls
+        if any("Check the answer for correctness" in message.content for message in call)
+        or any(
+            "Revise the answer using the bounded critique" in message.content for message in call
+        )
+    ]
+    assert verification_prompts
+    assert all("Lantern" in prompt and "Friday" in prompt for prompt in verification_prompts)
+
+
 def test_standard_chat_advances_and_uses_conversation_summary(settings_tmp) -> None:
     import anyio
 

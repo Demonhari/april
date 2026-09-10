@@ -632,8 +632,10 @@ _CLASSIFICATION_HINTS: dict[str, str] = {
     "deep_reasoning": "abstract analysis or comparison with no repository access",
     "memory_lookup": "recall a fact or preference from authorized local memory",
     "memory_write": "explicitly ask APRIL to remember durable local content",
-    "patch_proposal": "propose, draft, or suggest a change without applying it",
-    "code_modification": "fix, modify, change, or apply code in a repository",
+    "patch_proposal": (
+        "propose, draft, or suggest a change to an actual repository without applying it"
+    ),
+    "code_modification": "modify or apply a change to code, a file, or an actual repository",
     "command_execution": "run pytest, tests, or a command",
     "log_cleanup": "delete, clear, clean up, or purge logs",
     "package_install": "pip/npm/brew/apt install; policy decides what happens next",
@@ -781,6 +783,14 @@ def build_router_system_prompt(
         '"I prefer dark mode" => normal_conversation; '
         '"write a function filtering evens" => '
         '{"operation":"coding_assistance","context":"pasted_text","tool_class":"none"}; '
+        '"make that progress update one sentence and keep the project name and deadline" => '
+        '{"operation":"creative_writing","context":"conversation","tool_class":"none"}; '
+        '"rewrite the project status paragraph more concisely" => '
+        '{"operation":"creative_writing","context":"conversation","tool_class":"none"}; '
+        '"apply that update to README.md in this project" => '
+        '{"operation":"code_modification","context":"repository","tool_class":"none"}; '
+        '"modify the project source code with that change" => '
+        '{"operation":"code_modification","context":"repository","tool_class":"none"}; '
         '"show git status" => '
         '{"operation":"repository_inspection","context":"repository","tool_class":"git_status"}'
     )
@@ -802,6 +812,11 @@ def build_router_system_prompt(
         "system, external, or unknown. Use repository/local_document only when the user asks "
         "to access actual local resources. A code snippet or architecture explanation is not "
         "repository access.\n"
+        "A semantic mention of a project, project name, deadline, status update, or business "
+        "project is not local repository access. Content editing such as making an update "
+        "shorter, rewriting a paragraph, or keeping a project name and deadline is "
+        "creative_writing or normal_conversation with tool_class none. Use code_modification "
+        "only for an explicit local code/file/repository action.\n"
         "Repository inspection selected with git_status, search_files, list_files, or "
         "repo_indexer compiles to the canonical read-only git_status plus search_files pair; "
         "specific git_diff, git_log, git_branch, and read_file requests stay single-tool.\n"

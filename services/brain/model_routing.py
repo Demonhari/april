@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -57,6 +58,119 @@ class ModelRoutingOutcome:
     repair_proposal_operation: str | None = None
     repair_rejection_code: str | None = None
     coercions: list[str] = field(default_factory=list)
+
+
+_AUTHORITY_OPERATIONS = frozenset({"repository_inspection", "patch_proposal", "code_modification"})
+_AUTHORITY_TOOL_CLASSES = frozenset(
+    {
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_branch",
+        "list_files",
+        "search_files",
+        "repo_indexer",
+        "run_command",
+        "test_runner",
+        "patch_generator",
+        "patch_applier",
+    }
+)
+_WRITING_REFERENCES = re.compile(
+    r"\b(?:update|answer|sentence|sentences|paragraph|wording|draft|prose|text|"
+    r"details|deadline|project\s+name)\b"
+)
+_WRITING_ACTIONS = re.compile(
+    r"\b(?:make|write|draft|rewrite|revise|reword|shorten|condense|polish|"
+    r"proofread|double[- ]check|keep)\b"
+)
+_LOCAL_ACTIONS = re.compile(
+    r"\b(?:apply|modify|edit|change|write|run|execute|inspect|search|read|fix|"
+    r"patch|propose|prepare|check|summarize|index|override|show|explain|find)\b"
+)
+_LOCAL_RESOURCES = re.compile(
+    r"\b(?:repository|repo|codebase|source\s+code|code|file|files|directory|"
+    r"path|git|pytest|test\s+suite|patch|diff|readme|config(?:uration)?)\b"
+    r"|\b[A-Za-z0-9_.-]+\.(?:py|md|yaml|yml|json|toml|txt)\b"
+)
+
+
+def coerce_authority_route_for_context(
+    proposal: RoutingProposal,
+    *,
+    message: str,
+    history: list[Message] | None,
+) -> tuple[RoutingProposal, list[str]]:
+    """Keep model-selected authority out of an unambiguous prose continuation.
+
+    The model proposal remains available through ``first_proposal_*`` routing
+    diagnostics. This application-side check only narrows an authority-bearing
+    proposal when the current request and bounded history clearly describe
+    editing generated content, or when there is not enough evidence to grant
+    repository authority. Explicit local-resource actions are preserved so the
+    normal project and approval guards still apply.
+    """
+
+    if not (
+        proposal.operation in _AUTHORITY_OPERATIONS
+        or proposal.tool_class in _AUTHORITY_TOOL_CLASSES
+    ):
+        return proposal, []
+    if _is_content_edit_follow_up(message, history):
+        operation = "creative_writing"
+        reason = "authority_route_coerced_to_content_edit"
+    elif _has_explicit_local_action(message):
+        return proposal, []
+    else:
+        operation = "ambiguous_request"
+        reason = "authority_route_coerced_to_ambiguous_request"
+    return (
+        proposal.model_copy(
+            update={
+                "operation": operation,
+                "context": "conversation",
+                "tool_class": "none",
+                "memory_queries": [],
+            }
+        ),
+        [reason],
+    )
+
+
+def _is_content_edit_follow_up(message: str, history: list[Message] | None) -> bool:
+    text = " ".join(message.casefold().split())
+    if not _WRITING_ACTIONS.search(text):
+        return False
+    if _WRITING_REFERENCES.search(text):
+        return True
+    return _history_has_writing_context(history)
+
+
+def _history_has_writing_context(history: list[Message] | None) -> bool:
+    for item in bounded_history(history, max_items=6):
+        content = " ".join(item.content.casefold().split())
+        if _WRITING_REFERENCES.search(content) and _WRITING_ACTIONS.search(content):
+            return True
+    return False
+
+
+def _has_explicit_local_action(message: str) -> bool:
+    text = " ".join(message.casefold().split())
+    if not _LOCAL_ACTIONS.search(text):
+        return False
+    if re.fullmatch(r"(?:please\s+)?(?:apply|fix)\s+(?:the\s+)?(?:fix|patch|change)\.?", text):
+        return True
+    if re.search(r"\bapply\b.{0,80}\b(?:the\s+)?project\b", text):
+        return True
+    if re.search(r"\b(?:modify|change|edit)\b.{0,50}\b(?:project|repo|repository)\b", text):
+        return True
+    if re.search(
+        r"\b(?:search|find|inspect|index)\b.{0,100}\b(?:in|from|under)\s+"
+        r"(?:this|the)\s+project\b",
+        text,
+    ):
+        return True
+    return bool(_LOCAL_RESOURCES.search(text))
 
 
 def bounded_history(history: list[Message] | None, *, max_items: int = 4) -> list[Message]:
@@ -128,6 +242,12 @@ async def infer_model_route(
         proposal, parse_coercions = parse_routing_proposal_with_diagnostics(response.content)
         _record_first_proposal(outcome, proposal)
         outcome.coercions = _merge_codes(outcome.coercions, parse_coercions)
+        proposal, semantic_coercions = coerce_authority_route_for_context(
+            proposal,
+            message=message,
+            history=history,
+        )
+        outcome.coercions = _merge_codes(outcome.coercions, semantic_coercions)
         compiled = compiler.compile_with_diagnostics(proposal, method="model")
         decision = compiled.decision
         outcome.coercions = _merge_codes(outcome.coercions, compiled.coercions)
@@ -173,6 +293,12 @@ async def infer_model_route(
                 outcome.repair_rejection_code = "operation_changed"
                 outcome.failure_code = "repair_failure"
                 return outcome
+            proposal, semantic_coercions = coerce_authority_route_for_context(
+                proposal,
+                message=message,
+                history=history,
+            )
+            outcome.coercions = _merge_codes(outcome.coercions, semantic_coercions)
             compiled = compiler.compile_with_diagnostics(proposal, method="model_repair")
             decision = compiled.decision
             outcome.coercions = _merge_codes(outcome.coercions, compiled.coercions)
