@@ -145,7 +145,9 @@ async def test_dreamer_wall_clock_budget_skips_late_phases(settings_tmp) -> None
 
 @pytest.mark.asyncio
 async def test_dreamer_pauses_between_phases_when_governor_flips(settings_tmp) -> None:
-    enabled = _enabled_settings(settings_tmp)
+    enabled = _enabled_settings(settings_tmp).model_copy(
+        update={"governor": settings_tmp.governor.model_copy(update={"signal_ttl_seconds": 0.0})}
+    )
     database, memory = await _memory(enabled)
     allowed = ResourceSignals(12.0, 5.0, True, 600.0)
     busy = ResourceSignals(12.0, 95.0, True, 0.0)

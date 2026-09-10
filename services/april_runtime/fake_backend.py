@@ -25,9 +25,13 @@ class FakeBackend(RuntimeBackend):
         # Records the most recent structured-output request so deterministic tests
         # can assert that response_format/json_schema propagated end to end.
         self.last_response_format: ResponseFormat | None = None
+        self.thread_budget_calls: list[tuple[int, int]] = []
+        self.load_count = 0
+        self.last_timing: dict[str, object] = {}
 
     async def load(self, model: ModelDefinition) -> None:
         await asyncio.sleep(0)
+        self.load_count += 1
         self.loaded_model = model
 
     async def unload(self) -> None:
@@ -52,9 +56,18 @@ class FakeBackend(RuntimeBackend):
                 text = text.split(sequence, maxsplit=1)[0]
         output_words = text.split()[:max_output_tokens]
         content = " ".join(output_words)
+        input_tokens = len(await self.tokenize(prompt))
+        self.last_timing = {
+            "prompt_eval_tokens": input_tokens,
+            "prompt_eval_ms": 1.0,
+            "eval_tokens": len(output_words),
+            "eval_ms": 1.0,
+            "prompt_tokens": input_tokens,
+            "output_tokens": len(output_words),
+        }
         return GenerationResult(
             text=content,
-            input_tokens=len(await self.tokenize(prompt)),
+            input_tokens=input_tokens,
             output_tokens=len(output_words),
         )
 
@@ -96,6 +109,7 @@ class FakeBackend(RuntimeBackend):
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
         disable_thinking: bool = False,
+        prompt_tokens: int | None = None,
     ) -> GenerationResult:
         self.last_response_format = response_format
         if messages and messages[-1].role == "tool":
@@ -121,6 +135,7 @@ class FakeBackend(RuntimeBackend):
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
         disable_thinking: bool = False,
+        prompt_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         self.last_response_format = response_format
         async for token in self.stream(
@@ -135,6 +150,16 @@ class FakeBackend(RuntimeBackend):
 
     async def tokenize(self, text: str) -> list[int]:
         return [index for index, _ in enumerate(re.findall(r"\S+", text))]
+
+    def apply_thread_budget(self, n_threads: int, n_threads_batch: int) -> bool:
+        self.thread_budget_calls.append((n_threads, n_threads_batch))
+        return True
+
+    def timing_diagnostics(self) -> dict[str, object]:
+        return {"simulated": True, **self.last_timing}
+
+    def prefix_cache_diagnostics(self) -> dict[str, object]:
+        return {"enabled": False, "attached": False, "simulated": True}
 
     async def embed(self, text: str) -> list[float]:
         await asyncio.sleep(0)

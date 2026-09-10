@@ -323,6 +323,7 @@ def _print_model_doctor(payload: dict[str, Any]) -> None:
     table.add_row("Runtime token", str(payload["runtime_token"]))
     table.add_row("Machine", str(payload["machine"]))
     table.add_row("CPU count", str(payload["cpu_count"]))
+    table.add_row("Physical CPU cores", str(payload.get("physical_cpu_count", "unknown")))
     table.add_row("Estimated RAM", str(payload["estimated_ram"]))
     console.print(table)
 
@@ -356,6 +357,13 @@ def _print_model_doctor(payload: dict[str, Any]) -> None:
             str(model["realism"]),
         )
     console.print(models)
+    for advisory in payload.get("thread_advisories", []):
+        console.print(
+            "[yellow]Advisory:[/yellow] "
+            f"{advisory['model_id']} uses threads={advisory['threads']} and "
+            f"threads_batch={advisory['threads_batch']}, above the measured "
+            f"physical-core count ({advisory['physical_cores']})."
+        )
 
 
 def _print_model_recommendation(payload: dict[str, Any]) -> None:

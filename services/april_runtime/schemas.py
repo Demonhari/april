@@ -143,8 +143,8 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     options: GenerationOptions = Field(default_factory=GenerationOptions)
     response_format: ResponseFormat | None = None
-    # llama.cpp applies this when constructing the model instance. Runtime may
-    # safely reload an idle instance when the requested budget changes.
+    # llama.cpp applies this in place when the loaded backend supports the
+    # thread setter; a cold load uses the capped value.
     generation_threads: int | None = Field(default=None, ge=1, le=256)
     request_id: str | None = None
 
@@ -153,6 +153,7 @@ class Usage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    timing: dict[str, Any] | None = None
 
 
 class ChatResponse(BaseModel):
@@ -233,6 +234,11 @@ class ModelInfo(BaseModel):
     idle_unload_seconds: float | None = None
     priority: int = 0
     threads: int | None = None
+    threads_batch: int | None = None
+    flash_attn: bool | None = None
+    prefix_cache_mb: int | None = None
+    prefix_cache_min_tokens: int | None = None
+    prefix_cache: dict[str, Any] | None = None
     n_batch: int | None = None
     n_ubatch: int | None = None
     n_gpu_layers: int | None = None
@@ -272,6 +278,8 @@ class RuntimeHealth(BaseModel):
     baseline_model_instance: str | None = None
     candidate_instances: list[dict[str, Any]] = Field(default_factory=list)
     candidate_integrity_state: str = "unknown"
+    prefix_cache: dict[str, Any] | None = None
+    perf_profile: str | None = None
     rollout_state: str = "unknown"
     rollback_required: bool = False
 

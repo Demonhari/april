@@ -33,11 +33,11 @@ class RuntimeBackend(ABC):
 
     @abstractmethod
     async def load(self, model: ModelDefinition) -> None:
-        raise NotImplementedError
+        raise NotImplementedError  # pragma: no cover - abstract contract
 
     @abstractmethod
     async def unload(self) -> None:
-        raise NotImplementedError
+        raise NotImplementedError  # pragma: no cover - abstract contract
 
     @abstractmethod
     async def generate(
@@ -50,7 +50,7 @@ class RuntimeBackend(ABC):
         stop: list[str] | None = None,
         seed: int | None = None,
     ) -> GenerationResult:
-        raise NotImplementedError
+        raise NotImplementedError  # pragma: no cover - abstract contract
 
     @abstractmethod
     def stream(
@@ -63,7 +63,7 @@ class RuntimeBackend(ABC):
         stop: list[str] | None = None,
         seed: int | None = None,
     ) -> AsyncIterator[str]:
-        raise NotImplementedError
+        raise NotImplementedError  # pragma: no cover - abstract contract
 
     async def generate_messages(
         self,
@@ -77,6 +77,7 @@ class RuntimeBackend(ABC):
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
         disable_thinking: bool = False,
+        prompt_tokens: int | None = None,
     ) -> GenerationResult:
         # Backends that only implement prompt completion ignore response_format and
         # rely on prompt-plus-validation; chat-capable backends override this.
@@ -101,6 +102,7 @@ class RuntimeBackend(ABC):
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
         disable_thinking: bool = False,
+        prompt_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         return self.stream(
             prompt,
@@ -113,7 +115,7 @@ class RuntimeBackend(ABC):
 
     @abstractmethod
     async def tokenize(self, text: str) -> list[int]:
-        raise NotImplementedError
+        raise NotImplementedError  # pragma: no cover - abstract contract
 
     async def count_tokens(self, text: str) -> int:
         return len(await self.tokenize(text))
@@ -136,6 +138,20 @@ class RuntimeBackend(ABC):
         """Bounded sequential compatibility fallback; never runs concurrently."""
         return [await self.embed(text) for text in texts]
 
+    def apply_thread_budget(self, n_threads: int, n_threads_batch: int) -> bool:
+        del n_threads, n_threads_batch
+        return False
+
+    def timing_diagnostics(self) -> dict[str, object]:
+        return {}
+
+    def finish_timing_diagnostics(self, prompt_tokens: int, output_tokens: int) -> None:
+        """Finalize optional native timing counters after a streamed turn."""
+        del prompt_tokens, output_tokens
+
+    def prefix_cache_diagnostics(self) -> dict[str, object]:
+        return {}
+
     @abstractmethod
     async def health(self) -> BackendHealth:
-        raise NotImplementedError
+        raise NotImplementedError  # pragma: no cover - abstract contract

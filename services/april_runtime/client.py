@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -31,18 +32,21 @@ class RuntimeClient:
         *,
         timeout: float = 120.0,
         token: str | None = None,
-        generation_thread_provider: Callable[[], int] | None = None,
+        generation_thread_provider: Callable[[], int | Awaitable[int]] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.token = token
         self.generation_thread_provider = generation_thread_provider
 
-    def _generation_threads(self) -> int | None:
+    async def _generation_threads(self) -> int | None:
         if self.generation_thread_provider is None:
             return None
         try:
-            value = int(self.generation_thread_provider())
+            value = self.generation_thread_provider()
+            if inspect.isawaitable(value):
+                value = await value
+            value = int(value)
         except Exception:
             return None
         return value if value > 0 else None
@@ -67,7 +71,7 @@ class RuntimeClient:
             messages=messages,
             options=options or GenerationOptions(),
             response_format=response_format,
-            generation_threads=self._generation_threads(),
+            generation_threads=await self._generation_threads(),
             request_id=request_id,
         )
         try:
@@ -193,7 +197,9 @@ class RuntimeClient:
             model_id,
             request_id=request_id,
             generation_threads=(
-                generation_threads if generation_threads is not None else self._generation_threads()
+                generation_threads
+                if generation_threads is not None
+                else await self._generation_threads()
             ),
         )
 
@@ -319,7 +325,7 @@ class RuntimeClient:
             messages=messages,
             options=options or GenerationOptions(),
             response_format=response_format,
-            generation_threads=self._generation_threads(),
+            generation_threads=await self._generation_threads(),
             request_id=request_id,
         )
         try:

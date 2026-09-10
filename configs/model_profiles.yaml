@@ -7,29 +7,39 @@ profiles:
     brain:
       context_size: 4096
       threads: 8
+      threads_batch: 8
       n_batch: 128
       n_gpu_layers: 0
       use_mmap: true
       keep_loaded: true
+      prefix_cache_mb: 1024
+      prefix_cache_min_tokens: 128
     coding:
       context_size: 4096
       threads: 8
+      threads_batch: 8
       n_batch: 128
       n_gpu_layers: 0
       use_mmap: true
       keep_loaded: false
       idle_unload_seconds: 180
+      prefix_cache_mb: 768
+      prefix_cache_min_tokens: 128
     reading:
       context_size: 2048
       threads: 6
+      threads_batch: 6
       n_batch: 64
       n_gpu_layers: 0
       use_mmap: true
       keep_loaded: false
       idle_unload_seconds: 120
+      prefix_cache_mb: 512
+      prefix_cache_min_tokens: 128
     reasoning:
       context_size: 4096
       threads: 8
+      threads_batch: 8
       n_batch: 128
       n_gpu_layers: 0
       use_mmap: true
@@ -45,26 +55,35 @@ profiles:
     brain:
       context_size: 8192
       threads: 6
+      threads_batch: 6
       n_batch: 256
       n_gpu_layers: -1
       use_mmap: true
       keep_loaded: true
+      prefix_cache_mb: 1024
+      prefix_cache_min_tokens: 128
     coding:
       context_size: 8192
       threads: 6
+      threads_batch: 6
       n_batch: 256
       n_gpu_layers: -1
       use_mmap: true
       keep_loaded: false
       idle_unload_seconds: 300
+      prefix_cache_mb: 768
+      prefix_cache_min_tokens: 128
     reading:
       context_size: 4096
       threads: 6
+      threads_batch: 6
       n_batch: 128
       n_gpu_layers: -1
       use_mmap: true
       keep_loaded: false
       idle_unload_seconds: 240
+      prefix_cache_mb: 512
+      prefix_cache_min_tokens: 128
     reasoning:
       context_size: 8192
       threads: 6

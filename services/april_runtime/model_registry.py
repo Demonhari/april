@@ -54,6 +54,7 @@ class ModelDefinition(BaseModel):
     backend: str
     role: ModelRole
     threads: int = Field(gt=0)
+    threads_batch: int | None = Field(default=None, gt=0)
     context_size: int = Field(ge=256)
     temperature: float = Field(ge=0, le=2)
     max_output_tokens: int = Field(gt=0)
@@ -63,6 +64,7 @@ class ModelDefinition(BaseModel):
     n_ubatch: int | None = Field(default=None, gt=0)
     use_mmap: bool | None = None
     use_mlock: bool | None = None
+    flash_attn: bool | None = None
     chat_format: ChatFormat | None = None
     idle_unload_seconds: float | None = Field(default=None, gt=0)
     priority: int = 0
@@ -72,6 +74,8 @@ class ModelDefinition(BaseModel):
     # Optional operator-supplied conservative resident estimate. When absent,
     # local GGUF bytes are projected with overhead; missing files remain unknown.
     resident_gb: float | None = Field(default=None, gt=0.0)
+    prefix_cache_mb: int | None = Field(default=None, ge=0)
+    prefix_cache_min_tokens: int = Field(default=128, ge=16)
 
     @field_validator("backend")
     @classmethod
@@ -117,7 +121,12 @@ class ModelDefinition(BaseModel):
             size_gb = self.resolved_path(root).stat().st_size / (1024**3)
         except OSError:
             return None
-        return max(0.25, size_gb * overhead_factor)
+        prefix_gb = (
+            0.0
+            if self.role == "embedding" or not self.prefix_cache_mb
+            else self.prefix_cache_mb / 1024.0
+        )
+        return max(0.25, size_gb * overhead_factor) + prefix_gb
 
 
 class ModelRegistryConfig(BaseModel):

@@ -231,7 +231,7 @@ class AgentPool:
             result = AgentPrewarmResult(agent, model_id, "skipped", "runtime_client_unavailable")
             self._audit_prewarm(result, request_id=request_id)
             return result
-        governor_decision = self._governor_decision(model_id)
+        governor_decision = await self._governor_decision_async(model_id)
         if governor_decision is not None and not getattr(governor_decision, "allowed", True):
             reasons = tuple(getattr(governor_decision, "reasons", ()) or ())
             result = AgentPrewarmResult(
@@ -248,7 +248,7 @@ class AgentPool:
             request_id=request_id,
         )
         try:
-            thread_budget = self._generation_thread_budget()
+            thread_budget = await self._generation_thread_budget_async()
             await self.runtime_client.load(
                 model_id,
                 request_id=request_id,
@@ -281,6 +281,33 @@ class AgentPool:
                 return model_load(projected_resident_gb=projected)
         return self.governor.assess_resident()
 
+    async def _governor_decision_async(self, model_id: str) -> Any | None:
+        if self.governor is None:
+            return None
+        projected = None
+        if self.model_registry is not None and self.model_registry.exists(model_id):
+            projected = self.model_registry.get(model_id).projected_resident_gb(
+                self.model_registry.root
+            )
+        async_method = getattr(self.governor, "assess_model_load_async", None)
+        if callable(async_method):
+            try:
+                return await async_method(projected_resident_gb=projected, speculative=True)
+            except TypeError:
+                return await async_method(projected_resident_gb=projected)
+        sync_method = getattr(self.governor, "assess_model_load", None)
+        if callable(sync_method):
+            try:
+                return await asyncio.to_thread(
+                    sync_method, projected_resident_gb=projected, speculative=True
+                )
+            except TypeError:
+                return await asyncio.to_thread(sync_method, projected_resident_gb=projected)
+        async_method = getattr(self.governor, "assess_resident_async", None)
+        if callable(async_method):
+            return await async_method()
+        return await asyncio.to_thread(self.governor.assess_resident)
+
     def _generation_thread_budget(self) -> int | None:
         if self.governor is None:
             return None
@@ -292,6 +319,18 @@ class AgentPool:
         except Exception:
             return None
         return value if value > 0 else None
+
+    async def _generation_thread_budget_async(self) -> int | None:
+        if self.governor is None:
+            return None
+        async_method = getattr(self.governor, "generation_thread_budget_async", None)
+        if callable(async_method):
+            try:
+                value = int(await async_method())
+            except Exception:
+                return None
+            return value if value > 0 else None
+        return await asyncio.to_thread(self._generation_thread_budget)
 
     def _audit_prewarm(self, result: AgentPrewarmResult, *, request_id: str | None) -> None:
         if self.audit is None:

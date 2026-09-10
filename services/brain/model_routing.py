@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -58,6 +59,8 @@ class ModelRoutingOutcome:
     repair_proposal_operation: str | None = None
     repair_rejection_code: str | None = None
     coercions: list[str] = field(default_factory=list)
+    routing_latency_ms: float | None = None
+    runtime_timing: dict[str, object] = field(default_factory=dict)
 
 
 _AUTHORITY_OPERATIONS = frozenset({"repository_inspection", "patch_proposal", "code_modification"})
@@ -199,6 +202,23 @@ def routing_user_context(message: str, history: list[Message] | None) -> str:
     )
 
 
+def build_routing_request(
+    *, system_prompt: str, user_content: str, max_output_tokens: int
+) -> tuple[list[ChatMessage], GenerationOptions]:
+    """Build the canonical router request used by routing and prewarm."""
+    return (
+        [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=user_content),
+        ],
+        GenerationOptions(
+            temperature=0.0,
+            max_output_tokens=max_output_tokens,
+            enable_thinking=False,
+        ),
+    )
+
+
 def repair_system_prompt(contract_prompt: str) -> str:
     return (
         "Repair one untrusted candidate into the complete APRIL semantic routing contract. "
@@ -224,6 +244,7 @@ async def infer_model_route(
     Production and isolated verification call this operation. It never invokes
     deterministic/fallback routing and never executes tools.
     """
+    started = time.monotonic()
     prompt = system_prompt or build_router_system_prompt(compiler.bindings)
     user_context = routing_user_context(message, history)
     outcome = ModelRoutingOutcome()
@@ -237,7 +258,7 @@ async def infer_model_route(
     )
     _record_response(outcome, response)
     if not _response_is_complete(response, outcome):
-        return outcome
+        return _finish_routing_outcome(outcome, started)
     try:
         proposal, parse_coercions = parse_routing_proposal_with_diagnostics(response.content)
         _record_first_proposal(outcome, proposal)
@@ -259,7 +280,7 @@ async def infer_model_route(
         repairable = rejection.startswith("schema_rejection:") or rejection in {"tool_not_allowed"}
         if not repairable:
             outcome.failure_code = rejection
-            return outcome
+            return _finish_routing_outcome(outcome, started)
         outcome.repair_attempted = True
         category = "schema_rejection" if rejection.startswith("schema_rejection:") else rejection
         candidate_operation = outcome.first_proposal_operation or "unknown"
@@ -281,7 +302,7 @@ async def infer_model_route(
         _record_response(outcome, repair, preserve_first=False)
         if not _response_is_complete(repair, outcome):
             outcome.failure_code = outcome.failure_code or "repair_failure"
-            return outcome
+            return _finish_routing_outcome(outcome, started)
         try:
             proposal, parse_coercions = parse_routing_proposal_with_diagnostics(repair.content)
             outcome.repair_proposal_operation = proposal.operation
@@ -292,7 +313,7 @@ async def infer_model_route(
             ):
                 outcome.repair_rejection_code = "operation_changed"
                 outcome.failure_code = "repair_failure"
-                return outcome
+                return _finish_routing_outcome(outcome, started)
             proposal, semantic_coercions = coerce_authority_route_for_context(
                 proposal,
                 message=message,
@@ -307,16 +328,16 @@ async def infer_model_route(
             outcome.route_source = RouteSource.MODEL_REPAIR
             outcome.repair_succeeded = True
             outcome.failure_code = None
-            return outcome
+            return _finish_routing_outcome(outcome, started)
         except Exception as exc:
             _record_rejected_fields(outcome, exc, repair=True)
             outcome.repair_rejection_code = _rejection_code(exc)
             outcome.failure_code = "repair_failure"
-            return outcome
+            return _finish_routing_outcome(outcome, started)
     outcome.proposal = proposal
     outcome.decision = decision
     outcome.route_source = RouteSource.MODEL
-    return outcome
+    return _finish_routing_outcome(outcome, started)
 
 
 def _record_first_proposal(outcome: ModelRoutingOutcome, proposal: RoutingProposal) -> None:
@@ -370,17 +391,15 @@ async def _chat(
     request_id: str | None,
     max_output_tokens: int,
 ) -> ChatResponse:
+    messages, options = build_routing_request(
+        system_prompt=system_prompt,
+        user_content=user_content,
+        max_output_tokens=max_output_tokens,
+    )
     return await client.chat(
         model_id=model_id,
-        messages=[
-            ChatMessage(role="system", content=system_prompt),
-            ChatMessage(role="user", content=user_content),
-        ],
-        options=GenerationOptions(
-            temperature=0.0,
-            max_output_tokens=max_output_tokens,
-            enable_thinking=False,
-        ),
+        messages=messages,
+        options=options,
         response_format=ROUTING_PROPOSAL_RESPONSE_FORMAT,
         request_id=request_id,
     )
@@ -409,6 +428,14 @@ def _record_response(
         outcome.prompt_path = prompt_path
     if isinstance(response.diagnostics.get("runtime_backend"), str):
         outcome.runtime_backend = str(response.diagnostics["runtime_backend"])
+    timing = response.diagnostics.get("timing")
+    if isinstance(timing, dict):
+        outcome.runtime_timing = dict(timing)
+
+
+def _finish_routing_outcome(outcome: ModelRoutingOutcome, started: float) -> ModelRoutingOutcome:
+    outcome.routing_latency_ms = max((time.monotonic() - started) * 1000, 0.0)
+    return outcome
 
 
 def _response_is_complete(response: ChatResponse, outcome: ModelRoutingOutcome) -> bool:

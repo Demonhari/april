@@ -28,6 +28,7 @@ def runtime_health(
     backend: str,
     request_id: str | None = None,
     metric_provider: MetricProvider | None = None,
+    perf_profile: str | None = None,
 ) -> RuntimeHealth:
     models = lifecycle.list_models()
     missing = [model.id for model in models if model.missing_path]
@@ -39,6 +40,14 @@ def runtime_health(
     simulated = effective_backend == "fake"
     has_backend_error = any(model.state == "error" for model in models)
     candidate_readiness = lifecycle.candidate_readiness()
+    prefix_stats: dict[str, int] = {}
+    for model in models:
+        if not model.prefix_cache:
+            continue
+        for key in ("entries", "bytes", "hits", "misses", "evictions", "rejected_oversize"):
+            value = model.prefix_cache.get(key)
+            if isinstance(value, int):
+                prefix_stats[key] = prefix_stats.get(key, 0) + value
     # A working fake runtime is "ok" even though its configured GGUF paths do not
     # exist: it never loads them. Missing real-model paths stay informational in
     # ``missing_models`` so simulation is never mistaken for real readiness, and
@@ -79,6 +88,8 @@ def runtime_health(
         candidate_integrity_state=str(
             candidate_readiness.get("candidate_integrity_state", "unknown")
         ),
+        prefix_cache=prefix_stats or None,
+        perf_profile=perf_profile,
     )
 
 
@@ -91,7 +102,7 @@ def process_memory_metrics() -> ProcessMemoryMetrics:
     return ProcessMemoryMetrics(rss_bytes=rss, peak_rss_bytes=peak, estimated=estimated)
 
 
-def _psutil_rss() -> int | None:
+def _psutil_rss() -> int | None:  # pragma: no cover - host-specific probe failures
     try:
         import psutil
     except Exception:
@@ -102,7 +113,7 @@ def _psutil_rss() -> int | None:
         return None
 
 
-def _linux_proc_rss() -> int | None:
+def _linux_proc_rss() -> int | None:  # pragma: no cover - host-specific probe failures
     statm = Path("/proc/self/statm")
     if not statm.exists():
         return None
@@ -113,7 +124,7 @@ def _linux_proc_rss() -> int | None:
     return pages * os.sysconf("SC_PAGE_SIZE")
 
 
-def _peak_rss() -> int | None:
+def _peak_rss() -> int | None:  # pragma: no cover - host-specific platform probe
     value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     if value <= 0:
         return None

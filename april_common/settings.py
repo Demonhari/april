@@ -54,6 +54,9 @@ class RuntimeSettings(BaseModel):
     preload_keep_loaded: bool = True
     request_timeout_seconds: float = 120.0
     max_loaded_specialist_models: int = 2
+    prefix_cache_enabled: bool = True
+    prefix_prewarm: bool = True
+    perf_profile: Literal["off", "auto"] = "off"
 
 
 class MemorySettings(BaseModel):
@@ -336,6 +339,7 @@ class GovernorSettings(BaseModel):
     dreamer_nice: int = Field(default=10, ge=0, le=20)
     generation_threads_active: int = Field(default=6, ge=1, le=256)
     generation_threads_idle: int = Field(default=8, ge=1, le=256)
+    signal_ttl_seconds: float = Field(default=10.0, ge=0.0, le=300.0)
 
     @model_validator(mode="after")
     def generation_thread_budgets_are_ordered(self) -> GovernorSettings:
@@ -558,6 +562,9 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
         "runtime",
         "max_loaded_specialist_models",
     ),
+    "APRIL_RUNTIME_PREFIX_CACHE": ("runtime", "prefix_cache_enabled"),
+    "APRIL_RUNTIME_PREFIX_PREWARM": ("runtime", "prefix_prewarm"),
+    "APRIL_RUNTIME_PERF_PROFILE": ("runtime", "perf_profile"),
     "APRIL_CREDENTIAL_STORE": ("security", "credential_store"),
     "APRIL_CREDENTIAL_FILE_PATH": ("security", "credential_file_path"),
     "APRIL_API_CREDENTIAL_ID": ("security", "api_credential_id"),
@@ -676,6 +683,7 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
         "governor",
         "generation_threads_idle",
     ),
+    "APRIL_GOVERNOR_SIGNAL_TTL_SECONDS": ("governor", "signal_ttl_seconds"),
     "APRIL_EVOLUTION_ENABLED": ("evolution", "enabled"),
     "APRIL_EVOLUTION_WINDOW": ("evolution", "window"),
     "APRIL_EVOLUTION_REQUIRE_AC_POWER": ("evolution", "require_ac_power"),
@@ -843,6 +851,8 @@ def load_settings(
         if not raw.strip() and env_name in _OPTIONAL_BLANK_IS_NONE:
             # Explicit blank for an optional setting means "unset", not Path(".").
             value: Any = None
+        elif env_name == "APRIL_RUNTIME_PREFIX_CACHE":
+            value = raw.strip().casefold() != "off"
         elif env_name in {"APRIL_ALLOWED_FILESYSTEM_ROOTS", "APRIL_WAKE_WORD_MODEL_PATHS"}:
             value = [part.strip() for part in raw.split(",") if part.strip()]
         else:

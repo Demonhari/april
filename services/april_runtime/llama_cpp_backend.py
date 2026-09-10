@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Callable, Iterator
-from typing import Any
+from typing import Any, cast
 
 from april_common.errors import RuntimeUnavailableError
 from services.april_runtime.backend import BackendHealth, GenerationResult, RuntimeBackend
 from services.april_runtime.model_registry import ModelDefinition
+from services.april_runtime.prefix_cache import PrefixStatePolicy
 from services.april_runtime.prompt_templates import (
     CHAT_FORMAT_METADATA_KEYS,
     NATIVE_TEMPLATE_METADATA_KEYS,
@@ -48,7 +50,7 @@ def llama_chat_format(chat_format: str | None) -> str | None:
 class LlamaCppBackend(RuntimeBackend):
     supports_concurrent_generation = False
 
-    def __init__(self) -> None:
+    def __init__(self, *, prefix_cache_enabled: bool = True) -> None:
         self._llm: Any | None = None
         self._model: ModelDefinition | None = None
         self.last_prompt_path: str | None = None
@@ -57,16 +59,28 @@ class LlamaCppBackend(RuntimeBackend):
         # Only the prompt-rendering keys the renderer consults are retained, never
         # the raw template for logging/reporting. Populated after a successful load.
         self._prompt_metadata: dict[str, object] = {}
+        self._prefix_policy: PrefixStatePolicy | None = None
+        self._prefix_adapter: Any | None = None
+        self._prefix_disabled_reason: str | None = None
+        self._prefix_lookup_hit = False
+        self._prefix_lookup_diagnostics: dict[str, object] = {}
+        self._last_timing: dict[str, object] = {}
+        self._perf_started = False
+        self._llama_module: Any | None = None
+        self._prefix_cache_enabled = prefix_cache_enabled
 
     async def load(self, model: ModelDefinition) -> None:
         try:
-            from llama_cpp import Llama
+            import llama_cpp
+
+            Llama = llama_cpp.Llama
         except ImportError as exc:
             raise RuntimeUnavailableError(
                 "Optional dependency llama-cpp-python is not installed. "
                 "Install with `pip install .[runtime]` or set APRIL_RUNTIME_BACKEND=fake.",
                 {"model_id": model.id},
             ) from exc
+        self._llama_module = llama_cpp
         path = model.path.expanduser().resolve(strict=False)
         if not path.exists():
             raise RuntimeUnavailableError(
@@ -77,6 +91,7 @@ class LlamaCppBackend(RuntimeBackend):
             "model_path": str(path),
             "n_ctx": model.context_size,
             "n_threads": model.threads,
+            "n_threads_batch": model.threads_batch or model.threads,
             "verbose": False,
         }
         optional_values = {
@@ -86,6 +101,7 @@ class LlamaCppBackend(RuntimeBackend):
             "use_mmap": model.use_mmap,
             "use_mlock": model.use_mlock,
             "chat_format": llama_chat_format(model.chat_format),
+            "flash_attn": model.flash_attn,
         }
         kwargs.update({key: value for key, value in optional_values.items() if value is not None})
         if model.adapter_path is not None:
@@ -104,6 +120,37 @@ class LlamaCppBackend(RuntimeBackend):
             kwargs["embedding"] = True
         self._llm = await asyncio.to_thread(Llama, **kwargs)
         self._prompt_metadata = _extract_prompt_metadata(self._llm)
+        self._prefix_policy = None
+        self._prefix_adapter = None
+        self._prefix_disabled_reason = None
+        if (
+            model.role != "embedding"
+            and (model.prefix_cache_mb or 0) > 0
+            and self._prefix_cache_enabled
+            and _prefix_cache_enabled()
+        ):
+            base_cache = getattr(llama_cpp, "BaseLlamaCache", None)
+            if base_cache is not None and callable(getattr(self._llm, "set_cache", None)):
+                self._prefix_policy = PrefixStatePolicy(
+                    (model.prefix_cache_mb or 0) * 1024 * 1024,
+                    model.prefix_cache_min_tokens,
+                    64,
+                )
+                try:
+                    self._prefix_adapter = _build_prefix_adapter(
+                        base_cache,
+                        self._llm,
+                        self._prefix_policy,
+                        lambda: self._disable_prefix_cache("adapter_error"),
+                    )
+                except Exception:
+                    self._prefix_policy = None
+                    self._prefix_adapter = None
+                    self._prefix_disabled_reason = "cache_adapter_unavailable"
+            else:
+                self._prefix_disabled_reason = "cache_protocol_unavailable"
+        elif not self._prefix_cache_enabled or not _prefix_cache_enabled():
+            self._prefix_disabled_reason = "disabled_by_environment"
 
     def prompt_metadata(self) -> dict[str, object]:
         return dict(self._prompt_metadata)
@@ -113,6 +160,10 @@ class LlamaCppBackend(RuntimeBackend):
         self._llm = None
         self._model = None
         self._prompt_metadata = {}
+        self._prefix_policy = None
+        self._prefix_adapter = None
+        self._prefix_disabled_reason = None
+        self._llama_module = None
         if llm is not None:
             close = getattr(llm, "close", None) or getattr(llm, "release", None)
             if callable(close):
@@ -149,10 +200,16 @@ class LlamaCppBackend(RuntimeBackend):
         top_p: float | None = None,
         stop: list[str] | None = None,
         seed: int | None = None,
+        prompt_tokens: int | None = None,
+        _allow_cache_retry: bool = True,
     ) -> GenerationResult:
         if self._llm is None:
             raise RuntimeUnavailableError("Model is not loaded.")
         llm = self._llm
+        if prompt_tokens is None:
+            prompt_tokens = await self.count_tokens(prompt)
+        self._attach_prefix_cache(prompt_tokens, prompt)
+        self._begin_perf()
 
         def run() -> Any:
             kwargs: dict[str, Any] = {
@@ -168,11 +225,29 @@ class LlamaCppBackend(RuntimeBackend):
                 kwargs["seed"] = seed
             return llm(prompt, **kwargs)
 
-        output = await asyncio.to_thread(run)
+        try:
+            output = await asyncio.to_thread(run)
+        except Exception:
+            self._refresh_prefix_lookup()
+            if _allow_cache_retry and self._prefix_lookup_hit:
+                self._recover_from_cache_failure()
+                return await self._generate_prompt_completion(
+                    prompt,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    top_p=top_p,
+                    stop=stop,
+                    seed=seed,
+                    prompt_tokens=prompt_tokens,
+                    _allow_cache_retry=False,
+                )
+            raise
+        self._refresh_prefix_lookup()
         choice = output["choices"][0]
         text = str(choice.get("text", ""))
         input_tokens = await self.count_tokens(prompt)
         output_tokens = await self.count_tokens(text)
+        self._finish_perf(input_tokens, output_tokens)
         return GenerationResult(
             text=text,
             input_tokens=input_tokens,
@@ -192,10 +267,13 @@ class LlamaCppBackend(RuntimeBackend):
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
         disable_thinking: bool = False,
+        prompt_tokens: int | None = None,
     ) -> GenerationResult:
         self._reset_generation_diagnostics()
         if self._llm is None:
             raise RuntimeUnavailableError("Model is not loaded.")
+        if prompt_tokens is None:
+            prompt_tokens = await self.count_tokens(prompt)
         chat_completion = getattr(self._llm, "create_chat_completion", None)
         if not callable(chat_completion):
             self._mark_prompt_fallback(
@@ -209,6 +287,7 @@ class LlamaCppBackend(RuntimeBackend):
                 top_p=top_p,
                 stop=stop,
                 seed=seed,
+                prompt_tokens=prompt_tokens,
             )
 
         format_kwarg = llama_response_format(response_format)
@@ -231,7 +310,18 @@ class LlamaCppBackend(RuntimeBackend):
             )
 
         try:
-            output = await asyncio.to_thread(run)
+            self._attach_prefix_cache(prompt_tokens, prompt)
+            self._begin_perf()
+            try:
+                output = await asyncio.to_thread(run)
+            except Exception:
+                self._refresh_prefix_lookup()
+                if self._prefix_lookup_hit:
+                    self._recover_from_cache_failure()
+                    output = await asyncio.to_thread(run)
+                else:
+                    raise
+            self._refresh_prefix_lookup()
         except Exception as exc:
             if format_kwarg is not None and not _is_structured_fallback_exception(exc):
                 raise
@@ -250,9 +340,12 @@ class LlamaCppBackend(RuntimeBackend):
                 top_p=top_p,
                 stop=stop,
                 seed=seed,
+                prompt_tokens=prompt_tokens,
             )
         self._mark_chat_success()
-        return await self._chat_generation_result(output, prompt)
+        result = await self._chat_generation_result(output, prompt)
+        self._finish_perf(result.input_tokens, result.output_tokens)
+        return result
 
     async def stream(
         self,
@@ -263,6 +356,7 @@ class LlamaCppBackend(RuntimeBackend):
         top_p: float | None = None,
         stop: list[str] | None = None,
         seed: int | None = None,
+        prompt_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         self._reset_generation_diagnostics()
         self.last_prompt_path = "prompt_completion"
@@ -273,6 +367,7 @@ class LlamaCppBackend(RuntimeBackend):
             top_p=top_p,
             stop=stop,
             seed=seed,
+            prompt_tokens=prompt_tokens,
         ):
             yield token
 
@@ -285,10 +380,16 @@ class LlamaCppBackend(RuntimeBackend):
         top_p: float | None = None,
         stop: list[str] | None = None,
         seed: int | None = None,
+        prompt_tokens: int | None = None,
+        _allow_cache_retry: bool = True,
     ) -> AsyncIterator[str]:
         if self._llm is None:
             raise RuntimeUnavailableError("Model is not loaded.")
         llm = self._llm
+        if prompt_tokens is None:
+            prompt_tokens = await self.count_tokens(prompt)
+        self._attach_prefix_cache(prompt_tokens, prompt)
+        self._begin_perf()
 
         def make_iterator(is_cancelled: Callable[[], bool]) -> Iterator[str]:
             kwargs = self._completion_kwargs(
@@ -300,15 +401,37 @@ class LlamaCppBackend(RuntimeBackend):
                 seed=seed,
             )
             self._add_stopping_criteria(kwargs, is_cancelled)
-            for chunk in llm(prompt, **kwargs):
-                if is_cancelled():
-                    return
-                text = chunk["choices"][0].get("text", "")
-                if text:
-                    yield str(text)
+            try:
+                for chunk in llm(prompt, **kwargs):
+                    if is_cancelled():
+                        return
+                    text = chunk["choices"][0].get("text", "")
+                    if text:
+                        yield str(text)
+            except Exception:
+                self._refresh_prefix_lookup()
+                raise
 
-        async for token in pump_token_stream(make_iterator):
-            yield token
+        try:
+            async for token in pump_token_stream(make_iterator):
+                yield token
+        except Exception:
+            self._refresh_prefix_lookup()
+            if _allow_cache_retry and self._prefix_lookup_hit:
+                self._recover_from_cache_failure()
+                async for token in self._stream_prompt_completion(
+                    prompt,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    top_p=top_p,
+                    stop=stop,
+                    seed=seed,
+                    prompt_tokens=prompt_tokens,
+                    _allow_cache_retry=False,
+                ):
+                    yield token
+                return
+            raise
 
     async def stream_messages(
         self,
@@ -322,6 +445,7 @@ class LlamaCppBackend(RuntimeBackend):
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
         disable_thinking: bool = False,
+        prompt_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         self._reset_generation_diagnostics()
         if self._llm is None:
@@ -339,11 +463,16 @@ class LlamaCppBackend(RuntimeBackend):
                 top_p=top_p,
                 stop=stop,
                 seed=seed,
+                prompt_tokens=prompt_tokens,
             ):
                 yield token
             return
 
         llm = self._llm
+        if prompt_tokens is None:
+            prompt_tokens = await self.count_tokens(prompt)
+        self._attach_prefix_cache(prompt_tokens, prompt)
+        self._begin_perf()
         format_kwarg = llama_response_format(response_format)
 
         def make_iterator(is_cancelled: Callable[[], bool]) -> Iterator[str]:
@@ -374,6 +503,19 @@ class LlamaCppBackend(RuntimeBackend):
             except Exception as exc:
                 # If nothing was emitted yet, degrade to prompt completion; once
                 # tokens are flowing a mid-stream failure is surfaced to the caller.
+                self._refresh_prefix_lookup()
+                if not emitted and self._prefix_lookup_hit:
+                    self._recover_from_cache_failure()
+                    for chunk in chat_completion(
+                        messages=self._message_dicts(messages, disable_thinking=disable_thinking),
+                        **chat_kwargs,
+                    ):
+                        if is_cancelled():
+                            return
+                        text = self._chat_stream_text(chunk)
+                        if text:
+                            yield text
+                    return
                 if emitted:
                     raise
                 if format_kwarg is not None and not _is_structured_fallback_exception(exc):
@@ -461,10 +603,132 @@ class LlamaCppBackend(RuntimeBackend):
             return BackendHealth(ok=False, message="not loaded")
         return BackendHealth(ok=True, message="loaded")
 
+    def apply_thread_budget(self, n_threads: int, n_threads_batch: int) -> bool:
+        llm = self._llm
+        setter = getattr(self._llama_module, "llama_set_n_threads", None)
+        ctx = getattr(llm, "ctx", None) if llm is not None else None
+        if not callable(setter) or ctx is None:
+            return False
+        try:
+            setter(ctx, n_threads, n_threads_batch)
+        except Exception:
+            return False
+        return True
+
+    def timing_diagnostics(self) -> dict[str, object]:
+        return dict(self._last_timing)
+
+    def finish_timing_diagnostics(self, prompt_tokens: int, output_tokens: int) -> None:
+        self._finish_perf(prompt_tokens, output_tokens)
+
+    def prefix_cache_diagnostics(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "enabled": self._prefix_policy is not None,
+            "attached": self._prefix_adapter is not None
+            and getattr(self._llm, "cache", None) is self._prefix_adapter,
+            "disabled_reason": self._prefix_disabled_reason,
+        }
+        if self._prefix_policy is not None:
+            result.update(self._prefix_policy.stats())
+            result.update(self._prefix_lookup_diagnostics)
+        if self._prefix_lookup_diagnostics.get("hit") is True:
+            result["reused_prefix_tokens"] = max(
+                int(cast(Any, self._prefix_lookup_diagnostics.get("live_prefix_tokens", 0))),
+                int(cast(Any, self._prefix_lookup_diagnostics.get("cached_prefix_tokens", 0))),
+            )
+        return {key: value for key, value in result.items() if value is not None}
+
     def _reset_generation_diagnostics(self) -> None:
         self.last_prompt_path = None
         self.last_structured_output_fallback = False
         self.last_structured_output_fallback_reason = None
+        self._prefix_lookup_hit = False
+        self._prefix_lookup_diagnostics = {}
+        self._last_timing = {}
+
+    def _begin_perf(self) -> None:
+        self._perf_started = False
+        reset = getattr(self._llama_module, "llama_perf_context_reset", None)
+        ctx = getattr(self._llm, "ctx", None)
+        if callable(reset) and ctx is not None:
+            try:
+                reset(ctx)
+                self._perf_started = True
+            except Exception:
+                pass
+
+    def _refresh_prefix_lookup(self) -> None:
+        if self._prefix_adapter is not None:
+            self._prefix_lookup_diagnostics = dict(getattr(self._prefix_adapter, "last_lookup", {}))
+            self._prefix_lookup_hit = bool(self._prefix_lookup_diagnostics.get("hit", False))
+
+    def _finish_perf(self, prompt_tokens: int, output_tokens: int) -> None:
+        self._last_timing = {
+            "prompt_tokens": prompt_tokens,
+            "output_tokens": output_tokens,
+            "threads": self._model.threads if self._model else None,
+            "threads_batch": (
+                (self._model.threads_batch or self._model.threads) if self._model else None
+            ),
+        }
+        if self._prefix_adapter is not None:
+            self._prefix_lookup_diagnostics = dict(getattr(self._prefix_adapter, "last_lookup", {}))
+        if not self._perf_started:
+            self._last_timing = {
+                key: value for key, value in self._last_timing.items() if value is not None
+            }
+            return
+        reader = getattr(self._llama_module, "llama_perf_context", None)
+        ctx = getattr(self._llm, "ctx", None)
+        if not callable(reader) or ctx is None:
+            return
+        try:
+            data = reader(ctx)
+            values = {}
+            for target, names in {
+                "prompt_eval_tokens": ("n_p_eval", "prompt_eval_tokens"),
+                "prompt_eval_ms": ("t_p_eval", "prompt_eval_ms"),
+                "eval_tokens": ("n_eval", "eval_tokens"),
+                "eval_ms": ("t_eval", "eval_ms"),
+            }.items():
+                value = next(
+                    (data.get(name) for name in names if isinstance(data, dict) and name in data),
+                    next((getattr(data, name) for name in names if hasattr(data, name)), None),
+                )
+                if value is not None:
+                    values[target] = float(value) if target.endswith("_ms") else int(value)
+            self._last_timing.update(values)
+        except Exception:
+            return
+
+    def _attach_prefix_cache(self, prompt_tokens: int, prompt: str) -> None:
+        if self._llm is None or self._prefix_adapter is None or self._model is None:
+            return
+        if prompt_tokens < self._model.prefix_cache_min_tokens:
+            with contextlib.suppress(Exception):
+                self._llm.set_cache(None)
+            return
+        try:
+            self._llm.set_cache(self._prefix_adapter)
+        except Exception:
+            self._disable_prefix_cache("set_cache_failed")
+
+    def _recover_from_cache_failure(self) -> None:
+        llm = self._llm
+        if llm is not None:
+            reset = getattr(llm, "reset", None)
+            if callable(reset):
+                with contextlib.suppress(Exception):
+                    reset()
+        self._disable_prefix_cache("state_restore_failed")
+
+    def _disable_prefix_cache(self, reason: str) -> None:
+        self._prefix_disabled_reason = reason
+        self._prefix_adapter = None
+        self._prefix_policy = None
+        if self._llm is not None:
+            with contextlib.suppress(Exception):
+                self._llm.set_cache(None)
 
     def _mark_chat_success(self) -> None:
         self.last_prompt_path = "chat_template"
@@ -560,6 +824,97 @@ def _extract_prompt_metadata(llm: Any) -> dict[str, object]:
             if isinstance(value, str) and value.strip():
                 metadata[key] = value
     return metadata
+
+
+def _build_prefix_adapter(
+    base_cache: Any,
+    llm: Any,
+    policy: PrefixStatePolicy,
+    on_error: Callable[[], None],
+) -> Any:
+    class PrefixCacheAdapter(base_cache):
+        def __init__(self) -> None:
+            super().__init__(capacity_bytes=policy.capacity_bytes)
+            self.last_lookup: dict[str, object] = {}
+
+        @property
+        def cache_size(self) -> int:
+            return policy.bytes
+
+        def _find_longest_prefix_key(self, key: tuple[int, ...]) -> tuple[int, ...] | None:
+            entry = policy.lookup(key)
+            return entry.key if entry is not None else None
+
+        def __getitem__(self, key: object) -> Any:
+            try:
+                raw_key: Any = key
+                tokens = tuple(int(value) for value in raw_key)
+                live_raw = getattr(llm, "input_ids", ())
+                live_count = int(getattr(llm, "n_tokens", 0))
+                live = tuple(int(value) for value in live_raw[:live_count])
+                entry = policy.lookup(tokens)
+                cached = entry.key if entry is not None else ()
+                live_prefix = _common_prefix_length(live, tokens)
+                cached_prefix = _common_prefix_length(tokens, cached)
+                hit = cached_prefix > live_prefix
+                self.last_lookup = {
+                    "prompt_tokens": len(tokens),
+                    "live_prefix_tokens": live_prefix,
+                    "cached_prefix_tokens": cached_prefix,
+                    "hit": hit,
+                }
+                if not hit or entry is None:
+                    raise KeyError("prefix cache miss")
+                return entry.state
+            except KeyError:
+                raise
+            except Exception:
+                on_error()
+                raise KeyError("prefix cache miss") from None
+
+        def __contains__(self, key: object) -> bool:
+            try:
+                self.__getitem__(key)
+            except Exception:
+                return False
+            return True
+
+        def __setitem__(self, key: object, state: Any) -> None:
+            try:
+                raw_key: Any = key
+                tokens = tuple(int(value) for value in raw_key)
+                nbytes = len(getattr(state, "llama_state", b""))
+                for name in ("scores", "input_ids"):
+                    value = getattr(state, name, None)
+                    nbytes += int(getattr(value, "nbytes", 0))
+                policy.insert(tokens, state, nbytes)
+            except Exception:
+                on_error()
+
+    return PrefixCacheAdapter()
+
+
+def _common_prefix(left: tuple[int, ...], right: tuple[int, ...]) -> tuple[int, ...]:
+    import numpy as np
+
+    size = min(len(left), len(right))
+    if size == 0:
+        return ()
+    lhs = np.asarray(left[:size], dtype=np.int64)
+    rhs = np.asarray(right[:size], dtype=np.int64)
+    mismatch = np.flatnonzero(lhs != rhs)
+    end = int(mismatch[0]) if mismatch.size else size
+    return left[:end]
+
+
+def _common_prefix_length(left: tuple[int, ...], right: tuple[int, ...]) -> int:
+    return len(_common_prefix(left, right))
+
+
+def _prefix_cache_enabled() -> bool:
+    import os
+
+    return os.environ.get("APRIL_RUNTIME_PREFIX_CACHE", "on").casefold() != "off"
 
 
 def _strict_response_format(response_format: ResponseFormat | None) -> bool:

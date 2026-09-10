@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from collections.abc import AsyncIterator
@@ -21,6 +22,7 @@ from april_common.settings import get_settings
 from services.april_runtime.health import runtime_health
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelRegistry
+from services.april_runtime.perf_profile import load_matching_profile, profile_status
 from services.april_runtime.schemas import (
     CandidateRuntimeRequest,
     CandidateRuntimeResponse,
@@ -41,6 +43,14 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
         registry = ModelRegistry.from_file(
             settings.home / "configs" / "models.yaml", root=settings.home
         )
+        if settings.runtime.perf_profile == "auto":
+            registry = ModelRegistry(
+                {
+                    model.id: load_matching_profile(settings.home, model)
+                    for model in registry.list()
+                },
+                root=settings.home,
+            )
         from services.pool.governor import ResourceGovernor
 
         active_lifecycle = ModelLifecycle(
@@ -48,6 +58,7 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
             root_backend=settings.runtime.backend,
             max_loaded_specialist_models=settings.runtime.max_loaded_specialist_models,
             governor=ResourceGovernor(settings),
+            prefix_cache_enabled=settings.runtime.prefix_cache_enabled,
         )
     else:
         active_lifecycle = lifecycle
@@ -214,9 +225,16 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
 
     @app.get("/runtime/health")
     async def health() -> object:
+        active_profile = await asyncio.to_thread(
+            profile_status,
+            settings.home,
+            active_lifecycle.configured_model_definitions(),
+            settings.runtime.perf_profile,
+        )
         return runtime_health(
             active_lifecycle,
             backend=settings.runtime.backend,
+            perf_profile=active_profile,
         )
 
     return app

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import Any
 
 from agents.registry import AgentRegistry
 from april_common.audit import audit_logger_for_settings
@@ -15,6 +16,7 @@ from april_common.errors import ConfigError
 from april_common.settings import AprilSettings, get_settings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.model_registry import ModelRegistry
+from services.april_runtime.perf_profile import load_matching_profile_async
 from services.brain.orchestrator import AprilOrchestrator
 from services.evolution.adapters import AdapterLifecycleManager
 from services.evolution.dreamer import DreamerService
@@ -74,6 +76,7 @@ class ApiContainer:
     tool_worker_client: ToolWorkerClient | None = None
     tool_worker_manager: ToolWorkerProcessManager | None = None
     job_worker_manager: JobWorkerProcessManager | None = None
+    governor: Any | None = None
 
     def require_session_manager(self) -> SessionManager:
         if self.session_manager is None:
@@ -157,7 +160,7 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         active_settings.runtime.url,
         timeout=active_settings.runtime.request_timeout_seconds,
         token=active_settings.runtime.token,
-        generation_thread_provider=governor.generation_thread_budget,
+        generation_thread_provider=governor.generation_thread_budget_async,
     )
     await RolloutService(
         active_settings,
@@ -181,6 +184,14 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         active_settings.home / "configs" / "models.yaml",
         root=active_settings.home,
     )
+    if active_settings.runtime.perf_profile == "auto":
+        model_registry = ModelRegistry(
+            {
+                model.id: await load_matching_profile_async(active_settings.home, model)
+                for model in model_registry.list()
+            },
+            root=active_settings.home,
+        )
     agent_registry = build_agent_registry_from_config(
         home=active_settings.home,
         model_registry=model_registry,
@@ -337,4 +348,5 @@ async def _assemble_container(active_settings: AprilSettings, database: Database
         tool_worker_client=tool_worker_client,
         tool_worker_manager=tool_worker_manager,
         job_worker_manager=job_worker_manager,
+        governor=governor,
     )

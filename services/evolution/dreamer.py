@@ -145,7 +145,12 @@ class DreamerService:
             ):
                 # Like the wall-clock budget, governor policy is checked only
                 # between phases. Work already in flight is never interrupted.
-                governor_decision = self.governor.assess_background()
+                async_decision = getattr(self.governor, "assess_background_async", None)
+                governor_decision = (
+                    await async_decision()
+                    if callable(async_decision)
+                    else await asyncio.to_thread(self.governor.assess_background)
+                )
                 if not governor_decision.allowed:
                     joined_reasons = ",".join(governor_decision.reasons)
                     paused_reason = f"resource governor paused cycle: {joined_reasons}"

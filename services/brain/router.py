@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from april_common.errors import AprilError, RuntimeUnavailableError
 from services.april_runtime.client import RuntimeClient
 from services.brain.deterministic_router import DeterministicRouter
@@ -64,9 +66,11 @@ class BrainRouter:
                 effective_confidence=1.0,
                 confidence_source="deterministic_rule",
                 matched_rule=deterministic.matched_rule,
+                routing_latency_ms=0.0,
             )
 
         try:
+            routing_started = time.monotonic()
             outcome = await infer_model_route(
                 self.runtime_client,
                 model_id=self.router_model_id,
@@ -105,6 +109,9 @@ class BrainRouter:
                 repair_proposal_operation=outcome.repair_proposal_operation,
                 repair_rejection_code=outcome.repair_rejection_code,
                 coercions=outcome.coercions,
+                routing_latency_ms=outcome.routing_latency_ms
+                or (time.monotonic() - routing_started) * 1000,
+                runtime_timing=outcome.runtime_timing,
             )
         except (RuntimeUnavailableError, OSError, TimeoutError):
             return self._fallback_result(message, reason="runtime_unavailable")
@@ -136,4 +143,6 @@ class BrainRouter:
             repair_proposal_operation=getattr(outcome, "repair_proposal_operation", None),
             repair_rejection_code=getattr(outcome, "repair_rejection_code", None),
             coercions=list(getattr(outcome, "coercions", [])),
+            routing_latency_ms=getattr(outcome, "routing_latency_ms", None),
+            runtime_timing=dict(getattr(outcome, "runtime_timing", {})),
         )

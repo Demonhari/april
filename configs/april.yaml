@@ -12,6 +12,12 @@ runtime:
   preload_keep_loaded: true
   request_timeout_seconds: 120
   max_loaded_specialist_models: 2
+  # Prefix KV snapshots are RAM-only and may be disabled with
+  # APRIL_RUNTIME_PREFIX_CACHE=off. Router prefix prewarm is asynchronous.
+  prefix_cache_enabled: true
+  prefix_prewarm: true
+  # Operator-created profiles are ignored unless this is explicitly `auto`.
+  perf_profile: "off"
 
 # Secrets are resolved from the credential store. `auto` selects macOS
 # Keychain for production and retains development compatibility until the
@@ -191,10 +197,11 @@ daemon:
 governor:
   max_resident_gb: 12
   dreamer_nice: 10
-  # llama.cpp fixes n_threads when a model instance is loaded. The governor's
-  # typed request hint therefore takes effect on the next safe model load/reload.
+  # Thread budgets apply in place via llama_set_n_threads; changing the hint
+  # does not unload or reload an already loaded model.
   generation_threads_active: 6
   generation_threads_idle: 8
+  signal_ttl_seconds: 10.0
 
 # Nightly Dreamer self-evolution. OFF by default. All writes are fenced to
 # data/evolution/, data/playbooks/, and explicitly allowed DB tables; deleting

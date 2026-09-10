@@ -76,6 +76,7 @@ from apps.runner.commands.registry import (
     jobs_app,
     memory_app,
     model_app,
+    perf_app,
     profile_app,
     project_app,
     reminder_app,
@@ -132,6 +133,7 @@ april_app.add_typer(eval_app, name="eval")
 april_app.add_typer(setup_app, name="setup")
 april_app.add_typer(user_profile_app, name="profile")
 april_app.add_typer(reports_app, name="reports")
+april_app.add_typer(perf_app, name="perf")
 april_app.add_typer(jobs_app, name="jobs")
 april_app.add_typer(evolve_app, name="evolve")
 evolve_app.add_typer(rollout_app, name="rollout")
@@ -153,6 +155,7 @@ from apps.runner.commands import runner_core as _runner_core  # noqa: E402
 from apps.runner.commands import runner_jobs as _runner_jobs  # noqa: E402
 from apps.runner.commands import runner_memory as _runner_memory  # noqa: E402
 from apps.runner.commands import runner_models as _runner_models  # noqa: E402
+from apps.runner.commands import runner_perf as _runner_perf  # noqa: E402
 from apps.runner.commands import (  # noqa: E402
     runner_productivity as _runner_productivity,
 )
@@ -178,6 +181,7 @@ _COMMAND_MODULES = (
     _runner_services,
     _runner_reports,
     _evolve_rollout,
+    _runner_perf,
 )
 
 

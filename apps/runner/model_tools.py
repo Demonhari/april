@@ -18,6 +18,7 @@ import yaml
 
 from april_common.config_validation import validate_configuration
 from april_common.errors import ConfigError
+from april_common.hardware_profile import physical_cpu_count
 from april_common.path_security import is_path_within_roots
 from april_common.settings import load_settings
 from services.april_runtime.model_registry import (
@@ -981,6 +982,7 @@ def model_doctor(home: Path) -> dict[str, Any]:
                 "file_size": format_bytes(size),
                 "context_size": model.context_size,
                 "threads": model.threads,
+                "threads_batch": model.threads_batch or model.threads,
                 "n_batch": model.n_batch,
                 "n_ubatch": model.n_ubatch,
                 "n_gpu_layers": model.n_gpu_layers,
@@ -992,6 +994,19 @@ def model_doctor(home: Path) -> dict[str, Any]:
     from apps.runner.readiness import build_readiness_report
 
     readiness = build_readiness_report(root)
+    physical_cores = physical_cpu_count()
+    thread_advisories = []
+    if physical_cores is not None:
+        for entry in models:
+            if entry["threads"] > physical_cores or entry["threads_batch"] > physical_cores:
+                thread_advisories.append(
+                    {
+                        "model_id": entry["id"],
+                        "physical_cores": physical_cores,
+                        "threads": entry["threads"],
+                        "threads_batch": entry["threads_batch"],
+                    }
+                )
     return {
         "python_version": sys.version.split()[0],
         "april_home_basename": root.name,
@@ -1002,6 +1017,8 @@ def model_doctor(home: Path) -> dict[str, Any]:
         "machine": machine_kind(),
         "platform": platform.platform(),
         "cpu_count": os.cpu_count(),
+        "physical_cpu_count": physical_cores,
+        "thread_advisories": thread_advisories,
         "estimated_ram_bytes": ram,
         "estimated_ram": format_bytes(ram),
         "models": models,

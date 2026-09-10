@@ -12,6 +12,7 @@ data/patches/
 data/artifacts/
 data/audio_cache/
 data/verification/
+data/perf/
 data/run/
 data/voice_artifacts/
 data/evolution/

@@ -7,6 +7,7 @@ models:
     role: brain
     chat_format: granite
     threads: 8
+    threads_batch: 8
     context_size: 4096
     temperature: 0.3
     max_output_tokens: 1024
@@ -16,6 +17,8 @@ models:
     n_batch: 128
     n_gpu_layers: 0
     use_mmap: true
+    prefix_cache_mb: 1024
+    prefix_cache_min_tokens: 128
   coding:
     id: april-coding
     name: qwen3-1.7b
@@ -24,6 +27,7 @@ models:
     role: coding
     chat_format: qwen
     threads: 8
+    threads_batch: 8
     context_size: 4096
     temperature: 0.2
     max_output_tokens: 2048
@@ -33,6 +37,8 @@ models:
     n_batch: 128
     n_gpu_layers: 0
     use_mmap: true
+    prefix_cache_mb: 768
+    prefix_cache_min_tokens: 128
   reading:
     id: april-reading
     name: qwen3-0.6b
@@ -41,6 +47,7 @@ models:
     role: reading
     chat_format: qwen
     threads: 6
+    threads_batch: 6
     context_size: 2048
     temperature: 0.2
     max_output_tokens: 1024
@@ -50,3 +57,5 @@ models:
     n_batch: 64
     n_gpu_layers: 0
     use_mmap: true
+    prefix_cache_mb: 512
+    prefix_cache_min_tokens: 128

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,6 +220,9 @@ class ResourceGovernor:
             min_ram_headroom_gb=max(1.0, settings.governor.max_resident_gb * 0.1),
             require_ac_power_for_background=settings.evolution.require_ac_power,
         )
+        self._signal_lock = asyncio.Lock()
+        self._cached_signals: ResourceSignals | None = None
+        self._cached_signals_at = 0.0
 
     def generation_thread_budget(self) -> int:
         """Return the load-time generation thread budget for current activity.
@@ -238,9 +243,24 @@ class ResourceGovernor:
             return safe_default
         return self.settings.governor.generation_threads_idle
 
+    async def generation_thread_budget_async(self) -> int:
+        safe_default = self.settings.governor.generation_threads_active
+        try:
+            signals = await self._sample_async()
+        except Exception:
+            return safe_default
+        if signals.idle_source == SIGNAL_SOURCE_UNKNOWN:
+            return safe_default
+        if signals.user_idle_seconds < self.policy.min_idle_seconds_for_background:
+            return safe_default
+        return self.settings.governor.generation_threads_idle
+
     def assess_resident(self) -> GovernorDecision:
         """Gate always-on resident services such as Runtime/API/Sentinel."""
         signals = self.provider.sample()
+        return self._assess_resident_signals(signals)
+
+    def _assess_resident_signals(self, signals: ResourceSignals) -> GovernorDecision:
         reasons: list[str] = []
         advisories: list[str] = []
         if signals.ram_source == SIGNAL_SOURCE_UNKNOWN:
@@ -259,6 +279,12 @@ class ResourceGovernor:
     def assess_background(self) -> GovernorDecision:
         """Gate idle/background work such as Dreamer evolution."""
         resident = self.assess_resident()
+        return self._assess_background_signals(resident.signals, resident)
+
+    def _assess_background_signals(
+        self, signals: ResourceSignals, resident: GovernorDecision | None = None
+    ) -> GovernorDecision:
+        resident = resident or self._assess_resident_signals(signals)
         reasons = list(resident.reasons)
         signals = resident.signals
         if signals.ram_source == SIGNAL_SOURCE_UNKNOWN:
@@ -279,6 +305,55 @@ class ResourceGovernor:
             advisories=resident.advisories,
         )
 
+    async def _sample_async(self) -> ResourceSignals:
+        now = time.monotonic()
+        if (
+            self._cached_signals is not None
+            and now - self._cached_signals_at <= self.settings.governor.signal_ttl_seconds
+        ):
+            return self._cached_signals
+        async with self._signal_lock:
+            now = time.monotonic()
+            if (
+                self._cached_signals is not None
+                and now - self._cached_signals_at <= self.settings.governor.signal_ttl_seconds
+            ):
+                return self._cached_signals
+            signals = await asyncio.to_thread(self.provider.sample)
+            self._cached_signals = signals
+            self._cached_signals_at = time.monotonic()
+            return signals
+
+    async def sample_signals_async(self) -> ResourceSignals:
+        return await self._sample_async()
+
+    async def assess_resident_async(self) -> GovernorDecision:
+        return self._assess_resident_signals(await self._sample_async())
+
+    async def assess_background_async(self) -> GovernorDecision:
+        signals = await self._sample_async()
+        resident = self._assess_resident_signals(signals)
+        return self._assess_background_signals(signals, resident)
+
+    async def assess_model_load_async(
+        self,
+        *,
+        projected_resident_gb: float | None = None,
+        current_resident_gb: float = 0.0,
+        loaded_specialist_count: int = 0,
+        max_loaded_specialist_count: int | None = None,
+        speculative: bool = False,
+    ) -> GovernorDecision:
+        signals = await self._sample_async()
+        return self._assess_model_load_signals(
+            signals,
+            projected_resident_gb=projected_resident_gb,
+            current_resident_gb=current_resident_gb,
+            loaded_specialist_count=loaded_specialist_count,
+            max_loaded_specialist_count=max_loaded_specialist_count,
+            speculative=speculative,
+        )
+
     def assess_model_load(
         self,
         *,
@@ -295,7 +370,25 @@ class ResourceGovernor:
         conservative default is used and surfaced as an advisory rather than
         silently pretending the signal was exact.
         """
-        signals = self.provider.sample()
+        return self._assess_model_load_signals(
+            self.provider.sample(),
+            projected_resident_gb=projected_resident_gb,
+            current_resident_gb=current_resident_gb,
+            loaded_specialist_count=loaded_specialist_count,
+            max_loaded_specialist_count=max_loaded_specialist_count,
+            speculative=speculative,
+        )
+
+    def _assess_model_load_signals(
+        self,
+        signals: ResourceSignals,
+        *,
+        projected_resident_gb: float | None,
+        current_resident_gb: float,
+        loaded_specialist_count: int,
+        max_loaded_specialist_count: int | None,
+        speculative: bool,
+    ) -> GovernorDecision:
         reasons: list[str] = []
         advisories: list[str] = []
         if projected_resident_gb is None:

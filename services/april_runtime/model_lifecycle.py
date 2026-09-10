@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import math
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -59,6 +60,8 @@ class ResourceLoadGate(Protocol):
 
     def assess_resident(self) -> Any: ...  # GovernorDecision-shaped
 
+    async def assess_resident_async(self) -> Any: ...  # GovernorDecision-shaped
+
     def assess_model_load(
         self,
         *,
@@ -68,6 +71,16 @@ class ResourceLoadGate(Protocol):
         max_loaded_specialist_count: int | None = None,
         speculative: bool = False,
     ) -> Any: ...  # GovernorDecision-shaped
+
+    async def assess_model_load_async(
+        self,
+        *,
+        projected_resident_gb: float | None = None,
+        current_resident_gb: float = 0.0,
+        loaded_specialist_count: int = 0,
+        max_loaded_specialist_count: int | None = None,
+        speculative: bool = False,
+    ) -> Any: ...
 
 
 @dataclass(slots=True)
@@ -93,6 +106,7 @@ class ModelRuntimeState:
     load_duration_ms: float | None = None
     last_used_monotonic: float = 0.0
     loaded_threads: int | None = None
+    loaded_threads_batch: int | None = None
 
 
 class ModelLifecycle:
@@ -104,6 +118,7 @@ class ModelLifecycle:
         root_backend: str | None = None,
         max_loaded_specialist_models: int = 2,
         governor: ResourceLoadGate | None = None,
+        prefix_cache_enabled: bool = True,
     ) -> None:
         self.registry = registry
         self.root_backend = root_backend
@@ -113,6 +128,7 @@ class ModelLifecycle:
         # models (the brain) and embedding models always load, and power/idle
         # never block an interactive load — the gate looks at RAM/CPU headroom.
         self.governor = governor
+        self.prefix_cache_enabled = prefix_cache_enabled
         self._policy_lock = asyncio.Lock()
         self._states = {
             model.id: ModelRuntimeState(
@@ -133,7 +149,7 @@ class ModelLifecycle:
     def _default_backend_factory(self, model: ModelDefinition) -> RuntimeBackend:
         if self.root_backend == "fake" or model.backend == "fake":
             return FakeBackend()
-        return LlamaCppBackend()
+        return LlamaCppBackend(prefix_cache_enabled=self.prefix_cache_enabled)
 
     def _is_specialist(self, model: ModelDefinition) -> bool:
         # keep_loaded models (e.g. the brain) and embedding-role models are
@@ -145,6 +161,9 @@ class ModelLifecycle:
             if state.model.role == "embedding":
                 return state.model.id
         return None
+
+    def configured_model_definitions(self) -> list[ModelDefinition]:
+        return [state.model for state in self._states.values()]
 
     def get_state(self, model_id: str) -> ModelRuntimeState:
         try:
@@ -230,8 +249,8 @@ class ModelLifecycle:
             raise ModelUnavailableError(model_id, "Base model file is unavailable.")
         if not resolved_adapter.is_file() or resolved_adapter.is_symlink():
             raise ModelUnavailableError(model_id, "Candidate adapter file is unavailable.")
-        base_sha = _sha256_path(resolved_base)
-        actual_adapter_sha = _sha256_path(resolved_adapter)
+        base_sha = await asyncio.to_thread(_sha256_cached, resolved_base)
+        actual_adapter_sha = await asyncio.to_thread(_sha256_path, resolved_adapter)
         if actual_adapter_sha != adapter_sha256:
             raise ModelUnavailableError(model_id, "Candidate adapter hash mismatch.")
         if len(configuration_sha256) != 64:
@@ -324,6 +343,13 @@ class ModelLifecycle:
             idle_unload_seconds=state.model.idle_unload_seconds,
             priority=state.model.priority,
             threads=state.loaded_threads or state.model.threads,
+            threads_batch=(
+                state.loaded_threads_batch or state.model.threads_batch or state.model.threads
+            ),
+            flash_attn=state.model.flash_attn,
+            prefix_cache_mb=state.model.prefix_cache_mb,
+            prefix_cache_min_tokens=state.model.prefix_cache_min_tokens,
+            prefix_cache=(state.backend.prefix_cache_diagnostics() if state.backend else None),
             n_batch=state.model.n_batch,
             n_ubatch=state.model.n_ubatch,
             n_gpu_layers=state.model.n_gpu_layers,
@@ -354,7 +380,7 @@ class ModelLifecycle:
                 except AprilError:
                     continue
 
-    def _check_resource_gate(self, state: ModelRuntimeState) -> None:
+    async def _check_resource_gate_async(self, state: ModelRuntimeState) -> None:
         """Refuse a *new* specialist load under RAM/CPU pressure.
 
         Already-loaded models are untouched; the caller sees an explicit
@@ -365,15 +391,23 @@ class ModelLifecycle:
             return
         try:
             assess_model_load = getattr(self.governor, "assess_model_load", None)
-            if callable(assess_model_load):
-                decision = assess_model_load(
-                    projected_resident_gb=self._projected_model_load_gb(state),
-                    current_resident_gb=self._current_projected_resident_gb(),
-                    loaded_specialist_count=self._loaded_specialist_count(),
-                    max_loaded_specialist_count=self.max_loaded_specialist_models,
-                )
+            assess_model_load_async = getattr(self.governor, "assess_model_load_async", None)
+            kwargs = {
+                "projected_resident_gb": self._projected_model_load_gb(state),
+                "current_resident_gb": self._current_projected_resident_gb(),
+                "loaded_specialist_count": self._loaded_specialist_count(),
+                "max_loaded_specialist_count": self.max_loaded_specialist_models,
+            }
+            if callable(assess_model_load_async):
+                decision = await assess_model_load_async(**kwargs)
+            elif callable(assess_model_load):
+                decision = await asyncio.to_thread(assess_model_load, **kwargs)
             else:
-                decision = self.governor.assess_resident()
+                assess_resident_async = getattr(self.governor, "assess_resident_async", None)
+                if callable(assess_resident_async):
+                    decision = await assess_resident_async()
+                else:
+                    decision = await asyncio.to_thread(self.governor.assess_resident)
         except Exception:
             return
         if getattr(decision, "allowed", True):
@@ -411,10 +445,10 @@ class ModelLifecycle:
         if generation_threads is not None and generation_threads < 1:
             raise ValueError("generation_threads must be positive")
         if self._is_specialist(state.model) and state.identity is None:
-            self._check_resource_gate(state)
+            await self._check_resource_gate_async(state)
             await self._enforce_lifecycle(target_model_id=model_id)
         elif state.identity is not None and state.identity.is_candidate:
-            self._check_resource_gate(state)
+            await self._check_resource_gate_async(state)
             if (
                 self.max_loaded_specialist_models > 0
                 and state.state != "loaded"
@@ -428,17 +462,7 @@ class ModelLifecycle:
                 )
         async with state.lifecycle_lock:
             if state.state == "loaded":
-                if generation_threads is None or state.loaded_threads == generation_threads:
-                    return state
-                # llama.cpp fixes n_threads at construction. Do not disrupt a
-                # request already using this instance; the new hint will apply
-                # on a later safe load/reload.
-                if state.active_requests > 0 or state.backend is None:
-                    return state
-                await state.backend.unload()
-                state.backend = None
-                state.state = "unloaded"
-                state.loaded_threads = None
+                return state
             if state.state == "loading":
                 return state
             if state.state == "unavailable" and self.root_backend != "fake":
@@ -455,8 +479,11 @@ class ModelLifecycle:
             # (readiness uses ModelDefinition.resolved_adapter_path(registry.root)).
             # A relative adapter_path must not be resolved against the process cwd.
             update: dict[str, object] = {"path": state.model.resolved_path(self.registry.root)}
-            if generation_threads is not None:
-                update["threads"] = generation_threads
+            effective_threads = min(state.model.threads, generation_threads or state.model.threads)
+            configured_batch = state.model.threads_batch or state.model.threads
+            effective_threads_batch = min(configured_batch, generation_threads or configured_batch)
+            update["threads"] = effective_threads
+            update["threads_batch"] = effective_threads_batch
             try:
                 resolved_adapter = state.model.resolved_adapter_path(self.registry.root)
             except (OSError, ValueError) as exc:
@@ -527,7 +554,7 @@ class ModelLifecycle:
                     model_id=state.model.id,
                     candidate_id=None,
                     base_model_sha256=(
-                        _sha256_path(resolved_model.path)
+                        await asyncio.to_thread(_sha256_cached, resolved_model.path)
                         if resolved_model.path.is_file()
                         else hashlib.sha256(b"").hexdigest()
                     ),
@@ -535,7 +562,7 @@ class ModelLifecycle:
                         resolved_model.adapter_path.name if resolved_model.adapter_path else None
                     ),
                     adapter_sha256=(
-                        _sha256_path(resolved_model.adapter_path)
+                        await asyncio.to_thread(_sha256_path, resolved_model.adapter_path)
                         if resolved_model.adapter_path is not None
                         and resolved_model.adapter_path.is_file()
                         else None
@@ -543,6 +570,7 @@ class ModelLifecycle:
                     configuration_sha256=_configuration_hash(resolved_model),
                 )
             state.loaded_threads = resolved_model.threads
+            state.loaded_threads_batch = resolved_model.threads_batch or resolved_model.threads
             state.loaded_at = utc_now_iso()
             state.load_duration_ms = (time.monotonic() - started) * 1000
             state.unloaded_at = None
@@ -570,6 +598,7 @@ class ModelLifecycle:
                 state.backend = None
                 state.state = self._initial_state(state.model)
                 state.loaded_threads = None
+                state.loaded_threads_batch = None
                 state.unloaded_at = utc_now_iso()
             return state
 
@@ -598,6 +627,7 @@ class ModelLifecycle:
 
     async def generate(self, request: ChatRequest) -> ChatResponse:
         request_id = request.request_id or str(uuid.uuid4())
+        request_started = time.monotonic()
         state = await self.load_model(
             request.model_id, generation_threads=request.generation_threads
         )
@@ -633,10 +663,15 @@ class ModelLifecycle:
             else _NoopLock()
         )
         async with lock:
+            lock_wait_ms = (time.monotonic() - request_started) * 1000
+            thread_budget_applied = await self._apply_thread_budget(
+                state, request.generation_threads
+            )
             start = time.monotonic()
             try:
                 if request.options.enable_thinking is not None:
-                    result = await state.backend.generate_messages(
+                    result = await _generate_messages_compat(
+                        state.backend,
                         prompt,
                         messages=context.messages,
                         temperature=options.temperature,
@@ -646,9 +681,11 @@ class ModelLifecycle:
                         seed=options.seed,
                         response_format=request.response_format,
                         disable_thinking=disable_thinking,
+                        prompt_tokens=context.input_tokens,
                     )
                 else:
-                    result = await state.backend.generate_messages(
+                    result = await _generate_messages_compat(
+                        state.backend,
                         prompt,
                         messages=context.messages,
                         temperature=options.temperature,
@@ -657,6 +694,7 @@ class ModelLifecycle:
                         stop=options.stop,
                         seed=options.seed,
                         response_format=request.response_format,
+                        prompt_tokens=context.input_tokens,
                     )
             except Exception as exc:
                 state.state = "error"
@@ -684,6 +722,18 @@ class ModelLifecycle:
             output_tokens=result.output_tokens,
             total_tokens=result.input_tokens + result.output_tokens,
         )
+        timing = {
+            "load_wait_ms": max((start - request_started) * 1000, 0.0),
+            "lock_wait_ms": max(lock_wait_ms, 0.0),
+            "total_ms": max((time.monotonic() - request_started) * 1000, 0.0),
+            "prompt_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "threads": state.loaded_threads,
+            "threads_batch": state.loaded_threads_batch,
+            "thread_budget_applied": thread_budget_applied,
+            **state.backend.timing_diagnostics(),
+        }
+        usage = usage.model_copy(update={"timing": timing})
         warnings = ["Context was truncated."] if context.truncated else []
         reservation_reduced = reserved_output_tokens < options.max_output_tokens
         if reservation_reduced:
@@ -712,6 +762,8 @@ class ModelLifecycle:
             "context_budget": context.metadata(),
             "reserved_output_tokens": reserved_output_tokens,
             "output_reservation_reduced": reservation_reduced,
+            "timing": timing,
+            "prefix_cache": state.backend.prefix_cache_diagnostics(),
         }
         return ChatResponse(
             request_id=request_id,
@@ -808,13 +860,18 @@ class ModelLifecycle:
         )
         input_tokens = context.input_tokens
         output_tokens = 0
-        start = time.monotonic()
+        request_started = time.monotonic()
+        start = request_started
         lock = (
             state.generation_lock
             if not state.backend.supports_concurrent_generation
             else _NoopLock()
         )
         async with lock:
+            lock_wait_ms = (time.monotonic() - request_started) * 1000
+            thread_budget_applied = await self._apply_thread_budget(
+                state, request.generation_threads
+            )
             reservation_reduced = reserved_output_tokens < options.max_output_tokens
             reservation_warnings = (
                 [
@@ -836,7 +893,8 @@ class ModelLifecycle:
             )
             try:
                 if request.options.enable_thinking is not None:
-                    token_stream = state.backend.stream_messages(
+                    token_stream = _stream_messages_compat(
+                        state.backend,
                         prompt,
                         messages=context.messages,
                         temperature=options.temperature,
@@ -846,9 +904,11 @@ class ModelLifecycle:
                         seed=options.seed,
                         response_format=request.response_format,
                         disable_thinking=disable_thinking,
+                        prompt_tokens=context.input_tokens,
                     )
                 else:
-                    token_stream = state.backend.stream_messages(
+                    token_stream = _stream_messages_compat(
+                        state.backend,
                         prompt,
                         messages=context.messages,
                         temperature=options.temperature,
@@ -857,8 +917,11 @@ class ModelLifecycle:
                         stop=options.stop,
                         seed=options.seed,
                         response_format=request.response_format,
+                        prompt_tokens=context.input_tokens,
                     )
                 async for token in token_stream:
+                    if output_tokens == 0:
+                        ttft_ms = (time.monotonic() - request_started) * 1000
                     output_tokens += len(await state.backend.tokenize(token))
                     yield "token", {"text": token}
             except asyncio.CancelledError:
@@ -885,6 +948,19 @@ class ModelLifecycle:
         elapsed = max(time.monotonic() - start, 0.000_001)
         state.recent_latency_ms = elapsed * 1000
         state.recent_tokens_per_second = output_tokens / elapsed
+        state.backend.finish_timing_diagnostics(input_tokens, output_tokens)
+        timing = {
+            "load_wait_ms": max((start - request_started) * 1000, 0.0),
+            "lock_wait_ms": max(lock_wait_ms, 0.0),
+            "total_ms": max((time.monotonic() - request_started) * 1000, 0.0),
+            "ttft_ms": locals().get("ttft_ms"),
+            "prompt_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "threads": state.loaded_threads,
+            "threads_batch": state.loaded_threads_batch,
+            "thread_budget_applied": thread_budget_applied,
+            **state.backend.timing_diagnostics(),
+        }
         yield (
             "usage",
             {
@@ -912,6 +988,8 @@ class ModelLifecycle:
                     if reserved_output_tokens < options.max_output_tokens
                     else []
                 ),
+                "timing": timing,
+                "prefix_cache": state.backend.prefix_cache_diagnostics(),
             },
         )
         yield "done", {"finish_reason": "stop"}
@@ -920,6 +998,23 @@ class ModelLifecycle:
         async with self._policy_lock:
             await self._unload_idle_specialists()
             await self._evict_for_capacity(target_model_id=target_model_id)
+
+    async def _apply_thread_budget(
+        self, state: ModelRuntimeState, generation_threads: int | None
+    ) -> bool:
+        if state.backend is None:
+            return False
+        configured = state.model.threads
+        configured_batch = state.model.threads_batch or configured
+        desired = min(configured, generation_threads or configured)
+        desired_batch = min(configured_batch, generation_threads or configured_batch)
+        if state.loaded_threads == desired and state.loaded_threads_batch == desired_batch:
+            return True
+        applied = state.backend.apply_thread_budget(desired, desired_batch)
+        if applied:
+            state.loaded_threads = desired
+            state.loaded_threads_batch = desired_batch
+        return applied
 
     async def _unload_idle_specialists(self) -> None:
         now = time.monotonic()
@@ -990,6 +1085,20 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
+_BASE_DIGEST_CACHE: dict[tuple[str, int, int, int], str] = {}
+
+
+def _sha256_cached(path: Path) -> str:
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ino)
+    cached = _BASE_DIGEST_CACHE.get(key)
+    if cached is not None:
+        return cached
+    digest = _sha256_path(path)
+    _BASE_DIGEST_CACHE[key] = digest
+    return digest
+
+
 def _candidate_instance_id(
     model_id: str,
     candidate_id: str,
@@ -1015,3 +1124,29 @@ def _is_within(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+async def _generate_messages_compat(backend: RuntimeBackend, prompt: str, **kwargs: Any) -> Any:
+    method = backend.generate_messages
+    parameters: Mapping[str, inspect.Parameter]
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "prompt_tokens" not in parameters:
+        kwargs.pop("prompt_tokens", None)
+    return await method(prompt, **kwargs)
+
+
+def _stream_messages_compat(
+    backend: RuntimeBackend, prompt: str, **kwargs: Any
+) -> AsyncIterator[str]:
+    method = backend.stream_messages
+    parameters: Mapping[str, inspect.Parameter]
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "prompt_tokens" not in parameters:
+        kwargs.pop("prompt_tokens", None)
+    return method(prompt, **kwargs)

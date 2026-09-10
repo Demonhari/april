@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, time
 from pathlib import Path
@@ -52,7 +53,12 @@ class EvolutionSchedulerGate:
         today = now.date().isoformat()
         if await self.memory.get_scheduler_state(_LAST_EVOLUTION_DATE_KEY) == today:
             return EvolutionGateDecision(False, "already ran today")
-        decision = self.governor.assess_background()
+        async_decision = getattr(self.governor, "assess_background_async", None)
+        decision = (
+            await async_decision()
+            if callable(async_decision)
+            else await asyncio.to_thread(self.governor.assess_background)
+        )
         if not decision.allowed:
             return EvolutionGateDecision(False, ",".join(decision.reasons))
         return EvolutionGateDecision(True, "allowed")

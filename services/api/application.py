@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -37,6 +39,8 @@ from services.api.routes.tools import register_tool_routes
 from services.api.routes.voice import register_voice_routes
 from services.api.streaming import sse_event
 from services.api.wake_events import _handle_wake_event
+from services.brain.model_routing import build_routing_request, routing_user_context
+from services.brain.structured_output import ROUTING_PROPOSAL_RESPONSE_FORMAT
 from services.wake.schemas import WakeEvent
 from services.wake.wake_bus import WakeBus
 
@@ -62,6 +66,10 @@ def create_application(
         if active is not None and active.scheduler is not None:
             # start() is a no-op unless scheduler.enabled, so this is safe in tests.
             await active.scheduler.start()
+        prewarm_task: asyncio.Task[None] | None = None
+        if active is not None and active.settings.runtime.prefix_prewarm:
+            prewarm_task = _schedule_router_prewarm(active)
+        app.state.router_prewarm_task = prewarm_task
         wake_bus: WakeBus | None = None
         if active is not None and active.settings.wake.enabled:
             # Local wake bus: owner-only Unix socket for hotkey/desktop wakes.
@@ -75,6 +83,12 @@ def create_application(
         if app.state.wake_bus is not None:
             await app.state.wake_bus.stop()
             app.state.wake_bus = None
+        prewarm_task = app.state.router_prewarm_task
+        if prewarm_task is not None and not prewarm_task.done():
+            prewarm_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await prewarm_task
+        app.state.router_prewarm_task = None
         if app.state.container is not None:
             await app.state.container.aclose()
 
@@ -82,6 +96,7 @@ def create_application(
     app.state.container = container
     app.state.container_error = False
     app.state.wake_bus = None
+    app.state.router_prewarm_task = None
     initial_settings = container.settings if container is not None else get_settings()
     if initial_settings.api.cors_enabled:
         app.add_middleware(
@@ -166,3 +181,65 @@ def create_application(
         )
 
     return app
+
+
+def _schedule_router_prewarm(active: ApiContainer) -> asyncio.Task[None] | None:  # pragma: no cover
+    if active.settings.runtime.backend == "fake":
+        return None
+    task = asyncio.create_task(_router_prewarm(active))
+    task.add_done_callback(_consume_prewarm_task)
+    return task
+
+
+async def _router_prewarm(active: ApiContainer) -> None:  # pragma: no cover
+    governor = active.governor
+    if governor is not None:
+        async_method = getattr(governor, "assess_resident_async", None)
+        decision = (
+            await async_method()
+            if callable(async_method)
+            else await asyncio.to_thread(governor.assess_resident)
+        )
+        if not getattr(decision, "allowed", True):
+            _write_prewarm_audit(active, "skipped", ",".join(decision.reasons))
+            return
+    router = active.orchestrator.brain_router
+    messages, options = build_routing_request(
+        system_prompt=router.router_system_prompt,
+        user_content=routing_user_context("ping", None),
+        max_output_tokens=1,
+    )
+    try:
+        await active.runtime_client.chat(
+            model_id=router.router_model_id,
+            messages=messages,
+            options=options,
+            response_format=ROUTING_PROPOSAL_RESPONSE_FORMAT,
+            request_id=f"prewarm-{uuid.uuid4()}",
+        )
+    except Exception as exc:
+        _write_prewarm_audit(active, "failed", type(exc).__name__)
+    else:
+        _write_prewarm_audit(active, "loaded", None)
+
+
+def _write_prewarm_audit(  # pragma: no cover
+    active: ApiContainer, status: str, reason: str | None
+) -> None:
+    active.approvals.audit.write(
+        {
+            "event_type": "router_prefix_prewarm",
+            "actor": "core_api",
+            "status": status,
+            "reason": reason,
+        }
+    )
+
+
+def _consume_prewarm_task(task: asyncio.Task[None]) -> None:  # pragma: no cover
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except Exception:
+        return

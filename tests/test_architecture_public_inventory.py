@@ -193,6 +193,9 @@ april package staple
 april package validate
 april package validate-release-zip
 april package verify-signature
+april perf
+april perf bench
+april perf tune
 april profile
 april profile delete
 april profile set

@@ -254,6 +254,17 @@ def run_restricted_process_sync(
     process_launcher: AsyncProcessLauncher | None = None,
 ) -> RestrictedProcessResult:
     """Synchronous adapter for startup and diagnostic paths without an event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        # Check before constructing the coroutine.  Apart from producing a
+        # clearer programming error this avoids the otherwise easy-to-miss
+        # ``coroutine was never awaited`` warning.
+        raise RuntimeError(
+            "cannot run inside an event loop; use run_restricted_process or asyncio.to_thread"
+        )
     return asyncio.run(
         run_restricted_process(
             argv,

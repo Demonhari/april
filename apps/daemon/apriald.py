@@ -223,7 +223,12 @@ class AprialdSupervisor:
         return health
 
     async def health(self) -> DaemonHealth:
-        governor = self.governor.assess_resident()
+        async_decision = getattr(self.governor, "assess_resident_async", None)
+        governor = (
+            await async_decision()
+            if callable(async_decision)
+            else await asyncio.to_thread(self.governor.assess_resident)
+        )
         child_health: list[ChildHealth] = []
         degraded = not governor.allowed
         for runtime in self.children.values():
@@ -257,7 +262,12 @@ class AprialdSupervisor:
         self._audit("daemon_stop")
 
     async def _ensure_child(self, runtime: ChildRuntime) -> None:
-        decision = self.governor.assess_resident()
+        async_decision = getattr(self.governor, "assess_resident_async", None)
+        decision = (
+            await async_decision()
+            if callable(async_decision)
+            else await asyncio.to_thread(self.governor.assess_resident)
+        )
         if not decision.allowed:
             runtime.paused_reason = ",".join(decision.reasons)
             return
