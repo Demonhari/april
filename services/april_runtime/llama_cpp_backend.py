@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
@@ -76,7 +78,13 @@ class LlamaCppBackend(RuntimeBackend):
             "rejected_oversize": 0,
             "attach_skipped": 0,
         }
-        self._bytes_per_token_estimate = 0.0
+        self._kv_bytes_per_token_estimate = 0.0
+        self._prefix_completion_observations: deque[int] = deque(maxlen=20)
+        self._prefix_n_batch = 0
+        self._prefix_n_vocab = 0
+        self._prefix_n_ctx = 0
+        self._prefix_projected_bytes: int | None = None
+        self._prefix_capacity_bytes: int | None = None
         self._attach_skipped_reason: str | None = None
         self._last_timing: dict[str, object] = {}
         self._perf_started = False
@@ -147,7 +155,13 @@ class LlamaCppBackend(RuntimeBackend):
             "rejected_oversize": 0,
             "attach_skipped": 0,
         }
-        self._bytes_per_token_estimate = 0.0
+        self._kv_bytes_per_token_estimate = 0.0
+        self._prefix_completion_observations.clear()
+        self._prefix_n_batch, self._prefix_n_vocab, self._prefix_n_ctx = _snapshot_geometry(
+            self._llm, model
+        )
+        self._prefix_projected_bytes = None
+        self._prefix_capacity_bytes = None
         if (
             model.role != "embedding"
             and (model.prefix_cache_mb or 0) > 0
@@ -166,7 +180,7 @@ class LlamaCppBackend(RuntimeBackend):
                         self._llm,
                         self._prefix_policy,
                         lambda: self._disable_prefix_cache("adapter_error"),
-                        self._record_prefix_save,
+                        self._record_prefix_save_state,
                         self._record_prefix_event,
                     )
                     _install_state_wrappers(self._llm, self._prefix_adapter)
@@ -190,6 +204,9 @@ class LlamaCppBackend(RuntimeBackend):
         self._prefix_policy = None
         self._prefix_adapter = None
         self._prefix_disabled_reason = None
+        self._prefix_completion_observations.clear()
+        self._prefix_projected_bytes = None
+        self._prefix_capacity_bytes = None
         self._llama_module = None
         if llm is not None:
             close = getattr(llm, "close", None) or getattr(llm, "release", None)
@@ -663,6 +680,10 @@ class LlamaCppBackend(RuntimeBackend):
             "attached": attached,
             "disabled_reason": self._prefix_disabled_reason,
         }
+        if self._prefix_projected_bytes is not None:
+            result["projected_bytes"] = self._prefix_projected_bytes
+        if self._prefix_capacity_bytes is not None:
+            result["capacity_bytes"] = self._prefix_capacity_bytes
         if self._prefix_call_id and attached:
             result["lookup_performed"] = bool(
                 self._prefix_lookup_diagnostics.get("lookup_performed", False)
@@ -708,6 +729,8 @@ class LlamaCppBackend(RuntimeBackend):
         self._prefix_call_id = 0
         self._prefix_attached = False
         self._attach_skipped_reason = None
+        self._prefix_projected_bytes = None
+        self._prefix_capacity_bytes = None
         self._last_timing = {}
 
     def _begin_generation_attempt(self) -> int:
@@ -841,18 +864,24 @@ class LlamaCppBackend(RuntimeBackend):
         self._prefix_attached = False
         if self._llm is None or self._prefix_adapter is None or self._model is None:
             return
+        capacity = self._prefix_policy.capacity_bytes if self._prefix_policy is not None else 0
+        self._prefix_capacity_bytes = capacity
+        expected_completion_tokens = self._expected_completion_tokens(max_output_tokens)
+        projected_tokens = prompt_tokens + expected_completion_tokens
+        self._prefix_projected_bytes = self._projected_prefix_bytes(projected_tokens)
+        set_prompt_tokens = getattr(self._prefix_adapter, "set_prompt_tokens", None)
+        if callable(set_prompt_tokens):
+            set_prompt_tokens(prompt_tokens)
         if prompt_tokens < self._model.prefix_cache_min_tokens:
             with contextlib.suppress(Exception):
                 self._llm.set_cache(None)
             self._attach_skipped_reason = "short_prompt"
             self._prefix_aggregates["attach_skipped"] += 1
             return
-        if (
-            self._bytes_per_token_estimate > 0
-            and (prompt_tokens + max_output_tokens) * self._bytes_per_token_estimate
-            > self._prefix_policy.capacity_bytes
-            if self._prefix_policy is not None
-            else False
+        if self._prefix_policy is not None and (
+            self._kv_bytes_per_token_estimate > 0
+            and self._prefix_projected_bytes is not None
+            and self._prefix_projected_bytes > capacity
         ):
             with contextlib.suppress(Exception):
                 self._llm.set_cache(None)
@@ -887,15 +916,45 @@ class LlamaCppBackend(RuntimeBackend):
         if name in self._prefix_aggregates:
             self._prefix_aggregates[name] += 1
 
-    def _record_prefix_save(self, key: tuple[int, ...], nbytes: int) -> None:
+    def _record_prefix_save_state(self, key: tuple[int, ...], nbytes: int, state: Any) -> None:
+        """Learn only the variable KV portion from a successful native save."""
+        del nbytes
         self._prefix_aggregates["saves"] += 1
-        if key:
-            ratio = float(nbytes) / len(key)
-            self._bytes_per_token_estimate = (
-                ratio
-                if self._bytes_per_token_estimate <= 0
-                else 0.5 * self._bytes_per_token_estimate + 0.5 * ratio
+        state_tokens = int(getattr(state, "n_tokens", 0) or 0)
+        if state_tokens <= 0:
+            state_tokens = len(key)
+        native_bytes = len(getattr(state, "llama_state", b""))
+        kv_bytes = max(0, native_bytes - self._prefix_n_vocab * 4)
+        if state_tokens > 0:
+            sample = float(kv_bytes) / state_tokens
+            self._kv_bytes_per_token_estimate = (
+                sample
+                if self._kv_bytes_per_token_estimate <= 0
+                else 0.7 * self._kv_bytes_per_token_estimate + 0.3 * sample
             )
+        prompt_tokens = int(getattr(self._prefix_adapter, "prompt_tokens", 0) or 0)
+        self._prefix_completion_observations.append(max(0, state_tokens - prompt_tokens))
+
+    def _expected_completion_tokens(self, max_output_tokens: int) -> int:
+        cap = max(0, int(max_output_tokens))
+        observations = list(self._prefix_completion_observations)
+        if len(observations) < 5:
+            return min(cap, 256)
+        observations.sort()
+        index = max(0, math.ceil(0.9 * len(observations)) - 1)
+        return min(cap, observations[index])
+
+    def _projected_prefix_bytes(self, tokens: int) -> int:
+        n_batch = int(self._prefix_n_batch or (self._model.n_batch if self._model else 0) or 0)
+        n_vocab = int(self._prefix_n_vocab)
+        n_ctx = int(self._prefix_n_ctx or (self._model.context_size if self._model else 0) or 0)
+        projected = (
+            self._kv_bytes_per_token_estimate * max(0, tokens)
+            + min(max(0, tokens), max(0, n_batch)) * max(0, n_vocab) * 4
+            + max(0, n_ctx) * 4
+            + max(0, n_vocab) * 4
+        )
+        return max(0, math.ceil(projected))
 
     def _mark_chat_success(self) -> None:
         self.last_prompt_path = "chat_template"
@@ -993,12 +1052,35 @@ def _extract_prompt_metadata(llm: Any) -> dict[str, object]:
     return metadata
 
 
+def _snapshot_geometry(llm: Any, model: ModelDefinition) -> tuple[int, int, int]:
+    """Return the native snapshot dimensions, with safe model fallbacks."""
+
+    def read_int(name: str, fallback: int) -> int:
+        value = getattr(llm, name, None)
+        try:
+            if value is None:
+                return fallback
+            if callable(value):
+                value = value()
+            if value is None:
+                return fallback
+            parsed = int(value)
+            return parsed if parsed > 0 else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    n_batch = read_int("n_batch", model.n_batch or model.context_size)
+    n_vocab = read_int("n_vocab", int(getattr(model, "n_vocab", 0) or 0))
+    n_ctx = read_int("n_ctx", model.context_size)
+    return n_batch, n_vocab, n_ctx
+
+
 def _build_prefix_adapter(
     base_cache: Any,
     llm: Any,
     policy: PrefixStatePolicy,
     on_error: Callable[[], None],
-    on_save: Callable[[tuple[int, ...], int], None] | None = None,
+    on_save: Callable[[tuple[int, ...], int, Any], None] | None = None,
     on_event: Callable[[str], None] | None = None,
 ) -> Any:
     class PrefixCacheAdapter(base_cache):
@@ -1008,6 +1090,7 @@ def _build_prefix_adapter(
             self.last_restore: dict[str, object] = {}
             self.last_save: dict[str, object] = {}
             self._call_id = 0
+            self.prompt_tokens = 0
             self.on_event = on_event
 
         def begin_call(self, call_id: int) -> None:
@@ -1015,6 +1098,9 @@ def _build_prefix_adapter(
             self.last_lookup = {}
             self.last_restore = {}
             self.last_save = {}
+
+        def set_prompt_tokens(self, prompt_tokens: int) -> None:
+            self.prompt_tokens = max(0, int(prompt_tokens))
 
         @property
         def cache_size(self) -> int:
@@ -1075,7 +1161,7 @@ def _build_prefix_adapter(
                 before_rejected = policy.rejected_oversize
                 accepted = policy.insert(tokens, state, nbytes)
                 if accepted and on_save is not None:
-                    on_save(tokens, nbytes)
+                    on_save(tokens, nbytes, state)
                 if on_event is not None:
                     for _ in range(policy.evictions - before_evictions):
                         on_event("evictions")

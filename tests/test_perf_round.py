@@ -55,6 +55,77 @@ def test_prefix_policy_uses_longest_match_and_lru_caps() -> None:
     assert policy.lookup(()) is None
 
 
+def test_prefix_save_guard_models_snapshot_geometry_and_learns_kv_only() -> None:
+    model = ModelDefinition(
+        id="qwen",
+        name="qwen",
+        path=Path("qwen.gguf"),
+        backend="llama_cpp",
+        role="coding",
+        threads=8,
+        context_size=4096,
+        temperature=0.0,
+        max_output_tokens=2048,
+        prefix_cache_mb=768,
+        prefix_cache_min_tokens=128,
+    )
+    backend = LlamaCppBackend()
+    cache_calls: list[object] = []
+    backend._model = model
+    backend._llm = types.SimpleNamespace(set_cache=cache_calls.append)
+    backend._prefix_policy = PrefixStatePolicy(768 * 1024 * 1024, 128, 64)
+    backend._prefix_adapter = types.SimpleNamespace(set_prompt_tokens=lambda _tokens: None)
+    backend._prefix_n_batch = 128
+    backend._prefix_n_vocab = 151_936
+    backend._prefix_n_ctx = 4096
+
+    backend._attach_prefix_cache(150, "synthetic", max_output_tokens=2048)
+    assert backend._prefix_attached is True
+    short_state = types.SimpleNamespace(
+        n_tokens=150,
+        llama_state=b"k" * (150 * 112 * 1024 + 151_936 * 4),
+    )
+    backend._prefix_adapter.prompt_tokens = 150
+    backend._record_prefix_save_state((1,) * 150, 0, short_state)
+
+    backend._attach_prefix_cache(2000, "synthetic", max_output_tokens=2048)
+    assert backend._prefix_attached is True
+    assert backend._attach_skipped_reason is None
+    assert backend._prefix_projected_bytes is not None
+    assert backend._prefix_projected_bytes < backend._prefix_policy.capacity_bytes
+
+
+def test_prefix_save_guard_skips_a_genuinely_oversize_projection() -> None:
+    model = ModelDefinition(
+        id="small-cache",
+        name="small-cache",
+        path=Path("model.gguf"),
+        backend="llama_cpp",
+        role="coding",
+        threads=4,
+        context_size=4096,
+        temperature=0.0,
+        max_output_tokens=2048,
+        prefix_cache_mb=1,
+        prefix_cache_min_tokens=128,
+    )
+    backend = LlamaCppBackend()
+    backend._model = model
+    backend._llm = types.SimpleNamespace(set_cache=lambda _cache: None)
+    backend._prefix_policy = PrefixStatePolicy(1024 * 1024, 128, 64)
+    backend._prefix_adapter = types.SimpleNamespace(set_prompt_tokens=lambda _tokens: None)
+    backend._prefix_n_batch = 128
+    backend._prefix_n_vocab = 151_936
+    backend._prefix_n_ctx = 4096
+    backend._kv_bytes_per_token_estimate = 112 * 1024
+
+    backend._attach_prefix_cache(2000, "synthetic", max_output_tokens=2048)
+    assert backend._prefix_attached is False
+    assert backend._attach_skipped_reason == "projected_oversize"
+    assert backend._prefix_projected_bytes is not None
+    assert backend._prefix_projected_bytes > backend._prefix_policy.capacity_bytes
+
+
 def test_process_runner_sync_rejects_running_loop_without_creating_coroutine() -> None:
     async def check() -> None:
         with warnings.catch_warnings(record=True) as caught:
