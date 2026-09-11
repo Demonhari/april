@@ -185,6 +185,7 @@ class RouteResult(BaseModel):
     coercions: list[str] = Field(default_factory=list, max_length=8)
     routing_latency_ms: float | None = Field(default=None, ge=0.0)
     runtime_timing: dict[str, object] = Field(default_factory=dict)
+    runtime_prefix_cache: dict[str, object] = Field(default_factory=dict)
 
     @property
     def route_key(self) -> str:

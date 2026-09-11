@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
+import json
 import struct
 import sys
 import types
@@ -398,6 +400,66 @@ async def test_fake_voice_conversation_loop(settings_tmp, tmp_path: Path) -> Non
     )
     assert await loop.run_once() == "voice answer"
     assert api.payloads == [{"message": "open the project", "conversation_id": "voice-conv-1"}]
+
+
+@pytest.mark.asyncio
+async def test_voice_timing_observer_reports_ordered_redacted_breakdown(
+    settings_tmp, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    timings: list[dict[str, float]] = []
+    audio = tmp_path / "captured.wav"
+
+    async def capture(_path: Path) -> Path:
+        events.append("capture")
+        await asyncio.sleep(0.001)
+        audio.write_bytes(b"audio")
+        return audio
+
+    class SlowStt:
+        async def transcribe(self, _path: Path) -> str:
+            events.append("stt")
+            await asyncio.sleep(0.001)
+            return "April, synthetic request"
+
+    class SlowApi(FakeApi):
+        async def post(self, path: str, payload: dict[str, str]) -> dict[str, object]:
+            events.append("api")
+            await asyncio.sleep(0.001)
+            return await super().post(path, payload)
+
+    class SlowTts(FakeTextToSpeech):
+        async def synthesize(self, text: str, output_path: Path) -> Path:
+            events.append("tts")
+            await asyncio.sleep(0.001)
+            return await super().synthesize(text, output_path)
+
+    class OrderedPlayer(FakeAudioPlayer):
+        async def play(self, path: Path) -> None:
+            events.append("play")
+            await asyncio.sleep(0.001)
+            await super().play(path)
+
+    loop = PushToTalkLoop(
+        api_client=SlowApi(),  # type: ignore[arg-type]
+        stt=SlowStt(),  # type: ignore[arg-type]
+        tts=SlowTts(),
+        player=OrderedPlayer(),
+        capture=capture,
+        timing_observer=timings.append,
+    )
+    assert await loop.run_once() == "voice answer"
+    assert events == ["capture", "stt", "api", "tts", "play"]
+    assert len(timings) == 1
+    assert set(timings[0]) == {
+        "capture_ms",
+        "stt_ms",
+        "api_ms",
+        "tts_ms",
+        "time_to_first_audio_ms",
+    }
+    assert all(isinstance(value, float) and value >= 0 for value in timings[0].values())
+    assert "text" not in json.dumps(timings[0]).lower()
 
 
 @pytest.mark.asyncio

@@ -349,7 +349,9 @@ class ModelLifecycle:
             flash_attn=state.model.flash_attn,
             prefix_cache_mb=state.model.prefix_cache_mb,
             prefix_cache_min_tokens=state.model.prefix_cache_min_tokens,
-            prefix_cache=(state.backend.prefix_cache_diagnostics() if state.backend else None),
+            prefix_cache=(
+                state.backend.prefix_cache_aggregate_diagnostics() if state.backend else None
+            ),
             n_batch=state.model.n_batch,
             n_ubatch=state.model.n_ubatch,
             n_gpu_layers=state.model.n_gpu_layers,
@@ -631,6 +633,7 @@ class ModelLifecycle:
         state = await self.load_model(
             request.model_id, generation_threads=request.generation_threads
         )
+        loaded_at = time.monotonic()
         if state.backend is None:
             raise ModelUnavailableError(request.model_id, "Model backend is not available.")
         # Reserve the loaded instance before the first await after load_model.
@@ -657,17 +660,17 @@ class ModelLifecycle:
             metadata=metadata,
             disable_thinking=disable_thinking,
         )
+        context_ready_at = time.monotonic()
         lock = (
             state.generation_lock
             if not state.backend.supports_concurrent_generation
             else _NoopLock()
         )
         async with lock:
-            lock_wait_ms = (time.monotonic() - request_started) * 1000
+            lock_acquired_at = time.monotonic()
             thread_budget_applied = await self._apply_thread_budget(
                 state, request.generation_threads
             )
-            start = time.monotonic()
             try:
                 if request.options.enable_thinking is not None:
                     result = await _generate_messages_compat(
@@ -709,7 +712,8 @@ class ModelLifecycle:
                 ) from exc
             finally:
                 state.active_requests = max(0, state.active_requests - 1)
-            elapsed = max(time.monotonic() - start, 0.000_001)
+            generation_done_at = time.monotonic()
+            elapsed = max(generation_done_at - lock_acquired_at, 0.000_001)
         state.last_used_at = utc_now_iso()
         state.last_used_monotonic = time.monotonic()
         state.generations += 1
@@ -723,16 +727,19 @@ class ModelLifecycle:
             total_tokens=result.input_tokens + result.output_tokens,
         )
         timing = {
-            "load_wait_ms": max((start - request_started) * 1000, 0.0),
-            "lock_wait_ms": max(lock_wait_ms, 0.0),
-            "total_ms": max((time.monotonic() - request_started) * 1000, 0.0),
+            **state.backend.timing_diagnostics(),
             "prompt_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
             "threads": state.loaded_threads,
             "threads_batch": state.loaded_threads_batch,
             "thread_budget_applied": thread_budget_applied,
-            **state.backend.timing_diagnostics(),
+            "load_ms": max((loaded_at - request_started) * 1000, 0.0),
+            "context_ms": max((context_ready_at - loaded_at) * 1000, 0.0),
+            "lock_wait_ms": max((lock_acquired_at - context_ready_at) * 1000, 0.0),
+            "generation_ms": max((generation_done_at - lock_acquired_at) * 1000, 0.0),
+            "total_ms": max((generation_done_at - request_started) * 1000, 0.0),
         }
+        _add_derived_timing(timing)
         usage = usage.model_copy(update={"timing": timing})
         warnings = ["Context was truncated."] if context.truncated else []
         reservation_reduced = reserved_output_tokens < options.max_output_tokens
@@ -832,9 +839,11 @@ class ModelLifecycle:
     async def stream(
         self, request: ChatRequest
     ) -> AsyncIterator[tuple[RuntimeStreamEventName, dict[str, object]]]:
+        request_started = time.monotonic()
         state = await self.load_model(
             request.model_id, generation_threads=request.generation_threads
         )
+        loaded_at = time.monotonic()
         if state.backend is None:
             raise ModelUnavailableError(request.model_id, "Model backend is not available.")
         state.active_requests += 1
@@ -858,17 +867,16 @@ class ModelLifecycle:
             metadata=metadata,
             disable_thinking=disable_thinking,
         )
+        context_ready_at = time.monotonic()
         input_tokens = context.input_tokens
         output_tokens = 0
-        request_started = time.monotonic()
-        start = request_started
         lock = (
             state.generation_lock
             if not state.backend.supports_concurrent_generation
             else _NoopLock()
         )
         async with lock:
-            lock_wait_ms = (time.monotonic() - request_started) * 1000
+            lock_acquired_at = time.monotonic()
             thread_budget_applied = await self._apply_thread_budget(
                 state, request.generation_threads
             )
@@ -921,7 +929,7 @@ class ModelLifecycle:
                     )
                 async for token in token_stream:
                     if output_tokens == 0:
-                        ttft_ms = (time.monotonic() - request_started) * 1000
+                        first_token_at = time.monotonic()
                     output_tokens += len(await state.backend.tokenize(token))
                     yield "token", {"text": token}
             except asyncio.CancelledError:
@@ -942,25 +950,30 @@ class ModelLifecycle:
                 state.active_requests = max(0, state.active_requests - 1)
                 state.last_used_at = utc_now_iso()
                 state.last_used_monotonic = time.monotonic()
+            generation_done_at = time.monotonic()
         state.generations += 1
         state.input_tokens += input_tokens
         state.output_tokens += output_tokens
-        elapsed = max(time.monotonic() - start, 0.000_001)
+        elapsed = max(generation_done_at - lock_acquired_at, 0.000_001)
         state.recent_latency_ms = elapsed * 1000
         state.recent_tokens_per_second = output_tokens / elapsed
         state.backend.finish_timing_diagnostics(input_tokens, output_tokens)
         timing = {
-            "load_wait_ms": max((start - request_started) * 1000, 0.0),
-            "lock_wait_ms": max(lock_wait_ms, 0.0),
-            "total_ms": max((time.monotonic() - request_started) * 1000, 0.0),
-            "ttft_ms": locals().get("ttft_ms"),
+            **state.backend.timing_diagnostics(),
             "prompt_tokens": input_tokens,
             "output_tokens": output_tokens,
             "threads": state.loaded_threads,
             "threads_batch": state.loaded_threads_batch,
             "thread_budget_applied": thread_budget_applied,
-            **state.backend.timing_diagnostics(),
+            "load_ms": max((loaded_at - request_started) * 1000, 0.0),
+            "context_ms": max((context_ready_at - loaded_at) * 1000, 0.0),
+            "lock_wait_ms": max((lock_acquired_at - context_ready_at) * 1000, 0.0),
+            "generation_ms": max((generation_done_at - lock_acquired_at) * 1000, 0.0),
+            "total_ms": max((generation_done_at - request_started) * 1000, 0.0),
         }
+        if "first_token_at" in locals():
+            timing["ttft_ms"] = max((first_token_at - request_started) * 1000, 0.0)
+        _add_derived_timing(timing)
         yield (
             "usage",
             {
@@ -1124,6 +1137,32 @@ def _is_within(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _add_derived_timing(timing: dict[str, object]) -> None:
+    prompt_ms = timing.get("prompt_eval_ms")
+    eval_ms = timing.get("eval_ms")
+    prompt_eval_tokens = timing.get("prompt_eval_tokens")
+    eval_tokens = timing.get("eval_tokens")
+    prompt_tokens = timing.get("prompt_tokens")
+    if (
+        isinstance(prompt_ms, (int, float))
+        and prompt_ms > 0
+        and isinstance(prompt_eval_tokens, (int, float))
+    ):
+        timing["prompt_eval_tokens_per_second"] = (
+            float(prompt_eval_tokens) / float(prompt_ms) * 1000.0
+        )
+    if isinstance(eval_ms, (int, float)) and eval_ms > 0 and isinstance(eval_tokens, (int, float)):
+        timing["eval_tokens_per_second"] = float(eval_tokens) / float(eval_ms) * 1000.0
+    if (
+        isinstance(prompt_tokens, (int, float))
+        and prompt_tokens > 0
+        and isinstance(prompt_eval_tokens, (int, float))
+    ):
+        timing["prompt_reuse_ratio"] = min(
+            1.0, max(0.0, 1.0 - float(prompt_eval_tokens) / float(prompt_tokens))
+        )
 
 
 async def _generate_messages_compat(backend: RuntimeBackend, prompt: str, **kwargs: Any) -> Any:

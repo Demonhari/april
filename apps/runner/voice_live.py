@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import platform
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -60,6 +61,7 @@ class VoiceLiveReport(BaseModel):
     # AND summary == "pass"). A degraded/failed/skipped run can never set this true,
     # so a voice report can never be mistaken for a verified live voice pass.
     voice_live_verified: bool = False
+    voice_timing: dict[str, float] | None = None
 
     @model_validator(mode="after")
     def _mirror_timestamp(self) -> VoiceLiveReport:
@@ -177,6 +179,7 @@ async def run_voice_live_verification(
     tts: TextToSpeech | None = None,
     player: AudioPlayer | None = None,
     transcript_observer: TranscriptObserver | None = None,
+    timing_observer: Callable[[dict[str, float]], None] | None = None,
     report_path: Path | None = None,
 ) -> VoiceLiveReport:
     # Runs doctor first for operator guidance, but the report stores only safe
@@ -220,9 +223,13 @@ async def run_voice_live_verification(
     audio_player = player or SoundDeviceAudioPlayer(device=settings.voice.output_device)
 
     try:
+        capture_started = time.monotonic()
         recorded_path = await mic.record_push_to_talk(input_path)
+        capture_finished = time.monotonic()
+        stt_started = capture_finished
         report.recording_success = recorded_path.exists()
         transcript = require_usable_transcript(await speech.transcribe(recorded_path))
+        api_started = time.monotonic()
         report.stt_success = True
         report.transcript_length = len(transcript)
         if transcript_observer is not None:
@@ -230,9 +237,22 @@ async def run_voice_live_verification(
         report.transcription_user_confirmed = confirm_transcription(
             "Was the transcription correct? The report stores only transcript length."
         )
+        api_finished = time.monotonic()
+        tts_started = api_finished
         spoken_path = await synthesizer.synthesize("APRIL voice verification.", output_path)
+        player_started = time.monotonic()
         report.tts_success = spoken_path.exists()
         await audio_player.play(spoken_path)
+        report.voice_timing = {
+            "capture_ms": (capture_finished - capture_started) * 1000.0,
+            "stt_ms": (api_started - stt_started) * 1000.0,
+            "api_ms": 0.0,
+            "tts_ms": (player_started - tts_started) * 1000.0,
+            "time_to_first_audio_ms": (player_started - capture_finished) * 1000.0,
+        }
+        report.voice_timing["api_ms"] = (api_finished - api_started) * 1000.0
+        if timing_observer is not None:
+            timing_observer(dict(report.voice_timing))
         report.playback_user_confirmed = confirm_playback("Did you hear the playback?")
     except KeyboardInterrupt:
         report.skipped.append(VoiceLiveSkippedCheck(name="voice-live", reason="interrupted"))

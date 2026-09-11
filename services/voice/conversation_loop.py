@@ -179,6 +179,7 @@ class PushToTalkLoop:
         record_seconds: float | None = None,
         capture: CaptureStrategy | None = None,
         transcript_observer: Callable[[str], None] | None = None,
+        timing_observer: Callable[[dict[str, float]], None] | None = None,
     ) -> None:
         settings = get_settings()
         self.settings = settings
@@ -203,6 +204,7 @@ class PushToTalkLoop:
         self.conversation_id = conversation_id or str(uuid.uuid4())
         self.record_seconds = max_seconds
         self.transcript_observer = transcript_observer
+        self.timing_observer = timing_observer
         self.vad = VoiceActivityDetector(
             energy_threshold=settings.voice.vad_energy_threshold,
             required_frames=settings.voice.vad_onset_frames,
@@ -213,22 +215,53 @@ class PushToTalkLoop:
         audio_path = self.settings.audio_cache_path / f"{uuid.uuid4()}.wav"
         tts_path = self.settings.audio_cache_path / f"{uuid.uuid4()}-reply.wav"
         capture = self._capture or self.microphone.record_push_to_talk
+        captured_at: float | None = None
+        capture_started = time.monotonic()
+        stt_started: float | None = None
+        api_started: float | None = None
+        tts_started: float | None = None
+        player_started: float | None = None
         try:
             spoken_path = await capture(audio_path)
+            captured_at = time.monotonic()
+            stt_started = captured_at
             text = require_usable_transcript(
                 await self.stt.transcribe(spoken_path), wake_word="april"
             )
             if self.transcript_observer is not None:
                 self.transcript_observer(text)
+            api_started = time.monotonic()
             response = await self.api_client.post(
                 "/voice/input",
                 {"message": text, "conversation_id": self.conversation_id},
             )
             answer = response["result"]["final_message"]
+            tts_started = time.monotonic()
             output_path = await self.tts.synthesize(answer, tts_path)
+            player_started = time.monotonic()
             await self.player.play(output_path)
             return answer
         finally:
+            if self.timing_observer is not None:
+                now = time.monotonic()
+                end = captured_at or now
+                self.timing_observer(
+                    {
+                        "capture_ms": max((end - capture_started) * 1000.0, 0.0),
+                        "stt_ms": max(((api_started or now) - stt_started) * 1000.0, 0.0)
+                        if stt_started is not None
+                        else 0.0,
+                        "api_ms": max(((tts_started or now) - api_started) * 1000.0, 0.0)
+                        if api_started is not None
+                        else 0.0,
+                        "tts_ms": max(((player_started or now) - tts_started) * 1000.0, 0.0)
+                        if tts_started is not None
+                        else 0.0,
+                        "time_to_first_audio_ms": max((player_started - end) * 1000.0, 0.0)
+                        if player_started is not None
+                        else 0.0,
+                    }
+                )
             # Temporary audio is removed on every exit path (success or error)
             # unless the user opted to retain it for debugging.
             if not self.settings.voice.retain_debug_audio:
@@ -261,8 +294,16 @@ class WakeWordConversationLoop(PushToTalkLoop):
         self.settings.audio_cache_path.mkdir(parents=True, exist_ok=True)
         audio_path = self.settings.audio_cache_path / f"{uuid.uuid4()}-utterance.wav"
         tts_path = self.settings.audio_cache_path / f"{uuid.uuid4()}-reply.wav"
+        captured_at: float | None = None
+        capture_started = time.monotonic()
+        stt_started: float | None = None
+        api_started: float | None = None
+        tts_started: float | None = None
+        player_started: float | None = None
         try:
             spoken_path = await self._capture_wake_utterance(audio_path)
+            captured_at = time.monotonic()
+            stt_started = captured_at
             if self.last_endpoint_metrics is None or self.last_endpoint_metrics.stop_reason in {
                 "no_speech",
                 "too_short",
@@ -280,15 +321,38 @@ class WakeWordConversationLoop(PushToTalkLoop):
             )
             if self.transcript_observer is not None:
                 self.transcript_observer(text)
+            api_started = time.monotonic()
             response = await self.api_client.post(
                 "/voice/input",
                 {"message": text, "conversation_id": self.conversation_id},
             )
             answer = response["result"]["final_message"]
+            tts_started = time.monotonic()
             output_path = await self.tts.synthesize(answer, tts_path)
+            player_started = time.monotonic()
             await self.player.play(output_path)
             return answer
         finally:
+            if self.timing_observer is not None:
+                now = time.monotonic()
+                end = captured_at or now
+                self.timing_observer(
+                    {
+                        "capture_ms": max((end - capture_started) * 1000.0, 0.0),
+                        "stt_ms": max(((api_started or now) - stt_started) * 1000.0, 0.0)
+                        if stt_started is not None
+                        else 0.0,
+                        "api_ms": max(((tts_started or now) - api_started) * 1000.0, 0.0)
+                        if api_started is not None
+                        else 0.0,
+                        "tts_ms": max(((player_started or now) - tts_started) * 1000.0, 0.0)
+                        if tts_started is not None
+                        else 0.0,
+                        "time_to_first_audio_ms": max((player_started - end) * 1000.0, 0.0)
+                        if player_started is not None
+                        else 0.0,
+                    }
+                )
             if not self.settings.voice.retain_debug_audio:
                 for path in (audio_path, tts_path):
                     Path(path).unlink(missing_ok=True)

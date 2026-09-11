@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
-from typing import Any, cast
+from typing import Any
 
 from april_common.errors import RuntimeUnavailableError
 from services.april_runtime.backend import BackendHealth, GenerationResult, RuntimeBackend
@@ -64,6 +65,19 @@ class LlamaCppBackend(RuntimeBackend):
         self._prefix_disabled_reason: str | None = None
         self._prefix_lookup_hit = False
         self._prefix_lookup_diagnostics: dict[str, object] = {}
+        self._prefix_attached = False
+        self._prefix_call_id = 0
+        self._prefix_aggregates: dict[str, int] = {
+            "lookups": 0,
+            "restores": 0,
+            "restore_failures": 0,
+            "saves": 0,
+            "evictions": 0,
+            "rejected_oversize": 0,
+            "attach_skipped": 0,
+        }
+        self._bytes_per_token_estimate = 0.0
+        self._attach_skipped_reason: str | None = None
         self._last_timing: dict[str, object] = {}
         self._perf_started = False
         self._llama_module: Any | None = None
@@ -122,12 +136,22 @@ class LlamaCppBackend(RuntimeBackend):
         self._prompt_metadata = _extract_prompt_metadata(self._llm)
         self._prefix_policy = None
         self._prefix_adapter = None
+        self._prefix_attached = False
         self._prefix_disabled_reason = None
+        self._prefix_aggregates = {
+            "lookups": 0,
+            "restores": 0,
+            "restore_failures": 0,
+            "saves": 0,
+            "evictions": 0,
+            "rejected_oversize": 0,
+            "attach_skipped": 0,
+        }
+        self._bytes_per_token_estimate = 0.0
         if (
             model.role != "embedding"
             and (model.prefix_cache_mb or 0) > 0
             and self._prefix_cache_enabled
-            and _prefix_cache_enabled()
         ):
             base_cache = getattr(llama_cpp, "BaseLlamaCache", None)
             if base_cache is not None and callable(getattr(self._llm, "set_cache", None)):
@@ -142,14 +166,17 @@ class LlamaCppBackend(RuntimeBackend):
                         self._llm,
                         self._prefix_policy,
                         lambda: self._disable_prefix_cache("adapter_error"),
+                        self._record_prefix_save,
+                        self._record_prefix_event,
                     )
+                    _install_state_wrappers(self._llm, self._prefix_adapter)
                 except Exception:
                     self._prefix_policy = None
                     self._prefix_adapter = None
                     self._prefix_disabled_reason = "cache_adapter_unavailable"
             else:
                 self._prefix_disabled_reason = "cache_protocol_unavailable"
-        elif not self._prefix_cache_enabled or not _prefix_cache_enabled():
+        elif not self._prefix_cache_enabled:
             self._prefix_disabled_reason = "disabled_by_environment"
 
     def prompt_metadata(self) -> dict[str, object]:
@@ -208,7 +235,8 @@ class LlamaCppBackend(RuntimeBackend):
         llm = self._llm
         if prompt_tokens is None:
             prompt_tokens = await self.count_tokens(prompt)
-        self._attach_prefix_cache(prompt_tokens, prompt)
+        self._begin_generation_attempt()
+        self._attach_prefix_cache(prompt_tokens, prompt, max_output_tokens=max_output_tokens)
         self._begin_perf()
 
         def run() -> Any:
@@ -229,7 +257,7 @@ class LlamaCppBackend(RuntimeBackend):
             output = await asyncio.to_thread(run)
         except Exception:
             self._refresh_prefix_lookup()
-            if _allow_cache_retry and self._prefix_lookup_hit:
+            if _allow_cache_retry and self._current_call_had_restore_failure():
                 self._recover_from_cache_failure()
                 return await self._generate_prompt_completion(
                     prompt,
@@ -310,14 +338,17 @@ class LlamaCppBackend(RuntimeBackend):
             )
 
         try:
-            self._attach_prefix_cache(prompt_tokens, prompt)
+            self._begin_generation_attempt()
+            self._attach_prefix_cache(prompt_tokens, prompt, max_output_tokens=max_output_tokens)
             self._begin_perf()
             try:
                 output = await asyncio.to_thread(run)
             except Exception:
                 self._refresh_prefix_lookup()
-                if self._prefix_lookup_hit:
+                if self._current_call_had_restore_failure():
                     self._recover_from_cache_failure()
+                    self._begin_generation_attempt()
+                    self._begin_perf()
                     output = await asyncio.to_thread(run)
                 else:
                     raise
@@ -388,7 +419,8 @@ class LlamaCppBackend(RuntimeBackend):
         llm = self._llm
         if prompt_tokens is None:
             prompt_tokens = await self.count_tokens(prompt)
-        self._attach_prefix_cache(prompt_tokens, prompt)
+        self._begin_generation_attempt()
+        self._attach_prefix_cache(prompt_tokens, prompt, max_output_tokens=max_output_tokens)
         self._begin_perf()
 
         def make_iterator(is_cancelled: Callable[[], bool]) -> Iterator[str]:
@@ -417,7 +449,7 @@ class LlamaCppBackend(RuntimeBackend):
                 yield token
         except Exception:
             self._refresh_prefix_lookup()
-            if _allow_cache_retry and self._prefix_lookup_hit:
+            if _allow_cache_retry and self._current_call_had_restore_failure():
                 self._recover_from_cache_failure()
                 async for token in self._stream_prompt_completion(
                     prompt,
@@ -471,7 +503,8 @@ class LlamaCppBackend(RuntimeBackend):
         llm = self._llm
         if prompt_tokens is None:
             prompt_tokens = await self.count_tokens(prompt)
-        self._attach_prefix_cache(prompt_tokens, prompt)
+        self._begin_generation_attempt()
+        self._attach_prefix_cache(prompt_tokens, prompt, max_output_tokens=max_output_tokens)
         self._begin_perf()
         format_kwarg = llama_response_format(response_format)
 
@@ -504,8 +537,10 @@ class LlamaCppBackend(RuntimeBackend):
                 # If nothing was emitted yet, degrade to prompt completion; once
                 # tokens are flowing a mid-stream failure is surfaced to the caller.
                 self._refresh_prefix_lookup()
-                if not emitted and self._prefix_lookup_hit:
+                if not emitted and self._current_call_had_restore_failure():
                     self._recover_from_cache_failure()
+                    self._begin_generation_attempt()
+                    self._begin_perf()
                     for chunk in chat_completion(
                         messages=self._message_dicts(messages, disable_thinking=disable_thinking),
                         **chat_kwargs,
@@ -622,21 +657,47 @@ class LlamaCppBackend(RuntimeBackend):
         self._finish_perf(prompt_tokens, output_tokens)
 
     def prefix_cache_diagnostics(self) -> dict[str, object]:
+        attached = bool(self._prefix_adapter is not None and self._prefix_attached)
         result: dict[str, object] = {
             "enabled": self._prefix_policy is not None,
-            "attached": self._prefix_adapter is not None
-            and getattr(self._llm, "cache", None) is self._prefix_adapter,
+            "attached": attached,
             "disabled_reason": self._prefix_disabled_reason,
         }
-        if self._prefix_policy is not None:
-            result.update(self._prefix_policy.stats())
-            result.update(self._prefix_lookup_diagnostics)
-        if self._prefix_lookup_diagnostics.get("hit") is True:
-            result["reused_prefix_tokens"] = max(
-                int(cast(Any, self._prefix_lookup_diagnostics.get("live_prefix_tokens", 0))),
-                int(cast(Any, self._prefix_lookup_diagnostics.get("cached_prefix_tokens", 0))),
+        if self._prefix_call_id and attached:
+            result["lookup_performed"] = bool(
+                self._prefix_lookup_diagnostics.get("lookup_performed", False)
             )
+            if result["lookup_performed"]:
+                result.update(
+                    {
+                        key: value
+                        for key, value in self._prefix_lookup_diagnostics.items()
+                        if key
+                        in {
+                            "hit",
+                            "restored",
+                            "live_prefix_tokens",
+                            "cached_prefix_tokens",
+                            "reused_prefix_tokens",
+                            "restore_ms",
+                            "save_ms",
+                            "state_bytes",
+                        }
+                    }
+                )
+        elif self._prefix_call_id:
+            result["attach_skipped_reason"] = self._attach_skipped_reason
         return {key: value for key, value in result.items() if value is not None}
+
+    def prefix_cache_aggregate_diagnostics(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "enabled": self._prefix_policy is not None,
+            **self._prefix_aggregates,
+        }
+        if self._prefix_policy is not None:
+            stats = self._prefix_policy.stats()
+            result.update({key: stats[key] for key in ("entries", "bytes", "hits", "misses")})
+        return result
 
     def _reset_generation_diagnostics(self) -> None:
         self.last_prompt_path = None
@@ -644,7 +705,21 @@ class LlamaCppBackend(RuntimeBackend):
         self.last_structured_output_fallback_reason = None
         self._prefix_lookup_hit = False
         self._prefix_lookup_diagnostics = {}
+        self._prefix_call_id = 0
+        self._prefix_attached = False
+        self._attach_skipped_reason = None
         self._last_timing = {}
+
+    def _begin_generation_attempt(self) -> int:
+        self._prefix_call_id += 1
+        self._prefix_lookup_hit = False
+        self._prefix_lookup_diagnostics = {}
+        self._attach_skipped_reason = None
+        if self._prefix_adapter is not None:
+            begin = getattr(self._prefix_adapter, "begin_call", None)
+            if callable(begin):
+                begin(self._prefix_call_id)
+        return self._prefix_call_id
 
     def _begin_perf(self) -> None:
         self._perf_started = False
@@ -659,20 +734,48 @@ class LlamaCppBackend(RuntimeBackend):
 
     def _refresh_prefix_lookup(self) -> None:
         if self._prefix_adapter is not None:
-            self._prefix_lookup_diagnostics = dict(getattr(self._prefix_adapter, "last_lookup", {}))
-            self._prefix_lookup_hit = bool(self._prefix_lookup_diagnostics.get("hit", False))
+            lookup = dict(getattr(self._prefix_adapter, "last_lookup", {}))
+            if lookup.get("call_id") != self._prefix_call_id:
+                return
+            self._prefix_lookup_diagnostics = lookup
+            restore = dict(getattr(self._prefix_adapter, "last_restore", {}))
+            if restore.get("call_id") == self._prefix_call_id:
+                self._prefix_lookup_diagnostics.update(
+                    {
+                        "restored": bool(restore.get("ok")),
+                        "restore_ms": restore.get("ms"),
+                    }
+                )
+                if not restore.get("ok"):
+                    self._prefix_lookup_diagnostics["restore_failed"] = True
+            save = dict(getattr(self._prefix_adapter, "last_save", {}))
+            if save.get("call_id") == self._prefix_call_id:
+                self._prefix_lookup_diagnostics.update(
+                    {"save_ms": save.get("ms"), "state_bytes": save.get("bytes")}
+                )
+            if self._prefix_lookup_diagnostics.get("lookup_performed"):
+                live_value = self._prefix_lookup_diagnostics.get("live_prefix_tokens", 0)
+                cached_value = self._prefix_lookup_diagnostics.get("cached_prefix_tokens", 0)
+                live = int(live_value) if isinstance(live_value, (int, float)) else 0
+                cached = int(cached_value) if isinstance(cached_value, (int, float)) else 0
+                restored = bool(self._prefix_lookup_diagnostics.get("restored", False))
+                self._prefix_lookup_diagnostics["reused_prefix_tokens"] = max(
+                    live, cached if restored else 0
+                )
+                self._prefix_lookup_hit = bool(
+                    self._prefix_lookup_diagnostics.get("hit", False) and restored
+                )
+
+    def _current_call_had_restore_failure(self) -> bool:
+        self._refresh_prefix_lookup()
+        return bool(self._prefix_lookup_diagnostics.get("restore_failed", False))
 
     def _finish_perf(self, prompt_tokens: int, output_tokens: int) -> None:
         self._last_timing = {
             "prompt_tokens": prompt_tokens,
             "output_tokens": output_tokens,
-            "threads": self._model.threads if self._model else None,
-            "threads_batch": (
-                (self._model.threads_batch or self._model.threads) if self._model else None
-            ),
         }
-        if self._prefix_adapter is not None:
-            self._prefix_lookup_diagnostics = dict(getattr(self._prefix_adapter, "last_lookup", {}))
+        self._refresh_prefix_lookup()
         if not self._perf_started:
             self._last_timing = {
                 key: value for key, value in self._last_timing.items() if value is not None
@@ -684,32 +787,81 @@ class LlamaCppBackend(RuntimeBackend):
             return
         try:
             data = reader(ctx)
-            values = {}
+            values: dict[str, object] = {}
             for target, names in {
                 "prompt_eval_tokens": ("n_p_eval", "prompt_eval_tokens"),
-                "prompt_eval_ms": ("t_p_eval", "prompt_eval_ms"),
+                "prompt_eval_ms": ("t_p_eval_ms", "prompt_eval_ms"),
                 "eval_tokens": ("n_eval", "eval_tokens"),
-                "eval_ms": ("t_eval", "eval_ms"),
+                "eval_ms": ("t_eval_ms", "eval_ms"),
             }.items():
-                value = next(
-                    (data.get(name) for name in names if isinstance(data, dict) and name in data),
-                    next((getattr(data, name) for name in names if hasattr(data, name)), None),
-                )
+                # llama_perf_context_data is a ctypes structure in supported
+                # llama.cpp releases.  Mapping support remains for older test
+                # doubles and bindings that expose a dictionary.
+                value = next((getattr(data, name) for name in names if hasattr(data, name)), None)
+                if value is None and isinstance(data, dict):
+                    value = next((data.get(name) for name in names if name in data), None)
                 if value is not None:
                     values[target] = float(value) if target.endswith("_ms") else int(value)
             self._last_timing.update(values)
+            prompt_ms = self._last_timing.get("prompt_eval_ms")
+            eval_ms = self._last_timing.get("eval_ms")
+            prompt_eval_tokens = self._last_timing.get("prompt_eval_tokens")
+            eval_tokens = self._last_timing.get("eval_tokens")
+            if (
+                isinstance(prompt_ms, (int, float))
+                and prompt_ms > 0
+                and isinstance(prompt_eval_tokens, (int, float))
+            ):
+                self._last_timing["prompt_eval_tokens_per_second"] = (
+                    float(prompt_eval_tokens) / float(prompt_ms) * 1000.0
+                )
+            if (
+                isinstance(eval_ms, (int, float))
+                and eval_ms > 0
+                and isinstance(eval_tokens, (int, float))
+            ):
+                self._last_timing["eval_tokens_per_second"] = (
+                    float(eval_tokens) / float(eval_ms) * 1000.0
+                )
+            if (
+                isinstance(prompt_tokens, int)
+                and prompt_tokens > 0
+                and isinstance(prompt_eval_tokens, (int, float))
+            ):
+                self._last_timing["prompt_reuse_ratio"] = min(
+                    1.0, max(0.0, 1.0 - float(prompt_eval_tokens) / float(prompt_tokens))
+                )
         except Exception:
             return
 
-    def _attach_prefix_cache(self, prompt_tokens: int, prompt: str) -> None:
+    def _attach_prefix_cache(
+        self, prompt_tokens: int, prompt: str, *, max_output_tokens: int = 0
+    ) -> None:
+        del prompt
+        self._prefix_attached = False
         if self._llm is None or self._prefix_adapter is None or self._model is None:
             return
         if prompt_tokens < self._model.prefix_cache_min_tokens:
             with contextlib.suppress(Exception):
                 self._llm.set_cache(None)
+            self._attach_skipped_reason = "short_prompt"
+            self._prefix_aggregates["attach_skipped"] += 1
+            return
+        if (
+            self._bytes_per_token_estimate > 0
+            and (prompt_tokens + max_output_tokens) * self._bytes_per_token_estimate
+            > self._prefix_policy.capacity_bytes
+            if self._prefix_policy is not None
+            else False
+        ):
+            with contextlib.suppress(Exception):
+                self._llm.set_cache(None)
+            self._attach_skipped_reason = "projected_oversize"
+            self._prefix_aggregates["attach_skipped"] += 1
             return
         try:
             self._llm.set_cache(self._prefix_adapter)
+            self._prefix_attached = True
         except Exception:
             self._disable_prefix_cache("set_cache_failed")
 
@@ -724,11 +876,26 @@ class LlamaCppBackend(RuntimeBackend):
 
     def _disable_prefix_cache(self, reason: str) -> None:
         self._prefix_disabled_reason = reason
+        self._prefix_attached = False
         self._prefix_adapter = None
         self._prefix_policy = None
         if self._llm is not None:
             with contextlib.suppress(Exception):
                 self._llm.set_cache(None)
+
+    def _record_prefix_event(self, name: str) -> None:
+        if name in self._prefix_aggregates:
+            self._prefix_aggregates[name] += 1
+
+    def _record_prefix_save(self, key: tuple[int, ...], nbytes: int) -> None:
+        self._prefix_aggregates["saves"] += 1
+        if key:
+            ratio = float(nbytes) / len(key)
+            self._bytes_per_token_estimate = (
+                ratio
+                if self._bytes_per_token_estimate <= 0
+                else 0.5 * self._bytes_per_token_estimate + 0.5 * ratio
+            )
 
     def _mark_chat_success(self) -> None:
         self.last_prompt_path = "chat_template"
@@ -831,11 +998,23 @@ def _build_prefix_adapter(
     llm: Any,
     policy: PrefixStatePolicy,
     on_error: Callable[[], None],
+    on_save: Callable[[tuple[int, ...], int], None] | None = None,
+    on_event: Callable[[str], None] | None = None,
 ) -> Any:
     class PrefixCacheAdapter(base_cache):
         def __init__(self) -> None:
             super().__init__(capacity_bytes=policy.capacity_bytes)
             self.last_lookup: dict[str, object] = {}
+            self.last_restore: dict[str, object] = {}
+            self.last_save: dict[str, object] = {}
+            self._call_id = 0
+            self.on_event = on_event
+
+        def begin_call(self, call_id: int) -> None:
+            self._call_id = call_id
+            self.last_lookup = {}
+            self.last_restore = {}
+            self.last_save = {}
 
         @property
         def cache_size(self) -> int:
@@ -858,11 +1037,16 @@ def _build_prefix_adapter(
                 cached_prefix = _common_prefix_length(tokens, cached)
                 hit = cached_prefix > live_prefix
                 self.last_lookup = {
+                    "call_id": self._call_id,
+                    "lookup_performed": True,
                     "prompt_tokens": len(tokens),
                     "live_prefix_tokens": live_prefix,
                     "cached_prefix_tokens": cached_prefix,
                     "hit": hit,
+                    "restored": False,
                 }
+                if on_event is not None:
+                    on_event("lookups")
                 if not hit or entry is None:
                     raise KeyError("prefix cache miss")
                 return entry.state
@@ -887,11 +1071,97 @@ def _build_prefix_adapter(
                 for name in ("scores", "input_ids"):
                     value = getattr(state, name, None)
                     nbytes += int(getattr(value, "nbytes", 0))
-                policy.insert(tokens, state, nbytes)
+                before_evictions = policy.evictions
+                before_rejected = policy.rejected_oversize
+                accepted = policy.insert(tokens, state, nbytes)
+                if accepted and on_save is not None:
+                    on_save(tokens, nbytes)
+                if on_event is not None:
+                    for _ in range(policy.evictions - before_evictions):
+                        on_event("evictions")
+                    for _ in range(policy.rejected_oversize - before_rejected):
+                        on_event("rejected_oversize")
+                if not self.last_save or self.last_save.get("call_id") != self._call_id:
+                    self.last_save = {
+                        "call_id": self._call_id,
+                        "ok": accepted,
+                        "ms": 0.0,
+                        "bytes": nbytes,
+                    }
             except Exception:
+                if not self.last_save or self.last_save.get("call_id") != self._call_id:
+                    self.last_save = {
+                        "call_id": self._call_id,
+                        "ok": False,
+                        "ms": 0.0,
+                        "bytes": 0,
+                    }
                 on_error()
 
     return PrefixCacheAdapter()
+
+
+def _state_nbytes(state: Any) -> int:
+    size = len(getattr(state, "llama_state", b""))
+    for name in ("scores", "input_ids"):
+        size += int(getattr(getattr(state, name, None), "nbytes", 0))
+    return size
+
+
+def _install_state_wrappers(llm: Any, adapter: Any) -> None:
+    """Observe native state copies without changing llama.cpp behavior."""
+    load_state = getattr(llm, "load_state", None)
+    save_state = getattr(llm, "save_state", None)
+    if callable(load_state):
+
+        def wrapped_load(state: Any) -> Any:
+            started = time.monotonic()
+            try:
+                result = load_state(state)
+            except Exception:
+                adapter.last_restore = {
+                    "call_id": getattr(adapter, "_call_id", 0),
+                    "ok": False,
+                    "ms": (time.monotonic() - started) * 1000.0,
+                    "bytes": _state_nbytes(state),
+                }
+                if callable(getattr(adapter, "on_event", None)):
+                    adapter.on_event("restore_failures")
+                raise
+            adapter.last_restore = {
+                "call_id": getattr(adapter, "_call_id", 0),
+                "ok": True,
+                "ms": (time.monotonic() - started) * 1000.0,
+                "bytes": _state_nbytes(state),
+            }
+            if callable(getattr(adapter, "on_event", None)):
+                adapter.on_event("restores")
+            return result
+
+        llm.load_state = wrapped_load
+    if callable(save_state):
+
+        def wrapped_save() -> Any:
+            started = time.monotonic()
+            try:
+                result = save_state()
+            except Exception:
+                adapter.last_save = {
+                    "call_id": getattr(adapter, "_call_id", 0),
+                    "ok": False,
+                    "ms": (time.monotonic() - started) * 1000.0,
+                    "bytes": 0,
+                }
+                raise
+            adapter.last_save = {
+                "call_id": getattr(adapter, "_call_id", 0),
+                "ok": True,
+                "ms": (time.monotonic() - started) * 1000.0,
+                "bytes": _state_nbytes(result),
+            }
+            return result
+
+        llm.save_state = wrapped_save
 
 
 def _common_prefix(left: tuple[int, ...], right: tuple[int, ...]) -> tuple[int, ...]:
@@ -909,12 +1179,6 @@ def _common_prefix(left: tuple[int, ...], right: tuple[int, ...]) -> tuple[int, 
 
 def _common_prefix_length(left: tuple[int, ...], right: tuple[int, ...]) -> int:
     return len(_common_prefix(left, right))
-
-
-def _prefix_cache_enabled() -> bool:
-    import os
-
-    return os.environ.get("APRIL_RUNTIME_PREFIX_CACHE", "on").casefold() != "off"
 
 
 def _strict_response_format(response_format: ResponseFormat | None) -> bool:

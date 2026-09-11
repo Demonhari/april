@@ -809,6 +809,15 @@ def _parse_env_value(raw: str) -> Any:
         return raw
 
 
+def _parse_boolean_env(raw: str, env_name: str) -> bool:
+    normalized = raw.strip().casefold()
+    if normalized in {"off", "false", "0", "no", "disabled"}:
+        return False
+    if normalized in {"on", "true", "1", "yes", "enabled"}:
+        return True
+    raise ConfigError(f"{env_name} must be one of off/false/0/no/disabled or on/true/1/yes/enabled")
+
+
 def _set_nested(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     current = data
     for key in path[:-1]:
@@ -852,7 +861,7 @@ def load_settings(
             # Explicit blank for an optional setting means "unset", not Path(".").
             value: Any = None
         elif env_name == "APRIL_RUNTIME_PREFIX_CACHE":
-            value = raw.strip().casefold() != "off"
+            value = _parse_boolean_env(raw, env_name)
         elif env_name in {"APRIL_ALLOWED_FILESYSTEM_ROOTS", "APRIL_WAKE_WORD_MODEL_PATHS"}:
             value = [part.strip() for part in raw.split(",") if part.strip()]
         else:

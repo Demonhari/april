@@ -152,6 +152,9 @@ class RuntimeBackend(ABC):
     def prefix_cache_diagnostics(self) -> dict[str, object]:
         return {}
 
+    def prefix_cache_aggregate_diagnostics(self) -> dict[str, object]:
+        return {}
+
     @abstractmethod
     async def health(self) -> BackendHealth:
         raise NotImplementedError  # pragma: no cover - abstract contract

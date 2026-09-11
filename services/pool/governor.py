@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import sys
@@ -223,6 +224,8 @@ class ResourceGovernor:
         self._signal_lock = asyncio.Lock()
         self._cached_signals: ResourceSignals | None = None
         self._cached_signals_at = 0.0
+        self._refresh_tasks: set[asyncio.Task[None]] = set()
+        self._logger = logging.getLogger(__name__)
 
     def generation_thread_budget(self) -> int:
         """Return the load-time generation thread budget for current activity.
@@ -246,7 +249,7 @@ class ResourceGovernor:
     async def generation_thread_budget_async(self) -> int:
         safe_default = self.settings.governor.generation_threads_active
         try:
-            signals = await self._sample_async()
+            signals = await self._sample_interactive_async()
         except Exception:
             return safe_default
         if signals.idle_source == SIGNAL_SOURCE_UNKNOWN:
@@ -324,11 +327,48 @@ class ResourceGovernor:
             self._cached_signals_at = time.monotonic()
             return signals
 
+    async def _sample_interactive_async(self) -> ResourceSignals:
+        now = time.monotonic()
+        if self._cached_signals is not None:
+            if now - self._cached_signals_at <= self.settings.governor.signal_ttl_seconds:
+                return self._cached_signals
+            self._schedule_signal_refresh()
+            return self._cached_signals
+        async with self._signal_lock:
+            if self._cached_signals is not None:
+                return self._cached_signals
+            signals = await asyncio.to_thread(self.provider.sample)
+            self._cached_signals = signals
+            self._cached_signals_at = time.monotonic()
+            return signals
+
+    async def _refresh_signals(self) -> None:
+        async with self._signal_lock:
+            signals = await asyncio.to_thread(self.provider.sample)
+            self._cached_signals = signals
+            self._cached_signals_at = time.monotonic()
+
+    def _schedule_signal_refresh(self) -> None:
+        if any(not task.done() for task in self._refresh_tasks):
+            return
+        task = asyncio.create_task(self._refresh_signals())
+        self._refresh_tasks.add(task)
+        task.add_done_callback(self._finish_signal_refresh)
+
+    def _finish_signal_refresh(self, task: asyncio.Task[None]) -> None:
+        self._refresh_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            self._logger.exception("Resource signal refresh failed")
+
     async def sample_signals_async(self) -> ResourceSignals:
-        return await self._sample_async()
+        return await self._sample_interactive_async()
 
     async def assess_resident_async(self) -> GovernorDecision:
-        return self._assess_resident_signals(await self._sample_async())
+        return self._assess_resident_signals(await self._sample_interactive_async())
 
     async def assess_background_async(self) -> GovernorDecision:
         signals = await self._sample_async()
@@ -344,7 +384,7 @@ class ResourceGovernor:
         max_loaded_specialist_count: int | None = None,
         speculative: bool = False,
     ) -> GovernorDecision:
-        signals = await self._sample_async()
+        signals = await self._sample_interactive_async()
         return self._assess_model_load_signals(
             signals,
             projected_resident_gb=projected_resident_gb,

@@ -25,6 +25,7 @@ class PrefixStatePolicy:
         self._bytes = 0
         self.hits = 0
         self.misses = 0
+        self.lookups = 0
         self.evictions = 0
         self.rejected_oversize = 0
 
@@ -42,11 +43,13 @@ class PrefixStatePolicy:
             "bytes": self.bytes,
             "hits": self.hits,
             "misses": self.misses,
+            "lookups": self.lookups,
             "evictions": self.evictions,
             "rejected_oversize": self.rejected_oversize,
         }
 
     def lookup(self, tokens: tuple[int, ...]) -> PrefixStateEntry | None:
+        self.lookups += 1
         if not self._entries:
             self.misses += 1
             return None

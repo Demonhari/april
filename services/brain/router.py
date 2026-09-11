@@ -112,6 +112,7 @@ class BrainRouter:
                 routing_latency_ms=outcome.routing_latency_ms
                 or (time.monotonic() - routing_started) * 1000,
                 runtime_timing=outcome.runtime_timing,
+                runtime_prefix_cache=outcome.runtime_prefix_cache,
             )
         except (RuntimeUnavailableError, OSError, TimeoutError):
             return self._fallback_result(message, reason="runtime_unavailable")
@@ -145,4 +146,5 @@ class BrainRouter:
             coercions=list(getattr(outcome, "coercions", [])),
             routing_latency_ms=getattr(outcome, "routing_latency_ms", None),
             runtime_timing=dict(getattr(outcome, "runtime_timing", {})),
+            runtime_prefix_cache=dict(getattr(outcome, "runtime_prefix_cache", {})),
         )

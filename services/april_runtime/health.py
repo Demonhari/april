@@ -44,7 +44,19 @@ def runtime_health(
     for model in models:
         if not model.prefix_cache:
             continue
-        for key in ("entries", "bytes", "hits", "misses", "evictions", "rejected_oversize"):
+        for key in (
+            "entries",
+            "bytes",
+            "lookups",
+            "hits",
+            "misses",
+            "restores",
+            "restore_failures",
+            "saves",
+            "evictions",
+            "rejected_oversize",
+            "attach_skipped",
+        ):
             value = model.prefix_cache.get(key)
             if isinstance(value, int):
                 prefix_stats[key] = prefix_stats.get(key, 0) + value

@@ -14,6 +14,8 @@ runtime:
   max_loaded_specialist_models: 2
   # Prefix KV snapshots are RAM-only and may be disabled with
   # APRIL_RUNTIME_PREFIX_CACHE=off. Router prefix prewarm is asynchronous.
+  # Generation thread budgets apply in place when llama_set_n_threads is available;
+  # they do not unload or reload a loaded model.
   prefix_cache_enabled: true
   prefix_prewarm: true
   # Operator-created profiles are ignored unless this is explicitly `auto`.

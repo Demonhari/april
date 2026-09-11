@@ -161,6 +161,9 @@ class FakeBackend(RuntimeBackend):
     def prefix_cache_diagnostics(self) -> dict[str, object]:
         return {"enabled": False, "attached": False, "simulated": True}
 
+    def prefix_cache_aggregate_diagnostics(self) -> dict[str, object]:
+        return {"enabled": False, "simulated": True}
+
     async def embed(self, text: str) -> list[float]:
         await asyncio.sleep(0)
         return self._deterministic_embedding(text)

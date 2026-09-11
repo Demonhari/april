@@ -6,12 +6,11 @@ import asyncio
 import hashlib
 import json
 import os
-import platform
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from april_common.hardware_profile import physical_cpu_count
+from april_common.hardware_profile import cpu_brand, physical_cpu_count
 from services.april_runtime.model_registry import ModelDefinition
 
 TUNABLE_FIELDS = frozenset({"threads", "threads_batch", "n_batch", "n_ubatch", "flash_attn"})
@@ -39,7 +38,7 @@ def profile_inputs(model: ModelDefinition, root: Path) -> dict[str, object]:
         "model_identity": model_identity(model, root),
         "adapter_identity": _adapter_identity(model, root),
         "llama_cpp_python": llama_cpp_version(),
-        "cpu_brand": platform.processor()[:128] or None,
+        "cpu_brand": cpu_brand(),
         "physical_cores": physical_cpu_count(),
         "logical_cores": os.cpu_count(),
         "context_size": model.context_size,
@@ -71,7 +70,11 @@ def load_matching_profile(root: Path, model: ModelDefinition) -> ModelDefinition
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(payload, dict) or payload.get("model_id") != model.id:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != "april.perf.profile.v2"
+            or payload.get("model_id") != model.id
+        ):
             continue
         stored = payload.get("fingerprint_inputs")
         if stored != current:
@@ -106,6 +109,7 @@ def profile_status(root: Path, models: list[ModelDefinition], mode: str) -> str:
                 continue
             if (
                 isinstance(payload, dict)
+                and payload.get("schema") == "april.perf.profile.v2"
                 and payload.get("model_id") == model.id
                 and payload.get("fingerprint") == fingerprint
                 and payload.get("fingerprint_inputs") == current

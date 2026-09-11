@@ -79,6 +79,11 @@ def voice_verify_live(
         else:
             console.print("[yellow]<empty>[/yellow]")
 
+    observed_voice_timing: dict[str, float] = {}
+
+    def observe_voice_timing(timing: dict[str, float]) -> None:
+        observed_voice_timing.update(timing)
+
     result = asyncio.run(
         _composition_api.run_voice_live_verification(
             settings=settings,
@@ -88,6 +93,7 @@ def voice_verify_live(
             seconds=seconds,
             retain_debug_audio=retain_debug_audio,
             transcript_observer=show_transcript,
+            timing_observer=observe_voice_timing,
             report_path=report,
         )
     )

@@ -61,6 +61,7 @@ class ModelRoutingOutcome:
     coercions: list[str] = field(default_factory=list)
     routing_latency_ms: float | None = None
     runtime_timing: dict[str, object] = field(default_factory=dict)
+    runtime_prefix_cache: dict[str, object] = field(default_factory=dict)
 
 
 _AUTHORITY_OPERATIONS = frozenset({"repository_inspection", "patch_proposal", "code_modification"})
@@ -431,6 +432,9 @@ def _record_response(
     timing = response.diagnostics.get("timing")
     if isinstance(timing, dict):
         outcome.runtime_timing = dict(timing)
+    prefix_cache = response.diagnostics.get("prefix_cache")
+    if isinstance(prefix_cache, dict):
+        outcome.runtime_prefix_cache = dict(prefix_cache)
 
 
 def _finish_routing_outcome(outcome: ModelRoutingOutcome, started: float) -> ModelRoutingOutcome:

@@ -183,7 +183,7 @@ def create_application(
     return app
 
 
-def _schedule_router_prewarm(active: ApiContainer) -> asyncio.Task[None] | None:  # pragma: no cover
+def _schedule_router_prewarm(active: ApiContainer) -> asyncio.Task[None] | None:
     if active.settings.runtime.backend == "fake":
         return None
     task = asyncio.create_task(_router_prewarm(active))
@@ -191,7 +191,7 @@ def _schedule_router_prewarm(active: ApiContainer) -> asyncio.Task[None] | None:
     return task
 
 
-async def _router_prewarm(active: ApiContainer) -> None:  # pragma: no cover
+async def _router_prewarm(active: ApiContainer) -> None:
     governor = active.governor
     if governor is not None:
         async_method = getattr(governor, "assess_resident_async", None)
@@ -209,23 +209,30 @@ async def _router_prewarm(active: ApiContainer) -> None:  # pragma: no cover
         user_content=routing_user_context("ping", None),
         max_output_tokens=1,
     )
-    try:
-        await active.runtime_client.chat(
-            model_id=router.router_model_id,
-            messages=messages,
-            options=options,
-            response_format=ROUTING_PROPOSAL_RESPONSE_FORMAT,
-            request_id=f"prewarm-{uuid.uuid4()}",
-        )
-    except Exception as exc:
-        _write_prewarm_audit(active, "failed", type(exc).__name__)
-    else:
-        _write_prewarm_audit(active, "loaded", None)
+    reason: str | None = None
+    for attempt in range(3):
+        try:
+            await active.runtime_client.chat(
+                model_id=router.router_model_id,
+                messages=messages,
+                options=options,
+                response_format=ROUTING_PROPOSAL_RESPONSE_FORMAT,
+                request_id=f"prewarm-{uuid.uuid4()}",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            reason = type(exc).__name__
+            if attempt < 2:
+                await asyncio.sleep(10.0 * (attempt + 1))
+                continue
+            _write_prewarm_audit(active, "failed", reason)
+        else:
+            _write_prewarm_audit(active, "loaded", None)
+        return
 
 
-def _write_prewarm_audit(  # pragma: no cover
-    active: ApiContainer, status: str, reason: str | None
-) -> None:
+def _write_prewarm_audit(active: ApiContainer, status: str, reason: str | None) -> None:
     active.approvals.audit.write(
         {
             "event_type": "router_prefix_prewarm",
@@ -236,7 +243,7 @@ def _write_prewarm_audit(  # pragma: no cover
     )
 
 
-def _consume_prewarm_task(task: asyncio.Task[None]) -> None:  # pragma: no cover
+def _consume_prewarm_task(task: asyncio.Task[None]) -> None:
     if task.cancelled():
         return
     try:

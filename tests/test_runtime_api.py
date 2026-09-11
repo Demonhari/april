@@ -170,25 +170,41 @@ def test_runtime_load_transports_generation_threads_to_fake_backend(tmp_path: Pa
 
 def test_runtime_load_does_not_reload_on_thread_hint(tmp_path: Path) -> None:
     lifecycle = runtime_lifecycle(tmp_path)
+    lifecycle.get_state("april-brain").model = lifecycle.get_state("april-brain").model.model_copy(
+        update={"threads": 4, "threads_batch": 4}
+    )
     with _isolated_home(tmp_path), TestClient(create_app(lifecycle)) as client:
         first = client.post(
             "/runtime/models/load",
             json={"model_id": "april-brain", "generation_threads": 8},
         )
-        assert first.json()["generation_threads"] == 1
+        assert first.json()["generation_threads"] == 4
         state = lifecycle.get_state("april-brain")
+        assert isinstance(state.backend, FakeBackend)
+        assert state.backend.load_count == 1
         state.active_requests = 1
         deferred = client.post(
             "/runtime/models/load",
             json={"model_id": "april-brain", "generation_threads": 6},
         )
-        assert deferred.json()["generation_threads"] == 1
+        assert deferred.json()["generation_threads"] == 4
         state.active_requests = 0
         applied = client.post(
             "/runtime/models/load",
             json={"model_id": "april-brain", "generation_threads": 6},
         )
-        assert applied.json()["generation_threads"] == 1
+        assert applied.json()["generation_threads"] == 4
+        response = client.post(
+            "/runtime/chat",
+            json={
+                "model_id": "april-brain",
+                "messages": [{"role": "user", "content": "hello"}],
+                "generation_threads": 2,
+            },
+        )
+        assert response.status_code == 200
+        assert state.backend.load_count == 1
+        assert state.backend.thread_budget_calls[-1] == (2, 2)
 
 
 def test_runtime_unknown_model(tmp_path: Path) -> None:
