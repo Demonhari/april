@@ -14,7 +14,9 @@ from services.brain.capabilities import (
     is_self_introspection_request,
     is_voice_capability_request,
     render_conversation_recall_response,
+    stable_prefix_prompt,
     trusted_capability_summary,
+    trusted_capability_summary_parts,
     voice_capability_intent,
 )
 from services.brain.request_context import RequestContext, render_request_context
@@ -283,6 +285,47 @@ def test_runtime_status_labels_failed_evidence_as_unavailable(settings_tmp) -> N
     assert "Runtime evidence is unavailable" in summary
     assert "runtime status not queried" not in summary
     assert "state=unknown; loaded=unknown; healthy=unknown" in summary
+
+
+def test_stable_prefix_layout_partitions_without_changing_default_summary(settings_tmp) -> None:
+    registry = ModelRegistry.from_file(
+        project_root() / "configs" / "models.yaml", root=project_root()
+    )
+    kwargs = {
+        "settings": settings_tmp,
+        "agent_registry": default_agent_registry(),
+        "tool_registry": default_registry(),
+        "model_registry": registry,
+    }
+    text_summary = trusted_capability_summary(
+        **kwargs, request_context=RequestContext.from_origin("text", settings_tmp)
+    )
+    voice_summary = trusted_capability_summary(
+        **kwargs, request_context=RequestContext.from_origin("voice", settings_tmp)
+    )
+    stable_text, volatile_text = trusted_capability_summary_parts(
+        **kwargs, request_context=RequestContext.from_origin("text", settings_tmp)
+    )
+    stable_voice, volatile_voice = trusted_capability_summary_parts(
+        **kwargs, request_context=RequestContext.from_origin("voice", settings_tmp)
+    )
+    stable_evidence, volatile_evidence = trusted_capability_summary_parts(
+        **kwargs,
+        runtime_evidence={"simulated": False, "models": {}},
+        request_context=RequestContext.from_origin("voice", settings_tmp),
+    )
+    assert stable_text == stable_voice
+    assert stable_voice == stable_evidence
+    assert "Request origin: voice" not in stable_evidence
+    assert "Voice interface configured:" in stable_evidence
+    assert "Runtime evidence" in volatile_evidence
+    assert set((stable_text + "\n" + volatile_text).splitlines()) == set(text_summary.splitlines())
+    assert set((stable_voice + "\n" + volatile_voice).splitlines()) == set(
+        voice_summary.splitlines()
+    )
+    assert stable_prefix_prompt(stable_text, volatile_text).startswith(
+        "[APRIL_STABLE_PREFIX_LAYOUT]\n"
+    )
 
 
 def test_voice_request_context_is_transport_only_and_origin_scoped(settings_tmp) -> None:

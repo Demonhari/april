@@ -9,15 +9,20 @@ import pytest
 from services.april_runtime.llama_cpp_backend import LlamaCppBackend
 from services.april_runtime.model_registry import ModelDefinition
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("APRIL_TEST_GGUF_PATH") or importlib.util.find_spec("llama_cpp") is None,
-    reason="set APRIL_TEST_GGUF_PATH and install llama-cpp-python",
+CAPTURED_TEST_GGUF_PATH = os.environ.get("APRIL_TEST_GGUF_PATH")
+_REAL_OPTIONAL_AVAILABLE = (
+    bool(CAPTURED_TEST_GGUF_PATH) and importlib.util.find_spec("llama_cpp") is not None
 )
 
 
+@pytest.mark.skipif(
+    not _REAL_OPTIONAL_AVAILABLE,
+    reason="set APRIL_TEST_GGUF_PATH and install llama-cpp-python",
+)
 @pytest.mark.asyncio
 async def test_real_prefix_cache_and_thread_budget() -> None:
-    model_path = Path(os.environ["APRIL_TEST_GGUF_PATH"]).expanduser().resolve()
+    assert CAPTURED_TEST_GGUF_PATH is not None
+    model_path = Path(CAPTURED_TEST_GGUF_PATH).expanduser().resolve()
     if not model_path.is_file():
         pytest.skip("APRIL_TEST_GGUF_PATH is not a file")
     model = ModelDefinition(
@@ -80,5 +85,50 @@ async def test_real_prefix_cache_and_thread_budget() -> None:
             print("optional greedy cache equality:", restored.text == fresh.text)
         finally:
             await cache_off.unload()
+    finally:
+        await backend.unload()
+
+
+@pytest.mark.skipif(
+    not _REAL_OPTIONAL_AVAILABLE,
+    reason="set APRIL_TEST_GGUF_PATH and install llama-cpp-python",
+)
+@pytest.mark.asyncio
+async def test_real_prefix_cache_short_first_long_next() -> None:
+    assert CAPTURED_TEST_GGUF_PATH is not None
+    model_path = Path(CAPTURED_TEST_GGUF_PATH).expanduser().resolve()
+    if not model_path.is_file():
+        pytest.skip("APRIL_TEST_GGUF_PATH is not a file")
+    model = ModelDefinition(
+        id="optional-real-guard",
+        name="optional-real-guard",
+        path=model_path,
+        backend="llama_cpp",
+        role="brain",
+        threads=4,
+        threads_batch=4,
+        context_size=4096,
+        temperature=0.0,
+        max_output_tokens=2048,
+        prefix_cache_mb=1024,
+        prefix_cache_min_tokens=16,
+        chat_format="generic",
+    )
+    backend = LlamaCppBackend()
+    await backend.load(model)
+    try:
+        await backend.generate(
+            "short prefix token " * 150,
+            temperature=0.0,
+            max_output_tokens=1,
+        )
+        await backend.generate(
+            "long prefix token " * 1000,
+            temperature=0.0,
+            max_output_tokens=2048,
+        )
+        diagnostics = backend.prefix_cache_diagnostics()
+        assert diagnostics.get("attached") is True
+        assert diagnostics.get("attach_skipped_reason") != "projected_oversize"
     finally:
         await backend.unload()

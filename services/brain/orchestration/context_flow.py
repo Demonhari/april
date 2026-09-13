@@ -9,7 +9,9 @@ from april_common.errors import PermissionDeniedError
 from services.brain.capabilities import (
     collect_runtime_self_evidence,
     is_self_introspection_request,
+    stable_prefix_prompt,
     trusted_capability_summary,
+    trusted_capability_summary_parts,
 )
 from services.brain.execution import PreparedTurn, VerificationEvidence
 from services.brain.memory_policy import build_agent_memory_context
@@ -300,7 +302,18 @@ class ContextFlow:
             runtime_evidence=runtime_evidence,
             request_context=active_request_context,
         )
-        context_sections.insert(0, capability_summary)
+        prompt_capability_summary = capability_summary
+        if self.settings.orchestration.stable_prefix_layout:
+            stable, volatile = trusted_capability_summary_parts(
+                settings=self.settings,
+                agent_registry=self.agent_registry,
+                tool_registry=self.tool_registry,
+                model_registry=getattr(self, "model_registry", None),
+                runtime_evidence=runtime_evidence,
+                request_context=active_request_context,
+            )
+            prompt_capability_summary = stable_prefix_prompt(stable, volatile)
+        context_sections.insert(0, prompt_capability_summary)
         if memory_context.conversation_summary:
             context_sections.insert(0, memory_context.conversation_summary)
 
@@ -646,7 +659,7 @@ class ContextFlow:
             tool_outputs=tool_outputs,
             memory_context=memory_context,
         )
-        prompt_parts.insert(0, capability_summary)
+        prompt_parts.insert(0, prompt_capability_summary)
         citations.extend(prompt_citations)
         return PreparedTurn(
             request_id=active_request_id,

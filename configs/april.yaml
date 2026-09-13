@@ -21,6 +21,10 @@ runtime:
   # Operator-created profiles are ignored unless this is explicitly `auto`.
   perf_profile: "off"
 
+orchestration:
+  # Experimental stable-prefix layout; off preserves the current prompt bytes.
+  stable_prefix_layout: false
+
 # Secrets are resolved from the credential store. `auto` selects macOS
 # Keychain for production and retains development compatibility until the
 # explicit credential migration command is run.

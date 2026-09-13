@@ -11,6 +11,7 @@ from agents.schemas import AgentResult, LocalCitation, ProposedChange
 from april_common.settings import ConversationContextSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
+from services.brain.capabilities import STABLE_PREFIX_MARKER
 from services.brain.response_handling import sanitize_model_output
 from services.brain.structured_output import grammar_safe_json_schema
 from services.memory.schemas import Message, SuspendedAgentRun
@@ -395,7 +396,16 @@ class StructuredAgentLoop:
         messages = [ChatMessage(role="system", content=agent.system_prompt)]
         remaining_sections: list[str] = []
         for section in context_sections:
-            if section.startswith("[MACHINE-GENERATED CONVERSATION CONTEXT"):
+            if section.startswith(STABLE_PREFIX_MARKER):
+                marked = section.removeprefix(STABLE_PREFIX_MARKER)
+                stable, separator, volatile = marked.partition("\n\n")
+                messages[0] = ChatMessage(
+                    role="system",
+                    content=f"{messages[0].content}\n\n{stable}",
+                )
+                if separator and volatile:
+                    remaining_sections.append(volatile)
+            elif section.startswith("[MACHINE-GENERATED CONVERSATION CONTEXT"):
                 messages.append(ChatMessage(role="system", content=section))
             else:
                 remaining_sections.append(section)

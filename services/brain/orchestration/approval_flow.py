@@ -10,7 +10,9 @@ from april_common.time import parse_utc_iso, utc_now
 from services.brain.capabilities import (
     collect_runtime_self_evidence,
     is_self_introspection_request,
+    stable_prefix_prompt,
     trusted_capability_summary,
+    trusted_capability_summary_parts,
 )
 from services.brain.memory_policy import build_agent_memory_context
 from services.brain.request_context import RequestContext
@@ -107,17 +109,25 @@ class ApprovalFlow:
             if is_self_introspection_request(message)
             else None
         )
-        context_sections.insert(
-            0,
-            trusted_capability_summary(
+        capability_summary = trusted_capability_summary(
+            settings=self.settings,
+            agent_registry=self.agent_registry,
+            tool_registry=self.tool_registry,
+            model_registry=getattr(self, "model_registry", None),
+            runtime_evidence=runtime_evidence,
+            request_context=request_context,
+        )
+        if self.settings.orchestration.stable_prefix_layout:
+            stable, volatile = trusted_capability_summary_parts(
                 settings=self.settings,
                 agent_registry=self.agent_registry,
                 tool_registry=self.tool_registry,
                 model_registry=getattr(self, "model_registry", None),
                 runtime_evidence=runtime_evidence,
                 request_context=request_context,
-            ),
-        )
+            )
+            capability_summary = stable_prefix_prompt(stable, volatile)
+        context_sections.insert(0, capability_summary)
         if memory_context.conversation_summary:
             context_sections.insert(0, memory_context.conversation_summary)
         context = await self.tool_executor.context(

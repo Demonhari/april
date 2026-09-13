@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,10 +12,14 @@ from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelRegistry
 from services.april_runtime.schemas import ChatMessage, ChatRequest, GenerationOptions
 
+CAPTURED_TEST_GGUF_PATH = os.environ.get("APRIL_TEST_GGUF_PATH")
+_REAL_OPTIONAL_AVAILABLE = bool(CAPTURED_TEST_GGUF_PATH)
 
+
+@pytest.mark.skipif(not _REAL_OPTIONAL_AVAILABLE, reason="APRIL_TEST_GGUF_PATH is not set.")
 @pytest.mark.asyncio
 async def test_optional_real_gguf_load_generate_stream_unload(tmp_path: Path) -> None:
-    model_path = os.environ.get("APRIL_TEST_GGUF_PATH")
+    model_path = CAPTURED_TEST_GGUF_PATH
     if not model_path:
         pytest.skip("APRIL_TEST_GGUF_PATH is not set.")
     gguf = Path(model_path).expanduser().resolve()
@@ -76,3 +82,16 @@ async def test_optional_real_gguf_load_generate_stream_unload(tmp_path: Path) ->
     await lifecycle.unload_model("april-real-test")
     assert lifecycle.list_models()[0].state in {"unloaded", "unavailable"}
     assert lifecycle.get_state("april-real-test").backend is None
+
+
+def test_optional_path_is_captured_at_module_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = sys.modules[__name__]
+    original = CAPTURED_TEST_GGUF_PATH
+    monkeypatch.setenv("APRIL_TEST_GGUF_PATH", "synthetic-import-path.gguf")
+    importlib.reload(module)
+    assert module.CAPTURED_TEST_GGUF_PATH == "synthetic-import-path.gguf"
+    if original is None:
+        monkeypatch.delenv("APRIL_TEST_GGUF_PATH", raising=False)
+    else:
+        monkeypatch.setenv("APRIL_TEST_GGUF_PATH", original)
+    importlib.reload(module)

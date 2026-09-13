@@ -18,6 +18,14 @@ class TuneBudgetExceeded(RuntimeError):
     """Internal signal used to prevent profile writes after budget exhaustion."""
 
 
+class TuneWorkerFailed(RuntimeError):
+    """A candidate subprocess failed without invalidating the whole sweep."""
+
+    def __init__(self, side: str) -> None:
+        super().__init__(f"{side} worker failed")
+        self.side = side
+
+
 async def run_real_tune(
     home: Path,
     *,
@@ -31,19 +39,46 @@ async def run_real_tune(
     profile_fingerprint: Any,
     tunable_fields: Any,
     measure_candidate: Any = None,
+    development_unsandboxed_override: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     models = [model for model in registry.list() if role == "all" or model.role == role]
     results: list[dict[str, Any]] = []
     pending_profiles: list[dict[str, Any]] = []
     exhausted = False
-    measure_fn = measure_candidate or measure_real_candidate
+    if measure_candidate is None:
+
+        async def measure_fn(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return await measure_real_candidate(
+                *args,
+                development_unsandboxed_override=development_unsandboxed_override,
+                **kwargs,
+            )
+    else:
+        measure_fn = measure_candidate
     for model in models:
         if time.monotonic() - started >= max_minutes * 60:
             exhausted = True
             break
         winner = model
         winner_measure: dict[str, Any] | None = None
+        model_failed = False
+        routing_check_failed = False
+        if model.role == "brain" and measure_candidate is None:
+            try:
+                await measure_fn(
+                    home,
+                    model,
+                    model,
+                    runs=1,
+                    nonce_prefix="routing-start",
+                    routing_check=True,
+                )
+            except TuneBudgetExceeded:
+                exhausted = True
+                break
+            except Exception:
+                routing_check_failed = True
         for knob, values in await asyncio.to_thread(candidate_values, winner):
             for value in values:
                 if time.monotonic() - started >= max_minutes * 60:
@@ -68,6 +103,22 @@ async def run_real_tune(
                 except TuneBudgetExceeded:
                     exhausted = True
                     break
+                except TuneWorkerFailed as exc:
+                    results.append(
+                        {
+                            "model_id": model.id,
+                            "knob": knob,
+                            "value": value,
+                            "accepted": False,
+                            "reason": (
+                                "baseline_failed" if exc.side == "baseline" else "worker_failed"
+                            ),
+                        }
+                    )
+                    if exc.side == "baseline":
+                        model_failed = True
+                        break
+                    continue
                 accepted, reason = accept_candidate(baseline_measure, measured, knob)
                 results.append(
                     {
@@ -89,6 +140,10 @@ async def run_real_tune(
                     winner_measure = baseline_measure
             if exhausted:
                 break
+            if model_failed:
+                break
+        if model_failed:
+            continue
         if winner != model:
             try:
                 final_profile, final_baseline = await measure_abab_pair(
@@ -104,6 +159,17 @@ async def run_real_tune(
             except TuneBudgetExceeded:
                 exhausted = True
                 break
+            except TuneWorkerFailed:
+                results.append(
+                    {
+                        "model_id": model.id,
+                        "knob": "final_recheck",
+                        "value": None,
+                        "accepted": False,
+                        "reason": "worker_failed",
+                    }
+                )
+                continue
             final_knob = changed_tunable_knob(model, winner)
             final_ok, final_reason = accept_candidate(final_baseline, final_profile, final_knob)
             if not final_ok:
@@ -118,6 +184,32 @@ async def run_real_tune(
                 )
                 continue
             inputs = await asyncio.to_thread(profile_inputs, winner, home)
+            if model.role == "brain" and measure_candidate is None:
+                try:
+                    await measure_fn(
+                        home,
+                        model,
+                        winner,
+                        runs=1,
+                        nonce_prefix="routing-final",
+                        routing_check=True,
+                    )
+                except TuneBudgetExceeded:
+                    exhausted = True
+                    break
+                except Exception:
+                    routing_check_failed = True
+            if routing_check_failed:
+                results.append(
+                    {
+                        "model_id": model.id,
+                        "knob": "routing_check",
+                        "value": None,
+                        "accepted": False,
+                        "reason": "worker_failed",
+                    }
+                )
+                continue
             pending_profiles.append(
                 {
                     "schema": "april.perf.profile.v2",
@@ -159,7 +251,8 @@ async def measure_abab_pair(
     cooldown_seconds: float,
     deadline: float,
     measure_candidate: Any,
-    pairs: int = 3,
+    pairs: int = 2,
+    runs: int = 2,
     first: Any | None = None,
     second: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -170,16 +263,34 @@ async def measure_abab_pair(
     for pair in range(pairs):
         if time.monotonic() >= deadline:
             raise TuneBudgetExceeded
-        left_samples.append(
-            await measure_candidate(home, baseline, left, runs=1, nonce_prefix=f"pair-{pair}")
-        )
+        try:
+            left_samples.append(
+                await measure_candidate(
+                    home, baseline, left, runs=runs, nonce_prefix=f"pair-{pair}-baseline"
+                )
+            )
+        except TuneWorkerFailed as exc:
+            raise TuneWorkerFailed("baseline") from exc
+        except TuneBudgetExceeded:
+            raise
+        except Exception as exc:
+            raise TuneWorkerFailed("baseline") from exc
         if cooldown_seconds:
             await asyncio.sleep(cooldown_seconds)
         if time.monotonic() >= deadline:
             raise TuneBudgetExceeded
-        right_samples.append(
-            await measure_candidate(home, baseline, right, runs=1, nonce_prefix=f"pair-{pair}")
-        )
+        try:
+            right_samples.append(
+                await measure_candidate(
+                    home, baseline, right, runs=runs, nonce_prefix=f"pair-{pair}-candidate"
+                )
+            )
+        except TuneWorkerFailed:
+            raise
+        except TuneBudgetExceeded:
+            raise
+        except Exception as exc:
+            raise TuneWorkerFailed("candidate") from exc
         if cooldown_seconds:
             await asyncio.sleep(cooldown_seconds)
     return _aggregate_measurements(left_samples), _aggregate_measurements(right_samples)
@@ -216,8 +327,10 @@ async def measure_real_candidate(
     _baseline: Any,
     candidate: Any,
     *,
-    runs: int = 3,
+    runs: int = 2,
     nonce_prefix: str = "run",
+    development_unsandboxed_override: bool = False,
+    routing_check: bool = False,
 ) -> dict[str, Any]:
     payload = json.dumps(
         {
@@ -225,6 +338,7 @@ async def measure_real_candidate(
             "model": candidate.model_dump(mode="json"),
             "runs": runs,
             "nonce_prefix": nonce_prefix,
+            "routing_check": routing_check,
         },
         separators=(",", ":"),
     )
@@ -238,11 +352,14 @@ async def measure_real_candidate(
         max_stderr_bytes=64_000,
         resource_limit_profile=ResourceLimitProfile.MODEL_UTILITY,
         april_home=home,
-        development_unsandboxed_override=True,
+        development_unsandboxed_override=development_unsandboxed_override,
     )
     if result.returncode != 0:
-        raise RuntimeError("perf worker failed")
-    parsed = json.loads(result.stdout)
+        raise TuneWorkerFailed("candidate")
+    try:
+        parsed = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise TuneWorkerFailed("candidate") from exc
     metrics = parsed.get("metrics", [])
     metric_values = [float(item.get("metric", 0.0)) for item in metrics]
     prompt_values = [float(item.get("prompt_metric", 0.0)) for item in metrics]

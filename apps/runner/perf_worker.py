@@ -52,8 +52,9 @@ def _rss_bytes() -> int:
     return value if __import__("sys").platform == "darwin" else value * 1024
 
 
-def _workload_prompt(nonce: str) -> str:
-    return f"Measurement nonce: {nonce}\n" + "synthetic context token " * 1000
+def _workload_prompt(nonce: str, context_size: int) -> str:
+    token_count = max(256, min(768, context_size // 3))
+    return f"Measurement nonce: {nonce}\n" + "synthetic context token " * token_count
 
 
 async def measure(payload: dict[str, Any]) -> dict[str, Any]:
@@ -66,8 +67,8 @@ async def measure(payload: dict[str, Any]) -> dict[str, Any]:
     await lifecycle.generate(
         ChatRequest(
             model_id=model.id,
-            messages=[ChatMessage(role="user", content=_workload_prompt("warmup"))],
-            options=GenerationOptions(temperature=0.0, max_output_tokens=32, seed=17),
+            messages=[ChatMessage(role="user", content="Synthetic tune warmup.")],
+            options=GenerationOptions(temperature=0.0, max_output_tokens=1, seed=17),
         )
     )
     metrics: list[dict[str, Any]] = []
@@ -79,7 +80,9 @@ async def measure(payload: dict[str, Any]) -> dict[str, Any]:
                 messages=[
                     ChatMessage(
                         role="user",
-                        content=_workload_prompt(f"{payload.get('nonce_prefix', 'run')}-{index}"),
+                        content=_workload_prompt(
+                            f"{payload.get('nonce_prefix', 'run')}-{index}", model.context_size
+                        ),
                     )
                 ],
                 options=GenerationOptions(temperature=0.0, max_output_tokens=32, seed=17),
@@ -108,7 +111,7 @@ async def measure(payload: dict[str, Any]) -> dict[str, Any]:
         )
     )
     routing_decisions: list[tuple[str, str, str]] = []
-    if model.role == "brain":
+    if model.role == "brain" and bool(payload.get("routing_check", True)):
         import yaml
 
         fixture = home / "tests" / "fixtures" / "evals" / "brain_routes.yaml"

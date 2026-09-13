@@ -61,6 +61,7 @@ _MODEL_ROLES = (
 _MODEL_STATES = frozenset(
     {"unavailable", "unloaded", "loading", "loaded", "unloading", "error", "unknown"}
 )
+STABLE_PREFIX_MARKER = "[APRIL_STABLE_PREFIX_LAYOUT]\n"
 
 
 def _normalized_question(message: str) -> str:
@@ -385,6 +386,84 @@ def trusted_capability_summary(
             "model health unless corresponding evidence is supplied.",
         ]
     )
+
+
+def trusted_capability_summary_parts(
+    *,
+    settings: AprilSettings,
+    agent_registry: AgentRegistry,
+    tool_registry: ToolRegistry,
+    model_registry: ModelRegistry | None = None,
+    runtime_evidence: Mapping[str, Any] | None = None,
+    request_context: RequestContext | None = None,
+) -> tuple[str, str]:
+    """Split the existing summary into stable and request-scoped lines.
+
+    The original renderer remains the sole source of text, so the default
+    summary stays byte-identical. Stable lines are selected from that rendered
+    output and volatile lines retain their original order in the other block.
+    """
+    full = trusted_capability_summary(
+        settings=settings,
+        agent_registry=agent_registry,
+        tool_registry=tool_registry,
+        model_registry=model_registry,
+        runtime_evidence=runtime_evidence,
+        request_context=request_context,
+    )
+    stable_source = (
+        trusted_capability_summary(
+            settings=settings,
+            agent_registry=agent_registry,
+            tool_registry=tool_registry,
+            model_registry=model_registry,
+            runtime_evidence=None,
+            request_context=request_context,
+        )
+        if runtime_evidence is not None
+        else full
+    )
+    stable, _ = split_trusted_capability_summary(stable_source, runtime_evidence=None)
+    _, volatile = split_trusted_capability_summary(full, runtime_evidence=runtime_evidence)
+    return stable, volatile
+
+
+def split_trusted_capability_summary(
+    full: str, *, runtime_evidence: Mapping[str, Any] | None = None
+) -> tuple[str, str]:
+    """Split an already-rendered summary without re-reading application state."""
+    lines = full.splitlines()
+    stable: list[str] = []
+    volatile: list[str] = []
+    in_request_section = False
+    model_prefixes = tuple(f"- {label}:" for label, _role, _agent in _MODEL_ROLES)
+    for line in lines:
+        if line == "REQUEST PROVENANCE AND VOICE INTERFACE:":
+            in_request_section = True
+            volatile.append(line)
+            continue
+        if line == "CONFIGURED AI MODELS:":
+            in_request_section = False
+            stable.append(line)
+            continue
+        if in_request_section:
+            if line.startswith(("- Request origin:", "- Current-turn evidence:")):
+                volatile.append(line)
+            else:
+                stable.append(line)
+            continue
+        if line.startswith(model_prefixes):
+            stable.append(line)
+            continue
+        if line.startswith(("- Runtime evidence", "- Runtime backend evidence")):
+            volatile.append(line)
+            continue
+        stable.append(line)
+    return "\n".join(stable), "\n".join(volatile)
+
+
+def stable_prefix_prompt(stable: str, volatile: str) -> str:
+    return f"{STABLE_PREFIX_MARKER}{stable}\n\n{volatile}"
 
 
 def render_self_status(

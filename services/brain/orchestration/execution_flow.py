@@ -10,6 +10,7 @@ from agents.schemas import AgentResult, ProposedChange
 from april_common.errors import PermissionDeniedError
 from april_common.path_security import PathPolicy, normalize_existing_path
 from april_common.project_scope import normalize_project_child, validate_patch_text
+from services.brain.capabilities import split_trusted_capability_summary, stable_prefix_prompt
 from services.brain.execution import PreparedTurn
 from services.brain.memory_policy import AgentMemoryContext
 from services.brain.reasoning_resolver import resolve_reasoning_model
@@ -267,7 +268,13 @@ class ExecutionFlow:
             tool_outputs=[],
             memory_context=memory_context,
         )
-        prompt_parts.insert(0, trusted_context)
+        if self.settings.orchestration.stable_prefix_layout:
+            stable, volatile = split_trusted_capability_summary(
+                trusted_context, runtime_evidence={}
+            )
+            prompt_parts.insert(0, stable_prefix_prompt(stable, volatile))
+        else:
+            prompt_parts.insert(0, trusted_context)
         patch_instruction = (
             "Prepare a safe local code modification. Return a unified diff patch only.\n"
             "Do not include prose, markdown fences, shell commands, or instructions.\n"

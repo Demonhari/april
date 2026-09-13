@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 
 import pytest
@@ -114,6 +115,35 @@ def test_local_provider_non_macos_reports_unknown_sources() -> None:
     signals = provider.sample()
     assert signals.power_source == "unknown"
     assert signals.idle_source == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_async_governor_moves_darwin_probe_off_running_loop(settings_tmp) -> None:
+    def loop_sensitive_runner(argv: Sequence[str]) -> str:
+        # This emulates a command adapter that cannot be called from the loop
+        # but works when the governor delegates it to a worker thread.
+        coroutine = asyncio.sleep(0)
+        try:
+            asyncio.run(coroutine)
+        except RuntimeError:
+            coroutine.close()
+            raise
+        return {"vm_stat": VM_STAT, "pmset": PMSET_AC, "ioreg": IOREG_IDLE}[argv[0]]
+
+    provider = LocalResourceSignalProvider(
+        runner=loop_sensitive_runner,
+        platform_system=lambda: "Darwin",
+    )
+    direct = provider.sample()
+    assert direct.ram_source == "unknown"
+    assert direct.power_source == "unknown"
+    assert direct.idle_source == "unknown"
+
+    governor = ResourceGovernor(settings_tmp, provider=provider)
+    measured = await governor.sample_signals_async()
+    assert measured.ram_source == "vm_stat"
+    assert measured.power_source == "ac"
+    assert measured.idle_source == "hid"
 
 
 def test_generation_threads_active_user_uses_smaller_budget(settings_tmp) -> None:

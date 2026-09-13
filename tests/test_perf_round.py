@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import json
+import time
 import types
 import warnings
 from pathlib import Path
@@ -331,6 +332,31 @@ async def test_fake_perf_bench_includes_specialists() -> None:
     assert {case["role"] for case in report["cases"] if "role" in case} == {"coding", "reading"}
 
 
+@pytest.mark.asyncio
+async def test_fake_perf_bench_isolates_routing_stream_and_specialist_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apps.runner.commands import runner_perf
+
+    class BrokenLifecycle:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def generate(self, _request: object) -> object:
+            raise RuntimeError("synthetic runtime failure")
+
+        async def stream(self, _request: object):
+            raise RuntimeError("synthetic stream failure")
+            yield ("unused", {})
+
+    monkeypatch.setattr(runner_perf, "ModelLifecycle", BrokenLifecycle)
+    report = await runner_perf._run_fake_bench(Path.cwd(), role="all", repeat=1)
+    assert report["partial"] is True
+    encoded = json.dumps(report)
+    assert "synthetic runtime failure" not in encoded
+    assert "_generated_text" not in encoded
+
+
 def test_perf_bench_command_writes_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from apps.runner.commands import runner_perf
 
@@ -507,6 +533,77 @@ def test_real_bench_uses_typed_client_and_stops_isolated_session(
     assert Session.instances[-1].stopped is True
 
 
+def test_real_bench_comparison_is_partial_when_one_mode_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apps.runner.commands import runner_perf
+
+    calls = 0
+
+    def mode(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("isolated runtime failed")
+        return {
+            "schema": "april.perf.bench.v2",
+            "simulated": False,
+            "cases": [],
+            "summary": {},
+            "partial": False,
+            "fallback_count": 0,
+        }
+
+    monkeypatch.setattr(runner_perf, "_run_real_bench_mode", mode)
+    report = runner_perf._run_real_bench(
+        Path.cwd(), role="brain", repeat=1, compare_prefix_cache=True
+    )
+    assert report["partial"] is True
+    assert report["modes"]["off"]["error"]["error_type"] == "RuntimeError"
+    assert calls == 2
+
+
+def test_real_bench_layout_comparison_and_runtime_readiness_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from apps.runner.commands import runner_perf
+
+    monkeypatch.setattr(
+        runner_perf,
+        "_run_real_bench_mode",
+        lambda *_args, **_kwargs: {
+            "schema": "april.perf.bench.v2",
+            "simulated": False,
+            "cases": [],
+            "summary": {},
+            "partial": False,
+            "fallback_count": 0,
+        },
+    )
+    report = runner_perf._run_real_bench(tmp_path, role="brain", repeat=1, compare_layout=True)
+    assert report["comparison_kind"] == "layout"
+    plain = runner_perf._run_real_bench(tmp_path, role="brain", repeat=1)
+    assert plain["simulated"] is False
+
+    monkeypatch.setattr(runner_perf.importlib.util, "find_spec", lambda _name: None)
+    with pytest.raises(typer.Exit):
+        runner_perf._require_real_runtime(tmp_path, "llama_cpp", command="bench")
+    monkeypatch.setattr(runner_perf.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(
+        runner_perf,
+        "ModelRegistry",
+        types.SimpleNamespace(
+            from_file=lambda *_args, **_kwargs: types.SimpleNamespace(
+                list=lambda: [
+                    types.SimpleNamespace(resolved_path=lambda _home: tmp_path / "missing")
+                ]
+            )
+        ),
+    )
+    with pytest.raises(typer.Exit):
+        runner_perf._require_real_runtime(tmp_path, "llama_cpp", command="bench")
+
+
 def test_perf_bench_rejects_invalid_role() -> None:
     from apps.runner.commands.runner_perf import perf_bench
 
@@ -557,6 +654,85 @@ async def test_perf_bench_stream_and_redaction_helpers() -> None:
     assert runner_perf._summary_deltas(report, other)["coding"]["median_total_ms"] == 2.0
     assert runner_perf._summary_deltas({"summary": []}, {"summary": {}}) == {}
     assert runner_perf._routing_passes_identical([]) is None
+
+
+def test_bench_sizing_and_failure_helpers_are_redacted() -> None:
+    from apps.runner.commands import runner_perf
+
+    assert runner_perf.synthetic_context_token_count(1024) == 256
+    assert runner_perf.synthetic_context_token_count(4096) == 1148
+    assert runner_perf.synthetic_context(1024).count("synthetic context token") == 256
+    error = runner_perf._bench_failure_report(
+        role="brain", repeat=1, simulated=True, exc=ValueError("secret prompt")
+    )
+    assert error["partial"] is True
+    assert "secret prompt" not in json.dumps(error)
+    assert runner_perf._bench_error(ValueError()) == {
+        "error_code": "BENCH_CALL_FAILED",
+        "error_type": "ValueError",
+    }
+
+
+def test_perf_bench_writes_failure_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from apps.runner.commands import runner_perf
+
+    settings = types.SimpleNamespace(home=tmp_path, runtime=types.SimpleNamespace(backend="fake"))
+    monkeypatch.setattr(runner_perf, "load_settings", lambda: settings)
+
+    async def fail(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise RuntimeError("private prompt")
+
+    monkeypatch.setattr(runner_perf, "_run_fake_bench", fail)
+    output = tmp_path / "failure.json"
+    runner_perf.perf_bench(fake=True, role="brain", repeat=1, report=output)
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["partial"] is True
+    assert "private prompt" not in output.read_text(encoding="utf-8")
+
+
+def test_real_perf_bench_writes_failure_report_after_readiness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apps.runner.commands import runner_perf
+
+    settings = types.SimpleNamespace(
+        home=tmp_path, runtime=types.SimpleNamespace(backend="llama_cpp")
+    )
+    monkeypatch.setattr(runner_perf, "load_settings", lambda: settings)
+    monkeypatch.setattr(
+        runner_perf,
+        "_require_real_runtime",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("runtime unavailable")),
+    )
+    output = tmp_path / "real-failure.json"
+    runner_perf.perf_bench(fake=False, role="brain", repeat=1, report=output)
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["partial"] is True
+    assert report["error"]["error_type"] == "RuntimeError"
+
+
+def test_stable_layout_message_helpers_keep_volatile_content_out_of_system_prefix() -> None:
+    from agents.registry import default_agent_registry
+    from services.brain.agent_loop import StructuredAgentLoop
+    from services.brain.capabilities import stable_prefix_prompt
+    from services.brain.memory_policy import AgentMemoryContext
+    from services.brain.orchestration.finalization_flow import conversation_chat_messages
+
+    marked = stable_prefix_prompt("stable identity", "volatile request evidence")
+    agent = default_agent_registry().get("general_agent")
+    assert agent is not None
+    loop = StructuredAgentLoop.__new__(StructuredAgentLoop)
+    messages = loop._initial_messages(agent, "question", [], [marked])
+    assert "stable identity" in messages[0].content
+    assert "volatile request evidence" in messages[-1].content
+    assert "volatile request evidence" not in messages[0].content
+
+    with pytest.raises(Exception, match="String should have at least 1 character"):
+        conversation_chat_messages(
+            system_prompt="agent",
+            memory_context=AgentMemoryContext(),
+            current_prompt="[APRIL_STABLE_PREFIX_LAYOUT]\nonly stable",
+        )
 
 
 def test_perf_tune_rejects_invalid_role() -> None:
@@ -884,6 +1060,325 @@ async def test_tune_helpers_cover_pair_cooldown_and_knob_selection(
         == "flash_attn"
     )
     assert perf_tune.changed_tunable_knob(model, model) == "threads"
+
+
+@pytest.mark.asyncio
+async def test_tune_pair_and_sweep_isolate_worker_failures(tmp_path: Path) -> None:
+    from apps.runner import perf_tune
+
+    model = object()
+    candidate_calls = 0
+
+    async def candidate_failure(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        nonlocal candidate_calls
+        candidate_calls += 1
+        if candidate_calls == 2:
+            raise RuntimeError("candidate worker")
+        return {"metric": 1, "prompt_metric": 1, "valid_prefill": True}
+
+    with pytest.raises(perf_tune.TuneWorkerFailed, match="candidate"):
+        await perf_tune.measure_abab_pair(
+            tmp_path,
+            object(),
+            object(),
+            cooldown_seconds=0,
+            deadline=time.monotonic() + 1,
+            measure_candidate=candidate_failure,
+            pairs=1,
+            runs=1,
+        )
+
+    async def successful_measure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "metric": 1,
+            "prompt_metric": 1,
+            "outputs": [],
+            "peak_rss": 1,
+            "valid_prefill": True,
+        }
+
+    with pytest.raises(perf_tune.TuneBudgetExceeded):
+        await perf_tune.measure_abab_pair(
+            tmp_path,
+            model,
+            model,
+            cooldown_seconds=0.01,
+            deadline=time.monotonic() + 0.001,
+            measure_candidate=successful_measure,
+            pairs=1,
+            runs=1,
+        )
+
+    async def baseline_failure(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise RuntimeError("baseline worker")
+
+    with pytest.raises(perf_tune.TuneWorkerFailed, match="baseline"):
+        await perf_tune.measure_abab_pair(
+            tmp_path,
+            object(),
+            object(),
+            cooldown_seconds=0,
+            deadline=time.monotonic() + 1,
+            measure_candidate=baseline_failure,
+            pairs=1,
+            runs=1,
+        )
+
+    def model_with_copy(model_id: str) -> Any:
+        model = types.SimpleNamespace(id=model_id, role="coding", threads=8)
+        model.model_copy = lambda update: types.SimpleNamespace(
+            id=model.id,
+            role=model.role,
+            threads=update.get("threads", model.threads),
+        )
+        return model
+
+    model_a = model_with_copy("baseline-failed")
+    model_b = model_with_copy("candidate-failed")
+
+    async def sweep_measure(
+        _home: Path,
+        baseline: Any,
+        candidate: Any,
+        **_kwargs: object,
+    ) -> dict[str, Any]:
+        if baseline.id == "baseline-failed":
+            raise RuntimeError("baseline")
+        if candidate is not baseline:
+            raise RuntimeError("candidate")
+        return {
+            "metric": 1,
+            "prompt_metric": 1,
+            "outputs": ["same"],
+            "semantic_check": "same",
+            "routing_decisions": [],
+            "peak_rss": 1,
+            "valid_prefill": True,
+        }
+
+    output = await perf_tune.run_real_tune(
+        tmp_path,
+        role="all",
+        max_minutes=1,
+        cooldown_seconds=0,
+        registry=types.SimpleNamespace(list=lambda: [model_a, model_b]),
+        candidate_values=lambda _model: [("threads", [4])],
+        accept_candidate=lambda *_args: (False, "slower"),
+        profile_inputs=lambda *_args: {},
+        profile_fingerprint=lambda _inputs: "unused",
+        tunable_fields={"threads"},
+        measure_candidate=sweep_measure,
+    )
+    assert [item["reason"] for item in output["results"]] == [
+        "baseline_failed",
+        "worker_failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tune_worker_rejects_nonzero_and_invalid_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from apps.runner import perf_tune
+
+    candidate = types.SimpleNamespace(model_dump=lambda mode: {"id": "model"})
+    result = types.SimpleNamespace(returncode=1, stdout="")
+    monkeypatch.setattr(perf_tune, "run_restricted_process_sync", lambda *_a, **_k: result)
+    with pytest.raises(perf_tune.TuneWorkerFailed):
+        await perf_tune.measure_real_candidate(tmp_path, candidate, candidate)
+    result.returncode = 0
+    result.stdout = "not json"
+    with pytest.raises(perf_tune.TuneWorkerFailed):
+        await perf_tune.measure_real_candidate(tmp_path, candidate, candidate)
+
+
+@pytest.mark.asyncio
+async def test_tune_real_path_runs_brain_routing_checks_and_passes_sandbox_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apps.runner import perf_tune
+
+    model = ModelDefinition(
+        id="brain",
+        name="brain",
+        path=tmp_path / "brain.gguf",
+        backend="llama_cpp",
+        role="brain",
+        threads=8,
+        context_size=4096,
+        temperature=0.0,
+        max_output_tokens=32,
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def measure(
+        _home: Path,
+        _baseline: Any,
+        candidate: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        calls.append({"candidate": candidate, **kwargs})
+        metric = 2.0 if candidate.threads == 4 else 1.0
+        return {
+            "metric": metric,
+            "prompt_metric": metric,
+            "outputs": ["same"],
+            "semantic_check": "same",
+            "routing_decisions": [("normal_conversation", "general", "none")],
+            "peak_rss": 1,
+            "valid_prefill": True,
+        }
+
+    monkeypatch.setattr(perf_tune, "measure_real_candidate", measure)
+    output = await perf_tune.run_real_tune(
+        tmp_path,
+        role="brain",
+        max_minutes=1,
+        cooldown_seconds=0,
+        registry=types.SimpleNamespace(list=lambda: [model]),
+        candidate_values=lambda _model: [("threads", [4])],
+        accept_candidate=lambda baseline, candidate, _knob: (
+            candidate["metric"] >= baseline["metric"] * 1.05,
+            None,
+        ),
+        profile_inputs=lambda *_args: {"identity": "fixed"},
+        profile_fingerprint=lambda _inputs: "brain-profile",
+        tunable_fields={"threads"},
+        development_unsandboxed_override=True,
+    )
+    assert output["profiles"]
+    assert sum(call.get("routing_check") is True for call in calls) == 2
+    assert all(call.get("development_unsandboxed_override") is True for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_tune_final_recheck_worker_failure_and_deadline_are_isolated(
+    tmp_path: Path,
+) -> None:
+    from apps.runner import perf_tune
+
+    model = ModelDefinition(
+        id="coding",
+        name="coding",
+        path=tmp_path / "coding.gguf",
+        backend="fake",
+        role="coding",
+        threads=8,
+        context_size=2048,
+        temperature=0.0,
+        max_output_tokens=32,
+    )
+    calls = 0
+
+    async def measure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls > 4:
+            raise perf_tune.TuneWorkerFailed("candidate")
+        return {
+            "metric": 2 if calls % 2 == 0 else 1,
+            "prompt_metric": 2 if calls % 2 == 0 else 1,
+            "outputs": ["same"],
+            "semantic_check": "same",
+            "routing_decisions": [],
+            "peak_rss": 1,
+            "valid_prefill": True,
+        }
+
+    output = await perf_tune.run_real_tune(
+        tmp_path,
+        role="coding",
+        max_minutes=1,
+        cooldown_seconds=0,
+        registry=types.SimpleNamespace(list=lambda: [model]),
+        candidate_values=lambda _model: [("threads", [4])],
+        accept_candidate=lambda *_args: (True, None),
+        profile_inputs=lambda *_args: {},
+        profile_fingerprint=lambda _inputs: "unused",
+        tunable_fields={"threads"},
+        measure_candidate=measure,
+    )
+    assert output["results"][-1]["reason"] == "worker_failed"
+    with pytest.raises(perf_tune.TuneBudgetExceeded):
+        await perf_tune.measure_abab_pair(
+            tmp_path,
+            model,
+            model,
+            cooldown_seconds=0,
+            deadline=time.monotonic() - 1,
+            measure_candidate=measure,
+        )
+
+
+@pytest.mark.asyncio
+async def test_tune_routing_failure_and_candidate_exception_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apps.runner import perf_tune
+
+    model = ModelDefinition(
+        id="brain",
+        name="brain",
+        path=tmp_path / "brain.gguf",
+        backend="fake",
+        role="brain",
+        threads=8,
+        context_size=2048,
+        temperature=0.0,
+        max_output_tokens=32,
+    )
+
+    async def route_failure(
+        _home: Path, _baseline: Any, candidate: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        if kwargs.get("routing_check"):
+            raise RuntimeError("routing worker")
+        metric = 2 if candidate.threads == 4 else 1
+        return {
+            "metric": metric,
+            "prompt_metric": metric,
+            "outputs": ["same"],
+            "semantic_check": "same",
+            "routing_decisions": [],
+            "peak_rss": 1,
+            "valid_prefill": True,
+        }
+
+    monkeypatch.setattr(perf_tune, "measure_real_candidate", route_failure)
+    output = await perf_tune.run_real_tune(
+        tmp_path,
+        role="brain",
+        max_minutes=1,
+        cooldown_seconds=0,
+        registry=types.SimpleNamespace(list=lambda: [model]),
+        candidate_values=lambda _model: [("threads", [4])],
+        accept_candidate=lambda *_args: (True, None),
+        profile_inputs=lambda *_args: {},
+        profile_fingerprint=lambda _inputs: "unused",
+        tunable_fields={"threads"},
+    )
+    assert output["results"][-1]["knob"] == "routing_check"
+
+    explicit_calls = 0
+
+    async def explicit_candidate_failure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal explicit_calls
+        explicit_calls += 1
+        if explicit_calls == 2:
+            raise perf_tune.TuneWorkerFailed("candidate")
+        return {"metric": 1, "prompt_metric": 1, "valid_prefill": True}
+
+    with pytest.raises(perf_tune.TuneWorkerFailed, match="candidate"):
+        await perf_tune.measure_abab_pair(
+            tmp_path,
+            model,
+            model,
+            cooldown_seconds=0,
+            deadline=time.monotonic() + 1,
+            measure_candidate=explicit_candidate_failure,
+            pairs=1,
+            runs=1,
+        )
 
 
 @pytest.mark.asyncio
@@ -1222,6 +1717,7 @@ def test_perf_report_helpers_and_hardware_success_only_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import april_common.hardware_profile as hardware
+    from apps.runner.commands import runner_perf
     from apps.runner.commands.runner_perf import (
         _bench_summary,
         _compare_bench_modes,
@@ -1256,6 +1752,27 @@ def test_perf_report_helpers_and_hardware_success_only_cache(
     assert _routing_modes_identical(off, on)
     comparison = _compare_bench_modes(role="brain", repeat=1, off=off, on=on)
     assert comparison["comparison"]["fallback_or_failure_count"]["on"] == 1
+    assert (
+        _bench_summary(
+            [
+                {
+                    "workload": "brain",
+                    "phase": "agent",
+                    "pass": 1,
+                    "timing": {"total_ms": 4},
+                }
+            ]
+        )["brain"]["first_pass"]["median_total_ms"]
+        == 4
+    )
+    assert (
+        runner_perf._summary_deltas(
+            {"summary": {"brain": {"first_pass": {"median_total_ms": 4}}}},
+            {"summary": {"brain": {"first_pass": {"median_total_ms": 6}}}},
+        )["brain"]["median_total_ms"]
+        == 2
+    )
+    assert runner_perf._summary_deltas({"summary": {"bad": []}}, {"summary": {"bad": {}}}) == {}
 
     monkeypatch.setattr(hardware, "_physical_cpu_cache", None)
     monkeypatch.setattr(hardware.sys, "platform", "darwin")

@@ -154,6 +154,12 @@ class BrainSettings(BaseModel):
     routing_reliability_prior_failures: float = Field(default=4.0, gt=0.0, le=100.0)
 
 
+class OrchestrationSettings(BaseModel):
+    """Optional prompt-layout experiments; disabled unless explicitly enabled."""
+
+    stable_prefix_layout: bool = False
+
+
 class ConversationContextSettings(BaseModel):
     """Core-side character pre-bounds; Runtime remains the exact token authority."""
 
@@ -475,6 +481,7 @@ class AprilSettings(BaseModel):
     finetune: FinetuneSettings = Field(default_factory=FinetuneSettings)
     benchmark: BenchmarkSettings = Field(default_factory=BenchmarkSettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
+    orchestration: OrchestrationSettings = Field(default_factory=OrchestrationSettings)
     conversation_context: ConversationContextSettings = Field(
         default_factory=ConversationContextSettings
     )
@@ -565,6 +572,10 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "APRIL_RUNTIME_PREFIX_CACHE": ("runtime", "prefix_cache_enabled"),
     "APRIL_RUNTIME_PREFIX_PREWARM": ("runtime", "prefix_prewarm"),
     "APRIL_RUNTIME_PERF_PROFILE": ("runtime", "perf_profile"),
+    "APRIL_ORCHESTRATION_STABLE_PREFIX_LAYOUT": (
+        "orchestration",
+        "stable_prefix_layout",
+    ),
     "APRIL_CREDENTIAL_STORE": ("security", "credential_store"),
     "APRIL_CREDENTIAL_FILE_PATH": ("security", "credential_file_path"),
     "APRIL_API_CREDENTIAL_ID": ("security", "api_credential_id"),
@@ -860,7 +871,10 @@ def load_settings(
         if not raw.strip() and env_name in _OPTIONAL_BLANK_IS_NONE:
             # Explicit blank for an optional setting means "unset", not Path(".").
             value: Any = None
-        elif env_name == "APRIL_RUNTIME_PREFIX_CACHE":
+        elif env_name in {
+            "APRIL_RUNTIME_PREFIX_CACHE",
+            "APRIL_ORCHESTRATION_STABLE_PREFIX_LAYOUT",
+        }:
             value = _parse_boolean_env(raw, env_name)
         elif env_name in {"APRIL_ALLOWED_FILESYSTEM_ROOTS", "APRIL_WAKE_WORD_MODEL_PATHS"}:
             value = [part.strip() for part in raw.split(",") if part.strip()]

@@ -4,7 +4,6 @@ import asyncio
 import importlib.util
 import json
 import os
-import statistics
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +13,7 @@ import typer
 
 from agents.registry import default_agent_registry
 from apps.cli.render import console
+from apps.runner import bench_reporting as _bench_reporting
 from apps.runner.commands import registry as _registry
 from apps.runner.perf_tune import (
     run_real_tune as _run_real_tune_impl,
@@ -41,6 +41,15 @@ from services.brain.request_context import RequestContext
 from services.brain.router import BrainRouter
 from services.memory.schemas import Message
 from skills.registry import default_registry
+
+_agent_text_divergence = _bench_reporting.agent_text_divergence
+_bench_summary = _bench_reporting.bench_summary
+_health_memory = _bench_reporting.health_memory
+_redact_bench_report = _bench_reporting.redact_bench_report
+_routing_modes_identical = _bench_reporting.routing_modes_identical
+_routing_passes_identical = _bench_reporting.routing_passes_identical
+_summary_deltas = _bench_reporting.summary_deltas
+_timing_value = _bench_reporting.timing_value
 
 
 class _LocalRuntimeClient:
@@ -74,27 +83,35 @@ def perf_bench(
     repeat: int = typer.Option(1, "--repeat", min=1, max=20),
     report: Path | None = typer.Option(None, "--report"),
     compare_prefix_cache: bool = typer.Option(False, "--compare-prefix-cache"),
+    compare_layout: bool = typer.Option(False, "--compare-layout"),
 ) -> None:
     if role not in {"brain", "coding", "reading", "all"}:
         raise typer.BadParameter("role must be brain, coding, reading, or all")
     settings = load_settings()
-    if not fake:
-        _require_real_runtime(settings.home, settings.runtime.backend, command="bench")
-        output = _run_real_bench(
-            settings.home,
-            role=role,
-            repeat=repeat,
-            compare_prefix_cache=compare_prefix_cache,
-        )
-    else:
-        output = asyncio.run(
-            _run_fake_bench(
+    try:
+        if not fake:
+            _require_real_runtime(settings.home, settings.runtime.backend, command="bench")
+            output = _run_real_bench(
                 settings.home,
                 role=role,
                 repeat=repeat,
                 compare_prefix_cache=compare_prefix_cache,
+                compare_layout=compare_layout,
             )
-        )
+        else:
+            output = asyncio.run(
+                _run_fake_bench(
+                    settings.home,
+                    role=role,
+                    repeat=repeat,
+                    compare_prefix_cache=compare_prefix_cache,
+                    compare_layout=compare_layout,
+                )
+            )
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        output = _bench_failure_report(role=role, repeat=repeat, simulated=fake, exc=exc)
     target = report or (
         settings.home
         / "data"
@@ -106,10 +123,44 @@ def perf_bench(
     console.print(str(target))
 
 
-async def _run_fake_bench(
-    home: Path, *, role: str, repeat: int, compare_prefix_cache: bool = False
+def _bench_failure_report(
+    *, role: str, repeat: int, simulated: bool, exc: Exception
 ) -> dict[str, Any]:
-    if compare_prefix_cache:
+    return {
+        "schema": "april.perf.bench.v2",
+        "created_at": datetime.now(UTC).isoformat(),
+        "simulated": simulated,
+        "role": role,
+        "repeat": repeat,
+        "partial": True,
+        "error": {"error_code": "BENCH_FAILED", "error_type": type(exc).__name__},
+        "cases": [],
+        "summary": {},
+    }
+
+
+def synthetic_context_token_count(context_size: int) -> int:
+    """Return the bounded deterministic token budget used by perf workloads."""
+    return max(256, context_size // 2 - 900)
+
+
+def synthetic_context(context_size: int) -> str:
+    return "synthetic context token " * synthetic_context_token_count(context_size)
+
+
+def _bench_error(exc: Exception) -> dict[str, str]:
+    return {"error_code": "BENCH_CALL_FAILED", "error_type": type(exc).__name__}
+
+
+async def _run_fake_bench(
+    home: Path,
+    *,
+    role: str,
+    repeat: int,
+    compare_prefix_cache: bool = False,
+    compare_layout: bool = False,
+) -> dict[str, Any]:
+    if compare_prefix_cache or compare_layout:
         off = await _run_fake_bench(home, role=role, repeat=repeat)
         on = await _run_fake_bench(home, role=role, repeat=repeat)
         return {
@@ -119,7 +170,9 @@ async def _run_fake_bench(
             "role": role,
             "repeat": repeat,
             "modes": {"off": off, "on": on},
+            "partial": bool(off.get("partial") or on.get("partial")),
             "comparison": {
+                "kind": "layout" if compare_layout and not compare_prefix_cache else "prefix_cache",
                 "routing_decisions_identical_across_modes": _routing_modes_identical(off, on),
                 "fallback_or_failure_count": {
                     "off": off.get("fallback_count", 0),
@@ -141,24 +194,30 @@ async def _run_fake_bench(
         for pass_number in range(1, max(2, repeat) + 1):
             for case_number, case in enumerate(brain_cases, start=1):
                 started = time.monotonic()
-                result = await router.route_result(str(case["message"]))
-                cases.append(
-                    {
-                        "pass": pass_number,
-                        "case_id": f"case-{case_number:03d}",
-                        "workload": "brain",
-                        "phase": "routing",
-                        "latency_ms": (time.monotonic() - started) * 1000,
-                        "timing": result.runtime_timing,
-                        "route_source": result.route_source,
-                        "operation": result.decision.intent,
-                        "context": result.decision.agent,
-                        "tool_class": result.decision.tools_needed[0]
-                        if result.decision.tools_needed
-                        else "none",
-                        "prefix_cache": {},
-                    }
-                )
+                routing_case: dict[str, Any] = {
+                    "pass": pass_number,
+                    "case_id": f"case-{case_number:03d}",
+                    "workload": "brain",
+                    "phase": "routing",
+                }
+                try:
+                    result = await router.route_result(str(case["message"]))
+                    routing_case.update(
+                        {
+                            "latency_ms": (time.monotonic() - started) * 1000,
+                            "timing": result.runtime_timing,
+                            "route_source": result.route_source,
+                            "intent": result.decision.intent,
+                            "agent": result.decision.agent,
+                            "tool": result.decision.tools_needed[0]
+                            if result.decision.tools_needed
+                            else "none",
+                            "prefix_cache": {},
+                        }
+                    )
+                except Exception as exc:
+                    routing_case["error"] = _bench_error(exc)
+                cases.append(routing_case)
                 agent_request = ChatRequest(
                     model_id="april-brain",
                     messages=[
@@ -168,19 +227,36 @@ async def _run_fake_bench(
                     ],
                     options=GenerationOptions(temperature=0.0, max_output_tokens=48, seed=17),
                 )
-                stream_events = [event async for event in lifecycle.stream(agent_request)]
-                usage = next((payload for name, payload in stream_events if name == "usage"), {})
-                cases.append(
-                    {
-                        "pass": pass_number,
-                        "case_id": f"case-{case_number:03d}",
-                        "workload": "brain",
-                        "phase": "agent",
-                        "timing": usage.get("timing", {}),
-                        "prefix_cache": usage.get("prefix_cache", {}),
-                        "finish_reason": "stop",
-                    }
-                )
+                agent_case: dict[str, Any] = {
+                    "pass": pass_number,
+                    "case_id": f"case-{case_number:03d}",
+                    "workload": "brain",
+                    "phase": "agent",
+                }
+                try:
+                    stream_events = [event async for event in lifecycle.stream(agent_request)]
+                    error_event = next(
+                        (payload for name, payload in stream_events if name == "error"), None
+                    )
+                    usage = next(
+                        (payload for name, payload in stream_events if name == "usage"), {}
+                    )
+                    if error_event is not None:
+                        agent_case["error"] = {
+                            "error_code": str(error_event.get("code", "BENCH_CALL_FAILED")),
+                            "error_type": "RuntimeStreamError",
+                        }
+                    else:
+                        agent_case.update(
+                            {
+                                "timing": usage.get("timing", {}),
+                                "prefix_cache": usage.get("prefix_cache", {}),
+                                "finish_reason": "stop",
+                            }
+                        )
+                except Exception as exc:
+                    agent_case["error"] = _bench_error(exc)
+                cases.append(agent_case)
     specialist_roles = (
         [] if role == "brain" else ([role] if role != "all" else ["coding", "reading"])
     )
@@ -190,36 +266,42 @@ async def _run_fake_bench(
             continue
         prompt = "Performance workload: " + "local deterministic token " * 250
         for _ in range(repeat):
-            response = await lifecycle.generate(
-                ChatRequest(
-                    model_id=model.id,
-                    messages=[ChatMessage(role="user", content=prompt)],
-                    options=GenerationOptions(temperature=0.0, max_output_tokens=64, seed=17),
+            specialist_case: dict[str, Any] = {
+                "role": specialist_role,
+                "workload": specialist_role,
+                "phase": "agent",
+                "case_id": f"{specialist_role}-001",
+            }
+            try:
+                response = await lifecycle.generate(
+                    ChatRequest(
+                        model_id=model.id,
+                        messages=[ChatMessage(role="user", content=prompt)],
+                        options=GenerationOptions(temperature=0.0, max_output_tokens=64, seed=17),
+                    )
                 )
-            )
-            cases.append(
-                {
-                    "role": specialist_role,
-                    "workload": specialist_role,
-                    "phase": "agent",
-                    "case_id": f"{specialist_role}-001",
-                    "latency_ms": response.diagnostics["timing"]["total_ms"],
-                    "timing": response.diagnostics["timing"],
-                    "prefix_cache": response.diagnostics.get("prefix_cache", {}),
-                    "finish_reason": response.finish_reason,
-                }
-            )
+                specialist_case.update(
+                    {
+                        "latency_ms": response.diagnostics["timing"]["total_ms"],
+                        "timing": response.diagnostics["timing"],
+                        "prefix_cache": response.diagnostics.get("prefix_cache", {}),
+                        "finish_reason": response.finish_reason,
+                    }
+                )
+            except Exception as exc:
+                specialist_case["error"] = _bench_error(exc)
+            cases.append(specialist_case)
     decisions = {}
     if brain_cases:
         first = [
-            item["operation"]
+            item.get("intent")
             for item in cases
-            if item.get("pass") == 1 and item.get("phase") == "routing"
+            if item.get("pass") == 1 and item.get("phase") == "routing" and "intent" in item
         ]
         second = [
-            item["operation"]
+            item.get("intent")
             for item in cases
-            if item.get("pass") == 2 and item.get("phase") == "routing"
+            if item.get("pass") == 2 and item.get("phase") == "routing" and "intent" in item
         ]
         decisions = {
             "fallback_count": sum(1 for item in cases if item.get("route_source") == "fallback"),
@@ -232,117 +314,55 @@ async def _run_fake_bench(
         "role": role,
         "repeat": repeat,
         "cases": cases,
+        "partial": any("error" in item for item in cases),
         **decisions,
         "summary": _bench_summary(cases),
         "comparison": None,
     }
 
 
-def _bench_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for case in cases:
-        grouped.setdefault(str(case.get("workload", "unknown")), []).append(case)
-    result: dict[str, Any] = {}
-    for workload, items in grouped.items():
-        routing_timings = [
-            item.get("timing") or {} for item in items if item.get("phase") == "routing"
-        ]
-        agent_timings = [item.get("timing") or {} for item in items if item.get("phase") == "agent"]
-        totals = [
-            float(timing["total_ms"])
-            for timing in routing_timings
-            if isinstance(timing.get("total_ms"), (int, float))
-        ]
-        agent_ttft = [
-            float(timing["ttft_ms"])
-            for timing in agent_timings
-            if isinstance(timing.get("ttft_ms"), (int, float))
-        ]
-        agent_totals = [
-            float(timing["total_ms"])
-            for timing in agent_timings
-            if isinstance(timing.get("total_ms"), (int, float))
-        ]
-        rates = [
-            float(timing["prompt_eval_tokens_per_second"])
-            for timing in [item.get("timing") or {} for item in items]
-            if isinstance(timing.get("prompt_eval_tokens_per_second"), (int, float))
-            and timing["prompt_eval_tokens_per_second"] > 0
-        ]
-        reuse = [
-            float(timing["prompt_reuse_ratio"])
-            for timing in [item.get("timing") or {} for item in items]
-            if isinstance(timing.get("prompt_reuse_ratio"), (int, float))
-        ]
-        restore = [
-            float((item.get("prefix_cache") or {})["restore_ms"])
-            for item in items
-            if isinstance((item.get("prefix_cache") or {}).get("restore_ms"), (int, float))
-        ]
-        save = [
-            float((item.get("prefix_cache") or {})["save_ms"])
-            for item in items
-            if isinstance((item.get("prefix_cache") or {}).get("save_ms"), (int, float))
-        ]
-        state_sizes = [
-            int((item.get("prefix_cache") or {})["state_bytes"])
-            for item in items
-            if isinstance((item.get("prefix_cache") or {}).get("state_bytes"), int)
-        ]
-        result[workload] = {
-            "calls": len(items),
-            "routing_calls": len(routing_timings),
-            "agent_calls": len(agent_timings),
-            "median_total_ms": statistics.median(
-                [
-                    float((item.get("timing") or {})["total_ms"])
-                    for item in items
-                    if isinstance((item.get("timing") or {}).get("total_ms"), (int, float))
-                ]
-            )
-            if any(
-                isinstance((item.get("timing") or {}).get("total_ms"), (int, float))
-                for item in items
-            )
-            else None,
-            "median_routing_total_ms": statistics.median(totals) if totals else None,
-            "p90_total_ms": _percentile(totals, 0.9),
-            "median_agent_ttft_ms": statistics.median(agent_ttft) if agent_ttft else None,
-            "p90_agent_ttft_ms": _percentile(agent_ttft, 0.9),
-            "median_agent_total_ms": statistics.median(agent_totals) if agent_totals else None,
-            "p90_agent_total_ms": _percentile(agent_totals, 0.9),
-            "median_prompt_eval_tokens_per_second": statistics.median(rates) if rates else None,
-            "median_prompt_reuse_ratio": statistics.median(reuse) if reuse else None,
-            "median_restore_ms": statistics.median(restore) if restore else None,
-            "median_save_ms": statistics.median(save) if save else None,
-            "max_state_bytes": max(state_sizes) if state_sizes else None,
-        }
-    return result
-
-
-def _percentile(values: list[float], fraction: float) -> float | None:
-    if not values:
-        return None
-    ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, int((len(ordered) - 1) * fraction)))
-    return ordered[index]
-
-
 def _run_real_bench(
-    home: Path, *, role: str, repeat: int, compare_prefix_cache: bool = False
+    home: Path,
+    *,
+    role: str,
+    repeat: int,
+    compare_prefix_cache: bool = False,
+    compare_layout: bool = False,
 ) -> dict[str, Any]:
-    """Measure a fresh, temporary runtime through the typed RuntimeClient."""
+    def run_mode(*, cache_enabled: bool, layout_enabled: bool = False) -> dict[str, Any]:
+        try:
+            return _run_real_bench_mode(
+                home,
+                role=role,
+                repeat=repeat,
+                cache_enabled=cache_enabled,
+                layout_enabled=layout_enabled,
+            )
+        except Exception as exc:
+            return _bench_failure_report(role=role, repeat=repeat, simulated=False, exc=exc)
+
     if compare_prefix_cache:
-        off = _run_real_bench_mode(home, role=role, repeat=repeat, cache_enabled=False)
-        on = _run_real_bench_mode(home, role=role, repeat=repeat, cache_enabled=True)
-        return _compare_bench_modes(role=role, repeat=repeat, off=off, on=on)
-    return _redact_bench_report(
-        _run_real_bench_mode(home, role=role, repeat=repeat, cache_enabled=True)
-    )
+        off = run_mode(cache_enabled=False)
+        on = run_mode(cache_enabled=True)
+        return _compare_bench_modes(
+            role=role, repeat=repeat, off=off, on=on, comparison_kind="prefix_cache"
+        )
+    if compare_layout:
+        off = run_mode(cache_enabled=True, layout_enabled=False)
+        on = run_mode(cache_enabled=True, layout_enabled=True)
+        return _compare_bench_modes(
+            role=role, repeat=repeat, off=off, on=on, comparison_kind="layout"
+        )
+    return _redact_bench_report(run_mode(cache_enabled=True))
 
 
 def _run_real_bench_mode(
-    home: Path, *, role: str, repeat: int, cache_enabled: bool
+    home: Path,
+    *,
+    role: str,
+    repeat: int,
+    cache_enabled: bool,
+    layout_enabled: bool = False,
 ) -> dict[str, Any]:
     from apps.runner.verification.multi_model import AllConfiguredModelsVerifier
 
@@ -357,24 +377,39 @@ def _run_real_bench_mode(
         session._prepare()
         env = session._env()
         env["APRIL_RUNTIME_PREFIX_CACHE"] = "on" if cache_enabled else "off"
+        env["APRIL_RUNTIME_PREFIX_PREWARM"] = "off"
+        env["APRIL_ORCHESTRATION_STABLE_PREFIX_LAYOUT"] = "on" if layout_enabled else "off"
         session.runtime = session._start("services.april_runtime.server", env, session.runtime_log)
-        session.api = session._start("services.api.server", env, session.api_log)
         session._wait_json(session.runtime_url + "/runtime/health", auth_runtime=True)
         client = RuntimeClient(session.runtime_url, token=session.runtime_token, timeout=180.0)
         registry = ModelRegistry.from_file(home / "configs" / "models.yaml", root=home)
         selected_roles = {"brain", "coding", "reading"} if role == "all" else {role}
         selected = [item for item in registry.list() if item.role in selected_roles]
         before_health = asyncio.run(client.health())
+        unavailable_models: set[str] = set()
         for model in selected:
-            asyncio.run(client.load(model.id))
-            asyncio.run(
-                client.chat(
-                    model_id=model.id,
-                    messages=[ChatMessage(role="user", content="Synthetic performance warmup.")],
-                    options=GenerationOptions(temperature=0.0, max_output_tokens=1, seed=17),
-                    request_id=f"bench-warmup-{model.id}",
+            try:
+                asyncio.run(client.load(model.id))
+                asyncio.run(
+                    client.chat(
+                        model_id=model.id,
+                        messages=[
+                            ChatMessage(role="user", content="Synthetic performance warmup.")
+                        ],
+                        options=GenerationOptions(temperature=0.0, max_output_tokens=1, seed=17),
+                        request_id=f"bench-warmup-{model.id}",
+                    )
                 )
-            )
+            except Exception as exc:
+                unavailable_models.add(model.id)
+                cases.append(
+                    {
+                        "workload": str(model.role),
+                        "phase": "workload_error",
+                        "case_id": f"{model.role}-startup",
+                        "error": _bench_error(exc),
+                    }
+                )
         bench_settings = load_settings(root=home)
         agent_registry = default_agent_registry()
         capability_summary = trusted_capability_summary(
@@ -392,127 +427,76 @@ def _run_real_bench_mode(
             raw_cases = yaml.safe_load(fixture.read_text(encoding="utf-8")).get("cases", [])
             for pass_number in range(1, max(2, repeat) + 1):
                 for case_number, case in enumerate(raw_cases, start=1):
-                    result = asyncio.run(
-                        router.route_result(
-                            str(case["message"]), request_id=f"bench-{pass_number}-{case_number}"
+                    routing_case: dict[str, Any] = {
+                        "pass": pass_number,
+                        "case_id": f"case-{case_number:03d}",
+                        "workload": "brain",
+                        "phase": "routing",
+                    }
+                    try:
+                        result = asyncio.run(
+                            router.route_result(
+                                str(case["message"]),
+                                request_id=f"bench-{pass_number}-{case_number}",
+                            )
                         )
-                    )
-                    cases.append(
-                        {
-                            "pass": pass_number,
-                            "case_id": f"case-{case_number:03d}",
-                            "workload": "brain",
-                            "phase": "routing",
-                            "latency_ms": result.routing_latency_ms,
-                            "timing": result.runtime_timing or {},
-                            "route_source": result.route_source.value,
-                            "operation": result.decision.intent,
-                            "context": result.decision.agent,
-                            "tool_class": result.decision.tools_needed[0]
-                            if result.decision.tools_needed
-                            else "none",
-                            "prefix_cache": result.runtime_prefix_cache,
-                        }
-                    )
+                        routing_case.update(
+                            {
+                                "latency_ms": result.routing_latency_ms,
+                                "timing": result.runtime_timing or {},
+                                "route_source": result.route_source.value,
+                                "intent": result.decision.intent,
+                                "agent": result.decision.agent,
+                                "tool": result.decision.tools_needed[0]
+                                if result.decision.tools_needed
+                                else "none",
+                                "prefix_cache": result.runtime_prefix_cache,
+                            }
+                        )
+                    except Exception as exc:
+                        routing_case["error"] = _bench_error(exc)
+                    cases.append(routing_case)
                     agent = agent_registry.get("general_agent")
                     if agent is None:
-                        raise RuntimeError("general_agent is not configured")
-                    messages = conversation_chat_messages(
-                        system_prompt=agent.system_prompt,
-                        memory_context=AgentMemoryContext(history=_synthetic_history()),
-                        current_prompt=(
-                            f"{capability_summary}\n\n"
-                            f"Synthetic routing case request:\n{case['message']}"
-                        ),
-                    )
-                    usage, generated_text, finish_reason = asyncio.run(
-                        _stream_bench_call(
-                            client,
-                            model_id="april-brain",
-                            messages=messages,
-                            max_output_tokens=48,
-                            request_id=f"bench-agent-{pass_number}-{case_number}",
+                        cases.append(
+                            {
+                                "pass": pass_number,
+                                "case_id": f"case-{case_number:03d}",
+                                "workload": "brain",
+                                "phase": "agent",
+                                "error": {
+                                    "error_code": "WORKLOAD_UNAVAILABLE",
+                                    "error_type": "ConfigurationError",
+                                },
+                            }
                         )
-                    )
-                    cases.append(
-                        {
-                            "pass": pass_number,
-                            "case_id": f"case-{case_number:03d}",
-                            "workload": "brain",
-                            "phase": "agent",
-                            "latency_ms": _timing_value(usage, "total_ms"),
-                            "timing": usage.get("timing", {}),
-                            "prefix_cache": usage.get("prefix_cache", {}),
-                            "finish_reason": finish_reason,
-                            "_generated_text": generated_text,
-                        }
-                    )
-        if role in {"coding", "reading", "all"}:
-            specialist_roles = ("coding", "reading") if role == "all" else (role,)
-            for specialist_role in specialist_roles:
-                specialist_model = next(
-                    (item for item in selected if item.role == specialist_role), None
-                )
-                agent = agent_registry.get(f"{specialist_role}_agent")
-                if specialist_model is None or agent is None:
-                    continue
-                questions = (
-                    "Summarize the deterministic local performance context.",
-                    "List two relevant observations from the same synthetic context.",
-                )
-                synthetic_context = "synthetic context token " * 750
-                for pass_number in range(1, max(1, repeat) + 1):
-                    for question_number, question in enumerate(questions, start=1):
-                        if question_number == 2:
-                            routed = asyncio.run(
-                                router.route_result(
-                                    "Synthetic performance routing handoff.",
-                                    request_id=(f"bench-{specialist_role}-route-{pass_number}"),
-                                )
-                            )
-                            cases.append(
-                                {
-                                    "pass": pass_number,
-                                    "case_id": f"{specialist_role}-route-{pass_number:03d}",
-                                    "workload": specialist_role,
-                                    "phase": "routing",
-                                    "latency_ms": routed.routing_latency_ms,
-                                    "timing": routed.runtime_timing,
-                                    "prefix_cache": routed.runtime_prefix_cache,
-                                    "route_source": routed.route_source.value,
-                                    "operation": routed.decision.intent,
-                                    "context": routed.decision.agent,
-                                    "tool_class": (
-                                        routed.decision.tools_needed[0]
-                                        if routed.decision.tools_needed
-                                        else "none"
-                                    ),
-                                }
-                            )
+                        continue
+                    agent_case: dict[str, Any] = {
+                        "pass": pass_number,
+                        "case_id": f"case-{case_number:03d}",
+                        "workload": "brain",
+                        "phase": "agent",
+                    }
+                    try:
                         messages = conversation_chat_messages(
                             system_prompt=agent.system_prompt,
                             memory_context=AgentMemoryContext(history=_synthetic_history()),
                             current_prompt=(
-                                f"{capability_summary}\n\n{synthetic_context}\n\n{question}"
+                                f"{capability_summary}\n\n"
+                                f"Synthetic routing case request:\n{case['message']}"
                             ),
                         )
                         usage, generated_text, finish_reason = asyncio.run(
                             _stream_bench_call(
                                 client,
-                                model_id=specialist_model.id,
+                                model_id="april-brain",
                                 messages=messages,
                                 max_output_tokens=48,
-                                request_id=(
-                                    f"bench-{specialist_role}-agent-{pass_number}-{question_number}"
-                                ),
+                                request_id=f"bench-agent-{pass_number}-{case_number}",
                             )
                         )
-                        cases.append(
+                        agent_case.update(
                             {
-                                "pass": pass_number,
-                                "case_id": f"{specialist_role}-{question_number:03d}",
-                                "workload": specialist_role,
-                                "phase": "agent",
                                 "latency_ms": _timing_value(usage, "total_ms"),
                                 "timing": usage.get("timing", {}),
                                 "prefix_cache": usage.get("prefix_cache", {}),
@@ -520,6 +504,98 @@ def _run_real_bench_mode(
                                 "_generated_text": generated_text,
                             }
                         )
+                    except Exception as exc:
+                        agent_case["error"] = _bench_error(exc)
+                    cases.append(agent_case)
+        if role in {"coding", "reading", "all"}:
+            specialist_roles = ("coding", "reading") if role == "all" else (role,)
+            for specialist_role in specialist_roles:
+                specialist_model = next(
+                    (item for item in selected if item.role == specialist_role), None
+                )
+                agent = agent_registry.get(f"{specialist_role}_agent")
+                if (
+                    specialist_model is None
+                    or specialist_model.id in unavailable_models
+                    or agent is None
+                ):
+                    continue
+                questions = (
+                    "Summarize the deterministic local performance context.",
+                    "List two relevant observations from the same synthetic context.",
+                )
+                synthetic_prompt_context = synthetic_context(specialist_model.context_size)
+                for pass_number in range(1, max(1, repeat) + 1):
+                    for question_number, question in enumerate(questions, start=1):
+                        if question_number == 2:
+                            route_case = {
+                                "pass": pass_number,
+                                "case_id": f"{specialist_role}-route-{pass_number:03d}",
+                                "workload": specialist_role,
+                                "phase": "routing",
+                            }
+                            try:
+                                routed = asyncio.run(
+                                    router.route_result(
+                                        "Synthetic performance routing handoff.",
+                                        request_id=(f"bench-{specialist_role}-route-{pass_number}"),
+                                    )
+                                )
+                                route_case.update(
+                                    {
+                                        "latency_ms": routed.routing_latency_ms,
+                                        "timing": routed.runtime_timing,
+                                        "prefix_cache": routed.runtime_prefix_cache,
+                                        "route_source": routed.route_source.value,
+                                        "intent": routed.decision.intent,
+                                        "agent": routed.decision.agent,
+                                        "tool": (
+                                            routed.decision.tools_needed[0]
+                                            if routed.decision.tools_needed
+                                            else "none"
+                                        ),
+                                    }
+                                )
+                            except Exception as exc:
+                                route_case["error"] = _bench_error(exc)
+                            cases.append(route_case)
+                        agent_case = {
+                            "pass": pass_number,
+                            "case_id": f"{specialist_role}-{question_number:03d}",
+                            "workload": specialist_role,
+                            "phase": "agent",
+                        }
+                        try:
+                            messages = conversation_chat_messages(
+                                system_prompt=agent.system_prompt,
+                                memory_context=AgentMemoryContext(history=_synthetic_history()),
+                                current_prompt=(
+                                    f"{capability_summary}\n\n{synthetic_prompt_context}\n\n{question}"
+                                ),
+                            )
+                            usage, generated_text, finish_reason = asyncio.run(
+                                _stream_bench_call(
+                                    client,
+                                    model_id=specialist_model.id,
+                                    messages=messages,
+                                    max_output_tokens=48,
+                                    request_id=(
+                                        f"bench-{specialist_role}-agent-{pass_number}-{question_number}"
+                                    ),
+                                )
+                            )
+                            agent_case.update(
+                                {
+                                    "latency_ms": _timing_value(usage, "total_ms"),
+                                    "timing": usage.get("timing", {}),
+                                    "prefix_cache": usage.get("prefix_cache", {}),
+                                    "finish_reason": finish_reason,
+                                    "_generated_text": generated_text,
+                                }
+                            )
+                        except Exception as exc:
+                            agent_case["error"] = _bench_error(exc)
+                        cases.append(agent_case)
         after_health = asyncio.run(client.health())
         return {
             "schema": "april.perf.bench.v2",
@@ -529,6 +605,7 @@ def _run_real_bench_mode(
             "repeat": repeat,
             "cache_enabled": cache_enabled,
             "cases": cases,
+            "partial": any("error" in item for item in cases),
             "summary": _bench_summary(cases),
             "fallback_count": sum(1 for item in cases if item.get("route_source") == "fallback"),
             "routing_decisions_identical_across_passes": _routing_passes_identical(cases),
@@ -545,20 +622,13 @@ def _run_real_bench_mode(
         shutil.rmtree(session.temp, ignore_errors=True)
 
 
-def _routing_passes_identical(cases: list[dict[str, Any]]) -> bool | None:
-    grouped: dict[int, list[tuple[object, object, object]]] = {}
-    for item in cases:
-        if item.get("phase") != "routing":
-            continue
-        grouped.setdefault(int(item["pass"]), []).append(
-            (item.get("operation"), item.get("context"), item.get("tool_class"))
-        )
-    values = list(grouped.values())
-    return values[0] == values[1] if len(values) >= 2 else None
-
-
 def _compare_bench_modes(
-    *, role: str, repeat: int, off: dict[str, Any], on: dict[str, Any]
+    *,
+    role: str,
+    repeat: int,
+    off: dict[str, Any],
+    on: dict[str, Any],
+    comparison_kind: str = "prefix_cache",
 ) -> dict[str, Any]:
     divergence = _agent_text_divergence(off, on)
     clean_off = _redact_bench_report(off)
@@ -570,6 +640,8 @@ def _compare_bench_modes(
         "role": role,
         "repeat": repeat,
         "modes": {"off": clean_off, "on": clean_on},
+        "comparison_kind": comparison_kind,
+        "partial": bool(off.get("partial") or on.get("partial")),
         "comparison": {
             "routing_decisions_identical_across_modes": _routing_modes_identical(off, on),
             "fallback_or_failure_count": {
@@ -580,17 +652,6 @@ def _compare_bench_modes(
             "per_workload_deltas": _summary_deltas(off, on),
         },
     }
-
-
-def _routing_modes_identical(off: dict[str, Any], on: dict[str, Any]) -> bool:
-    def values(report: dict[str, Any]) -> list[tuple[object, object, object]]:
-        return [
-            (item.get("operation"), item.get("context"), item.get("tool_class"))
-            for item in report.get("cases", [])
-            if item.get("phase") == "routing"
-        ]
-
-    return values(off) == values(on)
 
 
 def _synthetic_history() -> list[Message]:
@@ -649,68 +710,10 @@ async def _stream_bench_call(
     return usage, "".join(generated), finish_reason
 
 
-def _timing_value(payload: dict[str, Any], key: str) -> float | None:
-    value = (payload.get("timing") or {}).get(key)
-    return float(value) if isinstance(value, (int, float)) else None
-
-
-def _health_memory(payload: dict[str, Any]) -> dict[str, int | None]:
-    return {
-        "rss_bytes": payload.get("process_rss_bytes")
-        if isinstance(payload.get("process_rss_bytes"), int)
-        else None,
-        "peak_rss_bytes": payload.get("process_peak_rss_bytes")
-        if isinstance(payload.get("process_peak_rss_bytes"), int)
-        else None,
-    }
-
-
-def _agent_text_divergence(off: dict[str, Any], on: dict[str, Any]) -> int:
-    def texts(report: dict[str, Any]) -> dict[str, str]:
-        return {
-            str(item.get("case_id")): str(item.get("_generated_text", ""))
-            for item in report.get("cases", [])
-            if item.get("phase") == "agent"
-        }
-
-    left, right = texts(off), texts(on)
-    return sum(left.get(case_id) != value for case_id, value in right.items())
-
-
-def _redact_bench_report(report: dict[str, Any]) -> dict[str, Any]:
-    """Remove in-memory-only generated text before a report is serialized."""
-    result = dict(report)
-    result["cases"] = [
-        {key: value for key, value in item.items() if not key.startswith("_")}
-        for item in report.get("cases", [])
-    ]
-    return result
-
-
-def _summary_deltas(off: dict[str, Any], on: dict[str, Any]) -> dict[str, dict[str, float | None]]:
-    deltas: dict[str, dict[str, float | None]] = {}
-    off_summary = off.get("summary", {})
-    on_summary = on.get("summary", {})
-    if not isinstance(off_summary, dict) or not isinstance(on_summary, dict):
-        return deltas
-    for workload in sorted(set(off_summary) | set(on_summary)):
-        left = off_summary.get(workload, {})
-        right = on_summary.get(workload, {})
-        if not isinstance(left, dict) or not isinstance(right, dict):
-            continue
-        fields: dict[str, float | None] = {}
-        for key, value in right.items():
-            baseline = left.get(key)
-            if isinstance(value, (int, float)) and isinstance(baseline, (int, float)):
-                fields[key] = float(value) - float(baseline)
-        deltas[str(workload)] = fields
-    return deltas
-
-
 @_registry.perf_app.command("tune")
 def perf_tune(
     role: str = typer.Option("all", "--role"),
-    max_minutes: float = typer.Option(30.0, "--max-minutes", min=0.01),
+    max_minutes: float = typer.Option(120.0, "--max-minutes", min=0.01),
     cooldown_seconds: float = typer.Option(20.0, "--cooldown-seconds", min=0.0),
     dry_run: bool = typer.Option(False, "--dry-run"),
     fake: bool = typer.Option(False, "--fake"),
@@ -723,6 +726,18 @@ def perf_tune(
     )
     selected_models = [model for model in registry.list() if role == "all" or model.role == role]
     candidates = {model.id: dict(_candidate_values(model)) for model in selected_models}
+    launches = {
+        model.id: sum(len(values) for values in candidates[model.id].values()) * 4
+        + (2 if model.role == "brain" else 0)
+        for model in selected_models
+    }
+    workload_token_sizes = {
+        model.id: {
+            "measured_prompt_tokens": max(256, min(768, getattr(model, "context_size", 1024) // 3)),
+            "warmup_prompt_tokens": 1,
+        }
+        for model in selected_models
+    }
     plan = {
         "role": role,
         "max_minutes": max_minutes,
@@ -730,6 +745,8 @@ def perf_tune(
         "physical_cores": _physical_cores_for_plan(),
         "logical_cores": os.cpu_count(),
         "candidates": candidates,
+        "worker_launches": launches,
+        "workload_token_sizes": workload_token_sizes,
         "thread_candidates_skipped": _physical_cores_for_plan() is None,
         "status": "plan_only" if dry_run else "simulated" if fake else "requires_real_runtime",
     }
@@ -747,6 +764,11 @@ def perf_tune(
                 role=role,
                 max_minutes=max_minutes,
                 cooldown_seconds=cooldown_seconds,
+                development_unsandboxed_override=getattr(
+                    getattr(settings, "workers", None),
+                    "development_unsandboxed_override",
+                    False,
+                ),
             )
         )
         target = (
@@ -793,7 +815,12 @@ def _physical_cores_for_plan() -> int | None:
 
 
 async def _run_real_tune(
-    home: Path, *, role: str, max_minutes: float, cooldown_seconds: float
+    home: Path,
+    *,
+    role: str,
+    max_minutes: float,
+    cooldown_seconds: float,
+    development_unsandboxed_override: bool = False,
 ) -> dict[str, Any]:
     registry = ModelRegistry.from_file(home / "configs" / "models.yaml", root=home)
     return await _run_real_tune_impl(
@@ -807,6 +834,7 @@ async def _run_real_tune(
         profile_inputs=profile_inputs,
         profile_fingerprint=profile_fingerprint,
         tunable_fields=TUNABLE_FIELDS,
+        development_unsandboxed_override=development_unsandboxed_override,
     )
 
 
@@ -814,28 +842,39 @@ def _candidate_values(model: Any) -> list[tuple[str, list[Any]]]:
     physical = _physical_cores_for_plan()
     logical = os.cpu_count()
     values: list[tuple[str, list[Any]]] = []
+    current_batch = int(getattr(model, "threads_batch", None) or model.threads)
+    current_n_batch = int(getattr(model, "n_batch", None) or model.context_size)
+    current_n_ubatch = min(int(getattr(model, "n_ubatch", None) or 512), current_n_batch)
+    current_flash = bool(getattr(model, "flash_attn", None) or False)
+
+    def changed(knob: str, value: Any) -> bool:
+        if knob == "threads_batch":
+            return int(value) != current_batch
+        if knob == "n_batch=n_ubatch":
+            return int(value) != current_n_batch or int(value) != current_n_ubatch
+        if knob == "flash_attn":
+            return bool(value) != current_flash
+        return int(value) != int(model.threads)
+
     if physical is not None:
-        values.extend(
-            [
-                (
-                    "threads_batch",
-                    sorted({max(1, physical - 2), physical, logical or physical}),
-                ),
-            ]
+        batch_values = sorted({max(1, physical - 2), physical, logical or physical})
+        values.append(
+            ("threads_batch", [value for value in batch_values if changed("threads_batch", value)])
         )
-    else:
-        values = []
-    values.extend(
-        [
-            (
-                "n_batch=n_ubatch",
-                [min(value, model.context_size) for value in (128, 256, 512)],
-            ),
-            ("flash_attn", [False, True]),
-        ]
+    batch_values = [min(value, model.context_size) for value in (128, 256, 512)]
+    values.append(
+        (
+            "n_batch=n_ubatch",
+            [value for value in batch_values if changed("n_batch=n_ubatch", value)],
+        )
+    )
+    values.append(
+        ("flash_attn", [value for value in (False, True) if changed("flash_attn", value)])
     )
     if physical is not None:
-        values.append(("threads", sorted({4, 6, physical})))
+        values.append(
+            ("threads", [value for value in sorted({4, 6, physical}) if changed("threads", value)])
+        )
     return values
 
 
