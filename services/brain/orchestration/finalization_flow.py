@@ -23,18 +23,13 @@ def conversation_chat_messages(
     system_prompt: str,
     memory_context: AgentMemoryContext,
     current_prompt: str,
+    stable_prefix: str | None = None,
 ) -> list[ChatMessage]:
     """Build the canonical agent conversation messages.
 
     Performance tooling uses this helper for a synthetic workload so its
     prefix is byte-identical to the production finalization path.
     """
-    stable_prefix: str | None = None
-    if current_prompt.startswith("[APRIL_STABLE_PREFIX_LAYOUT]\n"):
-        marked = current_prompt.removeprefix("[APRIL_STABLE_PREFIX_LAYOUT]\n")
-        stable_prefix, separator, current_prompt = marked.partition("\n\n")
-        if not separator:
-            stable_prefix, current_prompt = marked, ""
     if stable_prefix:
         system_prompt = f"{system_prompt}\n\n{stable_prefix}"
     messages = [ChatMessage(role="system", content=system_prompt)]
@@ -139,11 +134,13 @@ class FinalizationFlow:
         system_prompt: str,
         memory_context: AgentMemoryContext,
         current_prompt: str,
+        stable_prefix: str | None = None,
     ) -> list[ChatMessage]:
         return conversation_chat_messages(
             system_prompt=system_prompt,
             memory_context=memory_context,
             current_prompt=current_prompt,
+            stable_prefix=stable_prefix,
         )
 
     def _format_repo_chunks(self, chunks: list[SearchResult]) -> str:

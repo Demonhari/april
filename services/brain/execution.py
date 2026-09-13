@@ -48,6 +48,7 @@ class PreparedTurn:
     actor: str = "local-user"
     history: list[Message] = field(default_factory=list)
     context_sections: list[str] = field(default_factory=list)
+    stable_prefix: str | None = None
     request_context: RequestContext = field(default_factory=RequestContext.unknown)
     trusted_context: str | None = None
     verification_evidence: VerificationEvidence | None = None

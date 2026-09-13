@@ -264,6 +264,15 @@ class FakeRuntimeAsyncClient:
                     "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
                 },
             )
+        if url.endswith("/runtime/tokenize"):
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": json.get("request_id") or "token-request",
+                    "model_id": json["model_id"],
+                    "token_count": 3,
+                },
+            )
         return httpx.Response(
             200,
             json={
@@ -297,6 +306,12 @@ async def test_runtime_client_methods_and_stream(monkeypatch) -> None:
         request_id="request-1",
     )
     assert response.content == "ok"
+    assert (
+        await client.count_message_tokens(
+            model_id="april-brain", messages=[ChatMessage(role="user", content="hello")]
+        )
+        == 3
+    )
     assert await client.models() == {"models": []}
     assert await client.health(timeout=0.1) == {"status": "ok"}
     assert (await client.load("april-brain")).state == "loaded"
@@ -314,6 +329,39 @@ async def test_runtime_client_methods_and_stream(monkeypatch) -> None:
     )
     assert chat_payload["generation_threads"] == 6
     assert load_payload["generation_threads"] == 6
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_token_count_reports_http_failures(monkeypatch) -> None:
+    class ErrorClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> ErrorClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            return httpx.Response(400, json={"error": "bad request"})
+
+    monkeypatch.setattr("services.april_runtime.client.httpx.AsyncClient", ErrorClient)
+    client = RuntimeClient("http://127.0.0.1:2")
+    with pytest.raises(RuntimeUnavailableError, match="returned an error"):
+        await client.count_message_tokens(
+            model_id="april-brain", messages=[ChatMessage(role="user", content="hello")]
+        )
+
+    class OfflineClient(ErrorClient):
+        async def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr("services.april_runtime.client.httpx.AsyncClient", OfflineClient)
+    with pytest.raises(RuntimeUnavailableError, match="offline"):
+        await client.count_message_tokens(
+            model_id="april-brain", messages=[ChatMessage(role="user", content="hello")]
+        )
 
 
 def test_runner_install_main_uninstall_verify_and_shell_paths(tmp_path: Path, monkeypatch) -> None:

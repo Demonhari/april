@@ -149,6 +149,18 @@ class ChatRequest(BaseModel):
     request_id: str | None = None
 
 
+class TokenCountRequest(BaseModel):
+    model_id: str
+    messages: list[ChatMessage] = Field(min_length=1)
+    request_id: str | None = None
+
+
+class TokenCountResponse(BaseModel):
+    request_id: str
+    model_id: str
+    token_count: int = Field(ge=0)
+
+
 class Usage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0

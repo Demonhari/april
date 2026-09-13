@@ -33,6 +33,8 @@ from services.april_runtime.schemas import (
     EmbedResponse,
     LoadModelRequest,
     ModelOperationResponse,
+    TokenCountRequest,
+    TokenCountResponse,
 )
 from services.april_runtime.streaming import stream_event
 
@@ -100,6 +102,17 @@ def create_app(lifecycle: ModelLifecycle | None = None) -> FastAPI:
     @app.post("/runtime/chat")
     async def chat(request: ChatRequest) -> object:
         return await active_lifecycle.generate(request)
+
+    @app.post("/runtime/tokenize")
+    async def tokenize(request: TokenCountRequest) -> TokenCountResponse:
+        request_id = request.request_id or str(uuid.uuid4())
+        return TokenCountResponse(
+            request_id=request_id,
+            model_id=request.model_id,
+            token_count=await active_lifecycle.count_message_tokens(
+                request.model_id, request.messages
+            ),
+        )
 
     @app.post("/runtime/stream")
     async def stream(request: ChatRequest) -> StreamingResponse:

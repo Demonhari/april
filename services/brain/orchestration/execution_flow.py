@@ -10,7 +10,6 @@ from agents.schemas import AgentResult, ProposedChange
 from april_common.errors import PermissionDeniedError
 from april_common.path_security import PathPolicy, normalize_existing_path
 from april_common.project_scope import normalize_project_child, validate_patch_text
-from services.brain.capabilities import split_trusted_capability_summary, stable_prefix_prompt
 from services.brain.execution import PreparedTurn
 from services.brain.memory_policy import AgentMemoryContext
 from services.brain.reasoning_resolver import resolve_reasoning_model
@@ -57,6 +56,7 @@ class ExecutionFlow:
             request_id=prepared.request_id,
             history=prepared.history,
             context_sections=prepared.context_sections,
+            stable_prefix=prepared.stable_prefix,
             run_metadata=prepared.run_metadata,
         )
         # Mirror the run metadata (chat_mode, intelligence_rung, ...) into the
@@ -260,6 +260,8 @@ class ExecutionFlow:
         task_plan_id: str,
         request_context: RequestContext,
         trusted_context: str,
+        capability_prompt: str,
+        stable_prefix: str | None = None,
     ) -> PreparedTurn:
         prompt_parts, citations = await self._prompt_parts(
             message=message,
@@ -268,13 +270,7 @@ class ExecutionFlow:
             tool_outputs=[],
             memory_context=memory_context,
         )
-        if self.settings.orchestration.stable_prefix_layout:
-            stable, volatile = split_trusted_capability_summary(
-                trusted_context, runtime_evidence={}
-            )
-            prompt_parts.insert(0, stable_prefix_prompt(stable, volatile))
-        else:
-            prompt_parts.insert(0, trusted_context)
+        prompt_parts.insert(0, capability_prompt)
         patch_instruction = (
             "Prepare a safe local code modification. Return a unified diff patch only.\n"
             "Do not include prose, markdown fences, shell commands, or instructions.\n"
@@ -287,6 +283,7 @@ class ExecutionFlow:
                 system_prompt=agent_prompt,
                 memory_context=memory_context,
                 current_prompt="\n\n".join([*prompt_parts, patch_instruction]),
+                stable_prefix=stable_prefix,
             ),
             request_id=request_id,
         )
@@ -307,6 +304,7 @@ class ExecutionFlow:
                 task_plan_id=task_plan_id,
                 request_context=request_context,
                 trusted_context=trusted_context,
+                stable_prefix=stable_prefix,
             )
 
         generator_args = {"patch": response.content}
@@ -348,6 +346,7 @@ class ExecutionFlow:
                 task_plan_id=task_plan_id,
                 request_context=request_context,
                 trusted_context=trusted_context,
+                stable_prefix=stable_prefix,
             )
 
         patch_path = str(generator_result.data["patch_path"])
@@ -385,6 +384,7 @@ class ExecutionFlow:
                 task_plan_id=task_plan_id,
                 request_context=request_context,
                 trusted_context=trusted_context,
+                stable_prefix=stable_prefix,
             )
         affected_text = "\n".join(f"- {path}" for path in affected_files)
         final_message = (
@@ -411,6 +411,7 @@ class ExecutionFlow:
             task_plan_id=task_plan_id,
             request_context=request_context,
             trusted_context=trusted_context,
+            stable_prefix=stable_prefix,
         )
 
     async def _resolve_project(

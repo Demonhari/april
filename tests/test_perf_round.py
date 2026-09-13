@@ -656,12 +656,52 @@ async def test_perf_bench_stream_and_redaction_helpers() -> None:
     assert runner_perf._routing_passes_identical([]) is None
 
 
-def test_bench_sizing_and_failure_helpers_are_redacted() -> None:
+@pytest.mark.asyncio
+async def test_bench_workloads_are_token_sized_for_configured_models(settings_tmp: Any) -> None:
+    from agents.registry import default_agent_registry
     from apps.runner.commands import runner_perf
+    from services.april_runtime.model_lifecycle import ModelLifecycle
+    from services.april_runtime.model_registry import ModelRegistry
+    from services.brain.capabilities import trusted_capability_summary
+    from services.brain.memory_policy import AgentMemoryContext
+    from services.brain.request_context import RequestContext
+    from skills.registry import default_registry
 
-    assert runner_perf.synthetic_context_token_count(1024) == 256
-    assert runner_perf.synthetic_context_token_count(4096) == 1148
-    assert runner_perf.synthetic_context(1024).count("synthetic context token") == 256
+    home = Path.cwd()
+    registry = ModelRegistry.from_file(home / "configs" / "models.yaml", root=home)
+    lifecycle = ModelLifecycle(registry, root_backend="fake")
+    client = runner_perf._LocalRuntimeClient(lifecycle)
+    summary = trusted_capability_summary(
+        settings=settings_tmp,
+        agent_registry=default_agent_registry(),
+        tool_registry=default_registry(),
+        model_registry=registry,
+        request_context=RequestContext.unknown(),
+    )
+    for model in registry.list():
+        agent = default_agent_registry().get(
+            {"brain": "general_agent", "coding": "coding_agent", "reading": "reading_agent"}.get(
+                str(model.role), "general_agent"
+            )
+        )
+        if agent is None:
+            continue
+        plan = await runner_perf._fit_bench_message_set(
+            client=client,
+            model_id=model.id,
+            context_size=model.context_size,
+            max_output_tokens=48,
+            system_prompt=agent.system_prompt,
+            capability_summary=summary,
+            memory_context=AgentMemoryContext(history=runner_perf._synthetic_history()),
+            question="Synthetic benchmark question.",
+        )
+        assert plan["skipped"] is False
+        assert plan["token_count"] + 48 <= int(0.70 * model.context_size)
+        if model.role == "reading":
+            assert plan["messages"]
+    await lifecycle.cleanup()
+
     error = runner_perf._bench_failure_report(
         role="brain", repeat=1, simulated=True, exc=ValueError("secret prompt")
     )
@@ -671,6 +711,169 @@ def test_bench_sizing_and_failure_helpers_are_redacted() -> None:
         "error_code": "BENCH_CALL_FAILED",
         "error_type": "ValueError",
     }
+
+
+def test_perf_workload_filler_and_budget_helpers_are_token_based() -> None:
+    from apps.runner.perf_workload import (
+        FILLER_UNIT,
+        build_filler,
+        raw_workload_budget,
+        workload_budget,
+        workload_budget_for_fraction,
+    )
+
+    def count(text: str) -> int:
+        return len(text.split())
+
+    filler = build_filler(10, count)
+    assert filler.startswith(FILLER_UNIT)
+    assert count(filler) <= 10
+    assert build_filler(0, count) == ""
+    assert workload_budget(4096, 48, 100) == 2719
+    assert workload_budget(128, 48, 100) == 128
+    assert workload_budget_for_fraction(4096, 32, 10, 0.60) == 2415
+    assert raw_workload_budget(128, 48, 100) < 128
+
+
+@pytest.mark.asyncio
+async def test_perf_workload_async_filler_and_skip_reasons() -> None:
+    from apps.runner.perf_workload import build_filler_async, fit_bench_message_set
+    from services.brain.memory_policy import AgentMemoryContext
+
+    async def count_text(text: str) -> int:
+        return len(text.split())
+
+    assert (await build_filler_async(7, count_text)).split()
+    assert await build_filler_async(0, count_text) == ""
+
+    class CountingClient:
+        async def count_message_tokens(self, *, model_id: str, messages: list[Any]) -> int:
+            del model_id
+            return sum(len(message.content.split()) for message in messages)
+
+    fixed = await fit_bench_message_set(
+        client=CountingClient(),
+        model_id="test",
+        context_size=128,
+        max_output_tokens=1,
+        system_prompt="word " * 100,
+        capability_summary="capability",
+        memory_context=AgentMemoryContext(),
+        question="question",
+    )
+    assert fixed["skipped"] is True
+    assert fixed["reason"] == "fixed_prompt_exceeds_budget"
+
+    budget = await fit_bench_message_set(
+        client=CountingClient(),
+        model_id="test",
+        context_size=128,
+        max_output_tokens=32,
+        system_prompt="system",
+        capability_summary="capability",
+        memory_context=AgentMemoryContext(),
+        question="question",
+    )
+    assert budget["skipped"] is True
+    assert budget["reason"] == "workload_budget_below_minimum"
+
+    class OverheadClient(CountingClient):
+        calls = 0
+
+        async def count_message_tokens(self, *, model_id: str, messages: list[Any]) -> int:
+            measured = await super().count_message_tokens(model_id=model_id, messages=messages)
+            self.calls += 1
+            return measured + (50 if self.calls > 1 and len(messages) > 1 else 0)
+
+    sized = await fit_bench_message_set(
+        client=OverheadClient(),
+        model_id="test",
+        context_size=512,
+        max_output_tokens=32,
+        system_prompt="system",
+        capability_summary="capability",
+        memory_context=AgentMemoryContext(),
+        question="question",
+    )
+    assert sized["skipped"] is False
+    assert sized["token_count"] + 32 <= int(0.70 * 512)
+
+
+@pytest.mark.asyncio
+async def test_fake_bench_workload_skip_paths_are_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    import apps.runner.perf_fake_bench as fake_bench
+
+    class EmptyRegistry:
+        def list(self) -> list[Any]:
+            return []
+
+        def get(self, _name: str) -> None:
+            return None
+
+    monkeypatch.setattr(fake_bench, "default_agent_registry", lambda: EmptyRegistry())
+    brain_report = await fake_bench.run_fake_bench(Path.cwd(), role="brain", repeat=1)
+    assert any(case.get("phase") == "agent" and "error" in case for case in brain_report["cases"])
+
+    from agents.registry import default_agent_registry
+
+    monkeypatch.setattr(fake_bench, "default_agent_registry", default_agent_registry)
+
+    async def skip_workload(**_kwargs: Any) -> dict[str, Any]:
+        return {"skipped": True, "reason": "test_skip"}
+
+    monkeypatch.setattr(fake_bench, "fit_agent_workload", skip_workload)
+    brain_skip_report = await fake_bench.run_fake_bench(Path.cwd(), role="brain", repeat=1)
+    assert any(case.get("phase") == "workload_skipped" for case in brain_skip_report["cases"])
+    coding_report = await fake_bench.run_fake_bench(Path.cwd(), role="coding", repeat=1)
+    assert coding_report["cases"][0]["phase"] == "workload_skipped"
+
+    reading_report = await fake_bench.run_fake_bench(Path.cwd(), role="creative", repeat=1)
+    assert reading_report["cases"] == []
+
+
+def test_tune_workload_prompt_is_deterministic_and_token_sized() -> None:
+    from apps.runner.perf_worker import _workload_prompt
+
+    def count_tokens(text: str) -> int:
+        return len(text.split())
+
+    prompt = _workload_prompt("nonce", 1024, count_tokens, max_output_tokens=32)
+    assert prompt == _workload_prompt("nonce", 1024, count_tokens, max_output_tokens=32)
+    assert count_tokens(prompt) + 32 <= int(0.60 * 1024)
+    assert _workload_prompt("nonce", 128, count_tokens, max_output_tokens=32).startswith(
+        "Measurement nonce: nonce"
+    )
+    assert _workload_prompt("nonce", 512).startswith("Measurement nonce: nonce")
+
+
+@pytest.mark.asyncio
+async def test_tune_sized_workload_uses_tokenizer_and_fails_closed() -> None:
+    from apps.runner.perf_worker import _sized_workload_prompt
+
+    class CountingLifecycle:
+        def __init__(self, *, oversized: bool = False) -> None:
+            self.calls = 0
+            self.oversized = oversized
+
+        async def count_message_tokens(self, model_id: str, messages: list[Any]) -> int:
+            del model_id
+            self.calls += 1
+            text = messages[0].content
+            if self.oversized and self.calls > 1 and "\n" in text:
+                return 10_000
+            return len(text.split())
+
+    skipped, _, reason = await _sized_workload_prompt(
+        CountingLifecycle(), "model", "nonce", 128, 32
+    )
+    assert skipped is None
+    assert reason == "workload_budget_below_minimum"
+
+    lifecycle = CountingLifecycle(oversized=True)
+    skipped, _, reason = await _sized_workload_prompt(lifecycle, "model", "nonce", 512, 32)
+    assert skipped is None
+    assert reason == "sized_prompt_exceeds_budget"
+    assert lifecycle.calls > 4
 
 
 def test_perf_bench_writes_failure_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -714,25 +917,27 @@ def test_real_perf_bench_writes_failure_report_after_readiness_error(
 def test_stable_layout_message_helpers_keep_volatile_content_out_of_system_prefix() -> None:
     from agents.registry import default_agent_registry
     from services.brain.agent_loop import StructuredAgentLoop
-    from services.brain.capabilities import stable_prefix_prompt
     from services.brain.memory_policy import AgentMemoryContext
     from services.brain.orchestration.finalization_flow import conversation_chat_messages
 
-    marked = stable_prefix_prompt("stable identity", "volatile request evidence")
     agent = default_agent_registry().get("general_agent")
     assert agent is not None
     loop = StructuredAgentLoop.__new__(StructuredAgentLoop)
-    messages = loop._initial_messages(agent, "question", [], [marked])
+    messages = loop._initial_messages(
+        agent, "question", [], ["volatile request evidence"], "stable identity"
+    )
     assert "stable identity" in messages[0].content
     assert "volatile request evidence" in messages[-1].content
     assert "volatile request evidence" not in messages[0].content
 
-    with pytest.raises(Exception, match="String should have at least 1 character"):
-        conversation_chat_messages(
-            system_prompt="agent",
-            memory_context=AgentMemoryContext(),
-            current_prompt="[APRIL_STABLE_PREFIX_LAYOUT]\nonly stable",
-        )
+    messages = conversation_chat_messages(
+        system_prompt="agent",
+        memory_context=AgentMemoryContext(),
+        current_prompt="volatile",
+        stable_prefix="only stable",
+    )
+    assert messages[0].content == "agent\n\nonly stable"
+    assert messages[-1].content == "volatile"
 
 
 def test_perf_tune_rejects_invalid_role() -> None:
@@ -838,6 +1043,11 @@ def test_perf_tune_rejects_candidates() -> None:
         {**baseline, "routing_decisions": [("x", "b", "c")]},
         "threads",
     ) == (False, "semantic_drift")
+    assert _accept_candidate(
+        {**baseline, "routing_decisions": []},
+        {**baseline, "routing_decisions": []},
+        "threads",
+    ) != (False, "semantic_drift")
     assert _accept_candidate({**baseline, "valid_prefill": False}, baseline, "threads") == (
         False,
         "unmeasured",
@@ -1248,7 +1458,72 @@ async def test_tune_real_path_runs_brain_routing_checks_and_passes_sandbox_flag(
     )
     assert output["profiles"]
     assert sum(call.get("routing_check") is True for call in calls) == 2
+    assert output["routing_cases_compared"] == 1
+    assert sum(call.get("routing_check") is not True for call in calls) > 0
     assert all(call.get("development_unsandboxed_override") is True for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_tune_routing_mismatch_blocks_profile_and_runs_only_two_route_workers(
+    tmp_path: Path,
+) -> None:
+    from apps.runner import perf_tune
+
+    model = ModelDefinition(
+        id="brain",
+        name="brain",
+        path=tmp_path / "brain.gguf",
+        backend="llama_cpp",
+        role="brain",
+        threads=8,
+        context_size=4096,
+        temperature=0.0,
+        max_output_tokens=32,
+    )
+    calls: list[bool] = []
+
+    async def measure(
+        _home: Path,
+        _baseline: Any,
+        candidate: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        routing = bool(kwargs.get("routing_check"))
+        calls.append(routing)
+        return {
+            "metric": 2.0 if candidate.threads == 4 else 1.0,
+            "prompt_metric": 2.0,
+            "outputs": ["same"],
+            "semantic_check": "same",
+            "routing_decisions": (
+                [("changed", "general", "none")]
+                if candidate.threads == 4
+                else [("same", "general", "none")]
+            )
+            if routing
+            else [],
+            "peak_rss": 1,
+            "valid_prefill": True,
+        }
+
+    output = await perf_tune.run_real_tune(
+        tmp_path,
+        role="brain",
+        max_minutes=1,
+        cooldown_seconds=0,
+        registry=types.SimpleNamespace(list=lambda: [model]),
+        candidate_values=lambda _model: [("threads", [4])],
+        accept_candidate=lambda *_args: (True, None),
+        profile_inputs=lambda *_args: {"identity": "fixed"},
+        profile_fingerprint=lambda _inputs: "blocked",
+        tunable_fields={"threads"},
+        measure_candidate=measure,
+    )
+    assert sum(calls) == 2
+    assert output["profiles"] == []
+    routing_result = output["results"][-1]
+    assert routing_result["reason"] == "semantic_drift"
+    assert routing_result["routing_cases_compared"] == 1
 
 
 @pytest.mark.asyncio

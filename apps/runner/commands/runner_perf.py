@@ -4,10 +4,9 @@ import asyncio
 import importlib.util
 import json
 import os
-import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import typer
 
@@ -17,6 +16,12 @@ from apps.runner import bench_reporting as _bench_reporting
 from apps.runner.commands import registry as _registry
 from apps.runner.perf_tune import (
     run_real_tune as _run_real_tune_impl,
+)
+from apps.runner.perf_workload import (
+    bench_capability_context,
+    fit_agent_workload,
+    fit_bench_message_set,
+    workload_budget_for_fraction,
 )
 from april_common.settings import load_settings
 from services.april_runtime.client import RuntimeClient
@@ -36,7 +41,6 @@ from services.april_runtime.schemas import (
 )
 from services.brain.capabilities import trusted_capability_summary
 from services.brain.memory_policy import AgentMemoryContext
-from services.brain.orchestration.finalization_flow import conversation_chat_messages
 from services.brain.request_context import RequestContext
 from services.brain.router import BrainRouter
 from services.memory.schemas import Message
@@ -74,6 +78,12 @@ class _LocalRuntimeClient:
                 request_id=request_id,
             )
         )
+
+    async def count_message_tokens(self, *, model_id: str, messages: list[ChatMessage]) -> int:
+        return await self.lifecycle.count_message_tokens(model_id, messages)
+
+
+_fit_bench_message_set = fit_bench_message_set
 
 
 @_registry.perf_app.command("bench")
@@ -139,15 +149,6 @@ def _bench_failure_report(
     }
 
 
-def synthetic_context_token_count(context_size: int) -> int:
-    """Return the bounded deterministic token budget used by perf workloads."""
-    return max(256, context_size // 2 - 900)
-
-
-def synthetic_context(context_size: int) -> str:
-    return "synthetic context token " * synthetic_context_token_count(context_size)
-
-
 def _bench_error(exc: Exception) -> dict[str, str]:
     return {"error_code": "BENCH_CALL_FAILED", "error_type": type(exc).__name__}
 
@@ -159,166 +160,18 @@ async def _run_fake_bench(
     repeat: int,
     compare_prefix_cache: bool = False,
     compare_layout: bool = False,
+    layout_enabled: bool = False,
 ) -> dict[str, Any]:
-    if compare_prefix_cache or compare_layout:
-        off = await _run_fake_bench(home, role=role, repeat=repeat)
-        on = await _run_fake_bench(home, role=role, repeat=repeat)
-        return {
-            "schema": "april.perf.bench.v2",
-            "created_at": datetime.now(UTC).isoformat(),
-            "simulated": True,
-            "role": role,
-            "repeat": repeat,
-            "modes": {"off": off, "on": on},
-            "partial": bool(off.get("partial") or on.get("partial")),
-            "comparison": {
-                "kind": "layout" if compare_layout and not compare_prefix_cache else "prefix_cache",
-                "routing_decisions_identical_across_modes": _routing_modes_identical(off, on),
-                "fallback_or_failure_count": {
-                    "off": off.get("fallback_count", 0),
-                    "on": on.get("fallback_count", 0),
-                },
-            },
-        }
-    registry = ModelRegistry.from_file(home / "configs" / "models.yaml", root=home)
-    lifecycle = ModelLifecycle(registry, root_backend="fake")
-    local = _LocalRuntimeClient(lifecycle)
-    router = BrainRouter(cast(Any, local), brain_model_id="april-brain")
-    cases: list[dict[str, Any]] = []
-    brain_cases = []
-    if role in {"brain", "all"}:
-        fixture = home / "tests" / "fixtures" / "evals" / "brain_routes.yaml"
-        import yaml
+    from apps.runner.perf_fake_bench import run_fake_bench
 
-        brain_cases = yaml.safe_load(fixture.read_text(encoding="utf-8")).get("cases", [])
-        for pass_number in range(1, max(2, repeat) + 1):
-            for case_number, case in enumerate(brain_cases, start=1):
-                started = time.monotonic()
-                routing_case: dict[str, Any] = {
-                    "pass": pass_number,
-                    "case_id": f"case-{case_number:03d}",
-                    "workload": "brain",
-                    "phase": "routing",
-                }
-                try:
-                    result = await router.route_result(str(case["message"]))
-                    routing_case.update(
-                        {
-                            "latency_ms": (time.monotonic() - started) * 1000,
-                            "timing": result.runtime_timing,
-                            "route_source": result.route_source,
-                            "intent": result.decision.intent,
-                            "agent": result.decision.agent,
-                            "tool": result.decision.tools_needed[0]
-                            if result.decision.tools_needed
-                            else "none",
-                            "prefix_cache": {},
-                        }
-                    )
-                except Exception as exc:
-                    routing_case["error"] = _bench_error(exc)
-                cases.append(routing_case)
-                agent_request = ChatRequest(
-                    model_id="april-brain",
-                    messages=[
-                        ChatMessage(role="system", content="Synthetic agent system."),
-                        ChatMessage(role="user", content="Synthetic history."),
-                        ChatMessage(role="user", content="Synthetic question."),
-                    ],
-                    options=GenerationOptions(temperature=0.0, max_output_tokens=48, seed=17),
-                )
-                agent_case: dict[str, Any] = {
-                    "pass": pass_number,
-                    "case_id": f"case-{case_number:03d}",
-                    "workload": "brain",
-                    "phase": "agent",
-                }
-                try:
-                    stream_events = [event async for event in lifecycle.stream(agent_request)]
-                    error_event = next(
-                        (payload for name, payload in stream_events if name == "error"), None
-                    )
-                    usage = next(
-                        (payload for name, payload in stream_events if name == "usage"), {}
-                    )
-                    if error_event is not None:
-                        agent_case["error"] = {
-                            "error_code": str(error_event.get("code", "BENCH_CALL_FAILED")),
-                            "error_type": "RuntimeStreamError",
-                        }
-                    else:
-                        agent_case.update(
-                            {
-                                "timing": usage.get("timing", {}),
-                                "prefix_cache": usage.get("prefix_cache", {}),
-                                "finish_reason": "stop",
-                            }
-                        )
-                except Exception as exc:
-                    agent_case["error"] = _bench_error(exc)
-                cases.append(agent_case)
-    specialist_roles = (
-        [] if role == "brain" else ([role] if role != "all" else ["coding", "reading"])
+    return await run_fake_bench(
+        home,
+        role=role,
+        repeat=repeat,
+        compare_prefix_cache=compare_prefix_cache,
+        compare_layout=compare_layout,
+        layout_enabled=layout_enabled,
     )
-    for specialist_role in specialist_roles:
-        model = next((item for item in registry.list() if item.role == specialist_role), None)
-        if model is None:
-            continue
-        prompt = "Performance workload: " + "local deterministic token " * 250
-        for _ in range(repeat):
-            specialist_case: dict[str, Any] = {
-                "role": specialist_role,
-                "workload": specialist_role,
-                "phase": "agent",
-                "case_id": f"{specialist_role}-001",
-            }
-            try:
-                response = await lifecycle.generate(
-                    ChatRequest(
-                        model_id=model.id,
-                        messages=[ChatMessage(role="user", content=prompt)],
-                        options=GenerationOptions(temperature=0.0, max_output_tokens=64, seed=17),
-                    )
-                )
-                specialist_case.update(
-                    {
-                        "latency_ms": response.diagnostics["timing"]["total_ms"],
-                        "timing": response.diagnostics["timing"],
-                        "prefix_cache": response.diagnostics.get("prefix_cache", {}),
-                        "finish_reason": response.finish_reason,
-                    }
-                )
-            except Exception as exc:
-                specialist_case["error"] = _bench_error(exc)
-            cases.append(specialist_case)
-    decisions = {}
-    if brain_cases:
-        first = [
-            item.get("intent")
-            for item in cases
-            if item.get("pass") == 1 and item.get("phase") == "routing" and "intent" in item
-        ]
-        second = [
-            item.get("intent")
-            for item in cases
-            if item.get("pass") == 2 and item.get("phase") == "routing" and "intent" in item
-        ]
-        decisions = {
-            "fallback_count": sum(1 for item in cases if item.get("route_source") == "fallback"),
-            "routing_decisions_identical_across_passes": first == second,
-        }
-    return {
-        "schema": "april.perf.bench.v2",
-        "created_at": datetime.now(UTC).isoformat(),
-        "simulated": True,
-        "role": role,
-        "repeat": repeat,
-        "cases": cases,
-        "partial": any("error" in item for item in cases),
-        **decisions,
-        "summary": _bench_summary(cases),
-        "comparison": None,
-    }
 
 
 def _run_real_bench(
@@ -419,6 +272,13 @@ def _run_real_bench_mode(
             model_registry=registry,
             request_context=RequestContext.unknown(),
         )
+        capability_summary, stable_prefix = bench_capability_context(
+            settings=bench_settings,
+            agent_registry=agent_registry,
+            tool_registry=default_registry(),
+            model_registry=registry,
+            layout_enabled=layout_enabled,
+        )
         router = BrainRouter(client)
         if role in {"brain", "all"}:
             import yaml
@@ -478,19 +338,33 @@ def _run_real_bench_mode(
                         "phase": "agent",
                     }
                     try:
-                        messages = conversation_chat_messages(
-                            system_prompt=agent.system_prompt,
-                            memory_context=AgentMemoryContext(history=_synthetic_history()),
-                            current_prompt=(
-                                f"{capability_summary}\n\n"
-                                f"Synthetic routing case request:\n{case['message']}"
-                            ),
+                        plan = asyncio.run(
+                            fit_agent_workload(
+                                client=client,
+                                model=registry.get("april-brain"),
+                                agent=agent,
+                                max_output_tokens=48,
+                                capability_summary=capability_summary,
+                                memory_context=AgentMemoryContext(history=_synthetic_history()),
+                                question=f"Synthetic routing case request: {case['message']}",
+                                stable_prefix=stable_prefix,
+                                allow_filler=False,
+                            )
                         )
+                        if plan["skipped"]:
+                            cases.append(
+                                {
+                                    **agent_case,
+                                    "phase": "workload_skipped",
+                                    "reason": plan["reason"],
+                                }
+                            )
+                            continue
                         usage, generated_text, finish_reason = asyncio.run(
                             _stream_bench_call(
                                 client,
                                 model_id="april-brain",
-                                messages=messages,
+                                messages=plan["messages"],
                                 max_output_tokens=48,
                                 request_id=f"bench-agent-{pass_number}-{case_number}",
                             )
@@ -524,7 +398,6 @@ def _run_real_bench_mode(
                     "Summarize the deterministic local performance context.",
                     "List two relevant observations from the same synthetic context.",
                 )
-                synthetic_prompt_context = synthetic_context(specialist_model.context_size)
                 for pass_number in range(1, max(1, repeat) + 1):
                     for question_number, question in enumerate(questions, start=1):
                         if question_number == 2:
@@ -566,18 +439,32 @@ def _run_real_bench_mode(
                             "phase": "agent",
                         }
                         try:
-                            messages = conversation_chat_messages(
-                                system_prompt=agent.system_prompt,
-                                memory_context=AgentMemoryContext(history=_synthetic_history()),
-                                current_prompt=(
-                                    f"{capability_summary}\n\n{synthetic_prompt_context}\n\n{question}"
-                                ),
+                            plan = asyncio.run(
+                                fit_agent_workload(
+                                    client=client,
+                                    model=specialist_model,
+                                    agent=agent,
+                                    max_output_tokens=48,
+                                    capability_summary=capability_summary,
+                                    memory_context=AgentMemoryContext(history=_synthetic_history()),
+                                    question=question,
+                                    stable_prefix=stable_prefix,
+                                )
                             )
+                            if plan["skipped"]:
+                                cases.append(
+                                    {
+                                        **agent_case,
+                                        "phase": "workload_skipped",
+                                        "reason": plan["reason"],
+                                    }
+                                )
+                                continue
                             usage, generated_text, finish_reason = asyncio.run(
                                 _stream_bench_call(
                                     client,
                                     model_id=specialist_model.id,
-                                    messages=messages,
+                                    messages=plan["messages"],
                                     max_output_tokens=48,
                                     request_id=(
                                         f"bench-{specialist_role}-agent-{pass_number}-{question_number}"
@@ -733,7 +620,13 @@ def perf_tune(
     }
     workload_token_sizes = {
         model.id: {
-            "measured_prompt_tokens": max(256, min(768, getattr(model, "context_size", 1024) // 3)),
+            "target_prompt_tokens": workload_budget_for_fraction(
+                getattr(model, "context_size", 1024),
+                getattr(model, "max_output_tokens", 32),
+                0,
+                0.60,
+            ),
+            "reserved_output_tokens": getattr(model, "max_output_tokens", 32),
             "warmup_prompt_tokens": 1,
         }
         for model in selected_models
@@ -885,7 +778,9 @@ def _accept_candidate(
         "semantic_check", baseline.get("outputs")
     ):
         return False, "semantic_drift"
-    if baseline.get("routing_decisions") != candidate.get("routing_decisions"):
+    baseline_routing = baseline.get("routing_decisions")
+    candidate_routing = candidate.get("routing_decisions")
+    if baseline_routing and candidate_routing and baseline_routing != candidate_routing:
         return False, "semantic_drift"
     if not candidate.get("valid_prefill", True) or not baseline.get("valid_prefill", True):
         return False, "unmeasured"

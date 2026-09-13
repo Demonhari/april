@@ -15,6 +15,17 @@ _REAL_OPTIONAL_AVAILABLE = (
 )
 
 
+async def _repeated_to_target(
+    backend: LlamaCppBackend, target_tokens: int, unit: str = "shared prefix token "
+) -> str:
+    repetitions = 0
+    while len(await backend.tokenize(unit * repetitions)) < target_tokens:
+        repetitions += 1
+    while repetitions and len(await backend.tokenize(unit * repetitions)) > target_tokens:
+        repetitions -= 1
+    return unit * repetitions
+
+
 @pytest.mark.skipif(
     not _REAL_OPTIONAL_AVAILABLE,
     reason="set APRIL_TEST_GGUF_PATH and install llama-cpp-python",
@@ -43,13 +54,16 @@ async def test_real_prefix_cache_and_thread_budget() -> None:
     backend = LlamaCppBackend()
     await backend.load(model)
     try:
-        prefix = "system guidance " * 700
+        prefix = await _repeated_to_target(backend, int(model.context_size * 0.45))
+        if len(await backend.tokenize(f"{prefix}\nA")) + 4 >= model.context_size:
+            pytest.skip("configured context cannot hold the 45% prefix workload")
         first = await backend.generate(
             f"{prefix}\nA", temperature=0.0, max_output_tokens=4, seed=17
         )
-        await backend.generate(
-            "different family " * 700, temperature=0.0, max_output_tokens=4, seed=17
+        different = await _repeated_to_target(
+            backend, int(model.context_size * 0.45), "different family token "
         )
+        await backend.generate(different, temperature=0.0, max_output_tokens=4, seed=17)
         restored = await backend.generate(
             f"{prefix}\nA prime", temperature=0.0, max_output_tokens=4, seed=17
         )
@@ -117,13 +131,17 @@ async def test_real_prefix_cache_short_first_long_next() -> None:
     backend = LlamaCppBackend()
     await backend.load(model)
     try:
+        short = await _repeated_to_target(backend, int(model.context_size * 0.08))
+        long = await _repeated_to_target(backend, int(model.context_size * 0.45))
+        if len(await backend.tokenize(long)) + model.max_output_tokens >= model.context_size:
+            pytest.skip("configured context cannot hold the long-prefix workload")
         await backend.generate(
-            "short prefix token " * 150,
+            short,
             temperature=0.0,
             max_output_tokens=1,
         )
         await backend.generate(
-            "long prefix token " * 1000,
+            long,
             temperature=0.0,
             max_output_tokens=2048,
         )

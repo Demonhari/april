@@ -11,7 +11,6 @@ from agents.schemas import AgentResult, LocalCitation, ProposedChange
 from april_common.settings import ConversationContextSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
-from services.brain.capabilities import STABLE_PREFIX_MARKER
 from services.brain.response_handling import sanitize_model_output
 from services.brain.structured_output import grammar_safe_json_schema
 from services.memory.schemas import Message, SuspendedAgentRun
@@ -91,6 +90,7 @@ class StructuredAgentLoop:
         request_id: str,
         history: list[Message] | None = None,
         context_sections: list[str] | None = None,
+        stable_prefix: str | None = None,
         run_metadata: dict[str, Any] | None = None,
     ) -> AgentResult:
         if agent.model_id is None:
@@ -112,6 +112,7 @@ class StructuredAgentLoop:
             message,
             history or [],
             context_sections or [],
+            stable_prefix,
         )
         return await self._continue_run(
             agent=agent,
@@ -386,6 +387,7 @@ class StructuredAgentLoop:
         message: str,
         history: list[Message],
         context_sections: list[str],
+        stable_prefix: str | None = None,
     ) -> list[ChatMessage]:
         contract = (
             "Return exactly one JSON object with type final_answer, tool_request, "
@@ -396,19 +398,15 @@ class StructuredAgentLoop:
         messages = [ChatMessage(role="system", content=agent.system_prompt)]
         remaining_sections: list[str] = []
         for section in context_sections:
-            if section.startswith(STABLE_PREFIX_MARKER):
-                marked = section.removeprefix(STABLE_PREFIX_MARKER)
-                stable, separator, volatile = marked.partition("\n\n")
-                messages[0] = ChatMessage(
-                    role="system",
-                    content=f"{messages[0].content}\n\n{stable}",
-                )
-                if separator and volatile:
-                    remaining_sections.append(volatile)
-            elif section.startswith("[MACHINE-GENERATED CONVERSATION CONTEXT"):
+            if section.startswith("[MACHINE-GENERATED CONVERSATION CONTEXT"):
                 messages.append(ChatMessage(role="system", content=section))
             else:
                 remaining_sections.append(section)
+        if stable_prefix:
+            messages[0] = ChatMessage(
+                role="system",
+                content=f"{messages[0].content}\n\n{stable_prefix}",
+            )
         if history:
             messages.append(
                 ChatMessage(

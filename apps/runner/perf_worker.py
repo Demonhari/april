@@ -11,6 +11,12 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+from apps.runner.perf_workload import (
+    MIN_WORKLOAD_TOKENS,
+    build_filler,
+    build_filler_async,
+    raw_workload_budget,
+)
 from services.april_runtime.model_lifecycle import ModelLifecycle
 from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
 from services.april_runtime.schemas import (
@@ -52,9 +58,72 @@ def _rss_bytes() -> int:
     return value if __import__("sys").platform == "darwin" else value * 1024
 
 
-def _workload_prompt(nonce: str, context_size: int) -> str:
-    token_count = max(256, min(768, context_size // 3))
-    return f"Measurement nonce: {nonce}\n" + "synthetic context token " * token_count
+def _workload_prompt(
+    nonce: str,
+    context_size: int,
+    count_tokens: Any | None = None,
+    max_output_tokens: int = 32,
+) -> str:
+    """Build a deterministic tune prompt; sizing uses an injected tokenizer."""
+
+    fixed = f"Measurement nonce: {nonce}\n"
+    if count_tokens is None:
+        token_count = max(256, min(768, context_size // 3))
+        return fixed + "synthetic context token " * token_count
+    fixed_tokens = int(count_tokens(fixed))
+    filler_budget = raw_workload_budget(
+        context_size,
+        max_output_tokens,
+        fixed_tokens,
+        fraction=0.60,
+    )
+    if filler_budget < MIN_WORKLOAD_TOKENS:
+        return fixed
+    filler = build_filler(filler_budget, count_tokens)
+    return fixed + filler
+
+
+async def _sized_workload_prompt(
+    lifecycle: ModelLifecycle,
+    model_id: str,
+    nonce: str,
+    context_size: int,
+    max_output_tokens: int,
+) -> tuple[str | None, int, str | None]:
+    async def count(text: str) -> int:
+        counter = getattr(lifecycle, "count_message_tokens", None)
+        if callable(counter):
+            return int(
+                await counter(
+                    model_id,
+                    [ChatMessage(role="user", content=text)],
+                )
+            )
+        return len(text.split())
+
+    fixed = f"Measurement nonce: {nonce}\n"
+    fixed_tokens = await count(fixed)
+    raw_budget = raw_workload_budget(
+        context_size,
+        max_output_tokens,
+        fixed_tokens,
+        fraction=0.60,
+    )
+    if raw_budget < MIN_WORKLOAD_TOKENS:
+        return None, fixed_tokens, "workload_budget_below_minimum"
+    filler = await build_filler_async(raw_budget, count)
+    prompt = fixed + filler
+    measured = await count(prompt)
+    target = int(0.60 * context_size) - max_output_tokens
+    for _ in range(4):
+        if measured <= target:
+            break
+        filler = await build_filler_async(max(0, raw_budget - (measured - target)), count)
+        prompt = fixed + filler
+        measured = await count(prompt)
+    if measured > target:
+        return None, measured, "sized_prompt_exceeds_budget"
+    return prompt, measured, None
 
 
 async def measure(payload: dict[str, Any]) -> dict[str, Any]:
@@ -74,15 +143,32 @@ async def measure(payload: dict[str, Any]) -> dict[str, Any]:
     metrics: list[dict[str, Any]] = []
     for index in range(int(payload.get("runs", 3))):
         started = time.monotonic()
+        prompt, workload_tokens, workload_skip_reason = await _sized_workload_prompt(
+            lifecycle,
+            model.id,
+            f"{payload.get('nonce_prefix', 'run')}-{index}",
+            model.context_size,
+            32,
+        )
+        if prompt is None:
+            await lifecycle.cleanup()
+            return {
+                "metrics": [],
+                "routing_decisions": [],
+                "workload_skipped": {
+                    "reason": workload_skip_reason or "workload_unavailable",
+                    "token_count": workload_tokens,
+                },
+                "peak_rss_bytes": _rss_bytes(),
+                "valid_prefill": False,
+            }
         response = await lifecycle.generate(
             ChatRequest(
                 model_id=model.id,
                 messages=[
                     ChatMessage(
                         role="user",
-                        content=_workload_prompt(
-                            f"{payload.get('nonce_prefix', 'run')}-{index}", model.context_size
-                        ),
+                        content=prompt,
                     )
                 ],
                 options=GenerationOptions(temperature=0.0, max_output_tokens=32, seed=17),
@@ -134,6 +220,9 @@ async def measure(payload: dict[str, Any]) -> dict[str, Any]:
         "peak_rss_bytes": _rss_bytes(),
         "valid_prefill": all(
             item["prompt_eval_tokens"] >= 0.9 * item["prompt_tokens"] for item in metrics
+        ),
+        "workload_token_count": max(
+            (int(item.get("prompt_tokens", 0)) for item in metrics), default=0
         ),
     }
 

@@ -22,6 +22,8 @@ from services.april_runtime.schemas import (
     LoadModelRequest,
     ModelOperationResponse,
     ResponseFormat,
+    TokenCountRequest,
+    TokenCountResponse,
 )
 
 
@@ -109,6 +111,25 @@ class RuntimeClient:
                 "April Runtime returned an error.", _response_payload(response)
             )
         return EmbedResponse.model_validate(response.json()).embedding
+
+    async def count_message_tokens(self, *, model_id: str, messages: list[ChatMessage]) -> int:
+        request = TokenCountRequest(model_id=model_id, messages=messages)
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/runtime/tokenize",
+                    json=request.model_dump(),
+                    headers=self.headers,
+                )
+        except httpx.HTTPError as exc:
+            raise RuntimeUnavailableError(
+                "April Runtime is offline.", {"url": self.base_url}
+            ) from exc
+        if response.status_code >= 400:
+            raise RuntimeUnavailableError(
+                "April Runtime returned an error.", _response_payload(response)
+            )
+        return TokenCountResponse.model_validate(response.json()).token_count
 
     async def embed_many(
         self,

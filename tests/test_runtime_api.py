@@ -134,6 +134,17 @@ def test_runtime_normal_generation(tmp_path: Path) -> None:
     assert response.json()["model_id"] == "april-brain"
 
 
+def test_runtime_tokenize_counts_complete_chat_payload(tmp_path: Path) -> None:
+    with runtime_client(tmp_path) as client:
+        response = client.post(
+            "/runtime/tokenize",
+            json={"model_id": "april-brain", "messages": [{"role": "user", "content": "hello"}]},
+        )
+    assert response.status_code == 200
+    assert response.json()["model_id"] == "april-brain"
+    assert response.json()["token_count"] > 0
+
+
 def test_runtime_api_reports_adaptive_output_reservation(tmp_path: Path) -> None:
     lifecycle = adaptive_runtime_lifecycle(tmp_path)
     with _isolated_home(tmp_path), TestClient(create_app(lifecycle)) as client:

@@ -9,7 +9,6 @@ from april_common.errors import PermissionDeniedError
 from services.brain.capabilities import (
     collect_runtime_self_evidence,
     is_self_introspection_request,
-    stable_prefix_prompt,
     trusted_capability_summary,
     trusted_capability_summary_parts,
 )
@@ -303,6 +302,7 @@ class ContextFlow:
             request_context=active_request_context,
         )
         prompt_capability_summary = capability_summary
+        stable_prefix: str | None = None
         if self.settings.orchestration.stable_prefix_layout:
             stable, volatile = trusted_capability_summary_parts(
                 settings=self.settings,
@@ -312,7 +312,8 @@ class ContextFlow:
                 runtime_evidence=runtime_evidence,
                 request_context=active_request_context,
             )
-            prompt_capability_summary = stable_prefix_prompt(stable, volatile)
+            stable_prefix = stable
+            prompt_capability_summary = volatile
         context_sections.insert(0, prompt_capability_summary)
         if memory_context.conversation_summary:
             context_sections.insert(0, memory_context.conversation_summary)
@@ -338,6 +339,7 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
                 task_plan_id=task_plan.id,
@@ -361,6 +363,7 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
                 structured_agent=True,
@@ -385,6 +388,8 @@ class ContextFlow:
                 task_plan_id=task_plan.id,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
+                capability_prompt=prompt_capability_summary,
+                stable_prefix=stable_prefix,
             )
 
         planned_calls = self._planned_tool_calls(decision, message=message, project=project)
@@ -424,6 +429,7 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
                 task_plan_id=task_plan.id,
@@ -555,6 +561,7 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
                 task_plan_id=task_plan.id,
@@ -582,6 +589,7 @@ class ContextFlow:
                     actor=actor,
                     history=memory_context.history,
                     context_sections=context_sections,
+                    stable_prefix=stable_prefix,
                     request_context=active_request_context,
                     trusted_context=capability_summary,
                     task_plan_id=task_plan.id,
@@ -627,6 +635,7 @@ class ContextFlow:
                 actor=actor,
                 history=memory_context.history,
                 context_sections=context_sections,
+                stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
                 task_plan_id=task_plan.id,
@@ -672,6 +681,7 @@ class ContextFlow:
                 system_prompt=agent.system_prompt,
                 memory_context=memory_context,
                 current_prompt="\n\n".join(prompt_parts),
+                stable_prefix=stable_prefix,
             ),
             citations=citations,
             pending_approval=pending_approval,
@@ -680,6 +690,7 @@ class ContextFlow:
             actor=actor,
             history=memory_context.history,
             context_sections=context_sections,
+            stable_prefix=stable_prefix,
             request_context=active_request_context,
             trusted_context=capability_summary,
             verification_evidence=verification_evidence,

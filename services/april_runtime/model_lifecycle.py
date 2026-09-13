@@ -23,6 +23,7 @@ from services.april_runtime.llama_cpp_backend import LlamaCppBackend
 from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
 from services.april_runtime.prompt_templates import render_prompt
 from services.april_runtime.schemas import (
+    ChatMessage,
     ChatRequest,
     ChatResponse,
     ModelInfo,
@@ -782,6 +783,19 @@ class ModelLifecycle:
             warnings=warnings,
             diagnostics={key: value for key, value in diagnostics.items() if value is not None},
         )
+
+    async def count_message_tokens(self, model_id: str, messages: list[ChatMessage]) -> int:
+        """Count a complete chat payload with the loaded model tokenizer."""
+
+        state = await self.load_model(model_id)
+        if state.backend is None:
+            raise ModelUnavailableError(model_id, "Model backend is not available.")
+        prompt = render_prompt(
+            state.model,
+            messages,
+            metadata=state.backend.prompt_metadata(),
+        )
+        return await state.backend.count_tokens(prompt)
 
     async def embed(self, text: str, *, model_id: str | None = None) -> tuple[str, list[float]]:
         resolved_id, vectors = await self.embed_many([text], model_id=model_id)

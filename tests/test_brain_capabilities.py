@@ -14,7 +14,6 @@ from services.brain.capabilities import (
     is_self_introspection_request,
     is_voice_capability_request,
     render_conversation_recall_response,
-    stable_prefix_prompt,
     trusted_capability_summary,
     trusted_capability_summary_parts,
     voice_capability_intent,
@@ -314,18 +313,37 @@ def test_stable_prefix_layout_partitions_without_changing_default_summary(settin
         runtime_evidence={"simulated": False, "models": {}},
         request_context=RequestContext.from_origin("voice", settings_tmp),
     )
+    custom_context = RequestContext(
+        origin="text",
+        voice_configured=False,
+        voice_enabled=True,
+        voice_prerequisites="not_checked",
+        voice_last_verified="different",
+    )
+    stable_custom, _volatile_custom = trusted_capability_summary_parts(
+        **kwargs, request_context=custom_context
+    )
+    evidence_summary = trusted_capability_summary(
+        **kwargs,
+        runtime_evidence={"simulated": False, "models": {}},
+        request_context=RequestContext.from_origin("voice", settings_tmp),
+    )
     assert stable_text == stable_voice
     assert stable_voice == stable_evidence
+    assert stable_evidence == stable_custom
     assert "Request origin: voice" not in stable_evidence
-    assert "Voice interface configured:" in stable_evidence
+    assert "Voice interface configured:" not in stable_evidence
     assert "Runtime evidence" in volatile_evidence
-    assert set((stable_text + "\n" + volatile_text).splitlines()) == set(text_summary.splitlines())
-    assert set((stable_voice + "\n" + volatile_voice).splitlines()) == set(
+    assert sorted((stable_text + "\n" + volatile_text).splitlines()) == sorted(
+        text_summary.splitlines()
+    )
+    assert sorted((stable_voice + "\n" + volatile_voice).splitlines()) == sorted(
         voice_summary.splitlines()
     )
-    assert stable_prefix_prompt(stable_text, volatile_text).startswith(
-        "[APRIL_STABLE_PREFIX_LAYOUT]\n"
+    assert sorted((stable_evidence + "\n" + volatile_evidence).splitlines()) == sorted(
+        evidence_summary.splitlines()
     )
+    assert "CONFIGURED AI MODELS:" in volatile_evidence
 
 
 def test_voice_request_context_is_transport_only_and_origin_scoped(settings_tmp) -> None:

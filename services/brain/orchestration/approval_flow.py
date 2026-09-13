@@ -10,7 +10,6 @@ from april_common.time import parse_utc_iso, utc_now
 from services.brain.capabilities import (
     collect_runtime_self_evidence,
     is_self_introspection_request,
-    stable_prefix_prompt,
     trusted_capability_summary,
     trusted_capability_summary_parts,
 )
@@ -117,6 +116,7 @@ class ApprovalFlow:
             runtime_evidence=runtime_evidence,
             request_context=request_context,
         )
+        stable_prefix: str | None = None
         if self.settings.orchestration.stable_prefix_layout:
             stable, volatile = trusted_capability_summary_parts(
                 settings=self.settings,
@@ -126,7 +126,8 @@ class ApprovalFlow:
                 runtime_evidence=runtime_evidence,
                 request_context=request_context,
             )
-            capability_summary = stable_prefix_prompt(stable, volatile)
+            stable_prefix = stable
+            capability_summary = volatile
         context_sections.insert(0, capability_summary)
         if memory_context.conversation_summary:
             context_sections.insert(0, memory_context.conversation_summary)
@@ -145,6 +146,7 @@ class ApprovalFlow:
             request_id=active_request_id,
             history=memory_context.history,
             context_sections=context_sections,
+            stable_prefix=stable_prefix,
             run_metadata=run_metadata,
         )
         if result.status != "pending_approval":

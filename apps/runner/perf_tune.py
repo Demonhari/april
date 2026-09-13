@@ -26,6 +26,15 @@ class TuneWorkerFailed(RuntimeError):
         self.side = side
 
 
+class TuneWorkloadSkipped(RuntimeError):
+    """The model context cannot hold the deterministic tune workload."""
+
+    def __init__(self, side: str, reason: str) -> None:
+        super().__init__(f"{side} workload skipped: {reason}")
+        self.side = side
+        self.reason = reason
+
+
 async def run_real_tune(
     home: Path,
     *,
@@ -64,9 +73,11 @@ async def run_real_tune(
         winner_measure: dict[str, Any] | None = None
         model_failed = False
         routing_check_failed = False
-        if model.role == "brain" and measure_candidate is None:
+        routing_start: dict[str, Any] | None = None
+        routing_final: dict[str, Any] | None = None
+        if model.role == "brain":
             try:
-                await measure_fn(
+                routing_start = await measure_fn(
                     home,
                     model,
                     model,
@@ -104,6 +115,9 @@ async def run_real_tune(
                     exhausted = True
                     break
                 except TuneWorkerFailed as exc:
+                    skipped = (
+                        exc.__cause__ if isinstance(exc.__cause__, TuneWorkloadSkipped) else None
+                    )
                     results.append(
                         {
                             "model_id": model.id,
@@ -111,7 +125,16 @@ async def run_real_tune(
                             "value": value,
                             "accepted": False,
                             "reason": (
-                                "baseline_failed" if exc.side == "baseline" else "worker_failed"
+                                "workload_skipped"
+                                if skipped is not None
+                                else (
+                                    "baseline_failed" if exc.side == "baseline" else "worker_failed"
+                                )
+                            ),
+                            **(
+                                {"workload_skip_reason": skipped.reason}
+                                if skipped is not None
+                                else {}
                             ),
                         }
                     )
@@ -183,47 +206,68 @@ async def run_real_tune(
                     }
                 )
                 continue
-            inputs = await asyncio.to_thread(profile_inputs, winner, home)
-            if model.role == "brain" and measure_candidate is None:
-                try:
-                    await measure_fn(
-                        home,
-                        model,
-                        winner,
-                        runs=1,
-                        nonce_prefix="routing-final",
-                        routing_check=True,
-                    )
-                except TuneBudgetExceeded:
-                    exhausted = True
-                    break
-                except Exception:
-                    routing_check_failed = True
-            if routing_check_failed:
-                results.append(
-                    {
-                        "model_id": model.id,
-                        "knob": "routing_check",
-                        "value": None,
-                        "accepted": False,
-                        "reason": "worker_failed",
-                    }
+        if model.role == "brain":
+            try:
+                routing_final = await measure_fn(
+                    home,
+                    model,
+                    winner,
+                    runs=1,
+                    nonce_prefix="routing-final",
+                    routing_check=True,
                 )
-                continue
-            pending_profiles.append(
+            except TuneBudgetExceeded:
+                exhausted = True
+                break
+            except Exception:
+                routing_check_failed = True
+        if model.role == "brain":
+            start_decisions = routing_start.get("routing_decisions", []) if routing_start else []
+            final_decisions = routing_final.get("routing_decisions", []) if routing_final else []
+            routing_cases_compared = (
+                min(len(start_decisions), len(final_decisions))
+                if start_decisions and final_decisions
+                else 0
+            )
+            routing_identical = (
+                bool(start_decisions)
+                and bool(final_decisions)
+                and start_decisions == final_decisions
+            )
+            routing_reason = (
+                "worker_failed"
+                if routing_check_failed
+                else None
+                if routing_identical
+                else "semantic_drift"
+            )
+            results.append(
                 {
-                    "schema": "april.perf.profile.v2",
                     "model_id": model.id,
-                    "role": model.role,
-                    "fingerprint": profile_fingerprint(inputs),
-                    "fingerprint_inputs": inputs,
-                    "settings": {
-                        key: getattr(winner, key)
-                        for key in tunable_fields
-                        if getattr(winner, key) != getattr(model, key)
-                    },
+                    "knob": "routing_check",
+                    "value": None,
+                    "accepted": routing_reason is None,
+                    "reason": routing_reason,
+                    "routing_cases_compared": routing_cases_compared,
                 }
             )
+            if routing_reason is not None:
+                continue
+        inputs = await asyncio.to_thread(profile_inputs, winner, home)
+        pending_profiles.append(
+            {
+                "schema": "april.perf.profile.v2",
+                "model_id": model.id,
+                "role": model.role,
+                "fingerprint": profile_fingerprint(inputs),
+                "fingerprint_inputs": inputs,
+                "settings": {
+                    key: getattr(winner, key)
+                    for key in tunable_fields
+                    if getattr(winner, key) != getattr(model, key)
+                },
+            }
+        )
     profiles: list[dict[str, Any]] = []
     if not exhausted:
         for profile in pending_profiles:
@@ -239,6 +283,9 @@ async def run_real_tune(
         "role": role,
         "results": results,
         "profiles": profiles,
+        "routing_cases_compared": sum(
+            int(item.get("routing_cases_compared", 0)) for item in results
+        ),
         "stopped_due_to_budget": exhausted or time.monotonic() - started >= max_minutes * 60,
     }
 
@@ -264,12 +311,16 @@ async def measure_abab_pair(
         if time.monotonic() >= deadline:
             raise TuneBudgetExceeded
         try:
-            left_samples.append(
-                await measure_candidate(
-                    home, baseline, left, runs=runs, nonce_prefix=f"pair-{pair}-baseline"
-                )
+            left_result = await measure_candidate(
+                home, baseline, left, runs=runs, nonce_prefix=f"pair-{pair}-baseline"
             )
-        except TuneWorkerFailed as exc:
+            if left_result.get("workload_skipped"):
+                raise TuneWorkloadSkipped(
+                    "baseline",
+                    str(left_result["workload_skipped"].get("reason", "unknown")),
+                )
+            left_samples.append(left_result)
+        except TuneWorkloadSkipped as exc:
             raise TuneWorkerFailed("baseline") from exc
         except TuneBudgetExceeded:
             raise
@@ -280,13 +331,17 @@ async def measure_abab_pair(
         if time.monotonic() >= deadline:
             raise TuneBudgetExceeded
         try:
-            right_samples.append(
-                await measure_candidate(
-                    home, baseline, right, runs=runs, nonce_prefix=f"pair-{pair}-candidate"
-                )
+            right_result = await measure_candidate(
+                home, baseline, right, runs=runs, nonce_prefix=f"pair-{pair}-candidate"
             )
-        except TuneWorkerFailed:
-            raise
+            if right_result.get("workload_skipped"):
+                raise TuneWorkloadSkipped(
+                    "candidate",
+                    str(right_result["workload_skipped"].get("reason", "unknown")),
+                )
+            right_samples.append(right_result)
+        except TuneWorkloadSkipped as exc:
+            raise TuneWorkerFailed("candidate") from exc
         except TuneBudgetExceeded:
             raise
         except Exception as exc:
@@ -361,6 +416,12 @@ async def measure_real_candidate(
     except (TypeError, ValueError) as exc:
         raise TuneWorkerFailed("candidate") from exc
     metrics = parsed.get("metrics", [])
+    if isinstance(parsed.get("workload_skipped"), dict):
+        return {
+            "workload_skipped": parsed["workload_skipped"],
+            "routing_decisions": parsed.get("routing_decisions", []),
+            "valid_prefill": False,
+        }
     metric_values = [float(item.get("metric", 0.0)) for item in metrics]
     prompt_values = [float(item.get("prompt_metric", 0.0)) for item in metrics]
     return {
