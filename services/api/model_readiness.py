@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from april_common.errors import AprilError
 from april_common.model_artifacts import gguf_artifact_status
 from april_common.settings import AprilSettings
-from services.april_runtime.model_registry import ModelRegistry
+from services.april_runtime.colibri_backend import validate_colibri_url
+from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
+
+
+def _artifact_ready(model: ModelDefinition, path: Any) -> bool:
+    backend = model.backend
+    if backend == "colibri":
+        if not path.is_dir():
+            return False
+        if any(
+            ".." in Path(relative).parts or Path(relative).is_absolute()
+            for relative in model.colibri_expected_files
+        ):
+            return False
+        return all((path / relative).is_file() for relative in model.colibri_expected_files)
+    return path.is_file()
 
 
 def model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
@@ -44,7 +60,15 @@ def model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
         model.id: (
             "simulated"
             if settings.runtime.backend == "fake" or model.backend == "fake"
-            else gguf_artifact_status(model.resolved_path(registry.root))
+            else (
+                gguf_artifact_status(model.resolved_path(registry.root))
+                if model.backend == "llama_cpp"
+                else (
+                    "valid"
+                    if _artifact_ready(model, model.resolved_path(registry.root))
+                    else "missing"
+                )
+            )
         )
         for model in required_models
     }
@@ -52,6 +76,10 @@ def model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
         model_id
         for model_id, status in artifact_statuses.items()
         if status not in {"valid", "simulated"}
+    )
+    colibri_endpoint_ready = all(
+        model.backend != "colibri" or _valid_colibri_endpoint(model.colibri_base_url)
+        for model in required_models
     )
     router_failure_reason: str | None = None
     dedicated_router_available = False
@@ -68,7 +96,7 @@ def model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
         dedicated_router_available = router_valid and (
             settings.runtime.backend == "fake"
             or router_model.backend == "fake"
-            or router_model.resolved_path(registry.root).is_file()
+            or _artifact_ready(router_model, router_model.resolved_path(registry.root))
         )
         if not router_valid:
             router_failure_reason = "dedicated_router_role_mismatch"
@@ -85,8 +113,9 @@ def model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
         "production_model_artifacts_ready": bool(
             not missing_required_roles
             and not unavailable
-            and settings.runtime.backend == "llama_cpp"
+            and settings.runtime.backend in {"llama_cpp", "colibri"}
             and all(status == "valid" for status in artifact_statuses.values())
+            and colibri_endpoint_ready
         ),
         "reasoning_model_ids": [model.id for model in registry.list() if model.role == "reasoning"],
         "router_model_id": router_model_id,
@@ -94,3 +123,11 @@ def model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
         "dedicated_router_available": dedicated_router_available,
         "router_failure_reason": router_failure_reason,
     }
+
+
+def _valid_colibri_endpoint(value: str | None) -> bool:
+    try:
+        validate_colibri_url(value)
+    except ValueError:
+        return False
+    return True

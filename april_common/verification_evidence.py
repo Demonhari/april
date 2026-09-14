@@ -17,7 +17,7 @@ def verified_model_ids(home: Path) -> set[str]:
         return set()
     if (
         payload.get("report_type") != "multi_model"
-        or payload.get("runtime_backend") != "llama_cpp"
+        or payload.get("runtime_backend") not in {"llama_cpp", "colibri"}
         or payload.get("real_model_verified") is not True
         or payload.get("all_configured_models_verified") is not True
         or payload.get("verification_level") != "all"

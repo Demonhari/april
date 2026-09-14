@@ -25,6 +25,15 @@ orchestration:
   # Experimental stable-prefix layout; off preserves the current prompt bytes.
   stable_prefix_layout: false
 
+# Local integration foundations are inert until explicitly enabled and reviewed.
+integrations:
+  mcp:
+    enabled: false
+  browser:
+    enabled: false
+  external_tools:
+    enabled: false
+
 # Secrets are resolved from the credential store. `auto` selects macOS
 # Keychain for production and retains development compatibility until the
 # explicit credential migration command is run.

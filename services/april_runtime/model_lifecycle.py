@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol
 from april_common.errors import AprilError, ModelUnavailableError, NotFoundError
 from april_common.time import utc_now_iso
 from services.april_runtime.backend import RuntimeBackend
+from services.april_runtime.colibri_backend import ColibriBackend, colibri_manifest_digest
 from services.april_runtime.context_manager import ContextManager
 from services.april_runtime.fake_backend import FakeBackend
 from services.april_runtime.generation import effective_generation_options
@@ -150,6 +151,16 @@ class ModelLifecycle:
     def _default_backend_factory(self, model: ModelDefinition) -> RuntimeBackend:
         if self.root_backend == "fake" or model.backend == "fake":
             return FakeBackend()
+        backend_name = self.root_backend or model.backend
+        if backend_name == "colibri":
+            tokenizer_path = model.colibri_tokenizer_path
+            if tokenizer_path is not None and not tokenizer_path.is_absolute():
+                tokenizer_path = model.resolved_path(self.registry.root) / tokenizer_path
+            return ColibriBackend(
+                base_url=model.colibri_base_url,
+                model_name=model.colibri_model_name,
+                tokenizer_path=tokenizer_path,
+            )
         return LlamaCppBackend(prefix_cache_enabled=self.prefix_cache_enabled)
 
     def _is_specialist(self, model: ModelDefinition) -> bool:
@@ -322,6 +333,9 @@ class ModelLifecycle:
             name=state.model.name,
             role=state.model.role,
             backend=self.root_backend or state.model.backend,
+            artifact_kind=state.model.artifact_kind,
+            artifact_fingerprint=(state.identity.base_model_sha256 if state.identity else None),
+            capabilities=(state.backend.capabilities() if state.backend else {}),
             path=str(path),
             state=state.state,
             keep_loaded=state.model.keep_loaded,
@@ -512,6 +526,7 @@ class ModelLifecycle:
                 )
             if resolved_adapter is not None:
                 update["adapter_path"] = resolved_adapter
+            update["path"] = state.model.resolved_path(self.registry.root)
             resolved_model = state.model.model_copy(update=update)
             backend = self._backend_factory(resolved_model)
             if not getattr(backend, "supports_isolated_instances", True):
@@ -556,11 +571,7 @@ class ModelLifecycle:
                     instance_id=state.model.id,
                     model_id=state.model.id,
                     candidate_id=None,
-                    base_model_sha256=(
-                        await asyncio.to_thread(_sha256_cached, resolved_model.path)
-                        if resolved_model.path.is_file()
-                        else hashlib.sha256(b"").hexdigest()
-                    ),
+                    base_model_sha256=await asyncio.to_thread(_artifact_digest, resolved_model),
                     adapter_id=(
                         resolved_model.adapter_path.name if resolved_model.adapter_path else None
                     ),
@@ -1136,6 +1147,14 @@ def _candidate_instance_id(
     material = "|".join((model_id, candidate_id, base_sha256, adapter_sha256, configuration_sha256))
     suffix = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
     return f"candidate:{model_id}:{candidate_id}:{suffix}"
+
+
+def _artifact_digest(model: ModelDefinition) -> str:
+    if model.backend == "colibri":
+        return colibri_manifest_digest(model, model.path)
+    if model.path.is_file():
+        return _sha256_cached(model.path)
+    return hashlib.sha256(b"").hexdigest()
 
 
 def _configuration_hash(model: ModelDefinition) -> str:

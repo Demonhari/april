@@ -105,14 +105,14 @@ def production_activation_failure_reasons(
             "Authenticated Runtime liveness did not pass.",
             "run april doctor --daily-driver",
         )
-    if runtime_backend != "llama_cpp" or runtime_simulated is not False:
+    if runtime_backend not in {"llama_cpp", "colibri"} or runtime_simulated is not False:
         add(
             "runtime_simulated",
             "A fake, simulated, or unspecified Runtime is not production evidence.",
             "run april verify --all-configured-models --require-real-model "
             "--report data/verification/mac-readiness.json",
         )
-    if importlib.util.find_spec("llama_cpp") is None:
+    if runtime_backend == "llama_cpp" and importlib.util.find_spec("llama_cpp") is None:
         add(
             "llama_cpp_python_unavailable",
             "llama-cpp-python is unavailable.",

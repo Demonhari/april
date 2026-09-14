@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agents.schemas import AgentResult
+from services.brain.task_contract import TaskContract
 
 
 class ChatRequest(BaseModel):
@@ -35,6 +36,7 @@ class AgentRunRequest(BaseModel):
     project_id: str | None = None
     repo_path: str | None = None
     options: AgentRunOptions = Field(default_factory=AgentRunOptions)
+    task_contract: TaskContract | None = None
 
 
 class ToolApprovalAction(BaseModel):

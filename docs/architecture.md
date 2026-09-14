@@ -201,3 +201,35 @@ and writes redacted reports with basenames only plus verification levels
 live audio path and asks before recording. `scripts/create_macos_app_stub.sh` and
 `run april setup app-stub` create an unsigned local development launcher only;
 they bundle no models, tokens, voice assets, signing, or launch-at-login service.
+
+## Task contracts, coding evidence, and bounded specialists
+
+Write-capable runs may carry a typed `TaskContract` containing goal, project
+scope, risk, success criteria, verification requirements, delegation depth,
+re-plan budget, and a capability ceiling. Model output can propose work against
+that contract but cannot widen it. Internal investigator, implementer,
+reviewer, and researcher tasks receive the intersection of parent capability,
+specialist capability, and global policy; they are bounded and normally run
+sequentially.
+
+Coding verification binds its result to a deterministic repository-state digest
+made from project identity, HEAD, tracked diff, and relevant untracked-file
+content hashes. A passing result is stale after any state change. A bounded
+progress controller identifies repeated action/argument/state/result tuples;
+new repository state or new evidence is valid progress.
+
+## Optional Colibri and guarded integrations
+
+The optional `colibri` RuntimeBackend talks only to an explicitly configured
+loopback OpenAI-compatible service. It validates a typed
+`colibri_model_directory` artifact and local metadata/tokenizer contract,
+reports a stopped service as configured-but-unavailable, and never downloads,
+starts, or hashes a multi-gigabyte directory synchronously. APRIL does not
+forward privileged tool definitions to Colibri; all actions remain APRIL
+structured proposals through policy, approval, audit, and Tool Worker.
+
+MCP/browser/external-provider manifests are disabled by default and accept only
+local stdio or loopback endpoints in this foundation. Tool identity includes
+provider identity, schema fingerprint, declared risk, and exact approval;
+schema drift invalidates prior approval. Provider descriptions are untrusted
+data and cannot change APRIL policy.

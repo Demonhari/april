@@ -15,6 +15,7 @@ from services.brain.capabilities import (
 )
 from services.brain.memory_policy import build_agent_memory_context
 from services.brain.request_context import RequestContext
+from services.brain.task_contract import TaskContract
 from services.evolution.feedback_eval import stage_feedback_eval_case
 
 
@@ -30,6 +31,7 @@ class ApprovalFlow:
         project_id: str | None = None,
         repo_path: str | None = None,
         request_context: RequestContext | None = None,
+        task_contract: TaskContract | None = None,
     ) -> AgentResult:
         active_request_id = request_id or str(uuid.uuid4())
         agent = self.agent_registry.get(agent_id)
@@ -98,6 +100,10 @@ class ApprovalFlow:
             user_model_path=self.settings.evolution_path / "user_model.md",
         )
         run_metadata.update(prepared_context.diagnostics())
+        if task_contract is not None:
+            if task_contract.run_id != active_request_id:
+                raise PermissionDeniedError("Task contract run identity does not match request.")
+            run_metadata["task_contract"] = task_contract.model_dump(mode="json")
         run_metadata["context_category_character_usage"] = dict(
             memory_context.category_character_usage
         )

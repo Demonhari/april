@@ -41,6 +41,7 @@ def register_tool_routes(app: FastAPI, authorized: Callable[..., Any]) -> None:
                 project_id=request.project_id,
                 repo_path=request.repo_path,
                 request_context=RequestContext.from_origin("agent", active.settings),
+                task_contract=request.task_contract,
             )
         return ChatResponse(request_id=request_id, result=result)
 

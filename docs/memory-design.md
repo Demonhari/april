@@ -204,3 +204,18 @@ agent/model IDs, iteration number, request ID, sanitized loop messages, exact
 tool request, normalized args, context metadata, and terminal status. Rows are
 deleted when their conversation is deleted, and approval resume rejects missing
 conversation or project state instead of executing.
+
+## Current-state facts and reviewed experience
+
+Current-state facts are keyed explicitly by owner scope, project, entity, and
+attribute, with single or many cardinality. Supersession is exact-key and
+observation-time aware: facts in two projects remain independent, a newer
+single-valued fact supersedes an older one, and a late older observation cannot
+replace the current value. Values are opaque structured data, so the rule does
+not depend on English similarity or token overlap.
+
+Experience lessons are separate from raw run evidence. A lesson begins as a
+candidate with supporting evidence and a creation reason, then may be approved,
+rejected, or superseded through review. Only approved lessons may enter future
+prompt context. No lesson can grant tools, lower permissions, bypass exact
+approvals, enable network access, change audit policy, or activate a model.

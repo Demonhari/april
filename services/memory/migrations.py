@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.memory.database import Database
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 
 async def run_migrations(database: Database) -> None:
@@ -349,6 +349,43 @@ async def _run_migrations_locked(database: Database) -> None:
             source_message_ids_json TEXT NOT NULL DEFAULT '[]',
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS state_facts (
+            id TEXT PRIMARY KEY,
+            owner_scope TEXT NOT NULL,
+            project_id TEXT,
+            entity TEXT NOT NULL,
+            attribute TEXT NOT NULL,
+            cardinality TEXT NOT NULL CHECK (cardinality IN ('single', 'many')),
+            value_json TEXT NOT NULL,
+            evidence_reference TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            observed_at TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('current', 'historical', 'retracted')),
+            superseded_by TEXT REFERENCES state_facts(id),
+            origin TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_state_facts_current
+            ON state_facts(owner_scope, project_id, entity, attribute, status);
+
+        CREATE TABLE IF NOT EXISTS experience_lessons (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            task_signature TEXT NOT NULL,
+            lesson TEXT NOT NULL,
+            supporting_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('candidate', 'approved', 'rejected', 'superseded')
+            ),
+            creation_reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_experience_lessons_status
+            ON experience_lessons(status, project_id, updated_at);
 
         CREATE TABLE IF NOT EXISTS evolution_runs (
             id TEXT PRIMARY KEY,

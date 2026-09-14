@@ -40,6 +40,7 @@ from services.evolution.inspect import (
     overlay_diff,
     set_evolution_kill_switch,
 )
+from services.evolution.lessons import LessonStatus, LessonStore
 from services.evolution.playbook_miner import mine_playbook_candidates
 from services.evolution.rollouts import RolloutService
 from services.evolution.versions import PromptOverlayManager
@@ -116,6 +117,54 @@ def register_evolution_routes(
                     audit=active.approvals.audit,
                 )
         return {"feedback": record.model_dump()}
+
+    @app.get("/evolution/lessons")
+    async def lessons(
+        status: LessonStatus | None = None,
+        project_id: str | None = None,
+        active: ApiContainer = Depends(authorized),
+    ) -> object:
+        records = await LessonStore(active.database).list(status=status, project_id=project_id)
+        return {"lessons": [record.model_dump(mode="json") for record in records]}
+
+    @app.get("/evolution/lessons/{lesson_id}")
+    async def lesson(lesson_id: str, active: ApiContainer = Depends(authorized)) -> object:
+        record = await LessonStore(active.database).get(lesson_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="lesson not found")
+        return {"lesson": record.model_dump(mode="json")}
+
+    async def _transition_lesson(
+        lesson_id: str, status: LessonStatus, active: ApiContainer
+    ) -> object:
+        store = LessonStore(active.database)
+        record = await store.get(lesson_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="lesson not found")
+        await store.transition(lesson_id, status)
+        active.approvals.audit.write(
+            {
+                "event_type": "experience_lesson_transitioned",
+                "lesson_id": lesson_id,
+                "status": status,
+            }
+        )
+        updated = record.model_copy(update={"status": status})
+        return {"lesson": updated.model_dump(mode="json")}
+
+    @app.post("/evolution/lessons/{lesson_id}/approve")
+    async def approve_lesson(lesson_id: str, active: ApiContainer = Depends(authorized)) -> object:
+        return await _transition_lesson(lesson_id, "approved", active)
+
+    @app.post("/evolution/lessons/{lesson_id}/reject")
+    async def reject_lesson(lesson_id: str, active: ApiContainer = Depends(authorized)) -> object:
+        return await _transition_lesson(lesson_id, "rejected", active)
+
+    @app.post("/evolution/lessons/{lesson_id}/supersede")
+    async def supersede_lesson(
+        lesson_id: str, active: ApiContainer = Depends(authorized)
+    ) -> object:
+        return await _transition_lesson(lesson_id, "superseded", active)
 
     @app.get("/playbooks")
     async def playbooks(active: ApiContainer = Depends(authorized)) -> object:

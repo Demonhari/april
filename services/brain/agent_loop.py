@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from json import JSONDecodeError
 from typing import Annotated, Any, Literal
@@ -11,6 +12,7 @@ from agents.schemas import AgentResult, LocalCitation, ProposedChange
 from april_common.settings import ConversationContextSettings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
+from services.brain.evidence import compact_tool_evidence
 from services.brain.response_handling import sanitize_model_output
 from services.brain.structured_output import grammar_safe_json_schema
 from services.memory.schemas import Message, SuspendedAgentRun
@@ -451,8 +453,33 @@ class StructuredAgentLoop:
         )
         if len(encoded) <= self.max_tool_result_chars:
             return encoded
+        repository_state_digest = (
+            result.data.get("repository_state_digest")
+            if isinstance(result.data, dict)
+            and isinstance(result.data.get("repository_state_digest"), str)
+            else None
+        )
+        compact = compact_tool_evidence(
+            action=tool,
+            argument_digest=hashlib.sha256(tool.encode("utf-8")).hexdigest(),
+            repository_state_digest=repository_state_digest,
+            exit_status=0 if result.ok else 1,
+            result_status="pass" if result.ok else "fail",
+            output=text,
+            max_important_chars=max(80, self.max_tool_result_chars // 2),
+        )
         payload["data"] = {"truncated": True}
-        payload["output"] = text[: self.max_tool_result_chars // 2].rstrip() + "\n[TRUNCATED]"
+        payload["evidence"] = {
+            "action": compact.action,
+            "argument_digest": compact.argument_digest,
+            "repository_state_digest": compact.repository_state_digest,
+            "exit_status": compact.exit_status,
+            "result_status": compact.result_status,
+            "important_result": compact.important_result,
+            "output_digest": compact.output_digest,
+            "truncated": compact.truncated,
+        }
+        payload["output"] = compact.important_result.rstrip() + "\n[TRUNCATED]"
         return json.dumps(
             payload,
             sort_keys=True,

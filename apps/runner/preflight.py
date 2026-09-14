@@ -34,7 +34,8 @@ from april_common.settings import (
     AprilSettings,
     load_settings,
 )
-from services.april_runtime.model_registry import ModelRegistry
+from services.april_runtime.colibri_backend import validate_colibri_url
+from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
 
 PreflightStatus = Literal["pass", "warning", "fail"]
 
@@ -222,8 +223,8 @@ def build_preflight_report(
 
     # --- runtime backend -----------------------------------------------------
     backend = settings.runtime.backend
-    if backend == "llama_cpp":
-        checks.append(PreflightCheck(name="runtime backend", status="pass", detail="llama_cpp"))
+    if backend in {"llama_cpp", "colibri"}:
+        checks.append(PreflightCheck(name="runtime backend", status="pass", detail=backend))
     elif fake:
         checks.append(
             PreflightCheck(
@@ -285,7 +286,7 @@ def _config_errors(home: Path) -> list[str]:
 
 
 def _model_files_check(settings: AprilSettings, home: Path, *, fake: bool) -> PreflightCheck:
-    if fake or settings.runtime.backend != "llama_cpp":
+    if fake or settings.runtime.backend == "fake":
         return PreflightCheck(
             name="model files present",
             status="pass",
@@ -300,14 +301,19 @@ def _model_files_check(settings: AprilSettings, home: Path, *, fake: bool) -> Pr
     chat_models = [
         model
         for model in registry.list()
-        if model.backend == "llama_cpp" and model.role != "embedding"
+        if model.backend in {"llama_cpp", "colibri"} and model.role != "embedding"
     ]
-    missing = [model.id for model in chat_models if not model.resolved_path(registry.root).exists()]
+    missing = [
+        model.id
+        for model in chat_models
+        if not model.resolved_path(registry.root).exists()
+        or (model.backend == "colibri" and _colibri_endpoint_missing(model))
+    ]
     if not chat_models:
         return PreflightCheck(
             name="model files present",
             status="fail",
-            detail="no llama_cpp chat models are configured",
+            detail="no production chat models are configured",
         )
     if missing:
         return PreflightCheck(
@@ -318,8 +324,16 @@ def _model_files_check(settings: AprilSettings, home: Path, *, fake: bool) -> Pr
     return PreflightCheck(
         name="model files present",
         status="pass",
-        detail=f"{len(chat_models)} configured chat GGUF(s) present",
+        detail=f"{len(chat_models)} configured production chat model(s) present",
     )
+
+
+def _colibri_endpoint_missing(model: ModelDefinition) -> bool:
+    try:
+        validate_colibri_url(model.colibri_base_url)
+    except ValueError:
+        return True
+    return False
 
 
 def _port_and_lock_checks(

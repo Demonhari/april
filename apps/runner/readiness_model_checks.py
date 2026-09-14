@@ -62,11 +62,30 @@ from april_common.settings import (
 )
 from april_common.time import utc_now_iso
 from april_common.token_setup import legacy_plaintext_credentials_detected
-from services.april_runtime.model_registry import ModelRegistry
+from services.april_runtime.colibri_backend import validate_colibri_url
+from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
 from services.evaluation.model_quality import fixture_set_metadata
 from services.evolution.adapters import inspect_adapter_state
 from services.evolution.rollouts import inspect_rollout_state
 from services.memory.maintenance import check_database
+
+
+def _artifact_status(model: ModelDefinition, path: Path) -> str:
+    if model.backend == "llama_cpp":
+        return gguf_artifact_status(path)
+    if model.backend == "colibri":
+        if not path.is_dir():
+            return "missing_directory"
+        for relative in model.colibri_expected_files:
+            candidate = (path / relative).resolve(strict=False)
+            try:
+                candidate.relative_to(path.resolve(strict=False))
+            except ValueError:
+                return "invalid_metadata_path"
+            if not candidate.is_file():
+                return "missing_metadata"
+        return "valid"
+    return "not_applicable"
 
 
 def _build_model_and_registry_checks(
@@ -75,7 +94,7 @@ def _build_model_and_registry_checks(
     checks: list[ReadinessCheck],
 ) -> tuple[Any, ...]:
     backend = settings.runtime.backend
-    runtime_is_fake = backend != "llama_cpp"
+    runtime_is_fake = backend == "fake"
     llama_available = importlib.util.find_spec("llama_cpp") is not None
 
     # --- runtime backend -----------------------------------------------------
@@ -88,11 +107,30 @@ def _build_model_and_registry_checks(
                 action="Set APRIL_RUNTIME_BACKEND=llama_cpp (or runtime.backend in april.yaml).",
             )
         )
-    else:
+    elif backend == "llama_cpp":
         checks.append(ReadinessCheck(name="runtime backend", status="ok", detail="llama_cpp"))
+    elif backend == "colibri":
+        checks.append(ReadinessCheck(name="runtime backend", status="ok", detail="colibri"))
+    else:
+        checks.append(
+            ReadinessCheck(
+                name="runtime backend",
+                status="blocker",
+                detail="Unsupported runtime backend.",
+                action="run april config validate",
+            )
+        )
 
     # --- llama-cpp-python extra ---------------------------------------------
-    if llama_available:
+    if backend != "llama_cpp":
+        checks.append(
+            ReadinessCheck(
+                name="llama-cpp-python",
+                status="skipped",
+                detail="Not required by the configured production backend.",
+            )
+        )
+    elif llama_available:
         checks.append(
             ReadinessCheck(name="llama-cpp-python", status="ok", detail="import spec found")
         )
@@ -126,9 +164,7 @@ def _build_model_and_registry_checks(
         for model in registry.list():
             path = model.resolved_path(registry.root)
             exists = path.exists()
-            artifact_status = (
-                gguf_artifact_status(path) if model.backend == "llama_cpp" else "not_applicable"
-            )
+            artifact_status = _artifact_status(model, path)
             models.append(
                 ReadinessModel(
                     id=model.id,
@@ -151,8 +187,20 @@ def _build_model_and_registry_checks(
                         ),
                     )
                 )
-            if model.backend == "llama_cpp" and artifact_status != "valid":
+            if model.backend in {"llama_cpp", "colibri"} and artifact_status != "valid":
                 invalid_models[model.id] = artifact_status
+            if model.backend == "colibri":
+                try:
+                    validate_colibri_url(model.colibri_base_url)
+                except ValueError:
+                    checks.append(
+                        ReadinessCheck(
+                            name=f"colibri endpoint: {model.id}",
+                            status="blocker",
+                            detail="Colibri endpoint is missing or not loopback-only.",
+                            action="configure a local Colibri loopback endpoint",
+                        )
+                    )
         if invalid_models:
             checks.append(
                 ReadinessCheck(
@@ -166,12 +214,12 @@ def _build_model_and_registry_checks(
                     action=_SETUP_MODELS,
                 )
             )
-        elif any(model.backend == "llama_cpp" for model in registry.list()):
+        elif any(model.backend in {"llama_cpp", "colibri"} for model in registry.list()):
             checks.append(
                 ReadinessCheck(
                     name="configured GGUF model files",
                     status="ok",
-                    detail="All required configured llama_cpp model files are present.",
+                    detail="All configured production model artifacts are present.",
                 )
             )
         else:
@@ -179,7 +227,7 @@ def _build_model_and_registry_checks(
                 ReadinessCheck(
                     name="configured GGUF model files",
                     status="warning",
-                    detail="No llama_cpp model is configured; only fake models exist.",
+                    detail="No production model is configured; only fake models exist.",
                     action=_SETUP_MODELS,
                 )
             )
@@ -210,7 +258,8 @@ def _build_model_and_registry_checks(
                 dedicated_router_available = (
                     backend == "fake"
                     or router_model.backend == "fake"
-                    or router_model.resolved_path(registry.root).is_file()
+                    or _artifact_status(router_model, router_model.resolved_path(registry.root))
+                    == "valid"
                 )
                 if not dedicated_router_available:
                     router_failure_reason = "dedicated_router_artifact_unavailable"
@@ -235,7 +284,8 @@ def _build_model_and_registry_checks(
         and (
             backend == "fake"
             or any(
-                model.backend == "fake" or model.resolved_path(registry.root).is_file()
+                model.backend == "fake"
+                or _artifact_status(model, model.resolved_path(registry.root)) == "valid"
                 for model in reading_models
             )
         )

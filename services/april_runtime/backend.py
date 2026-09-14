@@ -131,6 +131,14 @@ class RuntimeBackend(ABC):
         """
         return {}
 
+    def capabilities(self) -> dict[str, object]:
+        """Report backend capabilities without exposing model or prompt data."""
+        return {
+            "streaming": True,
+            "embeddings": self.supports_native_batch_embeddings,
+            "native_tools_forwarded": False,
+        }
+
     async def embed(self, text: str) -> list[float]:
         raise RuntimeUnavailableError("backend does not support embeddings")
 

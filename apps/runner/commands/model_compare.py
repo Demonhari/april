@@ -6,11 +6,13 @@ import hashlib
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import typer
 
 from apps.cli.render import console
+from apps.runner.coding_compare import CODING_FIXTURES
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.hardware_profile import safe_hardware_profile
 from april_common.settings import BenchmarkSettings, load_settings
@@ -70,6 +72,130 @@ def register_model_compare(model_app: typer.Typer) -> None:
         console.print(f"  run april jobs show {job['id']}")
         console.print(f"  run april jobs cancel {job['id']}")
         console.print(f"  run april jobs retry {job['id']}")
+
+    @model_app.command("compare-coding")
+    def compare_coding(
+        model_a: str = typer.Argument(..., help="First registered local coding-capable model."),
+        model_b: str = typer.Argument(..., help="Second registered local coding-capable model."),
+        dry_run: bool = typer.Option(False, "--dry-run"),
+        json_output: bool = typer.Option(False, "--json"),
+        report: Path | None = typer.Option(None, "--report"),
+    ) -> None:
+        """Inspect a fixed offline coding comparison without activating a winner."""
+        settings = load_settings()
+        registry = ModelRegistry.from_file(
+            settings.home / "configs" / "models.yaml", root=settings.home
+        )
+        first = registry.get(model_a)
+        second = registry.get(model_b)
+        coding_roles = {"coding", "brain", "reasoning"}
+        if first.role not in coding_roles or second.role not in coding_roles:
+            raise typer.BadParameter("both models must be coding-capable registered local models")
+        plan = {
+            "models": [first.id, second.id],
+            "fixtures": list(CODING_FIXTURES),
+            "same_fixture_set": True,
+            "automatic_activation_performed": False,
+            "report": report.name if report is not None else "coding-model-comparison.json",
+        }
+        if dry_run:
+            if json_output:
+                console.print_json(data=plan)
+            else:
+                console.print("Coding comparison dry run")
+                console.print(f"Models: {first.id}, {second.id}")
+                console.print(f"Fixtures: {len(CODING_FIXTURES)} versioned offline cases")
+                console.print("Automatic activation: false")
+            return
+        comparison = asyncio.run(_run_coding_comparison(settings, (first.id, second.id)))
+        target = report or settings.home / "data" / "verification" / "coding-model-comparison.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.tmp")
+        temporary.write_text(json.dumps(comparison, indent=2, sort_keys=True), encoding="utf-8")
+        temporary.replace(target)
+        if json_output:
+            console.print_json(data=comparison)
+        else:
+            console.print(f"Wrote recommendation-only coding comparison to {target}")
+            console.print(f"Recommendation: {comparison['recommendation']}")
+
+
+async def _run_coding_comparison(settings: Any, model_ids: tuple[str, str]) -> dict[str, object]:
+    registry = ModelRegistry.from_file(
+        settings.home / "configs" / "models.yaml", root=settings.home
+    )
+    definitions = [registry.get(model_id) for model_id in model_ids]
+    results: list[dict[str, object]] = []
+    for model_id, definition in zip(model_ids, definitions, strict=True):
+        cancellation_event = asyncio.Event()
+        result = await run_model_utility_job(
+            settings,
+            model_id=model_id,
+            mode="benchmark",
+            cancellation_event=cancellation_event,
+            timeout_seconds=3_600.0,
+        )
+        redacted = _redacted_benchmark(result)
+        metrics: dict[str, object] = {
+            key: redacted.get(key)
+            for key in (
+                "coding_fixture_pass_rate",
+                "structured_json_reliability",
+                "first_token_latency_seconds",
+                "output_tokens_per_second",
+                "peak_process_rss_bytes",
+            )
+        }
+        results.append(
+            {
+                "model_id": model_id,
+                "backend": definition.backend,
+                "artifact_kind": definition.artifact_kind,
+                "configuration": {
+                    "context_size": definition.context_size,
+                    "max_output_tokens": definition.max_output_tokens,
+                    "threads": definition.threads,
+                    "threads_batch": definition.threads_batch,
+                    "chat_format": definition.chat_format,
+                },
+                "metrics": metrics,
+                "passed": bool(redacted.get("passed")),
+                "simulated": bool(redacted.get("simulated")),
+            }
+        )
+
+    def metric(result: dict[str, object], name: str) -> float:
+        metrics = result.get("metrics")
+        value = metrics.get(name) if isinstance(metrics, dict) else None
+        return float(value) if isinstance(value, (int, float)) else -1.0
+
+    ranked = sorted(
+        results,
+        key=lambda item: (
+            metric(item, "coding_fixture_pass_rate"),
+            metric(item, "structured_json_reliability"),
+        ),
+        reverse=True,
+    )
+    recommendation = (
+        str(ranked[0]["model_id"])
+        if ranked and not all(bool(item["simulated"]) for item in ranked)
+        else "insufficient_evidence"
+    )
+    return {
+        "schema_version": 1,
+        "report_type": "coding_model_comparison",
+        "model_ids": list(model_ids),
+        "fixture_set": list(CODING_FIXTURES),
+        "evaluation_version": "model-quality-v1",
+        "hardware_profile": safe_hardware_profile(),
+        "runtime_configuration": [item["configuration"] for item in results],
+        "same_fixture_set": True,
+        "scores": results,
+        "recommendation": recommendation,
+        "automatic_activation_performed": False,
+        "warnings": ["machine verification owns correctness; recommendation is advisory"],
+    }
 
 
 async def _compare(

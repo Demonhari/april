@@ -57,6 +57,11 @@ EXPECTED_API_ROUTES = {
     ("POST", "/memory/reindex"),
     ("POST", "/memory/repair-index"),
     ("POST", "/feedback"),
+    ("GET", "/evolution/lessons"),
+    ("GET", "/evolution/lessons/{lesson_id}"),
+    ("POST", "/evolution/lessons/{lesson_id}/approve"),
+    ("POST", "/evolution/lessons/{lesson_id}/reject"),
+    ("POST", "/evolution/lessons/{lesson_id}/supersede"),
     ("GET", "/playbooks"),
     ("POST", "/playbooks/adopt"),
     ("POST", "/playbooks/mine"),
@@ -167,6 +172,7 @@ april memory search
 april model
 april model benchmark
 april model compare-setups
+april model compare-coding
 april model doctor
 april model download
 april model import

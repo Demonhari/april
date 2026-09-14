@@ -56,3 +56,17 @@ Suspension stores sanitized loop messages and the exact pending tool request.
 After approval, APRIL appends a sanitized tool result and resumes the same run
 from the next iteration. A second Level 3+ tool request can suspend the same run
 again with a new approval ID.
+
+## TaskContract and coding completion
+
+The typed `TaskContract` is the authority for a run's project scope, risk,
+allowed tools, success criteria, verification requirements, delegation depth,
+and bounded re-plan attempts. A model plan is advisory and cannot construct a
+larger contract. For required coding verification, the completion gate requires
+current pass evidence for the exact repository-state digest; final model text
+alone is never completion proof.
+
+Specialist roles are internal bounded profiles. Their effective capability is
+parent ceiling intersected with specialist ceiling intersected with global APRIL
+policy. A reviewer contributes evidence only; reviewer agreement is not a
+substitute for machine verification.

@@ -224,6 +224,9 @@ class ModelInfo(BaseModel):
     name: str
     role: ModelRole
     backend: str
+    artifact_kind: Literal["gguf_file", "colibri_model_directory", "none"] = "gguf_file"
+    artifact_fingerprint: str | None = None
+    capabilities: dict[str, Any] = Field(default_factory=dict)
     path: str
     state: ModelState
     keep_loaded: bool

@@ -50,7 +50,7 @@ class RuntimeSettings(BaseModel):
     port: int = 8766
     url: str = "http://127.0.0.1:8766"
     token: str | None = Field(default=None, repr=False)
-    backend: str = "llama_cpp"
+    backend: Literal["llama_cpp", "colibri", "fake"] = "llama_cpp"
     preload_keep_loaded: bool = True
     request_timeout_seconds: float = 120.0
     max_loaded_specialist_models: int = 2
@@ -158,6 +158,18 @@ class OrchestrationSettings(BaseModel):
     """Optional prompt-layout experiments; disabled unless explicitly enabled."""
 
     stable_prefix_layout: bool = False
+
+
+class IntegrationProviderSettings(BaseModel):
+    enabled: bool = False
+
+
+class IntegrationSettings(BaseModel):
+    """External integrations are opt-in and remain local-only in this release."""
+
+    mcp: IntegrationProviderSettings = Field(default_factory=IntegrationProviderSettings)
+    browser: IntegrationProviderSettings = Field(default_factory=IntegrationProviderSettings)
+    external_tools: IntegrationProviderSettings = Field(default_factory=IntegrationProviderSettings)
 
 
 class ConversationContextSettings(BaseModel):
@@ -482,6 +494,7 @@ class AprilSettings(BaseModel):
     benchmark: BenchmarkSettings = Field(default_factory=BenchmarkSettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
     orchestration: OrchestrationSettings = Field(default_factory=OrchestrationSettings)
+    integrations: IntegrationSettings = Field(default_factory=IntegrationSettings)
     conversation_context: ConversationContextSettings = Field(
         default_factory=ConversationContextSettings
     )

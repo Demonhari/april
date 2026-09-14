@@ -1569,3 +1569,26 @@ milestones rather than hidden gaps:
 
 Model files are never committed to this repository and are never downloaded
 automatically; you provide them locally.
+
+## Optional Colibri and coding candidates
+
+APRIL can represent an operator-configured local Colibri service with
+`backend: colibri` and `artifact_kind: colibri_model_directory` in
+`configs/models.yaml`. The endpoint must be loopback (`localhost`, `127.0.0.1`,
+or `::1`); APRIL does not launch Colibri, download models, or send APRIL
+privileged tool definitions. A stopped service is reported as configured but
+unavailable. Existing checked-in GGUF/llama.cpp defaults are unchanged.
+
+For a fixed, offline plan comparing two registered coding-capable candidates:
+
+```bash
+run april model compare-coding qwen-candidate kat-candidate --dry-run
+```
+
+The comparison workflow is recommendation-only. Activation remains an explicit
+operator configuration change after machine verification. Write-capable coding
+runs use a typed TaskContract, bounded specialist roles, and repository-state-
+bound verification; a passing test result becomes stale when the repository
+changes. Current-state facts are exact-keyed, while experience lessons remain
+candidates until review. MCP/browser/external providers are disabled by
+default and accept only local stdio or loopback foundations.

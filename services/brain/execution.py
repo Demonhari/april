@@ -7,6 +7,7 @@ from agents.schemas import LocalCitation, ProposedChange
 from services.april_runtime.schemas import ChatMessage
 from services.brain.request_context import RequestContext
 from services.brain.schemas import BrainDecision, RouteResult
+from services.brain.task_contract import TaskContract
 from services.memory.schemas import Message
 
 
@@ -49,6 +50,7 @@ class PreparedTurn:
     history: list[Message] = field(default_factory=list)
     context_sections: list[str] = field(default_factory=list)
     stable_prefix: str | None = None
+    task_contract: TaskContract | None = None
     request_context: RequestContext = field(default_factory=RequestContext.unknown)
     trusted_context: str | None = None
     verification_evidence: VerificationEvidence | None = None

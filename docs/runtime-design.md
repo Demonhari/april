@@ -139,3 +139,24 @@ generation errors.
 llama.cpp streaming uses a bounded thread-safe queue bridge and reports
 structured stream errors without emitting a successful completion after
 producer failure.
+
+## Colibri backend
+
+`services/april_runtime/colibri_backend.py` is the optional non-GGUF
+production adapter. It uses injected `httpx` transport and tokenizer seams in
+tests and accepts only `localhost`, `127.0.0.1`, or `::1`. Health, model
+identity, JSON generation, SSE streaming, and tokenizer requests degrade to a
+safe unavailable result on timeout, malformed JSON, or a stopped server. The
+payload deliberately contains no APRIL-native `tools` or `tool_choice` fields.
+Embeddings remain unsupported until a separately audited local implementation
+exists.
+
+Colibri model definitions use `artifact_kind: colibri_model_directory`, an
+operator-provided directory, expected metadata files, endpoint, model name, and
+optional local tokenizer path. This contract proves the configured
+directory/metadata shape, not model weights' cryptographic identity. APRIL
+never starts the service or downloads artifacts. Existing llama.cpp GGUF
+loading and readiness checks remain unchanged. Install the optional `.[colibri]`
+extra only when a local `tokenizers` package is needed; otherwise the backend
+may use the explicitly provided tokenizer or the local Colibri tokenizer
+endpoint.

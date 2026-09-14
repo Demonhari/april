@@ -71,3 +71,11 @@ Production packaging adds operator-driven native signing/notarization commands,
 but this repository does not contain Apple credentials and automated tests are
 not proof of a signed/notarized artifact. APRIL does not add full-disk
 encryption, remote attestation, or off-device backup.
+
+Optional Colibri is local-only: non-loopback endpoints are rejected, the
+service is never started by APRIL, and privileged tool definitions are never
+sent to the model server. MCP/browser provider descriptions are untrusted and
+disabled by default; schema drift invalidates old approvals. Repository-state
+verification prevents a passing result from being reused after code changes.
+Current-state memory uses exact typed keys, and candidate lessons remain
+outside trusted policy until explicitly reviewed.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 from pathlib import Path
 from typing import Any, ClassVar, Literal
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -12,6 +13,7 @@ from april_common.errors import ConfigError, NotFoundError
 from services.april_runtime.schemas import ModelRole
 
 ChatFormat = Literal["generic", "granite", "qwen"]
+ArtifactKind = Literal["gguf_file", "colibri_model_directory", "none"]
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -36,7 +38,7 @@ UniqueKeyLoader.add_constructor(
 
 
 class ModelDefinition(BaseModel):
-    VALID_BACKENDS: ClassVar[set[str]] = {"llama_cpp", "fake"}
+    VALID_BACKENDS: ClassVar[set[str]] = {"llama_cpp", "colibri", "fake"}
     VALID_ROLES: ClassVar[set[str]] = {
         "brain",
         "router",
@@ -52,6 +54,11 @@ class ModelDefinition(BaseModel):
     name: str = Field(min_length=1)
     path: Path
     backend: str
+    artifact_kind: ArtifactKind = "gguf_file"
+    colibri_base_url: str | None = None
+    colibri_model_name: str | None = None
+    colibri_expected_files: list[str] = Field(default_factory=list, max_length=32)
+    colibri_tokenizer_path: Path | None = None
     role: ModelRole
     threads: int = Field(gt=0)
     threads_batch: int | None = Field(default=None, gt=0)
@@ -77,11 +84,61 @@ class ModelDefinition(BaseModel):
     prefix_cache_mb: int | None = Field(default=None, ge=0)
     prefix_cache_min_tokens: int = Field(default=128, ge=16)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _default_artifact_kind(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        backend = normalized.get("backend")
+        if "artifact_kind" not in normalized:
+            normalized["artifact_kind"] = (
+                "colibri_model_directory" if backend == "colibri" else "gguf_file"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_artifact_configuration(self) -> ModelDefinition:
+        if self.backend == "colibri" and self.artifact_kind != "colibri_model_directory":
+            raise ValueError("colibri models must use artifact_kind=colibri_model_directory")
+        if self.backend == "colibri" and not self.colibri_expected_files:
+            raise ValueError("colibri models must declare expected metadata files")
+        if self.backend == "llama_cpp" and self.artifact_kind != "gguf_file":
+            raise ValueError("llama_cpp models must use artifact_kind=gguf_file")
+        if self.backend == "fake" and self.artifact_kind not in {"none", "gguf_file"}:
+            raise ValueError("fake models must use artifact_kind=none or gguf_file")
+        return self
+
     @field_validator("backend")
     @classmethod
     def validate_backend(cls, value: str) -> str:
         if value not in cls.VALID_BACKENDS:
             raise ValueError(f"Unknown backend: {value}")
+        return value
+
+    @field_validator("colibri_base_url")
+    @classmethod
+    def validate_colibri_endpoint(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            raise ValueError("colibri_base_url must use an HTTP loopback host")
+        if parsed.username or parsed.password:
+            raise ValueError("colibri_base_url must not contain credentials")
+        return value.rstrip("/")
+
+    @field_validator("colibri_expected_files")
+    @classmethod
+    def validate_colibri_expected_files(cls, value: list[str]) -> list[str]:
+        for relative in value:
+            candidate = Path(relative)
+            if not relative or candidate.is_absolute() or ".." in candidate.parts:
+                raise ValueError("colibri_expected_files must contain safe relative paths")
         return value
 
     @field_validator("path")

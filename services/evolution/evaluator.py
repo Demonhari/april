@@ -84,7 +84,7 @@ RealRuntimeEvalStatus = Literal[
 
 # Backends that genuinely exercise a real local model. The fake/simulated
 # backend can never count as a real-runtime evaluation.
-_REAL_RUNTIME_BACKENDS = frozenset({"llama_cpp"})
+_REAL_RUNTIME_BACKENDS = frozenset({"llama_cpp", "colibri"})
 
 
 class RuntimeEvalClient(Protocol):
