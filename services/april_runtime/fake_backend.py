@@ -112,8 +112,50 @@ class FakeBackend(RuntimeBackend):
         prompt_tokens: int | None = None,
     ) -> GenerationResult:
         self.last_response_format = response_format
+        last_tool_message = next(
+            (message for message in reversed(messages) if message.role == "tool"),
+            None,
+        )
+        if last_tool_message is not None and (
+            "test_runner" in last_tool_message.content
+            and (
+                '"ok":true' in last_tool_message.content
+                or '"ok": true' in last_tool_message.content
+                or " passed in " in last_tool_message.content.casefold()
+            )
+        ):
+            text = (
+                '{"type":"final_answer","message":"Verification completed.",'
+                '"summary":"verified","citations":[]}'
+            )
+            return GenerationResult(
+                text=text,
+                input_tokens=len(await self.tokenize(prompt)),
+                output_tokens=len(text.split()),
+            )
         if messages and messages[-1].role == "tool":
             prompt = f"{prompt}\n\nTool result:\n{messages[-1].content}"
+            if (
+                "test_runner" in messages[-1].content
+                and (
+                    '"ok":true' in messages[-1].content
+                    or '"ok": true' in messages[-1].content
+                    or " passed in " in messages[-1].content.casefold()
+                )
+            ) or (
+                "test session starts" in messages[-1].content.casefold()
+                and " passed in " in messages[-1].content.casefold()
+            ):
+                prompt = f"{prompt}\n\n__FAKE_VERIFIED_TEST_RESULT__"
+                text = (
+                    '{"type":"final_answer","message":"Verification completed.",'
+                    '"summary":"verified","citations":[]}'
+                )
+                return GenerationResult(
+                    text=text,
+                    input_tokens=len(await self.tokenize(prompt)),
+                    output_tokens=len(text.split()),
+                )
         return await self.generate(
             prompt,
             temperature=temperature,
@@ -306,12 +348,45 @@ class FakeBackend(RuntimeBackend):
 
     def _structured_agent_response(self, prompt: str, lower: str) -> str:
         if "approved tool result" in lower or "tool result" in lower:
-            if '"tool": "patch_applier"' in lower or '"tool":"patch_applier"' in lower:
+            if "__fake_verified_test_result__" in lower or (
+                "test session starts" in lower and " passed in " in lower
+            ):
+                return (
+                    '{"type":"final_answer","message":"Verification completed.",'
+                    '"summary":"verified","citations":[]}'
+                )
+            patch_position = max(
+                lower.rfind('"tool": "patch_applier"'),
+                lower.rfind('"tool":"patch_applier"'),
+            )
+            generator_position = max(
+                lower.rfind('"tool": "patch_generator"'),
+                lower.rfind('"tool":"patch_generator"'),
+            )
+            test_position = max(
+                lower.rfind('"tool": "test_runner"'),
+                lower.rfind('"tool":"test_runner"'),
+            )
+            if test_position > patch_position and test_position > generator_position:
+                return (
+                    '{"type":"final_answer","message":"Verification completed.",'
+                    '"summary":"verified","citations":[]}'
+                )
+            if patch_position > generator_position:
+                if (
+                    "verification required" in lower
+                    or "run the configured verification tool" in lower
+                    or "verification_required=true" in lower
+                ):
+                    return (
+                        '{"type":"tool_request","tool":"test_runner",'
+                        '"args":{"argv":["pytest"]},"reason":"Run current machine verification."}'
+                    )
                 return (
                     '{"type":"final_answer","message":"Applied the approved patch.",'
                     '"summary":"patch applied","citations":[]}'
                 )
-            if '"tool": "patch_generator"' in lower or '"tool":"patch_generator"' in lower:
+            if generator_position >= 0:
                 patch_path = self._extract_json_string(prompt, "patch_path") or "patch.patch"
                 return (
                     '{"type":"tool_request","tool":"patch_applier","args":{'

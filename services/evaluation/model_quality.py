@@ -10,7 +10,14 @@ from typing import Any
 
 from april_common.settings import AprilSettings
 from services.april_runtime.client import RuntimeClient
-from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
+from services.april_runtime.colibri_backend import ColibriBackend
+from services.april_runtime.schemas import (
+    ChatMessage,
+    ChatResponse,
+    GenerationOptions,
+    ResponseFormat,
+    Usage,
+)
 from services.brain.deterministic_router import DeterministicRouter
 from services.brain.model_routing import infer_model_route
 from services.brain.route_contract import RouteCompiler
@@ -51,6 +58,73 @@ def fixture_set_metadata(home: Path) -> dict[str, Any]:
     }
 
 
+def coding_fixture_ids(home: Path) -> tuple[str, ...]:
+    """Return the exact coding cases installed in the versioned fixture set."""
+
+    try:
+        data = json.loads((fixture_directory(home) / "coding.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    fixtures = data.get("fixtures") if isinstance(data, dict) else None
+    if not isinstance(fixtures, list):
+        return ()
+    return tuple(
+        str(item["id"])
+        for item in fixtures
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    )
+
+
+class ColibriEvaluationClient:
+    """Runtime-shaped evaluator client backed directly by local Colibri."""
+
+    supports_seed = False
+
+    def __init__(self, *, backend: ColibriBackend, model_id: str) -> None:
+        self.backend = backend
+        self.model_id = model_id
+
+    async def chat(
+        self,
+        *,
+        model_id: str,
+        messages: list[ChatMessage],
+        options: GenerationOptions | None = None,
+        response_format: ResponseFormat | None = None,
+        request_id: str | None = None,
+    ) -> ChatResponse:
+        del model_id
+        selected = options or GenerationOptions()
+        result = await self.backend.generate_messages(
+            "",
+            messages=messages,
+            temperature=selected.temperature if selected.temperature is not None else 0.0,
+            max_output_tokens=selected.max_output_tokens or 256,
+            top_p=selected.top_p,
+            stop=selected.stop,
+            response_format=response_format,
+            disable_thinking=(
+                None if selected.enable_thinking is None else not selected.enable_thinking
+            ),
+        )
+        return ChatResponse(
+            request_id=request_id or f"colibri-eval-{self.model_id}",
+            model_id=self.model_id,
+            content=result.text,
+            usage=Usage(
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                total_tokens=result.input_tokens + result.output_tokens,
+            ),
+        )
+
+
+def _evaluation_options(client: Any, **values: Any) -> GenerationOptions:
+    if not getattr(client, "supports_seed", True):
+        values.pop("seed", None)
+    return GenerationOptions(**values)
+
+
 async def evaluate_model_quality(
     settings: AprilSettings,
     *,
@@ -59,11 +133,12 @@ async def evaluate_model_quality(
     model_id: str,
     coding_root: Path,
     tool_worker: ToolWorkerClient | None,
+    client: Any | None = None,
 ) -> dict[str, Any]:
     metadata = fixture_set_metadata(settings.home)
     if not metadata["installed"]:
         raise RuntimeError("model_quality_fixtures_unavailable")
-    client = RuntimeClient(runtime_url, token=runtime_token, timeout=180.0)
+    client = client or RuntimeClient(runtime_url, token=runtime_token, timeout=180.0)
     root = fixture_directory(settings.home)
     routing = await _routing(client, model_id, _load(root / "routing.json"), home=settings.home)
     strict_json = await _strict_json(client, model_id, _load(root / "strict_json.json"))
@@ -90,7 +165,7 @@ async def evaluate_model_quality(
 
 
 async def _routing(
-    client: RuntimeClient,
+    client: Any,
     model_id: str,
     data: Mapping[str, Any],
     *,
@@ -179,7 +254,7 @@ async def _routing(
 
 
 async def _strict_json(
-    client: RuntimeClient,
+    client: Any,
     model_id: str,
     data: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -198,7 +273,7 @@ async def _strict_json(
                 ),
                 ChatMessage(role="user", content=str(fixture["prompt"])),
             ],
-            options=GenerationOptions(temperature=0.0, max_output_tokens=256, seed=11),
+            options=_evaluation_options(client, temperature=0.0, max_output_tokens=256, seed=11),
             response_format=ResponseFormat(
                 type="json_object", json_schema=grammar_safe_json_schema(dict(schema))
             ),
@@ -224,7 +299,7 @@ async def _strict_json(
                 ),
                 ChatMessage(role="user", content=response.content),
             ],
-            options=GenerationOptions(temperature=0.0, max_output_tokens=256, seed=11),
+            options=_evaluation_options(client, temperature=0.0, max_output_tokens=256, seed=11),
             response_format=ResponseFormat(
                 type="json_object", json_schema=grammar_safe_json_schema(dict(schema))
             ),
@@ -255,7 +330,7 @@ async def _strict_json(
 
 
 async def _coding(
-    client: RuntimeClient,
+    client: Any,
     model_id: str,
     data: Mapping[str, Any],
     *,
@@ -284,7 +359,7 @@ async def _coding(
                 ),
                 ChatMessage(role="user", content=str(fixture["instruction"])),
             ],
-            options=GenerationOptions(temperature=0.0, max_output_tokens=768, seed=13),
+            options=_evaluation_options(client, temperature=0.0, max_output_tokens=768, seed=13),
             response_format=ResponseFormat(
                 type="json_object",
                 json_schema=grammar_safe_json_schema(
@@ -355,7 +430,7 @@ async def _coding(
 
 
 async def _context(
-    client: RuntimeClient,
+    client: Any,
     model_id: str,
     data: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -388,7 +463,9 @@ async def _context(
                         content=f"Context:\n{context}\n\nQuestion: {fixture['question']}",
                     ),
                 ],
-                options=GenerationOptions(temperature=0.0, max_output_tokens=128, seed=17),
+                options=_evaluation_options(
+                    client, temperature=0.0, max_output_tokens=128, seed=17
+                ),
                 request_id=f"benchmark-context-{fixture['id']}",
             )
             duration = time.monotonic() - started

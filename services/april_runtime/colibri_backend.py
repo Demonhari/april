@@ -21,6 +21,7 @@ from services.april_runtime.model_registry import ModelDefinition
 from services.april_runtime.schemas import ChatMessage, ResponseFormat
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_UNSET = object()
 
 
 def validate_colibri_url(url: str | None) -> str:
@@ -128,6 +129,8 @@ class ColibriBackend(RuntimeBackend):
             self.model_name = model.colibri_model_name or model.name
         if self._tokenizer is None:
             configured_tokenizer = model.colibri_tokenizer_path
+            if configured_tokenizer is not None:
+                configured_tokenizer = Path(configured_tokenizer)
             if configured_tokenizer is not None and not configured_tokenizer.is_absolute():
                 configured_tokenizer = model_dir / configured_tokenizer
             self._tokenizer_path = configured_tokenizer or self._tokenizer_path
@@ -136,6 +139,10 @@ class ColibriBackend(RuntimeBackend):
         if not health.ok:
             raise RuntimeUnavailableError("Colibri is configured but unavailable.")
         await self._validate_model_name()
+        if self._tokenizer is None:
+            raise RuntimeUnavailableError(
+                "Colibri exact local tokenizer is unavailable; configure tokenizer.json."
+            )
         self._loaded_model = model
 
     async def unload(self) -> None:
@@ -195,7 +202,7 @@ class ColibriBackend(RuntimeBackend):
         stop: list[str] | None = None,
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
-        disable_thinking: bool = False,
+        disable_thinking: bool | None = None,
         prompt_tokens: int | None = None,
     ) -> GenerationResult:
         del prompt
@@ -243,7 +250,7 @@ class ColibriBackend(RuntimeBackend):
         stop: list[str] | None = None,
         seed: int | None = None,
         response_format: ResponseFormat | None = None,
-        disable_thinking: bool = False,
+        disable_thinking: bool | None = None,
         prompt_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         del prompt, prompt_tokens
@@ -267,14 +274,18 @@ class ColibriBackend(RuntimeBackend):
                 ) as response:
                     if response.status_code >= 400:
                         raise RuntimeUnavailableError("Colibri streaming request failed.")
+                    completed = False
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
                             continue
                         data = line[5:].strip()
                         if data == "[DONE]":
+                            completed = True
                             break
                         try:
                             chunk = json.loads(data)
+                            if "choices" not in chunk and "usage" in chunk:
+                                continue
                             delta = chunk["choices"][0].get("delta", {})
                             text = _content_text(delta.get("content", ""))
                         except (ValueError, KeyError, IndexError, TypeError) as exc:
@@ -283,6 +294,8 @@ class ColibriBackend(RuntimeBackend):
                             ) from exc
                         if text:
                             yield text
+                    if not completed:
+                        raise RuntimeUnavailableError("Colibri stream ended before [DONE].")
             except httpx.HTTPError as exc:
                 raise RuntimeUnavailableError("Colibri is configured but unavailable.") from exc
 
@@ -295,12 +308,9 @@ class ColibriBackend(RuntimeBackend):
             self._load_optional_tokenizer()
         if self._tokenizer is not None:
             return list(self._tokenizer(text))
-        response = await self._request("POST", "/tokenize", json={"text": text})
-        data = _json_object(response)
-        tokens = data.get("tokens")
-        if not isinstance(tokens, list) or not all(isinstance(item, int) for item in tokens):
-            raise RuntimeUnavailableError("Colibri tokenizer response is malformed.")
-        return tokens
+        raise RuntimeUnavailableError(
+            "Colibri exact local tokenizer is unavailable; /tokenize is not supported."
+        )
 
     async def health(self) -> BackendHealth:
         if self.base_url is None:
@@ -322,15 +332,26 @@ class ColibriBackend(RuntimeBackend):
             "native_tools_forwarded": False,
             "embeddings": False,
             "streaming": True,
-            "tokenizer": self._tokenizer is not None or self._tokenizer_path is not None,
+            "tokenizer": self._tokenizer is not None,
+            "per_request_seed": False,
+            "thinking": True,
+            "response_format": "json_object_and_schema",
         }
 
     def _payload(self, *, messages: list[ChatMessage], **values: object) -> dict[str, object]:
+        seed = values.pop("seed", None)
+        del seed
+        response_format = values.pop("response_format", None)
+        disable_thinking = values.pop("disable_thinking", _UNSET)
         payload: dict[str, object] = {
             "model": self.model_name,
             "messages": [message.model_dump() for message in messages],
         }
         payload.update({key: value for key, value in values.items() if value is not None})
+        if isinstance(response_format, ResponseFormat) and response_format.type == "json_object":
+            payload["response_format"] = _colibri_response_format(response_format)
+        if disable_thinking is not None and disable_thinking is not _UNSET:
+            payload["enable_thinking"] = not bool(disable_thinking)
         # Deliberately no ``tools`` or ``tool_choice`` keys.  APRIL owns tools.
         return payload
 
@@ -390,6 +411,17 @@ class ColibriBackend(RuntimeBackend):
             self._tokenizer = local.encode
         except (ImportError, OSError, ValueError):
             return
+
+
+def _colibri_response_format(response_format: ResponseFormat) -> dict[str, object] | None:
+    if response_format.type != "json_object":
+        return None
+    if response_format.json_schema is None:
+        return {"type": "json_object"}
+    return {
+        "type": "json_schema",
+        "json_schema": {"schema": response_format.json_schema},
+    }
 
 
 def _json_object(response: httpx.Response) -> dict[str, Any]:

@@ -111,6 +111,22 @@ class StateFactStore:
         )
         return [_row_to_fact(row) for row in rows]
 
+    async def current_for_project(
+        self, *, project_id: str | None, limit: int = 32
+    ) -> list[StateFact]:
+        """Return a small project-relevant view, including global facts."""
+
+        bounded_limit = max(1, min(limit, 128))
+        rows = await self.database.fetchall(
+            """
+            SELECT * FROM state_facts
+            WHERE status = 'current' AND (project_id IS NULL OR project_id IS ?)
+            ORDER BY observed_at DESC LIMIT ?
+            """,
+            (project_id, bounded_limit),
+        )
+        return [_row_to_fact(row) for row in rows]
+
 
 def _row_to_fact(row: object) -> StateFact:
     mapping = dict(cast(Mapping[str, object], row))

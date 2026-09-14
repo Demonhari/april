@@ -204,13 +204,16 @@ they bundle no models, tokens, voice assets, signing, or launch-at-login service
 
 ## Task contracts, coding evidence, and bounded specialists
 
-Write-capable runs may carry a typed `TaskContract` containing goal, project
+Write-capable structured runs derive and carry a typed `TaskContract` containing goal, project
 scope, risk, success criteria, verification requirements, delegation depth,
 re-plan budget, and a capability ceiling. Model output can propose work against
 that contract but cannot widen it. Internal investigator, implementer,
 reviewer, and researcher tasks receive the intersection of parent capability,
 specialist capability, and global policy; they are bounded and normally run
-sequentially.
+sequentially. The investigator execution path is active for significant
+structured coding runs; implementer/reviewer/researcher remain bounded role
+profiles for future staged expansion, and no reviewer output is treated as
+machine verification.
 
 Coding verification binds its result to a deterministic repository-state digest
 made from project identity, HEAD, tracked diff, and relevant untracked-file

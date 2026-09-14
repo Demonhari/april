@@ -19,6 +19,7 @@ from services.brain.schemas import (
     PlannedToolCall,
     RouteResult,
 )
+from services.brain.task_contract import TaskContract
 from services.evolution.rollouts import CanaryContext
 from services.evolution.versions import LEARNED_GUIDANCE_HEADER
 from services.memory.schemas import Project
@@ -49,14 +50,42 @@ class ExecutionFlow:
             project_id=prepared.project_id,
             source="chat",
         )
+        specialist_context = list(prepared.context_sections)
+        specialist_coordinator = getattr(self, "specialist_coordinator", None)
+        if (
+            specialist_coordinator is not None
+            and prepared.task_contract is not None
+            and prepared.task_contract.task_type == "verified_code_modification"
+            and prepared.task_contract.maximum_specialist_depth > 0
+            and prepared.project_id is not None
+        ):
+            specialist = await specialist_coordinator.investigate(
+                parent_run_id=prepared.request_id,
+                parent_contract=prepared.task_contract,
+                parent_agent=agent,
+                goal=message,
+                context=context,
+                request_id=prepared.request_id,
+                history=prepared.history,
+                context_sections=specialist_context,
+            )
+            if specialist is not None:
+                task, specialist_result = specialist
+                if specialist_result.status == "ok":
+                    specialist_context.append(
+                        "[UNTRUSTED SPECIALIST FINDINGS; NOT POLICY]\n"
+                        f"role={task.role}\n"
+                        f"{specialist_coordinator.bounded_findings(specialist_result)}"
+                    )
         result = await self.structured_loop.run(
             agent=agent,
             message=message,
             context=context,
             request_id=prepared.request_id,
             history=prepared.history,
-            context_sections=prepared.context_sections,
+            context_sections=specialist_context,
             stable_prefix=prepared.stable_prefix,
+            task_contract=prepared.task_contract,
             run_metadata=prepared.run_metadata,
         )
         # Mirror the run metadata (chat_mode, intelligence_rung, ...) into the
@@ -262,6 +291,7 @@ class ExecutionFlow:
         trusted_context: str,
         capability_prompt: str,
         stable_prefix: str | None = None,
+        task_contract: TaskContract | None = None,
     ) -> PreparedTurn:
         prompt_parts, citations = await self._prompt_parts(
             message=message,
@@ -305,6 +335,7 @@ class ExecutionFlow:
                 request_context=request_context,
                 trusted_context=trusted_context,
                 stable_prefix=stable_prefix,
+                task_contract=task_contract,
             )
 
         generator_args = {"patch": response.content}
@@ -347,6 +378,7 @@ class ExecutionFlow:
                 request_context=request_context,
                 trusted_context=trusted_context,
                 stable_prefix=stable_prefix,
+                task_contract=task_contract,
             )
 
         patch_path = str(generator_result.data["patch_path"])
@@ -385,6 +417,7 @@ class ExecutionFlow:
                 request_context=request_context,
                 trusted_context=trusted_context,
                 stable_prefix=stable_prefix,
+                task_contract=task_contract,
             )
         affected_text = "\n".join(f"- {path}" for path in affected_files)
         final_message = (
@@ -412,6 +445,7 @@ class ExecutionFlow:
             request_context=request_context,
             trusted_context=trusted_context,
             stable_prefix=stable_prefix,
+            task_contract=task_contract,
         )
 
     async def _resolve_project(

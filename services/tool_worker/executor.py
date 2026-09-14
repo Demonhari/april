@@ -94,7 +94,7 @@ class ToolWorkerExecutor:
         argv = request.args.get("argv")
         if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
             raise ValueError("invalid_argv")
-        command, cwd, _rule = validate_command(argv, root)
+        command, cwd, _rule = validate_command(argv, root, allowed_roots=self.allowed_roots)
         category = (
             ProcessCategory.TEST_RUNNER
             if request.operation == "test_runner"

@@ -18,6 +18,7 @@ from april_common.process_runner import (
 )
 from april_common.process_sandbox import operation_policy
 from april_common.settings import AprilSettings
+from services.april_runtime.colibri_backend import colibri_manifest_digest, validate_colibri_url
 from services.april_runtime.model_registry import ModelRegistry
 
 MIN_GGUF_BYTES = 4
@@ -36,6 +37,9 @@ class ValidatedRegisteredModel:
     basename: str
     size: int
     sha256: str
+    artifact_kind: str = "gguf_file"
+    resident_gb: float | None = None
+    manifest_digest: str | None = None
 
 
 def validate_registered_model(
@@ -52,6 +56,34 @@ def validate_registered_model(
     path = model.resolved_path(registry.root)
     if not is_path_within_roots(path, [settings.home, *settings.allowed_roots]):
         raise ModelJobError("registered_model_outside_allowed_roots")
+    if model.backend == "colibri":
+        if not path.is_dir():
+            raise ModelJobError("registered_model_not_directory")
+        try:
+            validate_colibri_url(model.colibri_base_url)
+        except ValueError as exc:
+            raise ModelJobError("registered_model_invalid_colibri_endpoint") from exc
+        for relative in model.colibri_expected_files:
+            candidate = (path / relative).resolve(strict=False)
+            if not candidate.is_file():
+                raise ModelJobError("registered_model_missing_colibri_metadata")
+        tokenizer_path = model.colibri_tokenizer_path
+        if tokenizer_path is not None and not tokenizer_path.is_absolute():
+            tokenizer_path = path / tokenizer_path
+        if tokenizer_path is None or not tokenizer_path.is_file():
+            raise ModelJobError("registered_model_missing_colibri_tokenizer")
+        manifest_digest = colibri_manifest_digest(model, path)
+        return ValidatedRegisteredModel(
+            model_id=model.id,
+            role=str(model.role),
+            path=path,
+            basename=path.name,
+            size=0,
+            sha256=manifest_digest,
+            artifact_kind="colibri_model_directory",
+            resident_gb=model.resident_gb,
+            manifest_digest=manifest_digest,
+        )
     try:
         metadata = path.stat()
     except OSError as exc:

@@ -24,6 +24,7 @@ from services.brain.request_context import RequestContext
 from services.brain.route_contract import RouteCompiler
 from services.brain.router import BrainRouter
 from services.brain.routing_reliability import RoutingReliabilityService
+from services.brain.specialist_coordinator import SpecialistCoordinator
 from services.evolution.versions import PromptOverlayManager
 from services.memory.retriever import MemoryRetriever
 from services.memory.sqlite_memory import SqliteMemory
@@ -96,6 +97,7 @@ class AprilOrchestrator(
             memory=memory,
             context_settings=settings.conversation_context,
         )
+        self.specialist_coordinator = SpecialistCoordinator(loop=self.structured_loop)
         self.conversation_context = ConversationContextService(
             memory=memory,
             runtime_client=runtime_client,

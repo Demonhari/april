@@ -12,7 +12,6 @@ from typing import Any
 import typer
 
 from apps.cli.render import console
-from apps.runner.coding_compare import CODING_FIXTURES
 from april_common.config_fingerprint import config_fingerprint_digest
 from april_common.hardware_profile import safe_hardware_profile
 from april_common.settings import BenchmarkSettings, load_settings
@@ -22,7 +21,7 @@ from april_common.thermal_state import (
 )
 from april_common.time import utc_now_iso
 from services.april_runtime.model_registry import ModelRegistry
-from services.evaluation.model_quality import fixture_set_metadata
+from services.evaluation.model_quality import coding_fixture_ids, fixture_set_metadata
 from services.jobs.model_jobs import run_model_utility_job
 from services.jobs.registry import default_job_registry
 from services.jobs.store import JobStore
@@ -88,12 +87,15 @@ def register_model_compare(model_app: typer.Typer) -> None:
         )
         first = registry.get(model_a)
         second = registry.get(model_b)
+        fixture_metadata = fixture_set_metadata(settings.home)
+        actual_coding_fixtures = coding_fixture_ids(settings.home)
         coding_roles = {"coding", "brain", "reasoning"}
         if first.role not in coding_roles or second.role not in coding_roles:
             raise typer.BadParameter("both models must be coding-capable registered local models")
         plan = {
             "models": [first.id, second.id],
-            "fixtures": list(CODING_FIXTURES),
+            "fixtures": list(actual_coding_fixtures),
+            "fixture_set": fixture_metadata,
             "same_fixture_set": True,
             "automatic_activation_performed": False,
             "report": report.name if report is not None else "coding-model-comparison.json",
@@ -104,7 +106,9 @@ def register_model_compare(model_app: typer.Typer) -> None:
             else:
                 console.print("Coding comparison dry run")
                 console.print(f"Models: {first.id}, {second.id}")
-                console.print(f"Fixtures: {len(CODING_FIXTURES)} versioned offline cases")
+                console.print(
+                    f"Fixtures: {len(actual_coding_fixtures)} installed versioned coding cases"
+                )
                 console.print("Automatic activation: false")
             return
         comparison = asyncio.run(_run_coding_comparison(settings, (first.id, second.id)))
@@ -186,7 +190,10 @@ async def _run_coding_comparison(settings: Any, model_ids: tuple[str, str]) -> d
         "schema_version": 1,
         "report_type": "coding_model_comparison",
         "model_ids": list(model_ids),
-        "fixture_set": list(CODING_FIXTURES),
+        "fixture_set": {
+            "metadata": fixture_set_metadata(settings.home),
+            "coding_cases": list(coding_fixture_ids(settings.home)),
+        },
         "evaluation_version": "model-quality-v1",
         "hardware_profile": safe_hardware_profile(),
         "runtime_configuration": [item["configuration"] for item in results],

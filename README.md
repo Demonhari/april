@@ -1592,3 +1592,12 @@ bound verification; a passing test result becomes stale when the repository
 changes. Current-state facts are exact-keyed, while experience lessons remain
 candidates until review. MCP/browser/external providers are disabled by
 default and accept only local stdio or loopback foundations.
+
+The active structured coding path derives its contract from the trusted route,
+selected project, configured agent tools, and permission ceiling. It persists
+the controller through approval suspension/resume, feeds real Tool Worker
+results into deterministic no-progress detection, and accepts a verified final
+answer only when current machine evidence matches the repository state. A
+direct legacy patch-proposal run remains approval-bound and reports application
+separately from verified coding completion. Colibri requires a local exact
+tokenizer and explicit resident estimate; it has no `/tokenize` fallback.

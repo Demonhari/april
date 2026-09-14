@@ -2232,7 +2232,8 @@ def test_code_modification_approval_applies_exact_patch_once(settings_tmp) -> No
     )
     assert approve_response.status_code == 200
     assert approve_response.json()["status"] == "resumed"
-    assert approve_response.json()["result"]["status"] == "ok"
+    assert approve_response.json()["result"]["status"] == "error"
+    assert "incomplete" in approve_response.json()["result"]["final_message"]
     assert "fixed animation" in (settings_tmp.home / "README.md").read_text(encoding="utf-8")
     replay = client.post(
         "/tools/approve",
@@ -2294,7 +2295,8 @@ def test_code_modification_external_project_uses_april_artifact_store(
     )
     assert approve_response.status_code == 200
     assert approve_response.json()["status"] == "resumed"
-    assert approve_response.json()["result"]["status"] == "ok"
+    assert approve_response.json()["result"]["status"] == "error"
+    assert "incomplete" in approve_response.json()["result"]["final_message"]
     assert "fixed animation" in (external_repo / "README.md").read_text(encoding="utf-8")
 
 

@@ -404,13 +404,21 @@ class ModelLifecycle:
         ModelUnavailableError with the governor's reasons instead of a silent
         OOM later. Gate failures (probe errors) never block a load.
         """
-        if self.governor is None or state.state in {"loaded", "loading"}:
+        if state.state in {"loaded", "loading"}:
+            return
+        projected = self._projected_model_load_gb(state)
+        if state.model.backend == "colibri" and projected is None and self.root_backend != "fake":
+            raise ModelUnavailableError(
+                state.model.id,
+                "Colibri production load requires an explicit resident_gb estimate.",
+            )
+        if self.governor is None:
             return
         try:
             assess_model_load = getattr(self.governor, "assess_model_load", None)
             assess_model_load_async = getattr(self.governor, "assess_model_load_async", None)
             kwargs = {
-                "projected_resident_gb": self._projected_model_load_gb(state),
+                "projected_resident_gb": projected,
                 "current_resident_gb": self._current_projected_resident_gb(),
                 "loaded_specialist_count": self._loaded_specialist_count(),
                 "max_loaded_specialist_count": self.max_loaded_specialist_models,
@@ -461,6 +469,15 @@ class ModelLifecycle:
         state = self.get_state(model_id)
         if generation_threads is not None and generation_threads < 1:
             raise ValueError("generation_threads must be positive")
+        if (
+            state.model.backend == "colibri"
+            and self.root_backend != "fake"
+            and state.model.projected_resident_gb(self.registry.root) is None
+        ):
+            raise ModelUnavailableError(
+                model_id,
+                "Colibri production load requires an explicit resident_gb estimate.",
+            )
         if self._is_specialist(state.model) and state.identity is None:
             await self._check_resource_gate_async(state)
             await self._enforce_lifecycle(target_model_id=model_id)

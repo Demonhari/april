@@ -174,6 +174,11 @@ class ModelDefinition(BaseModel):
             return self.resident_gb
         if self.backend == "fake":
             return 0.0
+        if self.backend == "colibri":
+            # Colibri streams model weights from a directory.  Directory
+            # metadata size is not a resident-RAM estimate, so admission must
+            # remain conservative until the operator supplies one.
+            return None
         try:
             size_gb = self.resolved_path(root).stat().st_size / (1024**3)
         except OSError:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from april_common.effective_config import load_tools_file
 from april_common.errors import PermissionDeniedError, ValidationError
-from april_common.path_security import normalize_existing_path
+from april_common.path_security import PathPolicy, normalize_existing_path
 from april_common.process_environment import ProcessCategory, build_process_environment
 from april_common.process_runner import (
     ProcessStatus,
@@ -60,7 +60,12 @@ def _reject_shell_meta(argv: list[str]) -> None:
             raise PermissionDeniedError("Shell metacharacters are denied.")
 
 
-def validate_command(argv: list[str], cwd: str | Path) -> tuple[list[str], Path, CommandRule]:
+def validate_command(
+    argv: list[str],
+    cwd: str | Path,
+    *,
+    allowed_roots: tuple[Path, ...] | None = None,
+) -> tuple[list[str], Path, CommandRule]:
     if not argv:
         raise ValidationError("Command argv cannot be empty.")
     _reject_shell_meta(argv)
@@ -86,7 +91,14 @@ def validate_command(argv: list[str], cwd: str | Path) -> tuple[list[str], Path,
             "python -m module is not allowlisted.",
             {"allowed_modules": sorted(ALLOWED_PYTHON_MODULES)},
         )
-    resolved = normalize_existing_path(cwd, current_path_policy())
+    policy = current_path_policy()
+    if allowed_roots is not None:
+        policy = PathPolicy(
+            allowed_roots=allowed_roots,
+            max_read_bytes=policy.max_read_bytes,
+            max_write_bytes=policy.max_write_bytes,
+        )
+    resolved = normalize_existing_path(cwd, policy)
     if not resolved.is_dir():
         raise PermissionDeniedError("Command working directory must be an allowed directory.")
     binary = shutil.which(argv[0])

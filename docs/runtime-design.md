@@ -148,15 +148,25 @@ tests and accepts only `localhost`, `127.0.0.1`, or `::1`. Health, model
 identity, JSON generation, SSE streaming, and tokenizer requests degrade to a
 safe unavailable result on timeout, malformed JSON, or a stopped server. The
 payload deliberately contains no APRIL-native `tools` or `tool_choice` fields.
+`enable_thinking` maps to Colibri's field; per-request `seed` is not sent and
+is reported as unsupported. APRIL response formats are translated to
+Colibri's `json_object` or `json_schema` wire shape, including schemas.
 Embeddings remain unsupported until a separately audited local implementation
 exists.
 
 Colibri model definitions use `artifact_kind: colibri_model_directory`, an
 operator-provided directory, expected metadata files, endpoint, model name, and
 optional local tokenizer path. This contract proves the configured
-directory/metadata shape, not model weights' cryptographic identity. APRIL
-never starts the service or downloads artifacts. Existing llama.cpp GGUF
-loading and readiness checks remain unchanged. Install the optional `.[colibri]`
-extra only when a local `tokenizers` package is needed; otherwise the backend
-may use the explicitly provided tokenizer or the local Colibri tokenizer
-endpoint.
+directory/metadata shape, not model weights' cryptographic identity. A local
+`tokenizer.json` (loaded through the optional `tokenizers` package) or an
+injected tokenizer is required for production readiness; Colibri's OpenAI
+server has no `/tokenize` dependency in APRIL. Without exact local tokenization
+the model remains unavailable for conversational use. APRIL never starts the
+service or downloads artifacts. Existing llama.cpp GGUF loading and readiness
+checks remain unchanged.
+
+Colibri directories also require an explicit conservative `resident_gb` before
+production load/admission. Directory metadata size is never treated as RAM
+usage, and the checked-in governor limit is unchanged. Optional API-key
+credential references are not implemented: the current integration expects a
+loopback service without authentication rather than placing a secret in YAML.

@@ -10,13 +10,16 @@ from agents.reasoning.agent import reasoning_agent
 from april_common.audit import AuditLogger
 from services.april_runtime.schemas import ChatMessage, ChatResponse, Usage
 from services.brain.agent_loop import StructuredAgentLoop
+from services.brain.task_contract import CapabilityCeiling, TaskContract, VerificationRequirements
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.sqlite_memory import SqliteMemory
 from services.permissions.approvals import ApprovalStore
 from services.permissions.engine import PermissionEngine
-from services.permissions.tool_execution import ToolExecutionService
+from services.permissions.schemas import PermissionDecision
+from services.permissions.tool_execution import ToolExecutionOutcome, ToolExecutionService
 from skills.registry import default_registry
+from skills.schemas import ToolResult
 
 
 class SequenceRuntimeClient:
@@ -160,6 +163,23 @@ async def test_structured_agent_loop_failed_repair_returns_error(settings_tmp) -
 
 
 @pytest.mark.asyncio
+async def test_structured_agent_loop_rejects_empty_final_answer(settings_tmp) -> None:
+    loop, context, _memory, database, _runtime = await make_loop(
+        settings_tmp,
+        ['{"type":"final_answer","message":"","summary":"empty","citations":[]}'],
+    )
+    result = await loop.run(
+        agent=reasoning_agent(),
+        message="empty",
+        context=context,
+        request_id="request",
+    )
+    assert result.status == "error"
+    assert "complete user-facing answer" in result.final_message
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_structured_agent_loop_level_three_suspends(settings_tmp) -> None:
     loop, context, _memory, database, _runtime = await make_loop(
         settings_tmp,
@@ -227,6 +247,101 @@ async def test_agent_without_model_unavailable(settings_tmp) -> None:
     await database.close()
 
 
+def _verified_contract(context, settings_tmp) -> TaskContract:
+    return TaskContract(
+        run_id="request",
+        user_goal="repair the repository",
+        project_id=context.project_id,
+        project_root=str(settings_tmp.home),
+        task_type="verified_code_modification",
+        risk_class="write",
+        verification=VerificationRequirements(required=True),
+        maximum_replan_attempts=1,
+        capability_ceiling=CapabilityCeiling(
+            allowed_tools=frozenset(coding_agent().config.allowed_tools),
+            maximum_risk_level=3,
+            project_id=context.project_id,
+            project_root=str(settings_tmp.home),
+        ),
+    )
+
+
+class _VerificationExecutor:
+    def __init__(self, result: ToolResult) -> None:
+        self.result = result
+
+    async def request_or_execute(self, *, tool, args, context, **kwargs):
+        del tool, context, kwargs
+        return ToolExecutionOutcome(
+            status="executed",
+            args=args,
+            permission=PermissionDecision(
+                allowed=True,
+                permission_level=3,
+                risk_level="code_write",
+                confirmation_required=False,
+                reason="test",
+            ),
+            result=self.result,
+        )
+
+
+@pytest.mark.asyncio
+async def test_verified_coding_final_answer_requires_machine_verification(settings_tmp) -> None:
+    loop, context, _memory, database, _runtime = await make_loop(
+        settings_tmp,
+        [
+            '{"type":"final_answer","message":"done","summary":"done","citations":[]}',
+            '{"type":"final_answer","message":"still done","summary":"done","citations":[]}',
+        ],
+    )
+    result = await loop.run(
+        agent=coding_agent(),
+        message="repair",
+        context=context,
+        request_id="request",
+        task_contract=_verified_contract(context, settings_tmp),
+    )
+    assert result.status == "error"
+    assert "incomplete" in result.final_message
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_verified_coding_final_answer_accepts_current_passing_test(settings_tmp) -> None:
+    loop, context, memory, database, _runtime = await make_loop(
+        settings_tmp,
+        [
+            '{"type":"tool_request","tool":"test_runner","args":{"argv":["pytest"]},"reason":"verify"}',
+            '{"type":"final_answer","message":"verified","summary":"done","citations":[]}',
+        ],
+    )
+    loop.tool_executor = _VerificationExecutor(
+        ToolResult(
+            ok=True,
+            stdout="1 passed",
+            data={"returncode": 0},
+            risk_level="code_write",
+            permission_level=3,
+        )
+    )  # type: ignore[assignment]
+    result = await loop.run(
+        agent=coding_agent(),
+        message="repair",
+        context=context,
+        request_id="request",
+        task_contract=_verified_contract(context, settings_tmp),
+    )
+    assert result.status == "ok"
+    assert result.final_message == "verified"
+    run = await memory.database.fetchone(
+        "SELECT metadata_json FROM agent_runs ORDER BY created_at DESC LIMIT 1"
+    )
+    assert run is not None
+    assert "run_control" in json.loads(str(run["metadata_json"]))
+    await database.close()
+
+
 @pytest.mark.asyncio
 async def test_structured_agent_loop_rejects_invalid_tool_request(settings_tmp) -> None:
     # A tool_request carrying an extra forbidden field is schema-invalid: it must
@@ -273,4 +388,28 @@ async def test_structured_agent_loop_rejects_blocked_tool(settings_tmp) -> None:
     )
     assert result.status == "error"
     assert "blocked tool" in result.final_message
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_structured_agent_loop_compacts_large_tool_evidence(settings_tmp) -> None:
+    loop, _context, _memory, database, _runtime = await make_loop(settings_tmp, [])
+    loop.max_tool_result_chars = 120
+    result = ToolResult(
+        ok=False,
+        stderr="warning: retained diagnostic\n" + ("failure detail " * 80),
+        data={"repository_state_digest": "state-a"},
+        risk_level="read_only",
+        permission_level=0,
+    )
+
+    rendered = loop._format_tool_result("test_runner", result)
+
+    payload = json.loads(rendered)
+    assert payload["data"] == {"truncated": True}
+    assert payload["evidence"]["action"] == "test_runner"
+    assert payload["evidence"]["repository_state_digest"] == "state-a"
+    assert payload["evidence"]["truncated"] is True
+    assert payload["output"].endswith("[TRUNCATED]")
+    assert loop._format_tool_result("test_runner", None) == "test_runner: no result"
     await database.close()

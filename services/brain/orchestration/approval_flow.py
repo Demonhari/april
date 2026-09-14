@@ -1,6 +1,7 @@
 # mypy: disable-error-code="attr-defined"
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -13,9 +14,15 @@ from services.brain.capabilities import (
     trusted_capability_summary,
     trusted_capability_summary_parts,
 )
+from services.brain.context_memory import current_memory_context
 from services.brain.memory_policy import build_agent_memory_context
 from services.brain.request_context import RequestContext
-from services.brain.task_contract import TaskContract
+from services.brain.task_contract import (
+    TaskContract,
+    VerificationRequirements,
+    constrain_task_contract,
+    task_contract_for_request,
+)
 from services.evolution.feedback_eval import stage_feedback_eval_case
 
 
@@ -58,6 +65,58 @@ class ApprovalFlow:
             # request is rejected by the structured loop rather than relying on
             # the prompt to remain obedient.
             agent = self._tool_free_coding_agent(agent)
+        direct_intent = (
+            (
+                "code_modification"
+                if re.search(
+                    r"\b(apply|fix|edit|modify|change|write|patch)\b",
+                    message.casefold(),
+                )
+                else "coding_repo_analysis"
+            )
+            if agent.name == "coding_agent"
+            else "normal_conversation"
+        )
+        derived_contract = task_contract_for_request(
+            run_id=active_request_id,
+            user_goal=message,
+            agent_name=agent.name,
+            agent_tools=set(agent.config.allowed_tools),
+            project_id=project.id if project else None,
+            project_root=str(project.path) if project else None,
+            intent=direct_intent,
+            permission_level=3 if agent.name == "coding_agent" and project else 1,
+            risk_level="code_write" if agent.name == "coding_agent" and project else "safe",
+            allowed_scope=(str(project.path),) if project else (),
+        )
+        if (
+            agent.name == "coding_agent"
+            and derived_contract.task_type == "verified_code_modification"
+        ):
+            # The direct /agents/run endpoint is the legacy patch-proposal
+            # surface.  Its exact approval remains authoritative, while the
+            # routed structured coding path owns verified completion.
+            derived_contract = derived_contract.model_copy(
+                update={
+                    "task_type": "code_modification",
+                    "success_criteria": (),
+                    "verification": VerificationRequirements(
+                        required=False,
+                        require_current_repository_state=True,
+                    ),
+                    "maximum_specialist_depth": 0,
+                    "maximum_replan_attempts": 0,
+                }
+            )
+        effective_contract = (
+            constrain_task_contract(
+                derived_contract,
+                task_contract,
+                request_id=active_request_id,
+            )
+            if task_contract is not None
+            else derived_contract
+        )
         application_result = await self._application_owned_response(
             message,
             conversation_id=conversation_id,
@@ -100,15 +159,18 @@ class ApprovalFlow:
             user_model_path=self.settings.evolution_path / "user_model.md",
         )
         run_metadata.update(prepared_context.diagnostics())
-        if task_contract is not None:
-            if task_contract.run_id != active_request_id:
-                raise PermissionDeniedError("Task contract run identity does not match request.")
-            run_metadata["task_contract"] = task_contract.model_dump(mode="json")
+        run_metadata["task_contract"] = effective_contract.model_dump(mode="json")
         run_metadata["context_category_character_usage"] = dict(
             memory_context.category_character_usage
         )
         run_metadata["context_category_truncated"] = dict(memory_context.category_truncated)
         context_sections, _context_citations = self._memory_context_sections(memory_context)
+        context_sections.extend(
+            await current_memory_context(
+                self.memory.database,
+                project_id=project.id if project else None,
+            )
+        )
         runtime_evidence = (
             await collect_runtime_self_evidence(self.runtime_client)
             if is_self_introspection_request(message)
@@ -153,6 +215,7 @@ class ApprovalFlow:
             history=memory_context.history,
             context_sections=context_sections,
             stable_prefix=stable_prefix,
+            task_contract=effective_contract,
             run_metadata=run_metadata,
         )
         if result.status != "pending_approval":

@@ -121,7 +121,7 @@ def production_activation_failure_reasons(
     if not bool(model_registry.get("production_model_artifacts_ready")):
         add(
             "required_model_artifacts_unavailable",
-            "Brain, coding, and reading registrations must name readable GGUF files.",
+            "Brain, coding, and reading registrations must have ready local artifacts.",
             "run april setup models",
         )
     required_ids = set(model_registry.get("required_model_ids") or [])

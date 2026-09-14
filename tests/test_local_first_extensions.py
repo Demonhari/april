@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -9,10 +10,18 @@ from pathlib import Path
 import httpx
 import pytest
 
+from agents.schemas import AgentResult
 from apps.runner.coding_compare import CodingCaseMeasurement, compare_coding_models
-from april_common.errors import RuntimeUnavailableError
+from april_common.errors import ModelUnavailableError, RuntimeUnavailableError
+from april_common.process_runner import (
+    ProcessStatus,
+    ResourceLimitProfile,
+    ResourceLimitReport,
+    RestrictedProcessResult,
+)
 from services.april_runtime.colibri_backend import (
     ColibriBackend,
+    _colibri_response_format,
     _content_text,
     _is_within,
     _json_object,
@@ -20,16 +29,29 @@ from services.april_runtime.colibri_backend import (
     colibri_manifest_digest,
     validate_colibri_url,
 )
-from services.april_runtime.model_registry import ModelDefinition
+from services.april_runtime.model_lifecycle import ModelLifecycle
+from services.april_runtime.model_registry import ModelDefinition, ModelRegistry
+from services.april_runtime.schemas import ChatMessage, GenerationOptions, ResponseFormat
 from services.brain.coding_workflow import CodingCompletionGate
+from services.brain.context_memory import current_memory_context
 from services.brain.delegation import DelegationCeiling, SpecialistTask
 from services.brain.evidence import compact_tool_evidence
 from services.brain.progress_controller import ProgressController, ProgressEvent
 from services.brain.repository_state import RepositoryState, VerificationEvidence
 from services.brain.run_controller import RunController
-from services.brain.task_contract import TaskContract, VerificationRequirements
+from services.brain.specialist_coordinator import SpecialistCoordinator
+from services.brain.task_contract import (
+    CapabilityCeiling,
+    TaskContract,
+    VerificationRequirements,
+    constrain_task_contract,
+    task_contract_for_request,
+)
+from services.evaluation.model_quality import ColibriEvaluationClient
 from services.evolution.lessons import ExperienceLesson, LessonStore
 from services.integrations.mcp.contracts import ExternalToolManifest, IntegrationEndpoint
+from services.jobs import model_jobs
+from services.jobs.model_jobs import validate_registered_model
 from services.memory.database import Database
 from services.memory.migrations import run_migrations
 from services.memory.state_facts import StateFact, StateFactKey, StateFactStore
@@ -189,10 +211,11 @@ async def test_colibri_artifact_tokenizer_and_malformed_responses_fail_closed(
     backend = ColibriBackend(
         base_url=model.colibri_base_url,
         model_name=model.colibri_model_name,
+        tokenizer=lambda text: list(range(len(text.split()))),
         transport=httpx.MockTransport(tokenizer_transport),
     )
     await backend.load(model)
-    assert await backend.tokenize("one two three") == [1, 2, 3]
+    assert await backend.tokenize("one two three") == [0, 1, 2]
     assert backend.capabilities()["native_tools_forwarded"] is False
     await backend.unload()
 
@@ -203,6 +226,7 @@ async def test_colibri_artifact_tokenizer_and_malformed_responses_fail_closed(
     malformed_backend = ColibriBackend(
         base_url=model.colibri_base_url,
         model_name=model.colibri_model_name,
+        tokenizer_path=tmp_path / "missing-tokenizer.json",
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
                 200,
@@ -216,9 +240,8 @@ async def test_colibri_artifact_tokenizer_and_malformed_responses_fail_closed(
             )
         ),
     )
-    await malformed_backend.load(model)
-    with pytest.raises(RuntimeUnavailableError, match="tokenizer"):
-        await malformed_backend.tokenize("one")
+    with pytest.raises(RuntimeUnavailableError, match="exact local tokenizer"):
+        await malformed_backend.load(model)
 
 
 @pytest.mark.asyncio
@@ -240,6 +263,7 @@ async def test_colibri_missing_service_and_malformed_generation_are_unavailable(
     backend = ColibriBackend(
         base_url=model.colibri_base_url,
         model_name=model.colibri_model_name,
+        tokenizer=lambda text: list(range(len(text.split()))),
         transport=httpx.MockTransport(malformed),
     )
     await backend.load(model)
@@ -298,6 +322,7 @@ async def test_colibri_load_validation_and_stream_errors_are_safe(tmp_path: Path
         transport=httpx.MockTransport(bad_stream),
         base_url=model.colibri_base_url,
         model_name=model.colibri_model_name,
+        tokenizer=lambda text: list(range(len(text.split()))),
     )
     await backend.load(model)
     with pytest.raises(RuntimeUnavailableError, match="streaming JSON"):
@@ -341,7 +366,7 @@ async def test_colibri_http_error_status_and_local_tokenizer_fallback(tmp_path: 
     backend = ColibriBackend(
         base_url=model.colibri_base_url,
         model_name=model.colibri_model_name,
-        tokenizer_path=Path("tokenizer.json"),
+        tokenizer=lambda text: list(range(len(text.split()))),
         transport=httpx.MockTransport(error_transport),
     )
     await backend.load(model)
@@ -374,6 +399,7 @@ async def test_colibri_transport_and_optional_tokenizer_failures_are_bounded(
     backend = ColibriBackend(
         base_url=model.colibri_base_url,
         model_name=model.colibri_model_name,
+        tokenizer=lambda text: list(range(len(text.split()))),
         transport=httpx.MockTransport(failing_transport),
     )
     await backend.load(model)
@@ -406,7 +432,231 @@ async def test_colibri_transport_and_optional_tokenizer_failures_are_bounded(
     monkeypatch.setitem(sys.modules, "tokenizers", types.SimpleNamespace(Tokenizer=BrokenTokenizer))
     broken_backend = ColibriBackend(tokenizer_path=tokenizer_path)
     broken_backend._load_optional_tokenizer()
-    assert broken_backend.capabilities()["tokenizer"] is True
+    assert broken_backend.capabilities()["tokenizer"] is False
+
+
+@pytest.mark.asyncio
+async def test_colibri_wire_contract_maps_thinking_and_structured_formats_without_seed(
+    tmp_path: Path,
+) -> None:
+    model = _colibri_model(tmp_path)
+    payloads: list[dict[str, object]] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "coding-local"}]})
+        if request.url.path == "/v1/chat/completions":
+            payloads.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "{}"}}]},
+            )
+        raise AssertionError(request.url.path)
+
+    backend = ColibriBackend(
+        base_url=model.colibri_base_url,
+        model_name=model.colibri_model_name,
+        tokenizer=lambda text: list(range(len(text.split()))),
+        transport=httpx.MockTransport(transport),
+    )
+    await backend.load(model)
+    messages = [ChatMessage(role="user", content="return json")]
+    schema = ResponseFormat(type="json_object", json_schema={"type": "object"})
+    await backend.generate_messages(
+        "",
+        messages=messages,
+        temperature=0.0,
+        max_output_tokens=8,
+        seed=42,
+        response_format=schema,
+        disable_thinking=False,
+    )
+    await backend.generate_messages(
+        "",
+        messages=messages,
+        temperature=0.0,
+        max_output_tokens=8,
+        response_format=ResponseFormat(type="json_object"),
+        disable_thinking=True,
+    )
+    await backend.generate_messages(
+        "",
+        messages=messages,
+        temperature=0.0,
+        max_output_tokens=8,
+    )
+    assert payloads[0]["enable_thinking"] is True
+    assert "seed" not in payloads[0]
+    assert payloads[0]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"schema": {"type": "object"}},
+    }
+    assert payloads[1]["enable_thinking"] is False
+    assert payloads[1]["response_format"] == {"type": "json_object"}
+    assert "enable_thinking" not in payloads[2]
+    assert backend.capabilities()["per_request_seed"] is False
+    await backend.unload()
+
+
+@pytest.mark.asyncio
+async def test_colibri_does_not_assume_remote_tokenize_and_rejects_incomplete_sse(
+    tmp_path: Path,
+) -> None:
+    model = _colibri_model(tmp_path)
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "coding-local"}]})
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+            )
+        raise AssertionError(request.url.path)
+
+    backend = ColibriBackend(
+        base_url=model.colibri_base_url,
+        model_name=model.colibri_model_name,
+        tokenizer=lambda text: list(range(len(text.split()))),
+        transport=httpx.MockTransport(transport),
+    )
+    await backend.load(model)
+    with pytest.raises(RuntimeUnavailableError, match="not supported"):
+        await ColibriBackend(base_url=model.colibri_base_url).tokenize("one")
+    with pytest.raises(RuntimeUnavailableError, match="not supported"):
+        await ColibriBackend(tokenizer_path=tmp_path / "missing-tokenizer.json").tokenize("one")
+    with pytest.raises(RuntimeUnavailableError, match=r"before \[DONE\]"):
+        async for _chunk in backend.stream("hello", temperature=0.0, max_output_tokens=8):
+            pass
+    await backend.unload()
+
+
+@pytest.mark.asyncio
+async def test_colibri_relative_tokenizer_usage_events_and_identity_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = _colibri_model(tmp_path).model_copy(update={"colibri_tokenizer_path": "tokenizer.json"})
+    (model.path / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    class FakeTokenizer:
+        @classmethod
+        def from_file(cls, _path: str) -> object:
+            return cls()
+
+        def encode(self, text: str) -> list[int]:
+            return list(range(len(text.split())))
+
+    monkeypatch.setitem(sys.modules, "tokenizers", types.SimpleNamespace(Tokenizer=FakeTokenizer))
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "coding-local"}]})
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'data: {"usage":{"prompt_tokens":1}}\n\n'
+                    b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                    b"data: [DONE]\n\n"
+                ),
+            )
+        raise AssertionError(request.url.path)
+
+    backend = ColibriBackend(
+        base_url=model.colibri_base_url,
+        model_name=model.colibri_model_name,
+        transport=httpx.MockTransport(transport),
+    )
+    await backend.load(model)
+    assert await backend.tokenize("one two") == [0, 1]
+    backend._tokenizer = None
+    assert await backend.tokenize("one two") == [0, 1]
+    assert _colibri_response_format(ResponseFormat(type="text")) is None
+    chunks = [
+        chunk async for chunk in backend.stream("hello", temperature=0.0, max_output_tokens=8)
+    ]
+    assert chunks == ["ok"]
+    await backend.unload()
+
+    failing = ColibriBackend(base_url=model.colibri_base_url, model_name=model.colibri_model_name)
+
+    async def unexpected(_method: str, _path: str, **_kwargs: object) -> httpx.Response:
+        raise RuntimeError("unexpected local failure")
+
+    failing._request = unexpected  # type: ignore[method-assign]
+    with pytest.raises(RuntimeUnavailableError, match="could not be verified"):
+        await failing._validate_model_name()
+
+
+def test_colibri_local_protocol_helpers_fail_closed(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeUnavailableError, match="invalid JSON"):
+        _json_object(httpx.Response(200, content=b"not-json"))
+    with pytest.raises(RuntimeUnavailableError, match="malformed JSON object"):
+        _json_object(httpx.Response(200, json=["not", "an", "object"]))
+    missing_tokenizer = ColibriBackend(tokenizer_path=tmp_path / "missing-tokenizer.json")
+    missing_tokenizer._load_optional_tokenizer()
+    assert missing_tokenizer.capabilities()["tokenizer"] is False
+
+
+def test_colibri_directory_is_not_used_as_resident_ram_estimate(tmp_path: Path) -> None:
+    model = _colibri_model(tmp_path)
+    assert model.projected_resident_gb(tmp_path) is None
+    configured = model.model_copy(update={"resident_gb": 8.5})
+    assert configured.projected_resident_gb(tmp_path) == 8.5
+
+
+def test_colibri_registered_directory_is_validated_as_its_own_artifact_kind(settings_tmp) -> None:
+    model_dir = settings_tmp.home / "models" / "coding-colibri"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (settings_tmp.home / "configs").mkdir(parents=True, exist_ok=True)
+    (settings_tmp.home / "configs" / "models.yaml").write_text(
+        """
+models:
+  coding:
+    id: coding
+    name: local coding
+    path: models/coding-colibri
+    backend: colibri
+    artifact_kind: colibri_model_directory
+    colibri_base_url: http://127.0.0.1:4311
+    colibri_model_name: coding-local
+    colibri_expected_files: [config.json]
+    colibri_tokenizer_path: tokenizer.json
+    resident_gb: 8.0
+    role: coding
+    threads: 2
+    context_size: 2048
+    temperature: 0.2
+    max_output_tokens: 64
+""",
+        encoding="utf-8",
+    )
+    validated = validate_registered_model(settings_tmp, "coding")
+    assert validated.artifact_kind == "colibri_model_directory"
+    assert validated.size == 0
+    assert validated.manifest_digest == validated.sha256
+
+
+@pytest.mark.asyncio
+async def test_colibri_load_without_resident_estimate_is_rejected_before_service_access(
+    tmp_path: Path,
+) -> None:
+    model = _colibri_model(tmp_path)
+    registry = ModelRegistry.from_dict(
+        {"models": {"coding": model.model_dump(mode="json")}}, root=tmp_path
+    )
+    with pytest.raises(ModelUnavailableError, match="resident_gb"):
+        await ModelLifecycle(registry).load_model(model.id)
 
 
 def test_repository_state_capture_includes_changed_tracked_paths(tmp_path: Path) -> None:
@@ -594,6 +844,57 @@ async def test_candidate_lesson_is_not_visible_until_approved(tmp_path: Path) ->
         await store.transition(lesson.id, "superseded")
         assert (await store.get(lesson.id)).status == "superseded"
         assert await store.get("missing") is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_context_memory_includes_only_scoped_current_facts_and_approved_lessons(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "context-memory.db")
+    await database.connect()
+    await run_migrations(database)
+    try:
+        await StateFactStore(database).put(
+            StateFact(
+                key=StateFactKey(
+                    owner_scope="project",
+                    project_id="alpha",
+                    entity="backend",
+                    attribute="language",
+                ),
+                value="Tamil",
+                evidence_reference="state-alpha",
+                origin="user",
+            )
+        )
+        lessons = LessonStore(database)
+        candidate = await lessons.create_candidate(
+            ExperienceLesson(
+                project_id="alpha",
+                task_signature="coding",
+                lesson="candidate-only",
+                creation_reason="test",
+            )
+        )
+        approved = await lessons.create_candidate(
+            ExperienceLesson(
+                project_id="alpha",
+                task_signature="coding",
+                lesson="approved-only",
+                creation_reason="test",
+            )
+        )
+        await lessons.transition(approved.id, "approved")
+        rendered = "\n".join(await current_memory_context(database, project_id="alpha"))
+        assert "Tamil" in rendered
+        assert "approved-only" in rendered
+        assert "candidate-only" not in rendered
+        truncated = await current_memory_context(database, project_id="alpha", max_chars=90)
+        assert truncated[0].endswith("[TRUNCATED]")
+        assert await current_memory_context(database, project_id="beta") == []
+        assert (await lessons.get(candidate.id)).status == "candidate"
     finally:
         await database.close()
 
@@ -794,3 +1095,192 @@ def test_coding_comparison_uses_identical_fixtures_without_activation() -> None:
         ),
     )
     assert "candidate test pass rates are tied" in tied.warnings
+
+
+def test_task_contract_derivation_and_caller_narrowing_cannot_expand_authority() -> None:
+    derived = task_contract_for_request(
+        run_id="run-1",
+        user_goal="repair code",
+        agent_name="coding_agent",
+        agent_tools={"read_file", "test_runner", "patch_applier"},
+        project_id="alpha",
+        project_root="/project/alpha",
+        intent="code_modification",
+        permission_level=3,
+        risk_level="code_write",
+        allowed_scope=("/project/alpha",),
+    )
+    narrowed = TaskContract(
+        run_id="run-1",
+        user_goal="repair code",
+        project_id="alpha",
+        project_root="/project/alpha",
+        task_type="verified_code_modification",
+        risk_class="write",
+        verification=VerificationRequirements(required=True),
+        capability_ceiling=CapabilityCeiling(
+            allowed_tools=frozenset({"read_file"}),
+            maximum_risk_level=1,
+        ),
+    )
+    accepted = constrain_task_contract(derived, narrowed, request_id="run-1")
+    assert accepted.capability_ceiling.allowed_tools == {"read_file"}
+    assert accepted.project_root == "/project/alpha"
+    widened = narrowed.model_copy(
+        update={"capability_ceiling": CapabilityCeiling(allowed_tools=frozenset({"shell"}))}
+    )
+    with pytest.raises(ValueError, match="tools"):
+        constrain_task_contract(derived, widened, request_id="run-1")
+
+
+def test_task_contract_rejects_each_authority_expansion() -> None:
+    derived = task_contract_for_request(
+        run_id="run-1",
+        user_goal="repair code",
+        agent_name="coding_agent",
+        agent_tools={"read_file", "test_runner", "patch_applier"},
+        project_id="alpha",
+        project_root="/project/alpha",
+        intent="code_modification",
+        permission_level=3,
+        risk_level="code_write",
+        allowed_scope=("/project/alpha",),
+    )
+    base = TaskContract(
+        run_id="run-1",
+        user_goal="repair code",
+        project_id="alpha",
+        project_root="/project/alpha",
+        task_type="code_modification",
+        verification=VerificationRequirements(required=True),
+        capability_ceiling=CapabilityCeiling(
+            allowed_tools=frozenset({"read_file"}),
+            maximum_risk_level=1,
+        ),
+    )
+    cases = (
+        (base.model_copy(update={"run_id": "other"}), "identity"),
+        (base.model_copy(update={"project_id": "beta"}), "project"),
+        (base.model_copy(update={"project_root": "/project/beta"}), "root"),
+        (
+            base.model_copy(update={"capability_ceiling": CapabilityCeiling(maximum_risk_level=4)}),
+            "risk",
+        ),
+        (
+            base.model_copy(update={"verification": VerificationRequirements(required=False)}),
+            "verification",
+        ),
+        (base.model_copy(update={"maximum_specialist_depth": 2}), "delegation"),
+        (base.model_copy(update={"maximum_replan_attempts": 2}), "re-plan"),
+    )
+    for requested, message in cases:
+        with pytest.raises(ValueError, match=message):
+            constrain_task_contract(derived, requested, request_id="run-1")
+    with pytest.raises(ValueError, match="task type"):
+        constrain_task_contract(
+            derived.model_copy(update={"task_type": "code_modification"}),
+            base.model_copy(update={"task_type": "verified_code_modification"}),
+            request_id="run-1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_specialist_coordinator_bounds_depth_and_findings() -> None:
+    coordinator = SpecialistCoordinator(loop=object())  # type: ignore[arg-type]
+    contract = TaskContract(
+        run_id="run-1",
+        user_goal="repair code",
+        maximum_specialist_depth=0,
+        capability_ceiling=CapabilityCeiling(allowed_tools=frozenset({"read_file"})),
+    )
+    assert (
+        await coordinator.investigate(
+            parent_run_id="run-1",
+            parent_contract=contract,
+            parent_agent=None,  # type: ignore[arg-type]
+            goal="inspect",
+            context=None,  # type: ignore[arg-type]
+            request_id="request",
+            history=[],
+            context_sections=[],
+        )
+        is None
+    )
+    result = AgentResult(status="ok", final_message="x" * 20)
+    assert SpecialistCoordinator.bounded_findings(result, max_chars=10).endswith("[TRUNCATED]")
+
+
+def test_run_controller_rejects_corrupt_persisted_stage() -> None:
+    controller = RunController.for_contract(TaskContract(run_id="run-1", user_goal="inspect"))
+    snapshot = controller.snapshot()
+    snapshot["completion_stage"] = "not-a-stage"
+    with pytest.raises(ValueError, match="stage"):
+        RunController.restore(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_model_utility_job_enriches_bounded_worker_result(
+    settings_tmp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    validated = model_jobs.ValidatedRegisteredModel(
+        model_id="april-brain",
+        role="brain",
+        path=settings_tmp.home / "model.gguf",
+        basename="model.gguf",
+        size=4,
+        sha256="digest",
+    )
+    worker_result = RestrictedProcessResult(
+        status=ProcessStatus.COMPLETED,
+        returncode=0,
+        stdout='{"model_id":"april-brain","passed":true}',
+        stderr="",
+        stdout_truncated=False,
+        stderr_truncated=False,
+        duration_seconds=0.1,
+        failure_code=None,
+        resource_limits=ResourceLimitReport(
+            requested_profile=ResourceLimitProfile.MODEL_UTILITY,
+            applied=("cpu",),
+            unsupported=(),
+        ),
+    )
+
+    async def fake_worker(*args, **kwargs):
+        return worker_result
+
+    monkeypatch.setattr(model_jobs, "validate_registered_model", lambda *args, **kwargs: validated)
+    monkeypatch.setattr(model_jobs, "run_restricted_process", fake_worker)
+    result = await model_jobs.run_model_utility_job(
+        settings_tmp,
+        model_id="april-brain",
+        mode="verify",
+        cancellation_event=asyncio.Event(),
+        timeout_seconds=1.0,
+    )
+    assert result["passed"] is True
+    assert result["model_sha256"] == "digest"
+    assert result["resource_limits_applied"] == ["cpu"]
+
+
+@pytest.mark.asyncio
+async def test_colibri_evaluation_client_maps_runtime_response() -> None:
+    captured: dict[str, object] = {}
+
+    class Backend:
+        async def generate_messages(self, prompt, **kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(text="{}", input_tokens=2, output_tokens=1)
+
+    client = ColibriEvaluationClient(backend=Backend(), model_id="coding-colibri")  # type: ignore[arg-type]
+    response = await client.chat(
+        model_id="coding-colibri",
+        messages=[ChatMessage(role="user", content="return json")],
+        options=GenerationOptions(enable_thinking=False, temperature=0.0, max_output_tokens=8),
+        response_format=ResponseFormat(type="json_object"),
+        request_id="evaluation-request",
+    )
+    assert response.content == "{}"
+    assert response.usage.total_tokens == 3
+    assert captured["disable_thinking"] is True
+    assert captured["response_format"] == ResponseFormat(type="json_object")

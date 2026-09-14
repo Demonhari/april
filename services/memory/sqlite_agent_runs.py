@@ -95,6 +95,14 @@ class AgentRunRepository(SqliteRepositoryBase):
         )
         return run_id
 
+    async def update_agent_run_metadata(self, run_id: str, metadata: dict[str, Any]) -> None:
+        """Replace the redacted authoritative run-control metadata snapshot."""
+
+        await self.database.execute(
+            "UPDATE agent_runs SET metadata_json = ? WHERE id = ?",
+            (json.dumps(metadata, sort_keys=True), run_id),
+        )
+
     async def record_agent_iteration(
         self,
         *,

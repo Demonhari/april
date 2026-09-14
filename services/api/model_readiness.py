@@ -22,7 +22,12 @@ def _artifact_ready(model: ModelDefinition, path: Any) -> bool:
             for relative in model.colibri_expected_files
         ):
             return False
-        return all((path / relative).is_file() for relative in model.colibri_expected_files)
+        if not all((path / relative).is_file() for relative in model.colibri_expected_files):
+            return False
+        tokenizer = model.colibri_tokenizer_path
+        if tokenizer is not None and not tokenizer.is_absolute():
+            tokenizer = path / tokenizer
+        return tokenizer is not None and tokenizer.is_file() and model.resident_gb is not None
     return path.is_file()
 
 
@@ -81,6 +86,23 @@ def model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
         model.backend != "colibri" or _valid_colibri_endpoint(model.colibri_base_url)
         for model in required_models
     )
+    colibri_readiness = {
+        model.id: {
+            "tokenizer_configured": (
+                model.colibri_tokenizer_path is not None
+                and (
+                    model.resolved_path(registry.root) / model.colibri_tokenizer_path
+                    if model.colibri_tokenizer_path is not None
+                    and not model.colibri_tokenizer_path.is_absolute()
+                    else model.colibri_tokenizer_path
+                ).is_file()
+            ),
+            "resident_estimate_configured": model.resident_gb is not None,
+            "endpoint_configured": _valid_colibri_endpoint(model.colibri_base_url),
+        }
+        for model in required_models
+        if model.backend == "colibri"
+    }
     router_failure_reason: str | None = None
     dedicated_router_available = False
     if router_aliased:
@@ -117,6 +139,7 @@ def model_registry_readiness(settings: AprilSettings) -> dict[str, Any]:
             and all(status == "valid" for status in artifact_statuses.values())
             and colibri_endpoint_ready
         ),
+        "colibri_readiness": colibri_readiness,
         "reasoning_model_ids": [model.id for model in registry.list() if model.role == "reasoning"],
         "router_model_id": router_model_id,
         "router_aliased_to_brain": router_aliased,

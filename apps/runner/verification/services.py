@@ -134,8 +134,16 @@ class LauncherVerifier:
         shutil.copytree(self.repo_home / "configs", self.verify_home / "configs")
         self.project.mkdir()
         self.second_project.mkdir()
+        (self.project / ".gitignore").write_text(
+            "__pycache__/\n.pytest_cache/\n",
+            encoding="utf-8",
+        )
         (self.project / "README.md").write_text("# verify\nanimation bug\n", encoding="utf-8")
         (self.project / "app.py").write_text("value = 'old'\n", encoding="utf-8")
+        (self.project / "test_app.py").write_text(
+            "from app import value\n\n\ndef test_value_is_present():\n    assert value\n",
+            encoding="utf-8",
+        )
         (self.second_project / "README.md").write_text("# second\n", encoding="utf-8")
         verify_coordinator._git(self.project, "init")
         verify_coordinator._git(self.project, "config", "user.email", "april@example.local")
@@ -412,10 +420,21 @@ class LauncherVerifier:
         return "ok"
 
     def _approve(self, approval_id: str) -> str:
-        with self._client() as client:
-            response = client.post("/tools/approve", json={"approval_id": approval_id}).json()
-        if response.get("status") != "resumed":
-            raise RuntimeError(str(response))
+        response: dict[str, Any] = {}
+        for _ in range(4):
+            with self._client() as client:
+                response = client.post("/tools/approve", json={"approval_id": approval_id}).json()
+            if response.get("status") != "resumed":
+                raise RuntimeError(str(response))
+            result = response.get("result") or {}
+            if result.get("status") != "pending_approval":
+                break
+            pending = result.get("pending_approval") or {}
+            approval_id = str(pending.get("approval_id") or "")
+            if not approval_id:
+                raise RuntimeError("resumed run returned an approval without an id")
+        else:
+            raise RuntimeError("approval chain exceeded verification bound")
         if "fixed animation" not in (self.project / "README.md").read_text(encoding="utf-8"):
             raise RuntimeError("patch was not applied")
         if response.get("result", {}).get("status") != "ok":

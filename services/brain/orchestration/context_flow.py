@@ -12,6 +12,7 @@ from services.brain.capabilities import (
     trusted_capability_summary,
     trusted_capability_summary_parts,
 )
+from services.brain.context_memory import current_memory_context
 from services.brain.execution import PreparedTurn, VerificationEvidence
 from services.brain.memory_policy import build_agent_memory_context
 from services.brain.planner import task_plan_from_decision
@@ -21,6 +22,7 @@ from services.brain.schemas import (
     RouteResult,
     RouteSource,
 )
+from services.brain.task_contract import task_contract_for_request
 
 
 class ContextFlow:
@@ -170,6 +172,18 @@ class ContextFlow:
             high_risk_reasoning=(predicted_selection.high_stakes or predicted_selection.rung >= 2),
         )
         model_id = agent.model_id or decision.model_id
+        task_contract = task_contract_for_request(
+            run_id=active_request_id,
+            user_goal=message,
+            agent_name=agent.name,
+            agent_tools=set(agent.config.allowed_tools),
+            project_id=project.id if project else None,
+            project_root=str(project.path) if project else None,
+            intent=decision.intent,
+            permission_level=decision.permission_level,
+            risk_level=decision.risk_level,
+            allowed_scope=(str(project.path),) if project else (),
+        )
         run_metadata: dict[str, Any] = {
             **prepared_context.diagnostics(),
             "route_source": route_result.route_source.value,
@@ -180,6 +194,7 @@ class ContextFlow:
             "effective_routing_confidence": route_result.effective_confidence,
             "routing_reliability_sample_count": route_result.reliability_sample_count,
             "routing_confidence_source": route_result.confidence_source,
+            "task_contract": task_contract.model_dump(mode="json"),
         }
         if self.overlay_manager is not None:
             from services.evolution.rollouts import RolloutService
@@ -276,6 +291,12 @@ class ContextFlow:
         )
         run_metadata["context_category_truncated"] = dict(memory_context.category_truncated)
         context_sections, _context_citations = self._memory_context_sections(memory_context)
+        context_sections.extend(
+            await current_memory_context(
+                self.memory.database,
+                project_id=project.id if project else None,
+            )
+        )
         verification_source_sections = tuple(context_sections)
         verification_source_references = tuple(
             [f"memory:{result.id}" for result in memory_context.durable_memories]
@@ -342,6 +363,7 @@ class ContextFlow:
                 stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
+                task_contract=task_contract,
                 task_plan_id=task_plan.id,
                 run_metadata=run_metadata,
             )
@@ -366,6 +388,7 @@ class ContextFlow:
                 stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
+                task_contract=task_contract,
                 structured_agent=True,
                 warnings=list(prepared_context.warnings),
                 task_plan_id=task_plan.id,
@@ -390,6 +413,7 @@ class ContextFlow:
                 trusted_context=capability_summary,
                 capability_prompt=prompt_capability_summary,
                 stable_prefix=stable_prefix,
+                task_contract=task_contract,
             )
 
         planned_calls = self._planned_tool_calls(decision, message=message, project=project)
@@ -432,6 +456,7 @@ class ContextFlow:
                 stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
+                task_contract=task_contract,
                 task_plan_id=task_plan.id,
                 run_metadata=run_metadata,
             )
@@ -564,6 +589,7 @@ class ContextFlow:
                 stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
+                task_contract=task_contract,
                 task_plan_id=task_plan.id,
                 run_metadata=run_metadata,
             )
@@ -592,6 +618,7 @@ class ContextFlow:
                     stable_prefix=stable_prefix,
                     request_context=active_request_context,
                     trusted_context=capability_summary,
+                    task_contract=task_contract,
                     task_plan_id=task_plan.id,
                     run_metadata=run_metadata,
                 )
@@ -617,6 +644,7 @@ class ContextFlow:
                     context_sections=context_sections,
                     request_context=active_request_context,
                     trusted_context=capability_summary,
+                    task_contract=task_contract,
                     task_plan_id=task_plan.id,
                     run_metadata=run_metadata,
                 )
@@ -638,6 +666,7 @@ class ContextFlow:
                 stable_prefix=stable_prefix,
                 request_context=active_request_context,
                 trusted_context=capability_summary,
+                task_contract=task_contract,
                 task_plan_id=task_plan.id,
                 run_metadata=run_metadata,
             )
@@ -693,6 +722,7 @@ class ContextFlow:
             stable_prefix=stable_prefix,
             request_context=active_request_context,
             trusted_context=capability_summary,
+            task_contract=task_contract,
             verification_evidence=verification_evidence,
             task_plan_id=task_plan.id,
             run_metadata=run_metadata,
