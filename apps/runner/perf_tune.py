@@ -10,6 +10,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from apps.runner.perf_workload import (
+    TUNE_ABAB_PAIRS,
+    TUNE_RUNS_PER_WORKER,
+)
 from april_common.process_environment import ProcessCategory
 from april_common.process_runner import ResourceLimitProfile, run_restricted_process_sync
 
@@ -73,6 +77,7 @@ async def run_real_tune(
         winner_measure: dict[str, Any] | None = None
         model_failed = False
         routing_check_failed = False
+        final_recheck_passed = False
         routing_start: dict[str, Any] | None = None
         routing_final: dict[str, Any] | None = None
         if model.role == "brain":
@@ -167,7 +172,18 @@ async def run_real_tune(
                 break
         if model_failed:
             continue
-        if winner != model:
+        winner_settings = changed_tunable_settings(model, winner, tunable_fields)
+        if not winner_settings:
+            results.append(
+                {
+                    "model_id": model.id,
+                    "knob": "sweep",
+                    "value": None,
+                    "accepted": False,
+                    "reason": "no_candidate_accepted",
+                }
+            )
+        else:
             try:
                 final_profile, final_baseline = await measure_abab_pair(
                     home,
@@ -192,20 +208,21 @@ async def run_real_tune(
                         "reason": "worker_failed",
                     }
                 )
-                continue
-            final_knob = changed_tunable_knob(model, winner)
-            final_ok, final_reason = accept_candidate(final_baseline, final_profile, final_knob)
-            if not final_ok:
-                results.append(
-                    {
-                        "model_id": model.id,
-                        "knob": "final_recheck",
-                        "value": None,
-                        "accepted": False,
-                        "reason": final_reason or "rejected",
-                    }
-                )
-                continue
+            else:
+                final_knob = changed_tunable_knob(model, winner)
+                final_ok, final_reason = accept_candidate(final_baseline, final_profile, final_knob)
+                if not final_ok:
+                    results.append(
+                        {
+                            "model_id": model.id,
+                            "knob": "final_recheck",
+                            "value": None,
+                            "accepted": False,
+                            "reason": final_reason or "rejected",
+                        }
+                    )
+                else:
+                    final_recheck_passed = True
         if model.role == "brain":
             try:
                 routing_final = await measure_fn(
@@ -253,6 +270,8 @@ async def run_real_tune(
             )
             if routing_reason is not None:
                 continue
+        if not winner_settings or not final_recheck_passed:
+            continue
         inputs = await asyncio.to_thread(profile_inputs, winner, home)
         pending_profiles.append(
             {
@@ -261,11 +280,7 @@ async def run_real_tune(
                 "role": model.role,
                 "fingerprint": profile_fingerprint(inputs),
                 "fingerprint_inputs": inputs,
-                "settings": {
-                    key: getattr(winner, key)
-                    for key in tunable_fields
-                    if getattr(winner, key) != getattr(model, key)
-                },
+                "settings": winner_settings,
             }
         )
     profiles: list[dict[str, Any]] = []
@@ -283,6 +298,12 @@ async def run_real_tune(
         "role": role,
         "results": results,
         "profiles": profiles,
+        "profile_written": bool(profiles),
+        "winner_settings": {
+            profile["model_id"]: dict(profile["settings"]) for profile in pending_profiles
+        }
+        if profiles
+        else {},
         "routing_cases_compared": sum(
             int(item.get("routing_cases_compared", 0)) for item in results
         ),
@@ -298,8 +319,8 @@ async def measure_abab_pair(
     cooldown_seconds: float,
     deadline: float,
     measure_candidate: Any,
-    pairs: int = 2,
-    runs: int = 2,
+    pairs: int = TUNE_ABAB_PAIRS,
+    runs: int = TUNE_RUNS_PER_WORKER,
     first: Any | None = None,
     second: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -312,7 +333,12 @@ async def measure_abab_pair(
             raise TuneBudgetExceeded
         try:
             left_result = await measure_candidate(
-                home, baseline, left, runs=runs, nonce_prefix=f"pair-{pair}-baseline"
+                home,
+                baseline,
+                left,
+                runs=runs,
+                nonce_prefix=f"pair-{pair}-baseline",
+                routing_check=False,
             )
             if left_result.get("workload_skipped"):
                 raise TuneWorkloadSkipped(
@@ -332,7 +358,12 @@ async def measure_abab_pair(
             raise TuneBudgetExceeded
         try:
             right_result = await measure_candidate(
-                home, baseline, right, runs=runs, nonce_prefix=f"pair-{pair}-candidate"
+                home,
+                baseline,
+                right,
+                runs=runs,
+                nonce_prefix=f"pair-{pair}-candidate",
+                routing_check=False,
             )
             if right_result.get("workload_skipped"):
                 raise TuneWorkloadSkipped(
@@ -354,17 +385,20 @@ async def measure_abab_pair(
 def _aggregate_measurements(samples: list[dict[str, Any]]) -> dict[str, Any]:
     if not samples:
         return {"metric": 0.0, "prompt_metric": 0.0, "outputs": [], "peak_rss": 0}
-    return {
+    result = {
         "metric": statistics.median(float(item.get("metric", 0.0)) for item in samples),
         "prompt_metric": statistics.median(
             float(item.get("prompt_metric", 0.0)) for item in samples
         ),
         "outputs": [output for item in samples for output in item.get("outputs", [])],
         "semantic_check": [item.get("semantic_check") for item in samples],
-        "routing_decisions": [item.get("routing_decisions", []) for item in samples],
         "peak_rss": max(int(item.get("peak_rss", 0)) for item in samples),
         "valid_prefill": all(bool(item.get("valid_prefill", False)) for item in samples),
     }
+    if any(bool(item.get("routing_ran", False)) for item in samples):
+        result["routing_ran"] = True
+        result["routing_decisions"] = [item.get("routing_decisions", []) for item in samples]
+    return result
 
 
 def changed_tunable_knob(baseline: Any, candidate: Any) -> str:
@@ -375,6 +409,14 @@ def changed_tunable_knob(baseline: Any, candidate: Any) -> str:
     if baseline.flash_attn != candidate.flash_attn:
         return "flash_attn"
     return "threads"
+
+
+def changed_tunable_settings(baseline: Any, candidate: Any, tunable_fields: Any) -> dict[str, Any]:
+    return {
+        key: getattr(candidate, key)
+        for key in sorted(tunable_fields)
+        if getattr(candidate, key) != getattr(baseline, key)
+    }
 
 
 async def measure_real_candidate(

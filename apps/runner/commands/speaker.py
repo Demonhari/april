@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 
 from apps.cli.render import console
+from apps.runner.report_io import ReportPathError, preflight_report_path
 from apps.runner.speaker_live import (
     disable_speaker_gate,
     enable_soft_speaker_gate,
@@ -27,6 +28,11 @@ def register_speaker_commands(voice_app: typer.Typer) -> None:
     ) -> None:
         settings = load_settings()
         target = report if report.is_absolute() else settings.home / report
+        try:
+            target = preflight_report_path(target)
+        except ReportPathError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
         result = asyncio.run(
             run_speaker_live_verification(
                 settings=settings,
@@ -51,6 +57,11 @@ def enable_soft(
 ) -> None:
     settings = load_settings()
     target = report if report.is_absolute() else settings.home / report
+    try:
+        target = preflight_report_path(target)
+    except ReportPathError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
     enable_soft_speaker_gate(settings, target)
     console.print("Speaker gate set to soft using a fresh successful local report.")
 

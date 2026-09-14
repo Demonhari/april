@@ -31,6 +31,7 @@ from apps.runner.multi_model_report import (
     MultiModelVerificationReport,
 )
 from apps.runner.preflight import PreflightReport
+from apps.runner.report_io import ReportPathError, preflight_report_path
 from apps.runner.service_manager import AprilServiceManager
 from apps.runner.voice_live import VoiceLiveReport
 from apps.runner.wake_live import WakeWordLiveReport, run_sentinel_live_verification
@@ -190,6 +191,18 @@ def acceptance(
     fake-only pass). Add ``--start-services`` so live voice/wake-word checks can
     reach the Core API; ``--fake-services`` uses the fake runtime for plumbing only.
     """
+    report = report if isinstance(report, Path) else None
+    write_report = write_report is True
+    manager = _composition_api._manager()
+    target = report
+    if target is None and write_report:
+        target = default_acceptance_report_path(manager.home)
+    if target is not None:
+        try:
+            target = preflight_report_path(target)
+        except ReportPathError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
     try:
         validate_acceptance_flags(
             require_real_models=require_real_models,
@@ -200,7 +213,6 @@ def acceptance(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    manager = _composition_api._manager()
     settings = manager.settings
     thresholds = ReportThresholds(
         min_tokens_per_second=min_tokens_per_second,
@@ -543,7 +555,18 @@ def go_live(
     install, no microphone, no wake-word listening, no TTS, and no external network.
     The written report is redacted (basenames, counts, booleans, statuses only).
     """
+    report = report if isinstance(report, Path) else None
+    write_report = write_report is True
     manager = _composition_api._manager()
+    target = report
+    if target is None and write_report:
+        target = default_go_live_report_path(manager.home)
+    if target is not None:
+        try:
+            target = preflight_report_path(target)
+        except ReportPathError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
     thresholds = ReportThresholds(
         min_tokens_per_second=min_tokens_per_second,
         max_load_seconds=max_load_seconds,
@@ -559,10 +582,6 @@ def go_live(
         timeout=timeout,
         thresholds=thresholds,
     )
-
-    target = report
-    if target is None and write_report:
-        target = default_go_live_report_path(manager.home)
 
     if json_output:
         console.print_json(data=report_obj.model_dump())

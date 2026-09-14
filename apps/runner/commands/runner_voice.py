@@ -9,12 +9,23 @@ import typer
 from apps.cli.render import console, print_untrusted_text
 from apps.runner.commands import registry as _registry
 from apps.runner.commands.composition import composition as _composition_api
+from apps.runner.report_io import ReportPathError, preflight_report_path
 from apps.runner.voice_live import voice_live_failure_reasons
 from apps.runner.wake_live import run_sentinel_live_verification
 
 _T = TypeVar("_T")
 
 run_wake_word_live_verification = run_sentinel_live_verification
+
+
+def _prepare_report_path(report: Path | None) -> Path | None:
+    if report is None:
+        return None
+    try:
+        return preflight_report_path(report)
+    except ReportPathError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
 
 
 @_registry.voice_app.command("health")
@@ -53,6 +64,7 @@ def voice_verify_live(
         help="Keep the exact temporary audio files created by this explicit verification run.",
     ),
 ) -> None:
+    report = _prepare_report_path(report)
     settings = _composition_api._manager().settings
     doctor = _composition_api.collect_voice_doctor(settings)
     console.print(f"Voice doctor status: {doctor['status']}")
@@ -138,6 +150,7 @@ def voice_verify_wake_live(
     requires microphone access, whisper.cpp, a local wake-word model, and the
     loopback API; missing artifacts are reported as blockers, not passes.
     """
+    report = _prepare_report_path(report)
     settings = _composition_api._manager().settings
     doctor = _composition_api.collect_voice_doctor(settings)
     console.print(f"Voice doctor status: {doctor['status']}")
@@ -201,6 +214,8 @@ def voice_verify_conversation_live(
     ),
 ) -> None:
     """Verify two endpointed turns and real production barge-in on this Mac."""
+    report_path = _prepare_report_path(report)
+    assert report_path is not None
     settings = _composition_api._manager().settings
     console.print(
         "Turn 1: say “April” and a request, including a natural 300-500 ms pause. "
@@ -215,7 +230,7 @@ def voice_verify_conversation_live(
         _composition_api.run_voice_conversation_live_verification(
             settings=settings,
             confirm_microphone=lambda message: typer.confirm(message, default=False),
-            report_path=report,
+            report_path=report_path,
             timeout_seconds=timeout_seconds,
             retain_debug_audio=retain_debug_audio,
         )
@@ -227,7 +242,7 @@ def voice_verify_conversation_live(
         f"barge_in={result.barge_in_detected}, "
         f"verified={result.voice_conversation_live_verified})"
     )
-    console.print(f"[green]Wrote voice conversation report to {report.expanduser()}[/green]")
+    console.print(f"[green]Wrote voice conversation report to {report_path.expanduser()}[/green]")
     if not result.voice_conversation_live_verified:
         raise typer.Exit(1)
 

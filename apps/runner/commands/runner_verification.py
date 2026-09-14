@@ -21,6 +21,7 @@ from apps.runner.multi_model_report import (
     write_multi_model_report,
     write_routing_only_report,
 )
+from apps.runner.report_io import ReportPathError, preflight_report_path
 from apps.runner.soak import write_soak_report
 from apps.runner.verify import (
     VerifyCheck,
@@ -109,6 +110,13 @@ def verify(
         help="Temporary LoRA adapter path for all-configured-model verification.",
     ),
 ) -> None:
+    report_path = report if isinstance(report, Path) else None
+    if report_path is not None:
+        try:
+            report = preflight_report_path(report_path)
+        except ReportPathError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
     thresholds = ReportThresholds(
         min_tokens_per_second=min_tokens_per_second,
         max_load_seconds=max_load_seconds,

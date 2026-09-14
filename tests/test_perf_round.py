@@ -372,6 +372,130 @@ def test_perf_bench_command_writes_report(tmp_path: Path, monkeypatch: pytest.Mo
     assert json.loads(output.read_text(encoding="utf-8"))["simulated"] is True
 
 
+def test_perf_bench_report_preflight_rejects_directory_before_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apps.runner.commands import runner_perf
+
+    monkeypatch.setattr(
+        runner_perf,
+        "load_settings",
+        lambda: types.SimpleNamespace(home=tmp_path, runtime=types.SimpleNamespace(backend="fake")),
+    )
+    called = False
+
+    async def unexpected_runtime(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(runner_perf, "_run_fake_bench", unexpected_runtime)
+    report_directory = tmp_path / "report-directory"
+    report_directory.mkdir()
+    with pytest.raises(typer.Exit):
+        runner_perf.perf_bench(fake=True, role="brain", report=report_directory)
+    with pytest.raises(typer.Exit):
+        runner_perf.perf_tune(role="brain", dry_run=True, report=report_directory)
+    assert called is False
+
+
+def test_perf_bench_print_commands_does_not_load_runtime(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from apps.runner.commands import runner_perf
+
+    monkeypatch.setattr(runner_perf, "load_settings", lambda: pytest.fail("runtime loaded"))
+    runner_perf.perf_bench(role="all", print_commands=True)
+    lines = [line for line in capsys.readouterr().out.splitlines() if line]
+    assert len(lines) == 3
+    assert all(line.startswith("run april perf bench ") for line in lines)
+    assert all("\\" not in line for line in lines)
+
+
+def test_report_io_creates_parents_and_writes_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apps.runner import report_io
+    from apps.runner.report_io import write_json_report
+
+    target = tmp_path / "missing" / "report.json"
+    write_json_report(target, {"ok": True})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
+
+    target.write_text("old\n", encoding="utf-8")
+
+    def fail_replace(*_args: object) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(report_io.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        write_json_report(target, {"new": True})
+    assert target.read_text(encoding="utf-8") == "old\n"
+    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_report_io_rejects_unwritable_parent_before_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apps.runner import report_io
+
+    parent = tmp_path / "reports"
+    parent.mkdir()
+    monkeypatch.setattr(report_io.os, "access", lambda *_args: False)
+    with pytest.raises(report_io.ReportPathError, match="not writable"):
+        report_io.preflight_report_path(parent / "report.json")
+
+    target = parent / "existing.json"
+    target.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(report_io.os, "access", lambda path, _mode: path != target)
+    with pytest.raises(report_io.ReportPathError, match="file is not writable"):
+        report_io.preflight_report_path(target)
+
+
+def test_report_io_rejects_parent_creation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apps.runner import report_io
+
+    def fail_mkdir(*_args: object, **_kwargs: object) -> None:
+        raise OSError("mkdir failed")
+
+    monkeypatch.setattr(report_io.Path, "mkdir", fail_mkdir)
+    with pytest.raises(report_io.ReportPathError, match="cannot create report parent"):
+        report_io.preflight_report_path(tmp_path / "new" / "report.json")
+
+
+def test_report_write_failure_uses_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apps.runner.commands import runner_perf
+
+    primary = tmp_path / "primary.json"
+    fallback = tmp_path / "data" / "verification" / "fallback.json"
+    original = runner_perf.write_json_report
+
+    def write(path: Path, payload: Any) -> Path:
+        if path == primary:
+            raise OSError("primary unavailable")
+        return original(path, payload)
+
+    monkeypatch.setattr(runner_perf, "write_json_report", write)
+    assert (
+        runner_perf._write_report_with_fallback(primary, fallback, {"complete": True}) == fallback
+    )
+    assert json.loads(fallback.read_text(encoding="utf-8")) == {"complete": True}
+
+    def fail_write(*_args: object, **_kwargs: object) -> Path:
+        raise OSError("write failed")
+
+    monkeypatch.setattr(runner_perf, "write_json_report", fail_write)
+    with pytest.raises(OSError, match="write failed"):
+        runner_perf._write_report_with_fallback(primary, primary, {})
+    with pytest.raises(OSError, match="write failed"):
+        runner_perf._write_report_with_fallback(primary, fallback, {})
+
+
 @pytest.mark.asyncio
 async def test_real_tune_wrapper_and_worker_result_are_fakeable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1047,7 +1171,7 @@ def test_perf_tune_rejects_candidates() -> None:
         {**baseline, "routing_decisions": []},
         {**baseline, "routing_decisions": []},
         "threads",
-    ) != (False, "semantic_drift")
+    ) == (False, "unmeasured")
     assert _accept_candidate({**baseline, "valid_prefill": False}, baseline, "threads") == (
         False,
         "unmeasured",
@@ -1097,8 +1221,9 @@ async def test_tune_coordinate_sweep_uses_fake_worker_and_writes_profile(tmp_pat
         *,
         runs: int,
         nonce_prefix: str,
+        routing_check: bool = False,
     ) -> dict[str, Any]:
-        del runs, nonce_prefix
+        del runs, nonce_prefix, routing_check
         return {
             "metric": 20.0 if candidate.threads == 4 else 10.0,
             "prompt_metric": 10.0,
@@ -1125,7 +1250,142 @@ async def test_tune_coordinate_sweep_uses_fake_worker_and_writes_profile(tmp_pat
         measure_candidate=fake_measure,
     )
     assert output["profiles"] == [{"model_id": "model", "fingerprint": "fixed-fingerprint"}]
+    assert output["profile_written"] is True
+    assert output["winner_settings"] == {"model": {"threads": 4}}
     assert (tmp_path / "data/perf/profiles/fixed-fingerprint.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_tune_all_rejects_skip_final_recheck_and_profile_write(tmp_path: Path) -> None:
+    from apps.runner import perf_tune
+
+    model = ModelDefinition(
+        id="model",
+        name="model",
+        path=tmp_path / "model.gguf",
+        backend="fake",
+        role="coding",
+        threads=8,
+        context_size=1024,
+        temperature=0.0,
+        max_output_tokens=32,
+    )
+    calls = 0
+
+    async def measure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {
+            "metric": 1.0,
+            "prompt_metric": 1.0,
+            "outputs": ["same"],
+            "semantic_check": "same",
+            "peak_rss": 1,
+            "valid_prefill": True,
+        }
+
+    output = await perf_tune.run_real_tune(
+        tmp_path,
+        role="coding",
+        max_minutes=1.0,
+        cooldown_seconds=0.0,
+        registry=types.SimpleNamespace(list=lambda: [model]),
+        candidate_values=lambda _model: [("threads", [4])],
+        accept_candidate=lambda *_args: (False, "slower"),
+        profile_inputs=lambda *_args: {},
+        profile_fingerprint=lambda _inputs: "must-not-write",
+        tunable_fields={"threads"},
+        measure_candidate=measure,
+    )
+    assert calls == 4
+    assert output["profiles"] == []
+    assert output["profile_written"] is False
+    assert output["winner_settings"] == {}
+    assert output["results"][-1] == {
+        "model_id": "model",
+        "knob": "sweep",
+        "value": None,
+        "accepted": False,
+        "reason": "no_candidate_accepted",
+    }
+    assert not (tmp_path / "data/perf/profiles/must-not-write.json").exists()
+
+
+def test_tune_plan_uses_worker_constants_and_reports_estimate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from apps.runner import perf_workload
+    from apps.runner.commands import runner_perf
+
+    model = types.SimpleNamespace(id="april-brain", role="brain", context_size=4096)
+    monkeypatch.setattr(runner_perf, "load_settings", lambda: types.SimpleNamespace(home=tmp_path))
+    monkeypatch.setattr(
+        runner_perf,
+        "ModelRegistry",
+        types.SimpleNamespace(
+            from_file=lambda *_args, **_kwargs: types.SimpleNamespace(list=lambda: [model])
+        ),
+    )
+    monkeypatch.setattr(runner_perf, "_candidate_values", lambda _model: [("threads", [4, 6])])
+    runner_perf.perf_tune(role="brain", max_minutes=1.0, cooldown_seconds=0.0, dry_run=True)
+    output = capsys.readouterr().out
+    plan = json.loads(output[output.index("{") :])
+    workload = plan["workload_token_sizes"]["april-brain"]
+    assert workload == {
+        "measurement_max_output_tokens": perf_workload.TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS,
+        "reserved_output_tokens": perf_workload.TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS,
+        "target_prompt_tokens": perf_workload.tune_target_prompt_tokens(4096),
+        "warmup_prompt_tokens": perf_workload.tune_warmup_prompt_tokens(),
+    }
+    assert plan["worker_launches"]["april-brain"] == 14
+    assert plan["worker_launch_formula"]["pairs"] == perf_workload.TUNE_ABAB_PAIRS
+    assert plan["worker_launch_formula"]["runs_per_worker"] == perf_workload.TUNE_RUNS_PER_WORKER
+    assert plan["over_budget_models"] == {"april-brain": plan["estimated_minutes"]["april-brain"]}
+    assert "Warning: estimated runtime for april-brain" in output
+
+
+def test_tune_plan_target_matches_worker_prompt() -> None:
+    from apps.runner.perf_worker import _workload_prompt
+    from apps.runner.perf_workload import (
+        TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS,
+        tune_target_prompt_tokens,
+    )
+
+    def count_tokens(text: str) -> int:
+        return len(text.split())
+
+    prompt = _workload_prompt(
+        "nonce",
+        4096,
+        count_tokens,
+        max_output_tokens=TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS,
+    )
+    assert count_tokens(prompt) <= tune_target_prompt_tokens(4096)
+
+
+def test_tune_rate_assumptions_use_a_matching_profile(tmp_path: Path) -> None:
+    from apps.runner.perf_workload import tune_rate_assumptions
+
+    profile_dir = tmp_path / "data/perf/profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "measured.json").write_text(
+        json.dumps(
+            {
+                "model_id": "april-brain",
+                "estimate": {
+                    "load_seconds": 4,
+                    "prefill_tokens_per_second": 120,
+                    "decode_tokens_per_second": 7,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert tune_rate_assumptions(tmp_path, "april-brain") == {
+        "load_seconds": 4.0,
+        "prefill_tokens_per_second": 120.0,
+        "decode_tokens_per_second": 7.0,
+    }
 
 
 @pytest.mark.asyncio
@@ -1176,8 +1436,9 @@ async def test_tune_budget_and_final_recheck_never_write_unaccepted_profile(
         *,
         runs: int,
         nonce_prefix: str,
+        routing_check: bool = False,
     ) -> dict[str, Any]:
-        del runs, nonce_prefix
+        del runs, nonce_prefix, routing_check
         return {
             "metric": 20.0 if candidate.threads == 4 else 10.0,
             "prompt_metric": 10.0,
@@ -1382,6 +1643,7 @@ async def test_tune_pair_and_sweep_isolate_worker_failures(tmp_path: Path) -> No
     assert [item["reason"] for item in output["results"]] == [
         "baseline_failed",
         "worker_failed",
+        "no_candidate_accepted",
     ]
 
 

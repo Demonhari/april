@@ -18,11 +18,20 @@ from apps.runner.perf_tune import (
     run_real_tune as _run_real_tune_impl,
 )
 from apps.runner.perf_workload import (
+    TUNE_ABAB_PAIRS,
+    TUNE_FINAL_RECHECK_WORKERS,
+    TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS,
+    TUNE_ROUTING_WORKERS,
+    TUNE_RUNS_PER_WORKER,
+    TUNE_SIDES_PER_PAIR,
     bench_capability_context,
     fit_agent_workload,
     fit_bench_message_set,
-    workload_budget_for_fraction,
+    tune_rate_assumptions,
+    tune_target_prompt_tokens,
+    tune_warmup_prompt_tokens,
 )
+from apps.runner.report_io import ReportPathError, preflight_report_path, write_json_report
 from april_common.settings import load_settings
 from services.april_runtime.client import RuntimeClient
 from services.april_runtime.model_lifecycle import ModelLifecycle
@@ -94,10 +103,24 @@ def perf_bench(
     report: Path | None = typer.Option(None, "--report"),
     compare_prefix_cache: bool = typer.Option(False, "--compare-prefix-cache"),
     compare_layout: bool = typer.Option(False, "--compare-layout"),
+    print_commands: bool = typer.Option(False, "--print-commands"),
 ) -> None:
     if role not in {"brain", "coding", "reading", "all"}:
         raise typer.BadParameter("role must be brain, coding, reading, or all")
+    if print_commands is True:
+        for command in _recommended_perf_commands():
+            typer.echo(command)
+        return
     settings = load_settings()
+    default_target = _default_report_path(settings.home, "perf-bench")
+    report_path = report if isinstance(report, Path) else None
+    target = report_path.expanduser() if report_path is not None else default_target
+    try:
+        target = preflight_report_path(target)
+    except ReportPathError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    typer.echo(f"Report destination: {target}")
     try:
         if not fake:
             _require_real_runtime(settings.home, settings.runtime.backend, command="bench")
@@ -122,15 +145,38 @@ def perf_bench(
         raise
     except Exception as exc:
         output = _bench_failure_report(role=role, repeat=repeat, simulated=fake, exc=exc)
-    target = report or (
-        settings.home
-        / "data"
-        / "verification"
-        / f"perf-bench-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+    written = _write_report_with_fallback(target, default_target, output)
+    typer.echo(str(written))
+
+
+def _default_report_path(home: Path, prefix: str) -> Path:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return home / "data" / "verification" / f"{prefix}-{stamp}.json"
+
+
+def _write_report_with_fallback(target: Path, fallback: Path, output: dict[str, Any]) -> Path:
+    try:
+        return write_json_report(target, output)
+    except (OSError, ReportPathError) as primary_error:
+        if target == fallback:
+            raise
+        try:
+            written = write_json_report(fallback, output)
+        except (OSError, ReportPathError):
+            raise primary_error from None
+        typer.echo(f"Primary report write failed; wrote fallback report to {written}")
+        return written
+
+
+def _recommended_perf_commands() -> tuple[str, ...]:
+    return (
+        "run april perf bench --role brain --compare-prefix-cache "
+        "--report data/verification/perf-bench-cache-brain.json",
+        "run april perf bench --role all --compare-prefix-cache "
+        "--report data/verification/perf-bench-cache-all.json",
+        "run april perf bench --role brain --compare-layout "
+        "--report data/verification/perf-bench-layout.json",
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    console.print(str(target))
 
 
 def _bench_failure_report(
@@ -604,32 +650,65 @@ def perf_tune(
     cooldown_seconds: float = typer.Option(20.0, "--cooldown-seconds", min=0.0),
     dry_run: bool = typer.Option(False, "--dry-run"),
     fake: bool = typer.Option(False, "--fake"),
+    report: Path | None = typer.Option(None, "--report"),
 ) -> None:
     if role not in {"brain", "coding", "reading", "all"}:
         raise typer.BadParameter("role must be brain, coding, reading, or all")
     settings = load_settings()
+    default_target = _default_report_path(settings.home, "perf-tune")
+    report_path = report if isinstance(report, Path) else None
+    target = report_path.expanduser() if report_path is not None else default_target
+    try:
+        target = preflight_report_path(target)
+    except ReportPathError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
     registry = ModelRegistry.from_file(
         settings.home / "configs" / "models.yaml", root=settings.home
     )
     selected_models = [model for model in registry.list() if role == "all" or model.role == role]
     candidates = {model.id: dict(_candidate_values(model)) for model in selected_models}
-    launches = {
-        model.id: sum(len(values) for values in candidates[model.id].values()) * 4
-        + (2 if model.role == "brain" else 0)
-        for model in selected_models
-    }
+    launches: dict[str, int] = {}
+    estimates: dict[str, dict[str, Any]] = {}
     workload_token_sizes = {
         model.id: {
-            "target_prompt_tokens": workload_budget_for_fraction(
-                getattr(model, "context_size", 1024),
-                getattr(model, "max_output_tokens", 32),
-                0,
-                0.60,
-            ),
-            "reserved_output_tokens": getattr(model, "max_output_tokens", 32),
-            "warmup_prompt_tokens": 1,
+            "measurement_max_output_tokens": TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS,
+            "target_prompt_tokens": tune_target_prompt_tokens(getattr(model, "context_size", 1024)),
+            "reserved_output_tokens": TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS,
+            "warmup_prompt_tokens": tune_warmup_prompt_tokens(),
         }
         for model in selected_models
+    }
+    for model in selected_models:
+        candidate_count = sum(len(values) for values in candidates[model.id].values())
+        final_recheck_workers = TUNE_FINAL_RECHECK_WORKERS if candidate_count else 0
+        routing_workers = TUNE_ROUTING_WORKERS if model.role == "brain" else 0
+        launches[model.id] = (
+            candidate_count * TUNE_ABAB_PAIRS * TUNE_SIDES_PER_PAIR
+            + final_recheck_workers
+            + routing_workers
+        )
+        rates = tune_rate_assumptions(settings.home, model.id)
+        target_tokens = workload_token_sizes[model.id]["target_prompt_tokens"]
+        worker_seconds = rates["load_seconds"] + TUNE_RUNS_PER_WORKER * (
+            target_tokens / rates["prefill_tokens_per_second"]
+            + TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS / rates["decode_tokens_per_second"]
+        )
+        cooldowns = max(0, launches[model.id] - 1) * cooldown_seconds
+        estimates[model.id] = {
+            "estimated_minutes": (launches[model.id] * worker_seconds + cooldowns) / 60.0,
+            "worker_seconds": worker_seconds,
+            "cooldown_seconds": cooldowns,
+            "load_seconds": rates["load_seconds"],
+            "prefill_tokens_per_second": rates["prefill_tokens_per_second"],
+            "decode_tokens_per_second": rates["decode_tokens_per_second"],
+            "runs_per_worker": 2,
+            "target_prompt_tokens": target_tokens,
+        }
+    over_budget = {
+        model_id: item["estimated_minutes"]
+        for model_id, item in estimates.items()
+        if item["estimated_minutes"] > max_minutes
     }
     plan = {
         "role": role,
@@ -639,12 +718,36 @@ def perf_tune(
         "logical_cores": os.cpu_count(),
         "candidates": candidates,
         "worker_launches": launches,
+        "worker_launch_formula": {
+            "pairs": TUNE_ABAB_PAIRS,
+            "sides_per_pair": TUNE_SIDES_PER_PAIR,
+            "runs_per_worker": TUNE_RUNS_PER_WORKER,
+            "final_recheck_workers": TUNE_FINAL_RECHECK_WORKERS,
+            "routing_workers_for_brain": TUNE_ROUTING_WORKERS,
+        },
         "workload_token_sizes": workload_token_sizes,
+        "estimated_minutes": {
+            model_id: item["estimated_minutes"] for model_id, item in estimates.items()
+        },
+        "estimate_assumptions": estimates,
+        "over_budget_models": over_budget,
+        "profile_written": False,
+        "winner_settings": {},
         "thread_candidates_skipped": _physical_cores_for_plan() is None,
         "status": "plan_only" if dry_run else "simulated" if fake else "requires_real_runtime",
     }
+    typer.echo(
+        f"Report destination: {target}; estimated runtime: "
+        f"{sum(item['estimated_minutes'] for item in estimates.values()):.1f} minutes; "
+        f"worker launches: {sum(launches.values())}"
+    )
+    for model_id, minutes in over_budget.items():
+        typer.echo(
+            f"Warning: estimated runtime for {model_id} ({minutes:.1f} minutes) "
+            f"exceeds max_minutes={max_minutes:.1f}"
+        )
     if dry_run:
-        console.print(json.dumps(plan, indent=2, sort_keys=True))
+        typer.echo(json.dumps(plan, indent=2, sort_keys=True))
         return
     if not fake:
         _require_real_runtime(settings.home, settings.runtime.backend, command="tune")
@@ -664,28 +767,15 @@ def perf_tune(
                 ),
             )
         )
-        target = (
-            settings.home
-            / "data"
-            / "verification"
-            / (f"perf-tune-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
-        )
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        console.print(str(target))
+        written = _write_report_with_fallback(target, default_target, output)
+        typer.echo(str(written))
         return
-    target = (
-        settings.home
-        / "data"
-        / "verification"
-        / (f"perf-tune-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
+    written = _write_report_with_fallback(
+        target,
+        default_target,
+        {"schema": "april.perf.tune.v2", **plan, "simulated": fake},
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps({"schema": "april.perf.tune.v2", **plan, "simulated": fake}, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    console.print(str(target))
+    typer.echo(str(written))
 
 
 def _require_real_runtime(home: Path, backend: str, *, command: str) -> None:
@@ -780,8 +870,11 @@ def _accept_candidate(
         return False, "semantic_drift"
     baseline_routing = baseline.get("routing_decisions")
     candidate_routing = candidate.get("routing_decisions")
-    if baseline_routing and candidate_routing and baseline_routing != candidate_routing:
-        return False, "semantic_drift"
+    if "routing_decisions" in baseline or "routing_decisions" in candidate:
+        if not baseline_routing or not candidate_routing:
+            return False, "unmeasured"
+        if baseline_routing != candidate_routing:
+            return False, "semantic_drift"
     if not candidate.get("valid_prefill", True) or not baseline.get("valid_prefill", True):
         return False, "unmeasured"
     if candidate["peak_rss"] > baseline["peak_rss"] * 1.15:

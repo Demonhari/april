@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from agents.registry import AgentRegistry
@@ -21,6 +23,53 @@ from skills.registry import ToolRegistry
 
 FILLER_UNIT = "synthetic context token "
 MIN_WORKLOAD_TOKENS = 128
+TUNE_WORKLOAD_FRACTION = 0.60
+TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS = 32
+TUNE_WARMUP_PROMPT = "Synthetic tune warmup."
+TUNE_ABAB_PAIRS = 2
+TUNE_RUNS_PER_WORKER = 2
+TUNE_SIDES_PER_PAIR = 2
+TUNE_FINAL_RECHECK_WORKERS = 4
+TUNE_ROUTING_WORKERS = 2
+# Conservative estimates used only for operator-facing dry-run planning.
+TUNE_DEFAULT_LOAD_SECONDS = 60.0
+TUNE_DEFAULT_PREFILL_TOKENS_PER_SECOND = 10.0
+TUNE_DEFAULT_DECODE_TOKENS_PER_SECOND = 2.0
+
+
+def tune_target_prompt_tokens(
+    context_size: int, reserved_output_tokens: int = TUNE_MEASUREMENT_MAX_OUTPUT_TOKENS
+) -> int:
+    return int(TUNE_WORKLOAD_FRACTION * context_size) - reserved_output_tokens
+
+
+def tune_warmup_prompt_tokens() -> int:
+    return len(TUNE_WARMUP_PROMPT.split())
+
+
+def tune_rate_assumptions(home: Path, model_id: str) -> dict[str, float]:
+    rates = {
+        "load_seconds": TUNE_DEFAULT_LOAD_SECONDS,
+        "prefill_tokens_per_second": TUNE_DEFAULT_PREFILL_TOKENS_PER_SECOND,
+        "decode_tokens_per_second": TUNE_DEFAULT_DECODE_TOKENS_PER_SECOND,
+    }
+    directory = home / "data" / "perf" / "profiles"
+    for path in sorted(directory.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("model_id") != model_id:
+            continue
+        measured = payload.get("estimate") or payload.get("estimates")
+        if not isinstance(measured, dict):
+            continue
+        for key in rates:
+            value = measured.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                rates[key] = float(value)
+        break
+    return rates
 
 
 def build_filler(target_tokens: int, count_tokens: Callable[[str], int]) -> str:
