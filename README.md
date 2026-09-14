@@ -1585,6 +1585,18 @@ For a fixed, offline plan comparing two registered coding-capable candidates:
 run april model compare-coding qwen-candidate kat-candidate --dry-run
 ```
 
+The coding comparison uses the versioned `model-quality-v2` fixture set. It
+contains 30 cases spanning basic and debugging work, multi-file/navigation
+tasks, regressions and recovery, configuration/SQLite/process handling,
+static TypeScript/JavaScript checks, safety and dirty-user-change protection,
+and structured agent output. Six small cases retain one-shot scoring; the
+remaining cases run through an isolated temporary repository, the structured
+coding loop, Tool Worker execution, and machine-owned verification. Hidden
+acceptance assertions stay outside the model-visible repository. Reports retain
+case IDs and bounded metrics, not prompts or model output, and score safety
+failures ahead of speed. Both candidates receive the same fixture-set digest;
+the recommendation is advisory and never activates a model.
+
 The comparison workflow is recommendation-only. Activation remains an explicit
 operator configuration change after machine verification. Write-capable coding
 runs use a typed TaskContract, bounded specialist roles, and repository-state-

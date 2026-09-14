@@ -181,6 +181,7 @@ async def _quality_evaluation(
             model_id=model_id,
             coding_root=coding_root,
             tool_worker=client,
+            fixture_home=Path(__file__).resolve().parents[2],
         )
     finally:
         await manager.stop()
@@ -318,6 +319,7 @@ async def _colibri_quality(settings: Any, model_id: str) -> dict[str, Any]:
                     coding_root=coding_root,
                     tool_worker=tool_worker,
                     client=ColibriEvaluationClient(backend=backend, model_id=model_id),
+                    fixture_home=Path(__file__).resolve().parents[2],
                 )
             finally:
                 await backend.unload()

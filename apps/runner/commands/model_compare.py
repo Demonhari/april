@@ -21,6 +21,7 @@ from april_common.thermal_state import (
 )
 from april_common.time import utc_now_iso
 from services.april_runtime.model_registry import ModelRegistry
+from services.evaluation.coding_benchmark import redact_coding_result
 from services.evaluation.model_quality import coding_fixture_ids, fixture_set_metadata
 from services.jobs.model_jobs import run_model_utility_job
 from services.jobs.registry import default_job_registry
@@ -150,6 +151,20 @@ async def _run_coding_comparison(settings: Any, model_ids: tuple[str, str]) -> d
                 "peak_process_rss_bytes",
             )
         }
+        coding = redacted.get("coding")
+        if isinstance(coding, Mapping):
+            metrics.update(
+                {
+                    key: coding.get(key)
+                    for key in (
+                        "agentic_verified_success_rate",
+                        "test_pass_rate",
+                        "safety_failures",
+                        "recovery_success_count",
+                        "no_progress_intervention_count",
+                    )
+                }
+            )
         results.append(
             {
                 "model_id": model_id,
@@ -163,6 +178,12 @@ async def _run_coding_comparison(settings: Any, model_ids: tuple[str, str]) -> d
                     "chat_format": definition.chat_format,
                 },
                 "metrics": metrics,
+                "coding": coding,
+                "model_identity": {
+                    "artifact_kind": redacted.get("artifact_kind"),
+                    "manifest_digest": redacted.get("manifest_digest"),
+                    "model_sha256": redacted.get("model_sha256"),
+                },
                 "passed": bool(redacted.get("passed")),
                 "simulated": bool(redacted.get("simulated")),
             }
@@ -173,33 +194,58 @@ async def _run_coding_comparison(settings: Any, model_ids: tuple[str, str]) -> d
         value = metrics.get(name) if isinstance(metrics, dict) else None
         return float(value) if isinstance(value, (int, float)) else -1.0
 
+    def safety_failures(result: dict[str, object]) -> int:
+        value = metric(result, "safety_failures")
+        return max(0, int(value)) if value >= 0 else 0
+
     ranked = sorted(
         results,
         key=lambda item: (
+            safety_failures(item) == 0,
+            -safety_failures(item),
             metric(item, "coding_fixture_pass_rate"),
+            metric(item, "agentic_verified_success_rate"),
+            metric(item, "test_pass_rate"),
             metric(item, "structured_json_reliability"),
         ),
         reverse=True,
     )
-    recommendation = (
-        str(ranked[0]["model_id"])
-        if ranked and not all(bool(item["simulated"]) for item in ranked)
-        else "insufficient_evidence"
-    )
+    recommendation = "insufficient_evidence"
+    recommendation_reason = "simulated_results_are_not_production_evidence"
+    if ranked and not all(bool(item["simulated"]) for item in ranked):
+        if any(safety_failures(item) > 0 for item in ranked):
+            safe = [item for item in ranked if safety_failures(item) == 0]
+            if safe:
+                recommendation = str(safe[0]["model_id"])
+                recommendation_reason = "safety_precedence"
+            else:
+                recommendation_reason = "all_candidates_have_safety_failures"
+        else:
+            first_score = metric(ranked[0], "agentic_verified_success_rate")
+            second_score = (
+                metric(ranked[1], "agentic_verified_success_rate") if len(ranked) > 1 else -1.0
+            )
+            if first_score >= 0 and second_score >= 0 and abs(first_score - second_score) < 0.05:
+                recommendation = "tied"
+                recommendation_reason = "agentic_success_within_five_percent"
+            else:
+                recommendation = str(ranked[0]["model_id"])
+                recommendation_reason = "verified_agentic_success_precedence"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "report_type": "coding_model_comparison",
         "model_ids": list(model_ids),
         "fixture_set": {
             "metadata": fixture_set_metadata(settings.home),
             "coding_cases": list(coding_fixture_ids(settings.home)),
         },
-        "evaluation_version": "model-quality-v1",
+        "evaluation_version": "model-quality-v2",
         "hardware_profile": safe_hardware_profile(),
         "runtime_configuration": [item["configuration"] for item in results],
         "same_fixture_set": True,
         "scores": results,
         "recommendation": recommendation,
+        "recommendation_reason": recommendation_reason,
         "automatic_activation_performed": False,
         "warnings": ["machine verification owns correctness; recommendation is advisory"],
     }
@@ -623,12 +669,16 @@ def recommend_setup(
 
 
 def _redacted_benchmark(result: Mapping[str, Any]) -> dict[str, Any]:
+    quality = result.get("quality")
+    coding = quality.get("coding") if isinstance(quality, Mapping) else None
     return {
         "model_id": result["model_id"],
         "role": result["role"],
         "model_basename": result["model_basename"],
         "model_sha256": result["model_sha256"],
         "model_size": result["model_size"],
+        "artifact_kind": result.get("artifact_kind", "gguf_file"),
+        "manifest_digest": result.get("manifest_digest"),
         "passed": bool(result.get("passed")),
         "simulated": bool(result.get("simulated")),
         "fixture_set": result.get("fixture_set"),
@@ -636,6 +686,7 @@ def _redacted_benchmark(result: Mapping[str, Any]) -> dict[str, Any]:
         "strict_json_first_pass_reliability": result.get("strict_json_first_pass_reliability"),
         "structured_json_reliability": result.get("structured_json_reliability"),
         "coding_fixture_pass_rate": result.get("coding_fixture_pass_rate"),
+        "coding": redact_coding_result(coding),
         "context_handling_reliability": result.get("context_handling_reliability"),
         "lifecycle": result.get("lifecycle"),
         "thermal_evidence": _redacted_thermal_evidence(result.get("thermal_evidence")),
