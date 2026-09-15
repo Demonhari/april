@@ -25,6 +25,17 @@ def forbidden_reason(path: str) -> str | None:
         return "source_config_backup"
     if normalized.startswith("data/verification/"):
         return "generated_verification_report"
+    if normalized.startswith("third_party/"):
+        parts = PurePosixPath(normalized).parts
+        if any(part in {"build", "dist", "models", "weights", "checkpoints"} for part in parts):
+            return "third_party_generated_or_model_artifact"
+        if PurePosixPath(normalized).suffix.lower() in {
+            ".bin",
+            ".gguf",
+            ".safetensors",
+            ".onnx",
+        }:
+            return "third_party_model_or_voice_binary"
     if name in {"capability", "request-outcomes.json"} and normalized.startswith("data/"):
         return "runtime_worker_artifact"
     if name in {".env", ".env.local", ".env.production"}:

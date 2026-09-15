@@ -236,3 +236,12 @@ local stdio or loopback endpoints in this foundation. Tool identity includes
 provider identity, schema fingerprint, declared risk, and exact approval;
 schema drift invalidates prior approval. Provider descriptions are untrusted
 data and cannot change APRIL policy.
+
+Third-party source consolidation is separate from runtime authority. APRIL's
+source manifest and adaptation metadata live under `third_party/`, while the
+Colibri adapter remains the only APRIL Runtime integration used by agents.
+Reference projects are provenance-only and are excluded from the Python
+package surface. Colibri source is not fetched automatically: `run april
+third-party doctor` validates reviewed local source metadata, and
+`run april third-party build-colibri` performs only the fixed local build after
+that validation. Model weights and generated build output remain outside Git.

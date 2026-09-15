@@ -170,3 +170,19 @@ production load/admission. Directory metadata size is never treated as RAM
 usage, and the checked-in governor limit is unchanged. Optional API-key
 credential references are not implemented: the current integration expects a
 loopback service without authentication rather than placing a secret in YAML.
+
+### Maintained source boundary
+
+APRIL keeps the source/provenance boundary in `third_party/`. The checked-in
+`third_party/source-manifest.json` is authoritative for whether an upstream
+source is reviewed and reproducible. A buildable Colibri entry must record a
+full upstream Git revision and retain the upstream license and notice files;
+the local source is then built only by `run april third-party build-colibri`.
+The command never fetches dependencies, starts Colibri, or handles model
+weights. This checkout currently carries APRIL's adapter and adaptation
+metadata, but no Colibri upstream source, so the third-party doctor reports
+the runtime source as not staged.
+
+The architecture references under `third_party/reference_sources/` are
+metadata-only. They are not imported, packaged, or production dependencies.
+This repository does not copy their source or invent license/revision data.

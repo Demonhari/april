@@ -40,6 +40,16 @@ dist/
 *.april/
 *.app/
 .april_tmp/
+# Third-party source is staged only after provenance review; builds and model
+# artifacts never belong in Git.
+third_party/**/build/
+third_party/**/dist/
+third_party/**/models/
+third_party/**/weights/
+third_party/**/checkpoints/
+third_party/**/*.gguf
+third_party/**/*.safetensors
+third_party/**/*.onnx
 __pycache__/
 *.py[cod]
 .pytest_cache/

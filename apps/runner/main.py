@@ -85,6 +85,7 @@ from apps.runner.commands.registry import (
     rollout_app,
     setup_app,
     task_app,
+    third_party_app,
     user_profile_app,
     voice_app,
 )
@@ -143,6 +144,7 @@ april_app.add_typer(audit_app, name="audit")
 april_app.add_typer(database_app, name="database")
 april_app.add_typer(finetune_app, name="finetune")
 april_app.add_typer(package_app, name="package")
+april_app.add_typer(third_party_app, name="third-party")
 register_model_compare(model_app)
 register_coding_benchmark_commands(model_app)
 register_model_import_commands(model_app)
@@ -168,6 +170,7 @@ from apps.runner.commands import (  # noqa: E402
     runner_verification as _runner_verification,
 )
 from apps.runner.commands import runner_voice as _runner_voice  # noqa: E402
+from apps.runner.commands import third_party as _third_party  # noqa: E402, F401
 
 _COMMAND_MODULES = (
     _runner_jobs,

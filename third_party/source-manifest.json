@@ -1,0 +1,151 @@
+{
+  "manifest_id": "april-third-party-sources",
+  "schema_version": "1",
+  "provenance_status": "review-required",
+  "entries": [
+    {
+      "id": "colibri",
+      "kind": "runtime",
+      "status": "metadata_only",
+      "upstream": {
+        "name": "Colibri",
+        "repository": null,
+        "revision": null
+      },
+      "source_path": "third_party/colibri/source",
+      "license_files": [],
+      "notice_files": [],
+      "adaptation_metadata": "third_party/colibri/APRIL_ADAPTATION.md",
+      "production_dependency": false,
+      "fingerprint_scope": "upstream source manifest and APRIL adaptation metadata; no model weights"
+    },
+    {
+      "id": "mnem",
+      "kind": "reference",
+      "status": "metadata_only",
+      "upstream": {
+        "name": "Mnem",
+        "repository": null,
+        "revision": null
+      },
+      "source_path": "third_party/reference_sources/mnem",
+      "license_files": [],
+      "notice_files": [],
+      "adaptation_metadata": null,
+      "production_dependency": false,
+      "fingerprint_scope": "provenance metadata only"
+    },
+    {
+      "id": "agentmw",
+      "kind": "reference",
+      "status": "metadata_only",
+      "upstream": {
+        "name": "AgentMW",
+        "repository": null,
+        "revision": null
+      },
+      "source_path": "third_party/reference_sources/agentmw",
+      "license_files": [],
+      "notice_files": [],
+      "adaptation_metadata": null,
+      "production_dependency": false,
+      "fingerprint_scope": "provenance metadata only"
+    },
+    {
+      "id": "praxos",
+      "kind": "reference",
+      "status": "metadata_only",
+      "upstream": {
+        "name": "Praxos",
+        "repository": null,
+        "revision": null
+      },
+      "source_path": "third_party/reference_sources/praxos",
+      "license_files": [],
+      "notice_files": [],
+      "adaptation_metadata": null,
+      "production_dependency": false,
+      "fingerprint_scope": "provenance metadata only"
+    },
+    {
+      "id": "openvurp",
+      "kind": "reference",
+      "status": "metadata_only",
+      "upstream": {
+        "name": "OpenVURP",
+        "repository": null,
+        "revision": null
+      },
+      "source_path": "third_party/reference_sources/openvurp",
+      "license_files": [],
+      "notice_files": [],
+      "adaptation_metadata": null,
+      "production_dependency": false,
+      "fingerprint_scope": "provenance metadata only"
+    },
+    {
+      "id": "anybridge",
+      "kind": "reference",
+      "status": "metadata_only",
+      "upstream": {
+        "name": "Anybridge",
+        "repository": null,
+        "revision": null
+      },
+      "source_path": "third_party/reference_sources/anybridge",
+      "license_files": [],
+      "notice_files": [],
+      "adaptation_metadata": null,
+      "production_dependency": false,
+      "fingerprint_scope": "provenance metadata only"
+    },
+    {
+      "id": "tools-factory",
+      "kind": "reference",
+      "status": "metadata_only",
+      "upstream": {
+        "name": "Tools-Factory",
+        "repository": null,
+        "revision": null
+      },
+      "source_path": "third_party/reference_sources/tools-factory",
+      "license_files": [],
+      "notice_files": [],
+      "adaptation_metadata": null,
+      "production_dependency": false,
+      "fingerprint_scope": "provenance metadata only"
+    },
+    {
+      "id": "coocon",
+      "kind": "reference",
+      "status": "metadata_only",
+      "upstream": {
+        "name": "Coocon",
+        "repository": null,
+        "revision": null
+      },
+      "source_path": "third_party/reference_sources/coocon",
+      "license_files": [],
+      "notice_files": [],
+      "adaptation_metadata": null,
+      "production_dependency": false,
+      "fingerprint_scope": "provenance metadata only"
+    },
+    {
+      "id": "llm-use",
+      "kind": "reference",
+      "status": "metadata_only",
+      "upstream": {
+        "name": "llm-use",
+        "repository": null,
+        "revision": null
+      },
+      "source_path": "third_party/reference_sources/llm-use",
+      "license_files": [],
+      "notice_files": [],
+      "adaptation_metadata": null,
+      "production_dependency": false,
+      "fingerprint_scope": "provenance metadata only"
+    }
+  ]
+}

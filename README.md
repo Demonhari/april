@@ -1640,3 +1640,20 @@ answer only when current machine evidence matches the repository state. A
 direct legacy patch-proposal run remains approval-bound and reports application
 separately from verified coding completion. Colibri requires a local exact
 tokenizer and explicit resident estimate; it has no `/tokenize` fallback.
+
+APRIL's optional maintained-runtime source boundary is recorded in
+`third_party/source-manifest.json`. The current checkout contains APRIL's
+Colibri adapter and adaptation metadata, but no upstream Colibri source. The
+metadata-only reference archive is not imported or packaged. After separately
+obtaining and reviewing an upstream source, an operator must stage it at the
+manifested relative path, record its full revision, and preserve its license
+and notice files before these local commands can build it:
+
+```bash
+run april third-party doctor
+run april third-party build-colibri
+```
+
+These commands never fetch source or dependencies, start a Colibri server, or
+handle model weights. Build output remains ignored by Git; the source doctor
+reports the current unstaged state clearly.

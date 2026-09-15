@@ -245,6 +245,9 @@ april status
 april stop
 april task
 april task list
+april third-party
+april third-party doctor
+april third-party build-colibri
 april verify
 april voice
 april voice devices
