@@ -247,7 +247,11 @@ class JobWorker:
                 cancellation_event=cancellation,
                 progress=import_progress,
             )
-        if job.job_type in {"model_import_verification", "model_benchmark"}:
+        if job.job_type in {
+            "model_import_verification",
+            "model_benchmark",
+            "model_coding_benchmark",
+        }:
             cancellation = self._cancellation_events[job.id]
             await self.store.heartbeat(
                 job.id,
@@ -256,12 +260,33 @@ class JobWorker:
                 progress_percent=5,
                 progress_code="model_artifact_validation",
             )
+            utility_kwargs: dict[str, Any] = {
+                "suite": str(job.payload.get("suite", "full")),
+                "timeout_profile": str(job.payload.get("timeout_profile", "full-local")),
+                "case_timeout_multiplier": float(job.payload.get("case_timeout_multiplier", 1.0)),
+                "report_path": job.payload.get("report_path"),
+            }
+            if job.job_type != "model_coding_benchmark":
+                utility_kwargs = {}
             return await run_model_utility_job(
                 self.settings,
                 model_id=str(job.payload["model_id"]),
-                mode="verify" if job.job_type == "model_import_verification" else "benchmark",
+                mode=(
+                    "verify"
+                    if job.job_type == "model_import_verification"
+                    else (
+                        "coding_benchmark"
+                        if job.job_type == "model_coding_benchmark"
+                        else "benchmark"
+                    )
+                ),
                 cancellation_event=cancellation,
-                timeout_seconds=(900.0 if job.job_type == "model_import_verification" else 3600.0),
+                timeout_seconds=(
+                    900.0
+                    if job.job_type == "model_import_verification"
+                    else (21_600.0 if job.job_type == "model_coding_benchmark" else 3600.0)
+                ),
+                **utility_kwargs,
             )
         if job.job_type == "model_setup_comparison":
             cancellation = self._cancellation_events[job.id]

@@ -1605,6 +1605,33 @@ changes. Current-state facts are exact-keyed, while experience lessons remain
 candidates until review. MCP/browser/external providers are disabled by
 default and accept only local stdio or loopback foundations.
 
+For a memory-constrained Mac, benchmark heavyweight candidates one at a time
+and compare the saved reports without inference:
+
+```bash
+# Start only the KAT Colibri service, then:
+run april model doctor --json
+run april model benchmark-coding kat-candidate --suite smoke --timeout-profile smoke --report data/verification/coding-kat-smoke.json
+run april model benchmark-coding kat-candidate --suite full --timeout-profile full-local --report data/verification/coding-kat-full.json
+# Stop KAT, start only the Qwen Colibri service, then:
+run april model doctor --json
+run april model benchmark-coding qwen-candidate --suite smoke --timeout-profile smoke --report data/verification/coding-qwen-smoke.json
+run april model benchmark-coding qwen-candidate --suite full --timeout-profile full-local --report data/verification/coding-qwen-full.json
+# Stop Qwen before the offline comparison:
+run april model compare-coding-results data/verification/coding-kat-full.json data/verification/coding-qwen-full.json --report data/verification/coding-model-comparison.json
+```
+
+The smoke report is bring-up evidence only and is never comparison-eligible.
+The full local profile is bounded at 15 minutes per case and 6 hours per job;
+the same profile, fixture digest, evaluator, scoring policy, and case IDs must
+be present in both full reports. APRIL never starts or stops Colibri. A stopped
+or mismatched service fails clearly, and cancellation terminates the benchmark
+process group without activating a model. The report contains redacted,
+machine-verifiable metrics and a canonical identity digest, not transcripts or
+large command output. `compare-coding A B` remains available for systems that
+can serve both candidates, but the saved-report workflow is the recommended
+path for a one-heavy-model-at-a-time machine.
+
 The active structured coding path derives its contract from the trusted route,
 selected project, configured agent tools, and permission ceiling. It persists
 the controller through approval suspension/resume, feeds real Tool Worker

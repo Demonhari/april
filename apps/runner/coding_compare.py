@@ -22,6 +22,7 @@ CODING_FIXTURES = (
     "failure_recovery_v1",
     "strict_structured_output_v1",
 )
+CODING_BENCHMARK_REPORT_SCHEMA_VERSION = 1
 
 
 class CodingCaseMeasurement(BaseModel):

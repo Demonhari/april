@@ -62,6 +62,7 @@ from apps.runner.commands.common import (
     _status_payload as _status_payload,
 )
 from apps.runner.commands.finetune import finetune_app
+from apps.runner.commands.model_coding_benchmark import register_coding_benchmark_commands
 from apps.runner.commands.model_compare import register_model_compare
 from apps.runner.commands.model_import import register_model_import_commands
 from apps.runner.commands.packaging import package_app
@@ -143,6 +144,7 @@ april_app.add_typer(database_app, name="database")
 april_app.add_typer(finetune_app, name="finetune")
 april_app.add_typer(package_app, name="package")
 register_model_compare(model_app)
+register_coding_benchmark_commands(model_app)
 register_model_import_commands(model_app)
 register_speaker_commands(voice_app)
 

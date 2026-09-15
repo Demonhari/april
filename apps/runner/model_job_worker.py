@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from apps.runner.coding_benchmark_reports import build_coding_benchmark_report, write_coding_report
 from apps.runner.verify import ModelBenchmark, RealModelVerifier
 from april_common.errors import RuntimeUnavailableError
 from april_common.hardware_profile import safe_hardware_profile
@@ -15,7 +16,13 @@ from april_common.settings import load_settings
 from april_common.thermal_state import summarize_thermal_samples
 from services.april_runtime.colibri_backend import ColibriBackend
 from services.april_runtime.model_registry import ModelRegistry
-from services.evaluation.model_quality import ColibriEvaluationClient, evaluate_model_quality
+from services.evaluation.coding_benchmark import coding_benchmark_timeout_profile
+from services.evaluation.model_quality import (
+    ColibriEvaluationClient,
+    evaluate_coding_benchmark,
+    evaluate_model_quality,
+    fixture_set_metadata,
+)
 from services.jobs.model_jobs import validate_registered_model
 from services.tool_worker.client import ToolWorkerProcessManager, ToolWorkerUnavailable
 
@@ -152,6 +159,95 @@ def _benchmark(home: Path, model_id: str) -> dict[str, Any]:  # pragma: no cover
     }
 
 
+def _coding_benchmark(
+    home: Path,
+    model_id: str,
+    *,
+    suite: str,
+    timeout_profile: str,
+    case_timeout_multiplier: float,
+) -> dict[str, Any]:
+    settings = load_settings(root=home, legacy_credential_migration=True)
+    model = validate_registered_model(settings, model_id)
+    if model.artifact_kind == "colibri_model_directory":
+        payload = asyncio.run(
+            _colibri_coding_benchmark(
+                settings,
+                model_id,
+                suite=suite,
+                timeout_profile=timeout_profile,
+                case_timeout_multiplier=case_timeout_multiplier,
+            )
+        )
+        payload.update(
+            {
+                "artifact_kind": model.artifact_kind,
+                "role": model.role,
+                "model_sha256": model.sha256,
+                "manifest_digest": model.manifest_digest,
+                "model_basename": model.basename,
+            }
+        )
+        return payload
+    benchmark = ModelBenchmark(
+        home=home,
+        model_path=model.path,
+        prompt="Return a compact valid JSON object.",
+        runs=1,
+        max_output_tokens=64,
+        keep_loaded=False,
+        inherit_process_group=True,
+    )
+
+    def quality(session: ModelBenchmark) -> dict[str, Any]:
+        return asyncio.run(
+            _coding_quality_evaluation(
+                settings,
+                session=session,
+                model_id=model_id,
+                suite=suite,
+                timeout_profile=timeout_profile,
+                case_timeout_multiplier=case_timeout_multiplier,
+            )
+        )
+
+    runs, quality_result = benchmark.run_with_evaluation(quality)
+    quality_result = quality_result or {}
+    return {
+        "schema_version": 1,
+        "report_type": "coding_model_benchmark",
+        "model_id": model_id,
+        "passed": bool(runs) and all(run.ok for run in runs),
+        "runs": [
+            {
+                "run_index": run.run_index,
+                "ok": run.ok,
+                "first_token_latency_seconds": run.first_token_latency_seconds,
+                "generation_time_seconds": run.generation_time_seconds,
+                "output_tokens": run.output_tokens,
+                "tokens_per_second": run.tokens_per_second,
+                "process_rss_bytes": run.process_rss_bytes,
+                "peak_process_rss_bytes": run.peak_process_rss_bytes,
+            }
+            for run in runs
+        ],
+        "artifact_kind": model.artifact_kind,
+        "fixture_set": quality_result.get("fixture_set"),
+        "quality": {"coding": quality_result.get("coding")},
+        "coding_fixture_pass_rate": quality_result.get("coding_fixture_pass_rate"),
+        "coding": quality_result.get("coding"),
+        "timeout_profile": quality_result.get("timeout_profile"),
+        "suite": quality_result.get("suite"),
+        "case_ids": quality_result.get("case_ids"),
+        "simulated": settings.runtime.backend == "fake",
+        "hardware_profile": safe_hardware_profile(),
+        "role": model.role,
+        "model_sha256": model.sha256,
+        "manifest_digest": model.manifest_digest,
+        "model_basename": model.basename,
+    }
+
+
 async def _quality_evaluation(
     settings: Any,
     *,
@@ -182,6 +278,47 @@ async def _quality_evaluation(
             coding_root=coding_root,
             tool_worker=client,
             fixture_home=Path(__file__).resolve().parents[2],
+        )
+    finally:
+        await manager.stop()
+
+
+async def _coding_quality_evaluation(
+    settings: Any,
+    *,
+    session: ModelBenchmark,
+    model_id: str,
+    suite: str,
+    timeout_profile: str,
+    case_timeout_multiplier: float,
+) -> dict[str, Any]:
+    coding_root = session.temp / "coding-fixtures"
+    coding_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    manager = ToolWorkerProcessManager(
+        april_home=settings.home,
+        allowed_roots=(coding_root,),
+        runtime_directory=session.temp / "tool-worker",
+        environment=settings.environment,
+        development_unsandboxed_override=settings.workers.development_unsandboxed_override,
+    )
+    client = None
+    try:
+        client = await manager.start()
+    except ToolWorkerUnavailable:
+        if settings.environment == "production":
+            client = None
+    try:
+        return await evaluate_coding_benchmark(
+            settings,
+            runtime_url=session.runtime_url,
+            runtime_token=session.runtime_token,
+            model_id=model_id,
+            coding_root=coding_root,
+            tool_worker=client,
+            fixture_home=Path(__file__).resolve().parents[2],
+            suite=suite,
+            timeout_profile=timeout_profile,
+            case_timeout_multiplier=case_timeout_multiplier,
         )
     finally:
         await manager.stop()
@@ -294,6 +431,66 @@ async def _colibri_benchmark(settings: Any, model_id: str) -> dict[str, Any]:
     }
 
 
+async def _colibri_coding_benchmark(
+    settings: Any,
+    model_id: str,
+    *,
+    suite: str,
+    timeout_profile: str,
+    case_timeout_multiplier: float,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="april-colibri-coding-") as temporary:
+        root = Path(temporary)
+        coding_root = root / "coding-fixtures"
+        coding_root.mkdir(mode=0o700)
+        manager = ToolWorkerProcessManager(
+            april_home=settings.home,
+            allowed_roots=(coding_root,),
+            runtime_directory=root / "tool-worker",
+            environment=settings.environment,
+            development_unsandboxed_override=settings.workers.development_unsandboxed_override,
+        )
+        backend = None
+        try:
+            tool_worker = await manager.start()
+            backend = await _colibri_backend(settings, model_id)
+            quality = await evaluate_coding_benchmark(
+                settings,
+                runtime_url="",
+                runtime_token=None,
+                model_id=model_id,
+                coding_root=coding_root,
+                tool_worker=tool_worker,
+                client=ColibriEvaluationClient(backend=backend, model_id=model_id),
+                fixture_home=Path(__file__).resolve().parents[2],
+                suite=suite,
+                timeout_profile=timeout_profile,
+                case_timeout_multiplier=case_timeout_multiplier,
+            )
+            return {
+                "schema_version": 1,
+                "report_type": "coding_model_benchmark",
+                "model_id": model_id,
+                "passed": quality["coding"].get("fixture_pass_rate") == 1.0,
+                "runs": [],
+                "artifact_kind": "colibri_model_directory",
+                "fixture_set": quality.get("fixture_set"),
+                "quality": {"coding": quality.get("coding")},
+                "coding_fixture_pass_rate": quality.get("coding_fixture_pass_rate"),
+                "coding": quality.get("coding"),
+                "timeout_profile": quality.get("timeout_profile"),
+                "suite": quality.get("suite"),
+                "case_ids": quality.get("case_ids"),
+                "seed_control": "unsupported",
+                "simulated": False,
+                "hardware_profile": safe_hardware_profile(),
+            }
+        finally:
+            if backend is not None:
+                await backend.unload()
+            await manager.stop()
+
+
 async def _colibri_quality(settings: Any, model_id: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="april-colibri-eval-") as temporary:
         root = Path(temporary)
@@ -337,14 +534,71 @@ def main() -> None:  # pragma: no cover
     parser = argparse.ArgumentParser()
     parser.add_argument("--home", required=True, type=Path)
     parser.add_argument("--model-id", required=True)
-    parser.add_argument("--mode", required=True, choices=("verify", "benchmark"))
+    parser.add_argument(
+        "--mode", required=True, choices=("verify", "benchmark", "coding_benchmark")
+    )
+    parser.add_argument("--suite", choices=("smoke", "full"), default="full")
+    parser.add_argument("--timeout-profile", choices=("smoke", "full-local"), default="full-local")
+    parser.add_argument("--case-timeout-multiplier", type=float, default=1.0)
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     try:
-        payload = (
-            _verification(args.home, args.model_id)
-            if args.mode == "verify"
-            else _benchmark(args.home, args.model_id)
-        )
+        if args.mode == "verify":
+            payload = _verification(args.home, args.model_id)
+        elif args.mode == "benchmark":
+            payload = _benchmark(args.home, args.model_id)
+        else:
+            payload = _coding_benchmark(
+                args.home,
+                args.model_id,
+                suite=args.suite,
+                timeout_profile=args.timeout_profile,
+                case_timeout_multiplier=args.case_timeout_multiplier,
+            )
+            if args.report is not None:
+                settings = load_settings(root=args.home, legacy_credential_migration=True)
+                registry = ModelRegistry.from_file(
+                    settings.home / "configs" / "models.yaml", root=settings.home
+                )
+                definition = registry.get(args.model_id)
+                profile = payload.get("timeout_profile")
+                if not isinstance(profile, dict):
+                    configured = coding_benchmark_timeout_profile(args.timeout_profile)
+                    profile = {
+                        "name": configured.name,
+                        "case_timeout_seconds": (
+                            configured.case_timeout_seconds * args.case_timeout_multiplier
+                        ),
+                        "job_timeout_seconds": configured.job_timeout_seconds,
+                        "case_timeout_multiplier": args.case_timeout_multiplier,
+                    }
+                report = build_coding_benchmark_report(
+                    payload,
+                    model_id=definition.id,
+                    role=str(definition.role),
+                    backend=definition.backend,
+                    artifact_kind=definition.artifact_kind,
+                    configuration={
+                        "context_size": definition.context_size,
+                        "max_output_tokens": definition.max_output_tokens,
+                        "threads": definition.threads,
+                        "threads_batch": definition.threads_batch,
+                        "chat_format": definition.chat_format,
+                    },
+                    suite=args.suite,
+                    timeout_profile=profile,
+                    fixture_set=fixture_set_metadata(args.home),
+                    simulated=bool(payload.get("simulated")),
+                    hardware_profile=payload.get("hardware_profile"),
+                )
+                write_coding_report(report, args.report)
+                payload = {
+                    "model_id": args.model_id,
+                    "report_written": True,
+                    "report_identity_digest": report["identity_digest"],
+                    "comparison_eligible": report["comparison_eligible"],
+                    "simulated": report["simulated"],
+                }
     except RuntimeUnavailableError as exc:
         print(
             json.dumps(

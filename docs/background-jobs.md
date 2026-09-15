@@ -14,7 +14,8 @@ attempt available. Mutation jobs are never automatically retried.
 The separate Job Worker claims one job at a time by default. Fully integrated
 job types are `repository_index`, `memory_reindex`, `document_index`,
 `configured_test`, `model_import`, `model_import_verification`,
-`model_benchmark`, `model_setup_comparison`, `evolution_shadow`, and `self_check`.
+`model_benchmark`, `model_coding_benchmark`, `model_setup_comparison`,
+`evolution_shadow`, and `self_check`.
 Configured tests
 and model import require exact existing approvals. Fine-tuning is registered
 only when explicitly enabled; Dream Cycle is registered only when evolution is
@@ -28,8 +29,15 @@ sample count, reason code, and evidence hash; no case prompt or generation is
 stored in the job result.
 
 `run april model import`, `run april model verify`, `run april memory reindex`,
-`run april model benchmark`, and `run april model compare-setups` submit these
-durable jobs.
+`run april model benchmark`, `run april model benchmark-coding`, and `run april
+model compare-setups` submit these durable jobs. Coding benchmarks use the
+explicit `smoke` or `full-local` timeout profile; the latter is bounded at six
+hours and supports one heavy local candidate per job. APRIL never starts or
+stops an external Colibri process. Reports are written after the job reaches a
+terminal state; unavailable, cancelled, interrupted, or partial runs are
+explicitly ineligible. Two completed reports are compared by
+`run april model compare-coding-results`, which is a local, inference-free
+operation.
 
 For every exact-approved durable job type, including `model_import`,
 `configured_test`, and explicitly enabled `finetune`, job insertion, the

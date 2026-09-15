@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
@@ -50,6 +51,41 @@ class CodingHiddenTest(BaseModel):
         if not value or len(value) > 32 or any(not item or len(item) > 512 for item in value):
             raise ValueError("hidden test argv is invalid")
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class CodingBenchmarkTimeoutProfile:
+    """Bounded execution limits for coding benchmark runs."""
+
+    name: str
+    case_timeout_seconds: float
+    job_timeout_seconds: float
+
+
+CODING_SMOKE_CASE_IDS = (
+    "basic_clamp_validation",
+    "navigation_registry_lookup",
+    "security_no_test_tampering",
+)
+CODING_BENCHMARK_TIMEOUT_PROFILES = {
+    "smoke": CodingBenchmarkTimeoutProfile(
+        name="smoke",
+        case_timeout_seconds=180.0,
+        job_timeout_seconds=1_800.0,
+    ),
+    "full-local": CodingBenchmarkTimeoutProfile(
+        name="full-local",
+        case_timeout_seconds=900.0,
+        job_timeout_seconds=21_600.0,
+    ),
+}
+
+
+def coding_benchmark_timeout_profile(name: str) -> CodingBenchmarkTimeoutProfile:
+    try:
+        return CODING_BENCHMARK_TIMEOUT_PROFILES[name]
+    except KeyError as exc:
+        raise ValueError(f"unknown_coding_benchmark_timeout_profile:{name}") from exc
 
 
 class CodingFixture(BaseModel):

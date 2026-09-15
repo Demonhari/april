@@ -121,8 +121,12 @@ async def run_model_utility_job(
     mode: str,
     cancellation_event: asyncio.Event,
     timeout_seconds: float,
+    suite: str = "full",
+    timeout_profile: str = "full-local",
+    case_timeout_multiplier: float = 1.0,
+    report_path: str | None = None,
 ) -> dict[str, Any]:
-    if mode not in {"verify", "benchmark"}:
+    if mode not in {"verify", "benchmark", "coding_benchmark"}:
         raise ValueError("unknown_model_utility_mode")
     validated = validate_registered_model(
         settings,
@@ -140,6 +144,19 @@ async def run_model_utility_job(
             model_id,
             "--mode",
             mode,
+            *(
+                [
+                    "--suite",
+                    suite,
+                    "--timeout-profile",
+                    timeout_profile,
+                    "--case-timeout-multiplier",
+                    str(case_timeout_multiplier),
+                    *(["--report", report_path] if report_path else []),
+                ]
+                if mode == "coding_benchmark"
+                else []
+            ),
         ],
         cwd=settings.home,
         category=(
@@ -183,6 +200,9 @@ async def run_model_utility_job(
         "model_basename": validated.basename,
         "model_size": validated.size,
         "model_sha256": validated.sha256,
+        "manifest_digest": validated.manifest_digest,
+        "artifact_kind": validated.artifact_kind,
+        "resident_gb": validated.resident_gb,
         "stdout_truncated": result.stdout_truncated,
         "stderr_truncated": result.stderr_truncated,
         "resource_limits_applied": list(result.resource_limits.applied),

@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +33,11 @@ from services.brain.route_contract import RouteCompiler
 from services.brain.structured_output import grammar_safe_json_schema
 from services.brain.task_contract import task_contract_for_request
 from services.evaluation.coding_benchmark import (
+    CODING_SMOKE_CASE_IDS,
     CodingFileAssertion,
     CodingFixture,
     canonical_fixture_set,
+    coding_benchmark_timeout_profile,
     coding_fixture_directory,
     evaluate_file_assertions,
     load_coding_fixtures,
@@ -260,6 +262,63 @@ async def evaluate_model_quality(
     }
 
 
+async def evaluate_coding_benchmark(
+    settings: AprilSettings,
+    *,
+    runtime_url: str,
+    runtime_token: str | None,
+    model_id: str,
+    coding_root: Path,
+    tool_worker: ToolWorkerClient | None,
+    client: Any | None = None,
+    fixture_home: Path | None = None,
+    suite: str = "full",
+    timeout_profile: str = "full-local",
+    case_timeout_multiplier: float = 1.0,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    """Run only the versioned coding evaluator used by coding-model reports."""
+
+    if suite not in {"smoke", "full"}:
+        raise ValueError("unknown_coding_benchmark_suite")
+    if not 0.5 <= case_timeout_multiplier <= 4.0:
+        raise ValueError("case_timeout_multiplier_out_of_range")
+    profile = coding_benchmark_timeout_profile(timeout_profile)
+    fixture_source = fixture_home or settings.home
+    metadata = fixture_set_metadata(fixture_source)
+    if not metadata["installed"]:
+        raise RuntimeError("model_quality_fixtures_unavailable")
+    selected = _selected_fixture_version(fixture_source)
+    if selected != "v2":
+        raise RuntimeError("coding_benchmark_requires_model_quality_v2")
+    client = client or RuntimeClient(runtime_url, token=runtime_token, timeout=180.0)
+    coding = await _coding(
+        client,
+        model_id,
+        _load(_fixture_path(fixture_source, "coding.json", selected)),
+        coding_root=coding_root,
+        tool_worker=tool_worker,
+        settings=settings,
+        fixture_home=fixture_source,
+        suite=suite,
+        case_timeout_seconds=profile.case_timeout_seconds * case_timeout_multiplier,
+        progress=progress,
+    )
+    return {
+        "fixture_set": metadata,
+        "coding": coding,
+        "coding_fixture_pass_rate": coding["fixture_pass_rate"],
+        "timeout_profile": {
+            "name": profile.name,
+            "case_timeout_seconds": profile.case_timeout_seconds * case_timeout_multiplier,
+            "job_timeout_seconds": profile.job_timeout_seconds,
+            "case_timeout_multiplier": case_timeout_multiplier,
+        },
+        "suite": suite,
+        "case_ids": list(coding.get("case_ids", ())),
+    }
+
+
 async def _routing(
     client: Any,
     model_id: str,
@@ -434,8 +493,17 @@ async def _coding(
     tool_worker: ToolWorkerClient | None,
     settings: AprilSettings,
     fixture_home: Path,
+    suite: str = "full",
+    case_timeout_seconds: float | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     fixtures = _fixtures(data)
+    if suite == "smoke":
+        fixtures = [
+            fixture for fixture in fixtures if fixture.get("id") in set(CODING_SMOKE_CASE_IDS)
+        ]
+    elif suite != "full":
+        raise ValueError("unknown_coding_benchmark_suite")
     if tool_worker is None:
         return {
             "fixture_count": len(fixtures),
@@ -451,7 +519,8 @@ async def _coding(
         if selected_version == "v2"
         else {}
     )
-    for fixture in fixtures:
+    total_fixtures = len(fixtures)
+    for completed_count, fixture in enumerate(fixtures, start=1):
         typed = typed_fixtures.get(str(fixture.get("id")))
         if typed is not None and typed.mode == "agentic":
             measurement = await _run_agentic_coding_fixture(
@@ -461,6 +530,7 @@ async def _coding(
                 coding_root=coding_root,
                 tool_worker=tool_worker,
                 settings=settings,
+                timeout_seconds=case_timeout_seconds,
             )
             measurement["id"] = typed.id
             measurements[typed.id] = measurement
@@ -472,6 +542,8 @@ async def _coding(
             counts["safety_failures"] += int(not measurement["safety_passed"])
             counts["timeouts"] += int(measurement["timed_out"])
             counts["evaluator_unavailable"] += int(measurement["evaluator_exit_status"] is None)
+            if progress is not None:
+                progress(completed_count, total_fixtures, typed.id)
             continue
         candidate_file = (
             typed.candidate_file if typed is not None else fixture.get("candidate_file")
@@ -543,7 +615,7 @@ async def _coding(
                     "expected_content": fixture.get("expected_content") if typed is None else None,
                     "test_argv": test_argv,
                 },
-                timeout_seconds=30.0,
+                timeout_seconds=case_timeout_seconds or 30.0,
                 max_stdout_bytes=8_192,
                 max_stderr_bytes=8_192,
             )
@@ -631,6 +703,8 @@ async def _coding(
         measurement["verified_case_success"] = verified_case_success(measurement)
         counts["passed"] += int(measurement["verified_case_success"])
         measurements[str(fixture["id"])] = measurement
+        if progress is not None:
+            progress(completed_count, total_fixtures, str(fixture["id"]))
     total = len(fixtures)
     agentic = [item for item in measurements.values() if item["mode"] == "agentic"]
     category_scores: dict[str, dict[str, float | int]] = {}
@@ -643,6 +717,7 @@ async def _coding(
         }
     return {
         "fixture_count": total,
+        "case_ids": list(measurements),
         "fixture_pass_rate": counts["passed"] / total if total else 0.0,
         "test_pass_rate": counts["test_pass"] / total if total else 0.0,
         "syntax_or_compilation_failures": counts["syntax_or_compilation_failures"],
@@ -686,11 +761,12 @@ async def _run_agentic_coding_fixture(
     coding_root: Path,
     tool_worker: ToolWorkerClient,
     settings: AprilSettings,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run one fixture under its complete evaluator-owned timeout."""
 
     try:
-        async with asyncio.timeout(fixture.timeout_seconds):
+        async with asyncio.timeout(timeout_seconds or fixture.timeout_seconds):
             return await _run_agentic_coding_fixture_inner(
                 client,
                 model_id,
@@ -698,6 +774,7 @@ async def _run_agentic_coding_fixture(
                 coding_root=coding_root,
                 tool_worker=tool_worker,
                 settings=settings,
+                timeout_seconds=timeout_seconds,
             )
     except TimeoutError:
         return _timed_out_measurement(fixture)
@@ -750,6 +827,7 @@ async def _run_agentic_coding_fixture_inner(
     coding_root: Path,
     tool_worker: ToolWorkerClient,
     settings: AprilSettings,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run one case through StructuredAgentLoop and the trusted Tool Worker."""
 
@@ -869,6 +947,7 @@ async def _run_agentic_coding_fixture_inner(
             tool_worker,
             fixture,
             project,
+            timeout_seconds=timeout_seconds,
         )
         after_evaluator_state = RepositoryState.capture(project, project_id=fixture.id)
         evaluator_state_current = final_state.digest == after_evaluator_state.digest
@@ -881,7 +960,9 @@ async def _run_agentic_coding_fixture_inner(
                 for path, fragments in fixture.expected_file_contains.items()
             },
         )
-        hidden_tests_ok = await _run_hidden_tests(tool_worker, fixture, project)
+        hidden_tests_ok = await _run_hidden_tests(
+            tool_worker, fixture, project, timeout_seconds=timeout_seconds
+        )
         modified = _changed_relative_paths(project)
         dirty_preserved = all(
             (project / path).is_file() and (project / path).read_text(encoding="utf-8") == content
@@ -1027,6 +1108,7 @@ async def _run_evaluator_verification(
     tool_worker: ToolWorkerClient,
     fixture: CodingFixture,
     project: Path,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run the fixed fixture command after model interaction has ended."""
 
@@ -1036,7 +1118,7 @@ async def _run_evaluator_verification(
             operation="test_runner",
             project_root=project,
             args={"argv": list(fixture.verification_argv)},
-            timeout_seconds=fixture.timeout_seconds,
+            timeout_seconds=timeout_seconds or fixture.timeout_seconds,
             max_stdout_bytes=16_384,
             max_stderr_bytes=16_384,
         )
@@ -1061,6 +1143,7 @@ async def _run_hidden_tests(
     tool_worker: ToolWorkerClient,
     fixture: CodingFixture,
     project: Path,
+    timeout_seconds: float | None = None,
 ) -> bool:
     if not fixture.hidden_tests:
         return True
@@ -1082,7 +1165,7 @@ async def _run_hidden_tests(
                 operation="test_runner",
                 project_root=evaluator_root,
                 args={"argv": list(hidden.argv)},
-                timeout_seconds=fixture.timeout_seconds,
+                timeout_seconds=timeout_seconds or fixture.timeout_seconds,
                 max_stdout_bytes=16_384,
                 max_stderr_bytes=16_384,
             )

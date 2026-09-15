@@ -171,6 +171,8 @@ april memory repair-index
 april memory search
 april model
 april model benchmark
+april model benchmark-coding
+april model compare-coding-results
 april model compare-setups
 april model compare-coding
 april model doctor

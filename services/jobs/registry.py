@@ -79,6 +79,16 @@ class BenchmarkPayload(BaseModel):
     model_id: str = Field(min_length=1, max_length=128)
 
 
+class CodingBenchmarkPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str = Field(min_length=1, max_length=128)
+    suite: str = Field(default="full", pattern=r"^(smoke|full)$")
+    timeout_profile: str = Field(default="full-local", pattern=r"^(smoke|full-local)$")
+    case_timeout_multiplier: float = Field(default=1.0, ge=0.5, le=4.0)
+    report_path: str | None = Field(default=None, max_length=4096)
+
+
 class ModelSetupComparisonPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -256,6 +266,18 @@ def default_job_registry(
                 restart_safe=True,
                 default_timeout_seconds=3600.0,
                 maximum_attempts=2,
+                cancellation_behavior="process_group",
+                available=True,
+            ),
+            JobTypeDefinition(
+                "model_coding_benchmark",
+                CodingBenchmarkPayload,
+                permission_level=2,
+                approval_required=False,
+                idempotent=True,
+                restart_safe=False,
+                default_timeout_seconds=21_600.0,
+                maximum_attempts=1,
                 cancellation_behavior="process_group",
                 available=True,
             ),
