@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -10,16 +11,28 @@ import pytest
 
 from apps.runner.commands.model_compare import _redacted_benchmark
 from services.april_runtime.schemas import ChatResponse, Usage
+from services.brain.progress_controller import ProgressEvent
+from services.brain.run_controller import RunController
+from services.brain.task_contract import TaskContract
 from services.evaluation.coding_benchmark import (
+    CodingFixture,
+    CodingHiddenTest,
     canonical_fixture_set,
     evaluate_file_assertions,
     load_coding_fixtures,
+    path_is_within,
     redact_coding_result,
 )
 from services.evaluation.model_quality import (
+    _iteration_validation_metrics,
     _run_agentic_coding_fixture,
+    _run_control_metrics,
+    _run_evaluator_verification,
+    _run_hidden_tests,
+    _verification_recovery_metrics,
     coding_fixture_ids,
     fixture_set_metadata,
+    verified_case_success,
 )
 from services.tool_worker.schemas import ToolWorkerResponse
 
@@ -73,6 +86,165 @@ def test_hidden_acceptance_assertions_are_not_materialized_in_fixture_workspace(
     assert not (tmp_path / "hidden_acceptance.json").exists()
     assert all(relative in fixture.visible_files() for relative in fixture.hidden_assertions)
     assert evaluate_file_assertions(tmp_path, fixture.hidden_assertions) is False
+
+
+def test_hidden_tests_are_not_visible_and_run_only_in_evaluator_workspace(
+    tmp_path: Path,
+) -> None:
+    hidden = CodingHiddenTest(
+        files={
+            "__hidden_test_answer.py": (
+                "from solution import answer\ndef test_answer():\n    assert answer() == 2\n"
+            )
+        },
+        argv=("pytest", "-q", "__hidden_test_answer.py"),
+    )
+    fixture = CodingFixture(
+        id="hidden-test",
+        category="basic_python",
+        mode="agentic",
+        request="repair the answer",
+        initial_files={"solution.py": "def answer(): return 2\n"},
+        hidden_tests=(hidden,),
+    )
+    assert "__hidden_test_answer.py" not in fixture.visible_files()
+    (tmp_path / "solution.py").write_text("def answer(): return 2\n", encoding="utf-8")
+
+    class Worker:
+        async def execute(self, **kwargs: Any) -> ToolWorkerResponse:
+            args = kwargs["args"]
+            completed = subprocess.run(
+                list(args["argv"]),
+                cwd=Path(kwargs["project_root"]),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return ToolWorkerResponse(
+                request_id=str(kwargs["request_id"]),
+                ok=completed.returncode == 0,
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                status="completed",
+            )
+
+    assert asyncio.run(_run_hidden_tests(Worker(), fixture, tmp_path))
+    assert not (tmp_path / "__hidden_test_answer.py").exists()
+
+
+def test_canonical_case_success_rejects_easy_internal_test_only() -> None:
+    measurement = {
+        "completed": True,
+        "tests_passed": True,
+        "final_repository_state_correct": False,
+        "safety_passed": True,
+        "user_changes_preserved": True,
+    }
+    assert not verified_case_success(measurement)
+
+
+def test_forbidden_path_matching_uses_components_not_prefixes() -> None:
+    assert path_is_within(".git/config", ".git")
+    assert path_is_within("private/a.txt", "private")
+    assert not path_is_within("private2/a.txt", "private")
+    assert not path_is_within("../private/a.txt", "private")
+    assert not path_is_within("/private/a.txt", "private")
+
+
+def test_evaluator_uses_fixed_full_command_after_easy_test_passes(tmp_path: Path) -> None:
+    (tmp_path / "test_easy.py").write_text("def test_easy(): pass\n", encoding="utf-8")
+    (tmp_path / "test_full.py").write_text(
+        "def test_full_acceptance():\n    assert False\n", encoding="utf-8"
+    )
+    fixture = CodingFixture(
+        id="full-verification",
+        category="debugging_failure_evidence",
+        mode="agentic",
+        request="verify",
+        verification_argv=("pytest", "-q"),
+    )
+
+    class Worker:
+        async def execute(self, **kwargs: Any) -> ToolWorkerResponse:
+            args = kwargs["args"]
+            completed = subprocess.run(
+                list(args["argv"]),
+                cwd=Path(kwargs["project_root"]),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return ToolWorkerResponse(
+                request_id=str(kwargs["request_id"]),
+                ok=completed.returncode == 0,
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                status="completed",
+            )
+
+    result = asyncio.run(_run_evaluator_verification(Worker(), fixture, tmp_path))
+    assert result["passed"] is False
+    assert result["exit_status"] != 0
+
+
+def test_verification_required_is_not_no_progress_event() -> None:
+    assert (
+        _run_control_metrics([{"metadata_json": '{"run_control": {}}'}])["no_progress_event_count"]
+        == 0
+    )
+
+
+def test_hidden_test_schema_rejects_empty_argv() -> None:
+    with pytest.raises(ValueError, match="hidden test argv is invalid"):
+        CodingHiddenTest(argv=())
+
+
+def test_missing_run_control_has_no_progress_events() -> None:
+    assert _run_control_metrics([])["no_progress_event_count"] == 0
+
+
+def test_no_progress_events_are_persisted_separately_from_completion_feedback() -> None:
+    controller = RunController.for_contract(TaskContract(run_id="run", user_goal="code"))
+    event = ProgressEvent.from_values(
+        action_name="test_runner",
+        normalized_arguments={"argv": ["pytest"]},
+        input_state_digest="state",
+        result_status="fail",
+        evidence_digest="evidence",
+    )
+    controller.progress.duplicate_warning_threshold = 2
+    controller.progress.max_no_progress_cycles = 2
+    controller.observe(event)
+    decision = controller.observe(event)
+    assert decision.action == "stop"
+    assert controller.no_progress_stop_count == 1
+    restored = RunController.restore(controller.snapshot())
+    assert restored.no_progress_events[0]["reason"] == "no_progress_limit"
+
+
+def test_recovery_metrics_only_use_failed_test_runner_evidence() -> None:
+    rows = [
+        {
+            "tool_request_json": '{"tool":"read_file"}',
+            "tool_result_json": '{"ok":false,"stderr":"missing"}',
+        },
+        {
+            "tool_request_json": '{"tool":"test_runner"}',
+            "tool_result_json": '{"ok":false,"stderr":"failed"}',
+        },
+        {
+            "tool_request_json": '{"tool":"test_runner"}',
+            "tool_result_json": '{"ok":true,"stdout":"passed"}',
+        },
+    ]
+    failures, recovered = _verification_recovery_metrics(rows)
+    assert failures == 1
+    assert recovered is True
+    assert _iteration_validation_metrics(
+        [{"state": "structured_error", "tool_request_json": "{}"}]
+    ) == (1, 0)
 
 
 def test_behavioral_hidden_assertions_allow_non_reference_implementation(
@@ -272,6 +444,35 @@ async def test_agentic_fixture_uses_structured_loop_and_machine_verification(
     assert result["tests_passed"] is True
     assert result["final_repository_state_correct"] is True
     assert result["action_valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_agentic_fixture_timeout_is_bounded(settings_tmp: Any) -> None:
+    source = next(
+        item for item in load_coding_fixtures(ROOT, "v2") if item.id == "debug_async_timeout"
+    )
+    fixture = source.model_copy(update={"id": "timeout_case", "timeout_seconds": 0.01})
+
+    class SlowRuntime:
+        async def chat(self, **_: Any) -> ChatResponse:
+            await asyncio.sleep(1.0)
+            return ChatResponse(
+                request_id="slow",
+                model_id="fixture-model",
+                content='{"type":"final_answer","message":"late"}',
+                usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+
+    result = await _run_agentic_coding_fixture(
+        SlowRuntime(),
+        "fixture-model",
+        fixture,
+        coding_root=settings_tmp.home / "coding-timeout",
+        tool_worker=object(),  # type: ignore[arg-type]
+        settings=settings_tmp,
+    )
+    assert result["timed_out"] is True
+    assert result["verified_case_success"] is False
 
 
 @pytest.mark.parametrize("path", ["../escape", "/absolute"])

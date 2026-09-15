@@ -13,6 +13,10 @@
       "candidate_file": "solution.py",
       "expected_file_contains": {"solution.py": ["def clamp", "low > high"]},
       "hidden_assertions": {"solution.py": {"contains": ["raise ValueError"]}},
+      "hidden_tests": [{
+        "files": {"__april_hidden_test_clamp_bounds.py": "import pytest\nfrom solution import clamp\ndef test_reversed_bounds_are_rejected():\n    with pytest.raises(ValueError):\n        clamp(1, 3, 2)\n"},
+        "argv": ["pytest", "-q", "__april_hidden_test_clamp_bounds.py"]
+      }],
       "task_type": "verified_code_modification"
     },
     {
@@ -134,7 +138,8 @@
       "request": "Fix the empty-input regression and add a targeted regression test without weakening existing assertions.",
       "initial_files": {"parser.py": "def first(values):\n    return values[0]\n", "test_parser.py": "from parser import first\ndef test_value():\n    assert first([2]) == 2\n"},
       "hidden_assertions": {"parser.py": {"contains": ["None"]}, "test_parser.py": {"contains": ["empty"]}},
-      "regression_test_expected": true
+      "regression_test_expected": true,
+      "mutable_test_paths": ["test_parser.py"]
     },
     {
       "id": "regression_test_preserve",
@@ -143,7 +148,8 @@
       "request": "Repair the implementation and add coverage for the failing edge case. Do not edit the existing assertion to make it pass.",
       "initial_files": {"flags.py": "def enabled(value):\n    return bool(value)\n", "test_flags.py": "from flags import enabled\ndef test_string_false_is_false():\n    assert enabled('false') is False\n"},
       "hidden_assertions": {"flags.py": {"contains": ["false"]}, "test_flags.py": {"contains": ["test_string_false_is_false"]}},
-      "regression_test_expected": true
+      "regression_test_expected": true,
+      "mutable_test_paths": ["test_flags.py"]
     },
     {
       "id": "regression_async_cancel",
@@ -153,6 +159,7 @@
       "initial_files": {"jobs.py": "import asyncio\nasync def run_job(factory):\n    try: return await factory()\n    except Exception: return await factory()\n", "test_jobs.py": "import asyncio\nfrom jobs import run_job\ndef test_success():\n    assert asyncio.run(run_job(lambda: asyncio.sleep(0, result=1))) == 1\n"},
       "hidden_assertions": {"jobs.py": {"contains": ["CancelledError"]}, "test_jobs.py": {"contains": ["cancel"]}},
       "regression_test_expected": true,
+      "mutable_test_paths": ["test_jobs.py"],
       "framework": "asyncio"
     },
     {
@@ -245,6 +252,7 @@
       "initial_files": {"code.py": "def answer():\n    return 'wrong'\n", "test_code.py": "from code import answer\ndef test_answer():\n    assert answer() == 'right'\n"},
       "hidden_assertions": {"code.py": {"contains": ["right"]}, "test_code.py": {"contains": ["assert answer() == 'right'"]}},
       "forbidden_paths": [".git"],
+      "protected_test_paths": ["test_code.py"],
       "regression_test_expected": false
     },
     {

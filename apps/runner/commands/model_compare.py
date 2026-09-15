@@ -160,7 +160,9 @@ async def _run_coding_comparison(settings: Any, model_ids: tuple[str, str]) -> d
                         "agentic_verified_success_rate",
                         "test_pass_rate",
                         "safety_failures",
+                        "evaluator_verification_unavailable_count",
                         "recovery_success_count",
+                        "recovery_success_rate",
                         "no_progress_intervention_count",
                     )
                 }
@@ -198,14 +200,25 @@ async def _run_coding_comparison(settings: Any, model_ids: tuple[str, str]) -> d
         value = metric(result, "safety_failures")
         return max(0, int(value)) if value >= 0 else 0
 
+    def final_evidence_unavailable(result: dict[str, object]) -> bool:
+        return metric(result, "evaluator_verification_unavailable_count") > 0
+
+    def has_comparable_evidence(result: dict[str, object]) -> bool:
+        return (
+            metric(result, "agentic_verified_success_rate") >= 0
+            and metric(result, "coding_fixture_pass_rate") >= 0
+            and metric(result, "test_pass_rate") >= 0
+        )
+
     ranked = sorted(
         results,
         key=lambda item: (
             safety_failures(item) == 0,
             -safety_failures(item),
-            metric(item, "coding_fixture_pass_rate"),
             metric(item, "agentic_verified_success_rate"),
             metric(item, "test_pass_rate"),
+            metric(item, "coding_fixture_pass_rate"),
+            metric(item, "recovery_success_rate"),
             metric(item, "structured_json_reliability"),
         ),
         reverse=True,
@@ -213,7 +226,11 @@ async def _run_coding_comparison(settings: Any, model_ids: tuple[str, str]) -> d
     recommendation = "insufficient_evidence"
     recommendation_reason = "simulated_results_are_not_production_evidence"
     if ranked and not all(bool(item["simulated"]) for item in ranked):
-        if any(safety_failures(item) > 0 for item in ranked):
+        if any(
+            not has_comparable_evidence(item) or final_evidence_unavailable(item) for item in ranked
+        ):
+            recommendation_reason = "final_verification_evidence_unavailable"
+        elif any(safety_failures(item) > 0 for item in ranked):
             safe = [item for item in ranked if safety_failures(item) == 0]
             if safe:
                 recommendation = str(safe[0]["model_id"])
@@ -225,9 +242,22 @@ async def _run_coding_comparison(settings: Any, model_ids: tuple[str, str]) -> d
             second_score = (
                 metric(ranked[1], "agentic_verified_success_rate") if len(ranked) > 1 else -1.0
             )
-            if first_score >= 0 and second_score >= 0 and abs(first_score - second_score) < 0.05:
+            secondary_close = (
+                all(
+                    abs(metric(ranked[0], name) - metric(ranked[1], name)) < 0.05
+                    for name in ("test_pass_rate", "coding_fixture_pass_rate")
+                )
+                if len(ranked) > 1
+                else True
+            )
+            if (
+                first_score >= 0
+                and second_score >= 0
+                and abs(first_score - second_score) < 0.05
+                and secondary_close
+            ):
                 recommendation = "tied"
-                recommendation_reason = "agentic_success_within_five_percent"
+                recommendation_reason = "agentic_and_secondary_scores_within_five_percent"
             else:
                 recommendation = str(ranked[0]["model_id"])
                 recommendation_reason = "verified_agentic_success_precedence"

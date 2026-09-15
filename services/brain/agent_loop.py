@@ -426,7 +426,8 @@ class StructuredAgentLoop:
                         )
                     )
                 elif progress_decision.action == "stop":
-                    if controller.request_replan():
+                    if controller.request_no_progress_replan():
+                        await self._persist_controller(run_id, controller, run_metadata)
                         loop_messages.append(
                             ChatMessage(
                                 role="system",

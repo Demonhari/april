@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from services.brain.coding_workflow import CodingCompletionGate, CompletionDecision
@@ -34,6 +34,10 @@ class RunController:
     replan_attempts: int = 0
     latest_evidence: VerificationEvidence | None = None
     last_evidence_digest: str | None = None
+    no_progress_warning_count: int = 0
+    no_progress_replan_count: int = 0
+    no_progress_stop_count: int = 0
+    no_progress_events: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def for_contract(cls, contract: TaskContract) -> RunController:
@@ -44,13 +48,32 @@ class RunController:
         )
 
     def observe(self, event: ProgressEvent) -> ProgressDecision:
-        return self.progress.observe(event)
+        decision = self.progress.observe(event)
+        if decision.action != "record":
+            self.no_progress_events.append(
+                {
+                    "action": decision.action,
+                    "reason": decision.reason,
+                    "duplicate_count": decision.duplicate_count,
+                }
+            )
+            if decision.action == "warn":
+                self.no_progress_warning_count += 1
+            elif decision.action == "stop":
+                self.no_progress_stop_count += 1
+        return decision
 
     def request_replan(self) -> bool:
         if self.replan_attempts >= self.contract.maximum_replan_attempts:
             return False
         self.replan_attempts += 1
         return True
+
+    def request_no_progress_replan(self) -> bool:
+        allowed = self.request_replan()
+        if allowed:
+            self.no_progress_replan_count += 1
+        return allowed
 
     def completion_decision(
         self,
@@ -82,6 +105,10 @@ class RunController:
                 asdict(self.latest_evidence) if self.latest_evidence is not None else None
             ),
             "last_evidence_digest": self.last_evidence_digest,
+            "no_progress_warning_count": self.no_progress_warning_count,
+            "no_progress_replan_count": self.no_progress_replan_count,
+            "no_progress_stop_count": self.no_progress_stop_count,
+            "no_progress_events": list(self.no_progress_events),
         }
 
     @classmethod
@@ -116,5 +143,13 @@ class RunController:
                 str(snapshot["last_evidence_digest"])
                 if snapshot.get("last_evidence_digest")
                 else None
+            ),
+            no_progress_warning_count=max(0, int(snapshot.get("no_progress_warning_count", 0))),
+            no_progress_replan_count=max(0, int(snapshot.get("no_progress_replan_count", 0))),
+            no_progress_stop_count=max(0, int(snapshot.get("no_progress_stop_count", 0))),
+            no_progress_events=(
+                [item for item in snapshot.get("no_progress_events", []) if isinstance(item, dict)]
+                if isinstance(snapshot.get("no_progress_events"), list)
+                else []
             ),
         )

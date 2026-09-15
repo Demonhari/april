@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -22,6 +22,34 @@ class CodingFileAssertion(BaseModel):
     exists: bool | None = None
     contains: tuple[str, ...] = ()
     excludes: tuple[str, ...] = ()
+
+
+class CodingHiddenTest(BaseModel):
+    """Evaluator-only behavioural test material.
+
+    Hidden files are copied to a separate evaluator workspace only after model
+    interaction has ended.  They are never part of ``visible_files``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    files: dict[str, str] = Field(default_factory=dict)
+    argv: tuple[str, ...] = ("pytest", "-q")
+
+    @field_validator("files")
+    @classmethod
+    def bounded_files(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > 8:
+            raise ValueError("hidden test has too many files")
+        _validate_relative_file_mapping(value, "hidden test")
+        return value
+
+    @field_validator("argv")
+    @classmethod
+    def safe_argv(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value or len(value) > 32 or any(not item or len(item) > 512 for item in value):
+            raise ValueError("hidden test argv is invalid")
+        return value
 
 
 class CodingFixture(BaseModel):
@@ -43,6 +71,9 @@ class CodingFixture(BaseModel):
     candidate_file: str | None = None
     expected_file_contains: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     hidden_assertions: dict[str, CodingFileAssertion] = Field(default_factory=dict)
+    hidden_tests: tuple[CodingHiddenTest, ...] = ()
+    protected_test_paths: tuple[str, ...] = ()
+    mutable_test_paths: tuple[str, ...] = ()
     regression_test_expected: bool = False
     recovery_expected: bool = False
     no_progress_expected: bool = False
@@ -61,9 +92,10 @@ class CodingFixture(BaseModel):
         "dirty_files",
         "expected_file_contains",
         "hidden_assertions",
+        "hidden_tests",
     )
     @classmethod
-    def bounded_mapping(cls, value: dict[str, object]) -> dict[str, object]:
+    def bounded_mapping(cls, value: Any) -> Any:
         if len(value) > 32:
             raise ValueError("coding fixture has too many files or assertions")
         return value
@@ -71,31 +103,77 @@ class CodingFixture(BaseModel):
     @field_validator("initial_files", "visible_tests", "dirty_files")
     @classmethod
     def safe_file_contents(cls, value: dict[str, str]) -> dict[str, str]:
-        for path, content in value.items():
-            relative = Path(path) if isinstance(path, str) else Path(".")
-            if (
-                not isinstance(path, str)
-                or not path
-                or relative.is_absolute()
-                or ".." in relative.parts
-                or "\x00" in path
-            ):
-                raise ValueError("coding fixture contains an invalid path")
-            if not isinstance(content, str) or len(content.encode("utf-8")) > 65_536:
-                raise ValueError("coding fixture file is too large")
+        _validate_relative_file_mapping(value, "coding fixture")
         return value
 
-    @field_validator("allowed_paths", "forbidden_paths")
+    @field_validator(
+        "allowed_paths",
+        "forbidden_paths",
+        "protected_test_paths",
+        "mutable_test_paths",
+    )
     @classmethod
     def safe_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         for path in value:
-            relative = Path(path)
-            if not path or relative.is_absolute() or ".." in relative.parts or "\x00" in path:
+            if normalize_relative_path(path) is None:
                 raise ValueError("coding fixture path must remain relative")
         return value
 
     def visible_files(self) -> dict[str, str]:
         return {**self.initial_files, **self.visible_tests}
+
+    def effective_protected_test_paths(self) -> tuple[str, ...]:
+        if self.protected_test_paths:
+            return self.protected_test_paths
+        return tuple(path for path in self.visible_tests if _looks_like_test_path(path))
+
+
+def _validate_relative_file_mapping(value: Mapping[str, str], label: str) -> None:
+    for path, content in value.items():
+        relative = Path(path) if isinstance(path, str) else Path(".")
+        if (
+            not isinstance(path, str)
+            or not path
+            or relative.is_absolute()
+            or PureWindowsPath(path).is_absolute()
+            or ".." in relative.parts
+            or ".." in PurePosixPath(path.replace("\\", "/")).parts
+            or "\x00" in path
+        ):
+            raise ValueError(f"{label} contains an invalid path")
+        if not isinstance(content, str) or len(content.encode("utf-8")) > 65_536:
+            raise ValueError(f"{label} file is too large")
+
+
+def _looks_like_test_path(path: str) -> bool:
+    name = PurePosixPath(path.replace("\\", "/")).name
+    return name.startswith("test_") or name.endswith("_test.py") or ".test." in name
+
+
+def normalize_relative_path(path: str) -> str | None:
+    """Normalize a repository-relative path, rejecting escapes and absolutes."""
+
+    if not isinstance(path, str) or not path or "\x00" in path:
+        return None
+    if PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute():
+        return None
+    normalized = path.replace("\\", "/")
+    parts = PurePosixPath(normalized).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None
+    return "/".join(parts)
+
+
+def path_is_within(path: str, parent: str) -> bool:
+    """Return true only for a path equal to or below a relative parent."""
+
+    normalized_path = normalize_relative_path(path)
+    normalized_parent = normalize_relative_path(parent)
+    if normalized_path is None or normalized_parent is None:
+        return False
+    path_parts = PurePosixPath(normalized_path).parts
+    parent_parts = PurePosixPath(normalized_parent).parts
+    return path_parts[: len(parent_parts)] == parent_parts
 
 
 def coding_fixture_directory(home: Path, version: str = "v2") -> Path:
@@ -178,18 +256,40 @@ def redact_coding_result(value: object) -> dict[str, Any] | None:
                     "id",
                     "category",
                     "mode",
+                    "verified_case_success",
+                    "agent_completed",
                     "completed",
                     "tests_passed",
+                    "internal_verification_observed",
+                    "internal_verification_passed",
+                    "evaluator_verification_passed",
+                    "evaluator_exit_status",
+                    "evaluator_stdout_digest",
+                    "evaluator_stderr_digest",
+                    "evaluator_output_truncated",
+                    "evaluator_repository_state_digest",
+                    "final_repository_state_current",
                     "final_repository_state_correct",
+                    "hidden_acceptance_passed",
+                    "safety_passed",
                     "syntax_failure",
                     "forbidden_modifications",
                     "unnecessary_modifications",
                     "tests_modified_improperly",
+                    "test_tampering",
                     "user_changes_preserved",
                     "structured_output_valid",
                     "action_valid",
+                    "structured_output_failures",
+                    "action_validation_failures",
+                    "verification_failures_before_success",
+                    "recovered_after_verification_failure",
                     "recovered_after_failure",
                     "no_progress_intervened",
+                    "no_progress_warning_count",
+                    "no_progress_replan_count",
+                    "no_progress_stop_count",
+                    "no_progress_event_count",
                     "turns",
                     "tool_calls",
                     "replan_count",
@@ -212,11 +312,14 @@ def redact_coding_result(value: object) -> dict[str, Any] | None:
             "syntax_or_compilation_failures",
             "forbidden_file_modifications",
             "timeout_rate",
+            "evaluator_verification_unavailable_count",
             "unnecessary_change_rate",
             "agentic_case_count",
             "agentic_verified_success_rate",
+            "verified_success_rate",
             "safety_failures",
             "recovery_success_count",
+            "recovery_success_rate",
             "no_progress_intervention_count",
         )
     } | {
