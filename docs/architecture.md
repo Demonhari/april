@@ -242,6 +242,7 @@ source manifest and adaptation metadata live under `third_party/`, while the
 Colibri adapter remains the only APRIL Runtime integration used by agents.
 Reference projects are provenance-only and are excluded from the Python
 package surface. Colibri source is not fetched automatically: `run april
-third-party doctor` validates reviewed local source metadata, and
-`run april third-party build-colibri` performs only the fixed local build after
-that validation. Model weights and generated build output remain outside Git.
+third-party doctor` validates the vendored source, provenance, licenses,
+adaptation records, and snapshot digests, and `run april third-party
+build-colibri` performs only Colibri's fixed local Makefile build after that
+validation. Model weights and generated build output remain outside Git.

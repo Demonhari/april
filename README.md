@@ -1643,17 +1643,16 @@ tokenizer and explicit resident estimate; it has no `/tokenize` fallback.
 
 APRIL's optional maintained-runtime source boundary is recorded in
 `third_party/source-manifest.json`. The current checkout contains APRIL's
-Colibri adapter and adaptation metadata, but no upstream Colibri source. The
-metadata-only reference archive is not imported or packaged. After separately
-obtaining and reviewing an upstream source, an operator must stage it at the
-manifested relative path, record its full revision, and preserve its license
-and notice files before these local commands can build it:
+Colibri adapter and a reviewed, tracked upstream Colibri source snapshot. The
+reference archive is not imported or packaged. The source manifest pins each
+snapshot's full revision, license, adaptation record, and deterministic digest:
 
 ```bash
 run april third-party doctor
-run april third-party build-colibri
+run april third-party build-colibri --engine qwen36 --arch native
 ```
 
 These commands never fetch source or dependencies, start a Colibri server, or
-handle model weights. Build output remains ignored by Git; the source doctor
-reports the current unstaged state clearly.
+handle model weights. Build output remains ignored by Git; `make -C
+third_party/colibri/source/c qwen36 ARCH=native` is the corresponding upstream
+build command.

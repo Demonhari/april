@@ -50,6 +50,11 @@ third_party/**/checkpoints/
 third_party/**/*.gguf
 third_party/**/*.safetensors
 third_party/**/*.onnx
+third_party/**/source/**/*.o
+third_party/**/source/**/*.a
+third_party/**/source/**/*.so
+third_party/**/source/**/*.dylib
+third_party/colibri/source/c/qwen36
 __pycache__/
 *.py[cod]
 .pytest_cache/

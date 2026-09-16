@@ -27,13 +27,24 @@ def forbidden_reason(path: str) -> str | None:
         return "generated_verification_report"
     if normalized.startswith("third_party/"):
         parts = PurePosixPath(normalized).parts
-        if any(part in {"build", "dist", "models", "weights", "checkpoints"} for part in parts):
+        if name in {".coli_ssd", ".coli_usage"}:
+            return "third_party_runtime_cache"
+        if any(
+            part in {"build", "dist", "models", "weights", "checkpoints", "node_modules", ".venv"}
+            for part in parts
+        ):
             return "third_party_generated_or_model_artifact"
+        if normalized == "third_party/colibri/source/c/qwen36":
+            return "third_party_compiled_colibri_engine"
         if PurePosixPath(normalized).suffix.lower() in {
+            ".a",
             ".bin",
+            ".dylib",
             ".gguf",
             ".safetensors",
             ".onnx",
+            ".o",
+            ".so",
         }:
             return "third_party_model_or_voice_binary"
     if name in {"capability", "request-outcomes.json"} and normalized.startswith("data/"):

@@ -248,6 +248,10 @@ april task list
 april third-party
 april third-party doctor
 april third-party build-colibri
+april third-party colibri-info
+april third-party colibri-doctor
+april third-party colibri-plan
+april third-party colibri-serve
 april verify
 april voice
 april voice devices

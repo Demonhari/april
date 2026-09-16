@@ -1,151 +1,110 @@
 {
   "manifest_id": "april-third-party-sources",
   "schema_version": "1",
-  "provenance_status": "review-required",
+  "provenance_status": "complete",
   "entries": [
     {
       "id": "colibri",
       "kind": "runtime",
-      "status": "metadata_only",
-      "upstream": {
-        "name": "Colibri",
-        "repository": null,
-        "revision": null
-      },
+      "status": "vendored",
+      "upstream": {"name": "Colibri", "repository": "https://github.com/JustVugg/colibri.git", "revision": "a8f2ca623ffe9de9df11d56f34d11d2d501493d3"},
       "source_path": "third_party/colibri/source",
-      "license_files": [],
-      "notice_files": [],
+      "license_files": ["third_party/colibri/source/LICENSE"],
+      "notice_files": ["third_party/colibri/source/NOTICE", "third_party/colibri/source/THIRD_PARTY_NOTICES.md"],
       "adaptation_metadata": "third_party/colibri/APRIL_ADAPTATION.md",
       "production_dependency": false,
-      "fingerprint_scope": "upstream source manifest and APRIL adaptation metadata; no model weights"
+      "fingerprint_scope": "tracked source paths and file content digests; excludes c/tests/fixtures/e8_case.bin and APRIL metadata; does not identify model weights",
+      "original_upstream_snapshot_digest": "e1686b43b35384d917686722c8e392a29cd25389424c0ba045f11a30df15de7f",
+      "current_april_vendor_digest": "e1686b43b35384d917686722c8e392a29cd25389424c0ba045f11a30df15de7f",
+      "snapshot_exclusions": ["c/tests/fixtures/e8_case.bin", "c/deepseek_v4_tiny/.coli_usage"]
     },
     {
       "id": "mnem",
       "kind": "reference",
-      "status": "metadata_only",
-      "upstream": {
-        "name": "Mnem",
-        "repository": null,
-        "revision": null
-      },
+      "status": "vendored",
+      "upstream": {"name": "Mnem", "repository": "https://github.com/JustVugg/mnem.git", "revision": "df357585481721d4df4cbdfb5924ab9afe603281"},
       "source_path": "third_party/reference_sources/mnem",
-      "license_files": [],
-      "notice_files": [],
-      "adaptation_metadata": null,
-      "production_dependency": false,
-      "fingerprint_scope": "provenance metadata only"
+      "license_files": ["third_party/reference_sources/mnem/LICENSE"], "notice_files": [],
+      "adaptation_metadata": "third_party/reference_sources/mnem/APRIL_ADAPTATION.md", "production_dependency": false,
+      "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "original_upstream_snapshot_digest": "58affbc375ea986eb34e63989328f5675a062d0f251316807dc84a338a351d51", "current_april_vendor_digest": "58affbc375ea986eb34e63989328f5675a062d0f251316807dc84a338a351d51", "snapshot_exclusions": []
     },
     {
       "id": "agentmw",
       "kind": "reference",
-      "status": "metadata_only",
-      "upstream": {
-        "name": "AgentMW",
-        "repository": null,
-        "revision": null
-      },
+      "status": "vendored",
+      "upstream": {"name": "AgentMW", "repository": "https://github.com/JustVugg/agentmw.git", "revision": "0881f4d20bb7d1a073bfe0a06ac558ac49916c15"},
       "source_path": "third_party/reference_sources/agentmw",
-      "license_files": [],
-      "notice_files": [],
-      "adaptation_metadata": null,
-      "production_dependency": false,
-      "fingerprint_scope": "provenance metadata only"
-    },
-    {
-      "id": "praxos",
-      "kind": "reference",
-      "status": "metadata_only",
-      "upstream": {
-        "name": "Praxos",
-        "repository": null,
-        "revision": null
-      },
-      "source_path": "third_party/reference_sources/praxos",
-      "license_files": [],
-      "notice_files": [],
-      "adaptation_metadata": null,
-      "production_dependency": false,
-      "fingerprint_scope": "provenance metadata only"
-    },
-    {
-      "id": "openvurp",
-      "kind": "reference",
-      "status": "metadata_only",
-      "upstream": {
-        "name": "OpenVURP",
-        "repository": null,
-        "revision": null
-      },
-      "source_path": "third_party/reference_sources/openvurp",
-      "license_files": [],
-      "notice_files": [],
-      "adaptation_metadata": null,
-      "production_dependency": false,
-      "fingerprint_scope": "provenance metadata only"
+      "license_files": ["third_party/reference_sources/agentmw/LICENSE"], "notice_files": [],
+      "adaptation_metadata": "third_party/reference_sources/agentmw/APRIL_ADAPTATION.md", "production_dependency": false,
+      "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "original_upstream_snapshot_digest": "39ee0665e0948270f980618c15cc32367531c859aefc0b5d3fe5696331aee7c6", "current_april_vendor_digest": "39ee0665e0948270f980618c15cc32367531c859aefc0b5d3fe5696331aee7c6", "snapshot_exclusions": []
     },
     {
       "id": "anybridge",
       "kind": "reference",
-      "status": "metadata_only",
-      "upstream": {
-        "name": "Anybridge",
-        "repository": null,
-        "revision": null
-      },
+      "status": "vendored",
+      "upstream": {"name": "Anybridge", "repository": "https://github.com/JustVugg/anybridge.git", "revision": "0d373612a01b479e3853d2004b036f691a643c7f"},
       "source_path": "third_party/reference_sources/anybridge",
-      "license_files": [],
-      "notice_files": [],
-      "adaptation_metadata": null,
-      "production_dependency": false,
-      "fingerprint_scope": "provenance metadata only"
+      "license_files": ["third_party/reference_sources/anybridge/LICENSE"], "notice_files": [],
+      "adaptation_metadata": "third_party/reference_sources/anybridge/APRIL_ADAPTATION.md", "production_dependency": false,
+      "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "original_upstream_snapshot_digest": "0d72e0af02c4de9502d7402b2ac8b7dcc3758d83a857033687a149a329406106", "current_april_vendor_digest": "0d72e0af02c4de9502d7402b2ac8b7dcc3758d83a857033687a149a329406106", "snapshot_exclusions": []
     },
     {
       "id": "tools-factory",
       "kind": "reference",
-      "status": "metadata_only",
-      "upstream": {
-        "name": "Tools-Factory",
-        "repository": null,
-        "revision": null
-      },
+      "status": "vendored",
+      "upstream": {"name": "Tools-Factory", "repository": "https://github.com/JustVugg/tools-factory.git", "revision": "1eedf0d000adf633c1b0db3dc9bf6ca2ab83bec5"},
       "source_path": "third_party/reference_sources/tools-factory",
-      "license_files": [],
-      "notice_files": [],
-      "adaptation_metadata": null,
-      "production_dependency": false,
-      "fingerprint_scope": "provenance metadata only"
+      "license_files": ["third_party/reference_sources/tools-factory/LICENSE"], "notice_files": [],
+      "adaptation_metadata": "third_party/reference_sources/tools-factory/APRIL_ADAPTATION.md", "production_dependency": false,
+      "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "original_upstream_snapshot_digest": "622d55c34f0d3b6b7beeeb323a94400ca29864eef59c616eb80b97c7e9907fcc", "current_april_vendor_digest": "622d55c34f0d3b6b7beeeb323a94400ca29864eef59c616eb80b97c7e9907fcc", "snapshot_exclusions": []
     },
     {
-      "id": "coocon",
+      "id": "praxos",
       "kind": "reference",
-      "status": "metadata_only",
-      "upstream": {
-        "name": "Coocon",
-        "repository": null,
-        "revision": null
-      },
-      "source_path": "third_party/reference_sources/coocon",
-      "license_files": [],
-      "notice_files": [],
-      "adaptation_metadata": null,
-      "production_dependency": false,
-      "fingerprint_scope": "provenance metadata only"
+      "status": "vendored",
+      "upstream": {"name": "Praxos", "repository": "https://github.com/JustVugg/praxos.git", "revision": "e9548abf92843b3cbfc44efa4d667bc17d661b26"},
+      "source_path": "third_party/reference_sources/praxos",
+      "license_files": ["third_party/reference_sources/praxos/LICENSE"], "notice_files": [],
+      "adaptation_metadata": "third_party/reference_sources/praxos/APRIL_ADAPTATION.md", "production_dependency": false,
+      "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "original_upstream_snapshot_digest": "55cf877b7b666c460c938fbbeb94e6861d429a6fa969b42dddc2b78b762e27c9", "current_april_vendor_digest": "55cf877b7b666c460c938fbbeb94e6861d429a6fa969b42dddc2b78b762e27c9", "snapshot_exclusions": []
+    },
+    {
+      "id": "openvurp",
+      "kind": "reference",
+      "status": "vendored",
+      "upstream": {"name": "OpenVURP", "repository": "https://github.com/openvurp/openvurp.git", "revision": "fc68e643e8df7282757af8af4d8d4adfb0975eb0"},
+      "source_path": "third_party/reference_sources/openvurp",
+      "license_files": ["third_party/reference_sources/openvurp/LICENSE"], "notice_files": [],
+      "adaptation_metadata": "third_party/reference_sources/openvurp/APRIL_ADAPTATION.md", "production_dependency": false,
+      "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "original_upstream_snapshot_digest": "fe8cc504e1317842a024e061ed3f2ec82457cb80388db7aa0fb7bd89e7102714", "current_april_vendor_digest": "fe8cc504e1317842a024e061ed3f2ec82457cb80388db7aa0fb7bd89e7102714", "snapshot_exclusions": []
     },
     {
       "id": "llm-use",
       "kind": "reference",
-      "status": "metadata_only",
-      "upstream": {
-        "name": "llm-use",
-        "repository": null,
-        "revision": null
-      },
+      "status": "vendored",
+      "upstream": {"name": "llm-use", "repository": "https://github.com/llm-use/llm-use.git", "revision": "464e0fb85876c7b8b76d9ee5ede83ce96c4b15f8"},
       "source_path": "third_party/reference_sources/llm-use",
-      "license_files": [],
-      "notice_files": [],
-      "adaptation_metadata": null,
-      "production_dependency": false,
-      "fingerprint_scope": "provenance metadata only"
+      "license_files": ["third_party/reference_sources/llm-use/LICENSE"], "notice_files": [],
+      "adaptation_metadata": "third_party/reference_sources/llm-use/APRIL_ADAPTATION.md", "production_dependency": false,
+      "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "original_upstream_snapshot_digest": "ca419b10050741992c409d60080bc77af09582761df55f17bfc3e159d2a6325b", "current_april_vendor_digest": "ca419b10050741992c409d60080bc77af09582761df55f17bfc3e159d2a6325b", "snapshot_exclusions": []
+    },
+    {
+      "id": "coocon",
+      "kind": "reference",
+      "status": "vendored",
+      "upstream": {"name": "Coocon", "repository": "https://github.com/JustVugg/coocon.git", "revision": "f45a6ea73e4925adfa57d3127775ba70603003e6"},
+      "source_path": "third_party/reference_sources/coocon",
+      "license_files": ["third_party/reference_sources/coocon/LICENSE"], "notice_files": [],
+      "adaptation_metadata": "third_party/reference_sources/coocon/APRIL_ADAPTATION.md", "production_dependency": false,
+      "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "original_upstream_snapshot_digest": "554d3e7111cb781cbdf3654536c2b3a9592f55a3117c3c36eadea42813ee684a", "current_april_vendor_digest": "554d3e7111cb781cbdf3654536c2b3a9592f55a3117c3c36eadea42813ee684a", "snapshot_exclusions": []
     }
   ]
 }

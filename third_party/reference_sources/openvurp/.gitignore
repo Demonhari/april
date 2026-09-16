@@ -1,0 +1,113 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local/private runtime state
+memory/runtime/
+memory/session_store/
+memory/subagents/
+memory/*.md
+memory/*.json
+memory/
+logs/
+.backups/
+.reset_baseline/
+.claude/
+.codex
+gh.zip
+arduino-cli.exe
+
+# Vendored binaries (users install their own)
+bin/
+gh.zip
+*.exe
+arduino-cli.exe
+
+# Build / packaging
+*.egg-info/
+build/
+dist/
+
+# Agent private workspace & runtime identity
+.agents/
+anima.json
+pacts.json
+
+# Old/separate projects not part of this repo
+oldvurp/
+agentmw/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+envi/
+env/
+.openvurp_backups/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+.integrity_baseline.json
+
+# Runtime junk / scratch (never publish)
+%SystemDrive%/
+.cache/
+.deno_bin/
+downloads/
+
+# Separate companion projects (own repos, not part of openvurp)
+news_pulse/
+vurp_heart/
+
+# Tue cose, non del progetto: quello che openvurp ha PRODOTTO per te
+# (giornali, brief, pagine) e i file di lavoro personali. Chi clona il repo
+# vuole lo strumento, non i tuoi PDF di luglio.
+output/
+site/
+*.pdf
+.claude.json
+*.bak
+*.bak-*
+
+# Copie di sicurezza che l'agente si lascia dietro
+BOOTSTRAP.md.bak
+
+# Roba tua, non del progetto: gira sul tuo disco, non finisce pubblica.
+# Contiene i tuoi percorsi e riguarda solo te.
+eyes.py
+scripts/brescello_oggi.py
+scripts/build_giornale.py
+scripts/build_giornale_unito.py
+scripts/send_giornale.py
+scripts/morning_brief.py
+scripts/send_morning_brief.py
+scripts/scan_lan.ps1
+skills/giornale-arco.md
+
+# Un ChatStore aperto sulla radice del repo invece che su memory/ si crea qui
+# un database vuoto. E' successo davvero: meglio ignorarlo che ritrovarselo
+# pubblicato come se fosse dati veri.
+/chats/
+
+# Resta sul disco e funziona (agent.py lo carica se c'e', altrimenti va avanti
+# senza), ma non parte con il repo. Si integrera' quando avra' la sua forma.
+
+# WhatsApp/Baileys: le chiavi di sessione stanno in memory/ (gia' ignorata),
+# e le dipendenze del ponte se le scarica ognuno.
+channels/wa-bridge/node_modules/
+channels/wa-bridge/package-lock.json
+BOOTSTRAP.md
+scripts/build_meridian.py
+meridian-preview.png
+make_buffett_report.py
+scripts/make_screenshots.py

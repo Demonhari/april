@@ -1,10 +1,9 @@
 # APRIL third-party notices
 
-No upstream source is bundled in this checkout yet. Consequently, there are no
-upstream license texts or notices to reproduce here. The source manifest marks
-Colibri and the architecture references as metadata-only until their reviewed
-source and corresponding notices are supplied.
+The reviewed Colibri source is retained under `third_party/colibri/source/`.
+Its upstream `LICENSE`, `NOTICE`, and `THIRD_PARTY_NOTICES.md` files are kept
+unchanged. Each MIT reference snapshot retains its upstream `LICENSE`; those
+repositories did not provide a NOTICE file, so APRIL does not fabricate one.
 
-When source is staged, its original license and notice files must be retained
-at the paths recorded in `third_party/source-manifest.json`. Do not replace
-those files with APRIL-authored summaries.
+The paths recorded in `third_party/source-manifest.json` are authoritative. Do
+not replace upstream license or notice files with APRIL-authored summaries.

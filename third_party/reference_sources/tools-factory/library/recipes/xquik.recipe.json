@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "gutenberg.create.v1",
+  "id": "xquik",
+  "kind": "openapi",
+  "source": "https://xquik.com/openapi.json",
+  "goal": "Xquik API automation tools for reads, monitors, webhooks, and draft workflows.",
+  "auth": "api-key",
+  "_blocker": "Set XQUIK_API_KEY at runtime for authenticated endpoints.",
+  "nextCommands": [
+    "curl -o /tmp/xquik.openapi.json https://xquik.com/openapi.json",
+    "node bin/gutenberg.js generate /tmp/xquik.openapi.json --out library/tools/xquik --name xquik --force --strict",
+    "node bin/gutenberg.js verify library/tools/xquik"
+  ]
+}

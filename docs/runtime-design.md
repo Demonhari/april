@@ -175,14 +175,14 @@ loopback service without authentication rather than placing a secret in YAML.
 
 APRIL keeps the source/provenance boundary in `third_party/`. The checked-in
 `third_party/source-manifest.json` is authoritative for whether an upstream
-source is reviewed and reproducible. A buildable Colibri entry must record a
-full upstream Git revision and retain the upstream license and notice files;
-the local source is then built only by `run april third-party build-colibri`.
-The command never fetches dependencies, starts Colibri, or handles model
-weights. This checkout currently carries APRIL's adapter and adaptation
-metadata, but no Colibri upstream source, so the third-party doctor reports
-the runtime source as not staged.
+source is reviewed and reproducible. The vendored Colibri entry records a full
+upstream Git revision, deterministic source digest, adaptation record, and
+retained upstream license/notices; the local source is then built only by
+`run april third-party build-colibri` (or its equivalent upstream Makefile
+command). The command never fetches dependencies, starts Colibri, or handles
+model weights.
 
 The architecture references under `third_party/reference_sources/` are
-metadata-only. They are not imported, packaged, or production dependencies.
-This repository does not copy their source or invent license/revision data.
+vendored source snapshots for provenance only. They are not imported,
+packaged, or production dependencies; their upstream licenses and revisions are
+recorded without inventing notices that the source projects do not provide.

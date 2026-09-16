@@ -1,42 +1,48 @@
 # APRIL third-party source policy
 
-This directory contains APRIL-owned provenance and adaptation metadata for
-third-party runtimes and architectural references. It is not a Python package
-and is not a production dependency.
+This directory contains APRIL-owned provenance and adaptation metadata plus
+reviewed source snapshots for third-party runtimes and architectural references.
+It is not a Python package and is not a production dependency.
 
-The checked-in manifest is `source-manifest.json`. A source entry is buildable
-only when it is explicitly marked `vendored`, names a full 40-character Git
-revision, and includes the upstream license and notice files. APRIL does not
+The checked-in manifest is `source-manifest.json`. A source entry is ready only
+when it is explicitly marked `vendored`, names a full 40-character Git
+revision, preserves its upstream license and applicable notices, has an
+adaptation record, and matches its recorded snapshot digest. APRIL does not
 clone, download, install, or update third-party source automatically.
 
-The current checkout intentionally contains no Colibri upstream source. The
-maintained APRIL integration is the adapter in
-`services/april_runtime/colibri_backend.py`; `third_party/colibri/` records the
-boundary and the metadata required before upstream source can be staged. The
-doctor therefore reports Colibri as not staged until an operator supplies the
-source and provenance.
+The reviewed Colibri source is vendored at `third_party/colibri/source/`.
+APRIL's maintained integration remains the adapter in
+`services/april_runtime/colibri_backend.py`; the vendored tree preserves
+upstream files and licenses and is the only third-party tree eligible for the
+runtime build workflow.
 
-The architecture projects listed in `reference_sources` are provenance-only
-references. APRIL does not copy or import their source, and they cannot become
-runtime dependencies. This is required by APRIL's development rules.
+The eight projects under `reference_sources` are complete Git-tracked source
+snapshots for provenance and architectural research. They are never imported,
+packaged, or used as APRIL runtime dependencies.
 
-## Source staging contract
+## Updating a reviewed snapshot
 
-An operator who has separately obtained and reviewed an upstream source may
-stage it under the manifest's relative path, update the entry to `vendored`,
-record the exact upstream revision, and add the upstream license and notice
-files. The APRIL adaptation record must be updated at the same time. Model
-weights, checkpoints, build directories, and other generated artifacts remain
-outside Git.
+Future updates must begin with a clean, separately reviewed upstream checkout.
+Verify its origin, revision, license, notices, and security/API changes; then
+replace the tracked snapshot, preserve or update the APRIL adaptation record,
+refresh the manifest digests, run the doctor and (for Colibri) build checks,
+and review the resulting diff. Model weights, checkpoints, build directories,
+and other generated artifacts remain outside Git.
 
-Use the local commands to validate the state and build only already-staged
+Use the local commands to validate the state and build only already-vendored
 source:
 
 ```text
 run april third-party doctor
-run april third-party build-colibri
+run april third-party build-colibri --engine qwen36 --arch native
 ```
 
 Neither command accesses the network or starts a Colibri server. The build
-command only runs the declared local CMake entrypoint after the manifest doctor
-passes.
+command only runs Colibri's declared local Makefile target after the manifest
+doctor passes.
+
+The vendored build can also be invoked directly:
+
+```text
+make -C third_party/colibri/source/c qwen36 ARCH=native
+```
