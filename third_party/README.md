@@ -14,7 +14,9 @@ The reviewed Colibri source is vendored at `third_party/colibri/source/`.
 APRIL's maintained integration remains the adapter in
 `services/april_runtime/colibri_backend.py`; the vendored tree preserves
 upstream files and licenses and is the only third-party tree eligible for the
-runtime build workflow.
+runtime build workflow. Its explicitly allowlisted local output
+`source/c/qwen36` may exist after a build; it is reported by the doctor, omitted
+from source digests, and remains prohibited from Git tracking.
 
 The eight projects under `reference_sources` are complete Git-tracked source
 snapshots for provenance and architectural research. They are never imported,

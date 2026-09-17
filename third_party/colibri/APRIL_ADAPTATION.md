@@ -22,6 +22,10 @@ The adapter contract currently requires:
 - explicit conservative resident-memory configuration for admission;
 - a bounded metadata manifest rather than a synchronous full-weight hash.
 
+The generated Qwen36 engine at `source/c/qwen36` is an explicitly allowlisted
+local build output. It is not source, is excluded from snapshot digests, and is
+kept out of Git by APRIL's scoped ignore and source-hygiene rules.
+
 Original upstream portions remain under their original copyright and license;
 the upstream `LICENSE`, `NOTICE`, and `THIRD_PARTY_NOTICES.md` files are
 retained in this snapshot. Subsequent APRIL-specific modifications are

@@ -78,6 +78,7 @@ class ThirdPartySource:
     original_upstream_snapshot_digest: str | None
     current_april_vendor_digest: str | None
     snapshot_exclusions: tuple[str, ...]
+    allowed_local_build_artifacts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -178,7 +179,13 @@ def inspect_source_manifest(root: Path, path: Path | None = None) -> dict[str, A
         adaptation_present = adaptation_path is not None and _safe_is_file(root, adaptation_path)
         pinned = entry.revision is not None and bool(_REVISION_RE.fullmatch(entry.revision))
         snapshot_digest, nested_git, forbidden_paths = _vendor_tree_details(
-            root, entry.source_path, entry.snapshot_exclusions
+            root,
+            entry.source_path,
+            entry.snapshot_exclusions,
+            entry.allowed_local_build_artifacts,
+        )
+        local_build_artifacts = _existing_local_build_artifacts(
+            root, entry.source_path, entry.allowed_local_build_artifacts
         )
         snapshot_matches = (
             snapshot_digest is not None
@@ -225,8 +232,15 @@ def inspect_source_manifest(root: Path, path: Path | None = None) -> dict[str, A
                 "adaptation_metadata_present": adaptation_present,
                 "snapshot_digest": snapshot_digest,
                 "snapshot_matches": snapshot_matches,
+                "source_integrity": (
+                    "ready"
+                    if snapshot_matches and not nested_git and not forbidden_paths
+                    else "not_ready"
+                ),
                 "nested_git": nested_git,
                 "forbidden_paths": forbidden_paths,
+                "local_build_artifacts": local_build_artifacts,
+                "allowed_local_build_artifacts": list(entry.allowed_local_build_artifacts),
                 "production_dependency": entry.production_dependency,
                 "ready": source_ready,
                 "reason": reason,
@@ -351,6 +365,21 @@ def _parse_entry(root: Path, raw: dict[str, Any]) -> ThirdPartySource:
         for item in exclusions
     ):
         raise ThirdPartySourceError(f"Source {entry_id} has invalid snapshot exclusions.")
+    allowed_local_build_artifacts = raw.get("allowed_local_build_artifacts", [])
+    if not isinstance(allowed_local_build_artifacts, list) or not all(
+        isinstance(item, str)
+        and item
+        and not Path(item).is_absolute()
+        and ".." not in Path(item).parts
+        and item not in {".", ".."}
+        and not any(char in item for char in "*?[]")
+        for item in allowed_local_build_artifacts
+    ):
+        raise ThirdPartySourceError(f"Source {entry_id} has invalid local build artifact paths.")
+    if kind == "reference" and allowed_local_build_artifacts:
+        raise ThirdPartySourceError(
+            f"Reference source {entry_id} cannot allow local build artifacts."
+        )
     return ThirdPartySource(
         id=entry_id,
         kind=kind,
@@ -367,6 +396,7 @@ def _parse_entry(root: Path, raw: dict[str, Any]) -> ThirdPartySource:
         original_upstream_snapshot_digest=original_digest,
         current_april_vendor_digest=current_digest,
         snapshot_exclusions=tuple(exclusions),
+        allowed_local_build_artifacts=tuple(allowed_local_build_artifacts),
     )
 
 
@@ -478,6 +508,7 @@ def _vendor_tree_details(
     root: Path,
     relative: Path,
     exclusions: tuple[str, ...] = (),
+    allowed_local_build_artifacts: tuple[str, ...] = (),
 ) -> tuple[str | None, bool, list[str]]:
     """Inspect only the vendored tree and return relative, redacted findings."""
 
@@ -490,12 +521,15 @@ def _vendor_tree_details(
     records: list[dict[str, str]] = []
     nested_git = False
     forbidden: list[str] = []
+    allowed = set(allowed_local_build_artifacts)
     for candidate in sorted(source.rglob("*")):
         candidate_relative = candidate.relative_to(source)
         parts = candidate_relative.parts
         display_path = candidate_relative.as_posix()
         if ".git" in parts:
             nested_git = True
+            continue
+        if display_path in allowed and candidate.is_file() and not candidate.is_symlink():
             continue
         if (
             any(part in _FORBIDDEN_DIRECTORY_NAMES for part in parts)
@@ -522,6 +556,19 @@ def _vendor_tree_details(
     return hashlib.sha256(material).hexdigest(), nested_git, forbidden
 
 
+def _existing_local_build_artifacts(
+    root: Path,
+    source_relative: Path,
+    allowed_local_build_artifacts: tuple[str, ...],
+) -> list[str]:
+    source = _safe_relative_path(root, source_relative)
+    return [
+        relative
+        for relative in allowed_local_build_artifacts
+        if (source / relative).is_file() and not (source / relative).is_symlink()
+    ]
+
+
 def _file_digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -531,11 +578,16 @@ def _file_digest(path: Path) -> str:
 
 
 def vendor_snapshot_digest(
-    root: Path, relative: Path, exclusions: tuple[str, ...] = ()
+    root: Path,
+    relative: Path,
+    exclusions: tuple[str, ...] = (),
+    allowed_local_build_artifacts: tuple[str, ...] = (),
 ) -> str | None:
     """Return the deterministic digest used for a vendored source tree."""
 
-    digest, _nested_git, _forbidden_paths = _vendor_tree_details(root, relative, exclusions)
+    digest, _nested_git, _forbidden_paths = _vendor_tree_details(
+        root, relative, exclusions, allowed_local_build_artifacts
+    )
     return digest
 
 

@@ -128,6 +128,49 @@ def test_vendored_entry_with_listed_missing_notice_is_not_ready(tmp_path: Path) 
     assert result["entries"][0]["notice_required"] is True
 
 
+def test_expected_colibri_build_artifact_is_allowed_and_outside_digest(tmp_path: Path) -> None:
+    source = tmp_path / "third_party" / "colibri" / "source"
+    (source / "c").mkdir(parents=True)
+    (source / "LICENSE").write_text("L", encoding="utf-8")
+    (tmp_path / "third_party" / "colibri" / "APRIL_ADAPTATION.md").write_text("A", encoding="utf-8")
+    entry = _entry(
+        status="vendored",
+        upstream={"name": "Colibri", "revision": "a" * 40},
+        license_files=["third_party/colibri/source/LICENSE"],
+        adaptation_metadata="third_party/colibri/APRIL_ADAPTATION.md",
+        allowed_local_build_artifacts=["c/qwen36"],
+    )
+    digest_before = vendor_snapshot_digest(
+        tmp_path,
+        Path(entry["source_path"]),
+        allowed_local_build_artifacts=("c/qwen36",),
+    )
+    entry.update(
+        original_upstream_snapshot_digest=digest_before,
+        current_april_vendor_digest=digest_before,
+    )
+    manifest = _manifest(tmp_path, entry)
+    absent = inspect_source_manifest(tmp_path, manifest)
+    assert absent["ready"] is True
+    assert absent["entries"][0]["local_build_artifacts"] == []
+
+    binary = source / "c" / "qwen36"
+    binary.write_bytes(b"\x7fELF local build output")
+    present = inspect_source_manifest(tmp_path, manifest)
+    assert present["ready"] is True
+    assert present["entries"][0]["source_integrity"] == "ready"
+    assert present["entries"][0]["local_build_artifacts"] == ["c/qwen36"]
+    assert present["entries"][0]["forbidden_paths"] == []
+    assert (
+        vendor_snapshot_digest(
+            tmp_path,
+            Path(entry["source_path"]),
+            allowed_local_build_artifacts=("c/qwen36",),
+        )
+        == digest_before
+    )
+
+
 def test_build_colibri_uses_upstream_make_target(monkeypatch) -> None:
     calls: list[tuple[list[str], Path, bool]] = []
     monkeypatch.setattr(
@@ -251,6 +294,40 @@ def test_source_hygiene_rejects_generated_and_model_artifacts() -> None:
     assert forbidden_reason("third_party/reference_sources/foo/weights.bin")
     assert forbidden_reason("third_party/colibri/source/Makefile") is None
     assert forbidden_reason("third_party/colibri/APRIL_ADAPTATION.md") is None
+
+
+def test_doctor_rejects_unexpected_binary_suffixes_and_runtime_cache(tmp_path: Path) -> None:
+    source = tmp_path / "third_party" / "colibri" / "source"
+    source.mkdir(parents=True)
+    (source / "LICENSE").write_text("L", encoding="utf-8")
+    (tmp_path / "third_party" / "colibri" / "APRIL_ADAPTATION.md").write_text("A", encoding="utf-8")
+    entry = _entry(
+        status="vendored",
+        upstream={"name": "Colibri", "revision": "a" * 40},
+        license_files=["third_party/colibri/source/LICENSE"],
+        adaptation_metadata="third_party/colibri/APRIL_ADAPTATION.md",
+        allowed_local_build_artifacts=["c/qwen36"],
+    )
+    digest = vendor_snapshot_digest(
+        tmp_path,
+        Path(entry["source_path"]),
+        allowed_local_build_artifacts=("c/qwen36",),
+    )
+    entry.update(original_upstream_snapshot_digest=digest, current_april_vendor_digest=digest)
+    manifest = _manifest(tmp_path, entry)
+    (source / "unexpected").write_bytes(b"\x7fELF")
+    (source / "unexpected.o").write_bytes(b"object")
+    (source / "model.safetensors").write_bytes(b"weights")
+    (source / ".coli_usage").write_text("cache", encoding="utf-8")
+    result = inspect_source_manifest(tmp_path, manifest)
+    assert result["ready"] is False
+    assert result["entries"][0]["source_integrity"] == "not_ready"
+    assert result["entries"][0]["snapshot_matches"] is False
+    assert set(result["entries"][0]["forbidden_paths"]) >= {
+        "unexpected.o",
+        "model.safetensors",
+        ".coli_usage",
+    }
 
 
 def _entry(entry_id: str = "colibri", **updates: object) -> dict[str, object]:
@@ -467,6 +544,7 @@ def test_launcher_reports_missing_script_and_start_failure(tmp_path: Path, monke
         upstream={"name": "Colibri", "revision": "a" * 40},
         license_files=["third_party/colibri/source/LICENSE"],
         adaptation_metadata="third_party/colibri/APRIL_ADAPTATION.md",
+        allowed_local_build_artifacts=["c/qwen36"],
     )
     digest = vendor_snapshot_digest(tmp_path, Path(entry["source_path"]))
     entry.update(original_upstream_snapshot_digest=digest, current_april_vendor_digest=digest)
@@ -477,6 +555,7 @@ def test_launcher_reports_missing_script_and_start_failure(tmp_path: Path, monke
     script = source / "c" / "coli"
     script.parent.mkdir()
     script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    (script.parent / "qwen36").write_bytes(b"\x7fELF local build output")
     monkeypatch.setattr(
         "apps.runner.third_party_sources.resolve_colibri_python",
         lambda: Path("python3"),
@@ -485,7 +564,11 @@ def test_launcher_reports_missing_script_and_start_failure(tmp_path: Path, monke
         "apps.runner.third_party_sources.subprocess.run",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("blocked")),
     )
-    digest = vendor_snapshot_digest(tmp_path, Path(entry["source_path"]))
+    digest = vendor_snapshot_digest(
+        tmp_path,
+        Path(entry["source_path"]),
+        allowed_local_build_artifacts=("c/qwen36",),
+    )
     entry.update(original_upstream_snapshot_digest=digest, current_april_vendor_digest=digest)
     _manifest(tmp_path, entry)
     with pytest.raises(ThirdPartySourceError, match="could not start"):
@@ -503,6 +586,11 @@ def test_manifest_rejects_bad_entry_metadata(tmp_path: Path) -> None:
         (_entry(source_path="third_party/../outside"), "outside"),
         (_entry(source_path="outside"), "under third_party"),
         (_entry(adaptation_metadata=""), "invalid relative path"),
+        (_entry(allowed_local_build_artifacts=["../qwen36"]), "local build artifact"),
+        (
+            _entry(kind="reference", allowed_local_build_artifacts=["bin/tool"]),
+            "local build artifacts",
+        ),
         (_entry(production_dependency="yes"), "dependency flag"),
         (_entry(fingerprint_scope=""), "fingerprint scope"),
         (_entry(kind="reference", production_dependency=True), "production dependency"),

@@ -13,10 +13,11 @@
       "notice_files": ["third_party/colibri/source/NOTICE", "third_party/colibri/source/THIRD_PARTY_NOTICES.md"],
       "adaptation_metadata": "third_party/colibri/APRIL_ADAPTATION.md",
       "production_dependency": false,
-      "fingerprint_scope": "tracked source paths and file content digests; excludes c/tests/fixtures/e8_case.bin and APRIL metadata; does not identify model weights",
+      "fingerprint_scope": "tracked source paths and file content digests; excludes c/tests/fixtures/e8_case.bin, APRIL metadata, and allowlisted local build artifacts; does not identify model weights",
       "original_upstream_snapshot_digest": "e1686b43b35384d917686722c8e392a29cd25389424c0ba045f11a30df15de7f",
       "current_april_vendor_digest": "e1686b43b35384d917686722c8e392a29cd25389424c0ba045f11a30df15de7f",
-      "snapshot_exclusions": ["c/tests/fixtures/e8_case.bin", "c/deepseek_v4_tiny/.coli_usage"]
+      "snapshot_exclusions": ["c/tests/fixtures/e8_case.bin", "c/deepseek_v4_tiny/.coli_usage"],
+      "allowed_local_build_artifacts": ["c/qwen36"]
     },
     {
       "id": "mnem",
@@ -27,6 +28,7 @@
       "license_files": ["third_party/reference_sources/mnem/LICENSE"], "notice_files": [],
       "adaptation_metadata": "third_party/reference_sources/mnem/APRIL_ADAPTATION.md", "production_dependency": false,
       "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "allowed_local_build_artifacts": [],
       "original_upstream_snapshot_digest": "58affbc375ea986eb34e63989328f5675a062d0f251316807dc84a338a351d51", "current_april_vendor_digest": "58affbc375ea986eb34e63989328f5675a062d0f251316807dc84a338a351d51", "snapshot_exclusions": []
     },
     {
@@ -38,6 +40,7 @@
       "license_files": ["third_party/reference_sources/agentmw/LICENSE"], "notice_files": [],
       "adaptation_metadata": "third_party/reference_sources/agentmw/APRIL_ADAPTATION.md", "production_dependency": false,
       "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "allowed_local_build_artifacts": [],
       "original_upstream_snapshot_digest": "39ee0665e0948270f980618c15cc32367531c859aefc0b5d3fe5696331aee7c6", "current_april_vendor_digest": "39ee0665e0948270f980618c15cc32367531c859aefc0b5d3fe5696331aee7c6", "snapshot_exclusions": []
     },
     {
@@ -49,6 +52,7 @@
       "license_files": ["third_party/reference_sources/anybridge/LICENSE"], "notice_files": [],
       "adaptation_metadata": "third_party/reference_sources/anybridge/APRIL_ADAPTATION.md", "production_dependency": false,
       "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "allowed_local_build_artifacts": [],
       "original_upstream_snapshot_digest": "0d72e0af02c4de9502d7402b2ac8b7dcc3758d83a857033687a149a329406106", "current_april_vendor_digest": "0d72e0af02c4de9502d7402b2ac8b7dcc3758d83a857033687a149a329406106", "snapshot_exclusions": []
     },
     {
@@ -60,6 +64,7 @@
       "license_files": ["third_party/reference_sources/tools-factory/LICENSE"], "notice_files": [],
       "adaptation_metadata": "third_party/reference_sources/tools-factory/APRIL_ADAPTATION.md", "production_dependency": false,
       "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "allowed_local_build_artifacts": [],
       "original_upstream_snapshot_digest": "622d55c34f0d3b6b7beeeb323a94400ca29864eef59c616eb80b97c7e9907fcc", "current_april_vendor_digest": "622d55c34f0d3b6b7beeeb323a94400ca29864eef59c616eb80b97c7e9907fcc", "snapshot_exclusions": []
     },
     {
@@ -71,6 +76,7 @@
       "license_files": ["third_party/reference_sources/praxos/LICENSE"], "notice_files": [],
       "adaptation_metadata": "third_party/reference_sources/praxos/APRIL_ADAPTATION.md", "production_dependency": false,
       "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "allowed_local_build_artifacts": [],
       "original_upstream_snapshot_digest": "55cf877b7b666c460c938fbbeb94e6861d429a6fa969b42dddc2b78b762e27c9", "current_april_vendor_digest": "55cf877b7b666c460c938fbbeb94e6861d429a6fa969b42dddc2b78b762e27c9", "snapshot_exclusions": []
     },
     {
@@ -82,6 +88,7 @@
       "license_files": ["third_party/reference_sources/openvurp/LICENSE"], "notice_files": [],
       "adaptation_metadata": "third_party/reference_sources/openvurp/APRIL_ADAPTATION.md", "production_dependency": false,
       "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "allowed_local_build_artifacts": [],
       "original_upstream_snapshot_digest": "fe8cc504e1317842a024e061ed3f2ec82457cb80388db7aa0fb7bd89e7102714", "current_april_vendor_digest": "fe8cc504e1317842a024e061ed3f2ec82457cb80388db7aa0fb7bd89e7102714", "snapshot_exclusions": []
     },
     {
@@ -93,6 +100,7 @@
       "license_files": ["third_party/reference_sources/llm-use/LICENSE"], "notice_files": [],
       "adaptation_metadata": "third_party/reference_sources/llm-use/APRIL_ADAPTATION.md", "production_dependency": false,
       "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "allowed_local_build_artifacts": [],
       "original_upstream_snapshot_digest": "ca419b10050741992c409d60080bc77af09582761df55f17bfc3e159d2a6325b", "current_april_vendor_digest": "ca419b10050741992c409d60080bc77af09582761df55f17bfc3e159d2a6325b", "snapshot_exclusions": []
     },
     {
@@ -104,6 +112,7 @@
       "license_files": ["third_party/reference_sources/coocon/LICENSE"], "notice_files": [],
       "adaptation_metadata": "third_party/reference_sources/coocon/APRIL_ADAPTATION.md", "production_dependency": false,
       "fingerprint_scope": "tracked upstream source paths and file content digests; excludes APRIL metadata and model weights",
+      "allowed_local_build_artifacts": [],
       "original_upstream_snapshot_digest": "554d3e7111cb781cbdf3654536c2b3a9592f55a3117c3c36eadea42813ee684a", "current_april_vendor_digest": "554d3e7111cb781cbdf3654536c2b3a9592f55a3117c3c36eadea42813ee684a", "snapshot_exclusions": []
     }
   ]
